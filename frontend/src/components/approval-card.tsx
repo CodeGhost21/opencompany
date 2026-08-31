@@ -43,7 +43,7 @@ import {
   type GrantScope,
 } from "@/api/types";
 import { MAIN_THREAD_ID } from "@/lib/chat";
-import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
@@ -559,11 +559,22 @@ export interface ApprovalThreadLink {
  */
 export function approvalThreadLink(
   approval: ApprovalSummary,
-  desks: Desk[],
+  /**
+   * The company's desks, or `null` when the read failed and the topology is
+   * unknown.
+   *
+   * The two were one value until desk fabrication was removed: an empty answer
+   * used to be replaced by `defaultDesks()`, so `[]` could only mean a failed
+   * read. It now means what it says — a company with no desks — and the
+   * failure it used to stand for is spelled `null`, because the `#general`
+   * label below must be withheld from one and not from the other.
+   */
+  desks: Desk[] | null,
   members: TeamMember[],
 ): ApprovalThreadLink | null {
   if (!approval.thread) return null;
-  const channelId = channelIdForThread(approval.thread, desks, members);
+  const known = desks ?? [];
+  const channelId = channelIdForThread(approval.thread, known, members);
   if (!channelId) return null;
 
   // Looked up by the **resolved channel**, not by the raw thread id. They are
@@ -572,7 +583,7 @@ export function approvalThreadLink(
   // raised under `main` resolves to that desk's channel, and asking for a desk
   // called `main` would find nothing and label it "Origin unavailable" — on a
   // conversation whose transcript is right there on screen.
-  const desk = desks.find((candidate) => candidate.id === channelId);
+  const desk = known.find((candidate) => candidate.id === channelId);
   if (desk) return { channelId, label: `#${desk.channel}` };
 
   // The built-in `#general` channel (issue #1743), which is deliberately in no
@@ -583,12 +594,14 @@ export function approvalThreadLink(
   // the General ids keeps its own name, exactly as `channelIdForThread` keeps
   // it its own thread.
   //
-  // Guarded on a non-empty desk list because that is how this file already
-  // encodes "the topology is unknown": a failed `/desks` read resolves to `[]`
-  // (an empty *response* falls back to `defaultDesks()`), and a failed read
-  // must not be guessed at — `ChatView` surfaces the error and renders no rail,
-  // so a link into it would land nowhere.
-  if (channelId === MAIN_THREAD_ID && desks.length > 0) {
+  // Guarded on the topology being *known* rather than on the list being
+  // non-empty. A failed read must not be guessed at — `ChatView` surfaces the
+  // error and renders no rail, so a link into it would land nowhere — but a
+  // company that genuinely declares no desks still has `#general`, and that is
+  // the one channel every company has. While an empty answer was overwritten
+  // with `defaultDesks()` the two cases were the same value, and reading the
+  // length was the only test available; now the failure says `null`.
+  if (channelId === MAIN_THREAD_ID && desks !== null) {
     return { channelId, label: `#${GENERAL_CHANNEL}` };
   }
 
@@ -635,14 +648,15 @@ export function useApprovalThreadLinks(
     [approvals],
   );
   const [topology, setTopology] = useState<{
-    desks: Desk[];
+    /** `null` when the desks read failed — see `approvalThreadLink`. */
+    desks: Desk[] | null;
     members: TeamMember[];
   } | null>(null);
   // Topology that resolved during a hold. `null` means nothing pending; an
   // empty topology is a real answer and must not be mistaken for "nothing
   // arrived".
   const pending = useRef<{
-    desks: Desk[];
+    desks: Desk[] | null;
     members: TeamMember[];
   } | null>(null);
   // Live is read inside the async topology read, which must not close over a
@@ -657,15 +671,17 @@ export function useApprovalThreadLinks(
     }
     let live = true;
     void Promise.all([
-      // Same empty-response fallback as ChatView and AppShell: a company with
-      // no declared `[[group_chat]]` entries still has the default desks, and
-      // an approval raised in one of those (e.g. the `main` thread) must be
-      // resolvable even though `/desks` came back empty. The fallback lives in
-      // the success handler on purpose — a failed read must not be guessed at.
+      // The host's answer, taken as given — the same rule ChatView and
+      // AppShell now follow. An empty list is a company with no desks, and an
+      // approval raised on its `main` thread still resolves to `#general`. It
+      // used to be swapped for `defaultDesks()`, which resolved approvals to
+      // fabricated channels the rail no longer shows.
+      //
+      // A *failed* read is `null`, not `[]`: unknown, and not to be guessed at.
       client
         .listDesks(company)
-        .then((dtos) => (dtos.length ? dtos.map(deskFromDto) : defaultDesks()))
-        .catch(() => []),
+        .then((dtos) => dtos.map(deskFromDto))
+        .catch(() => null),
       client.listTeam(company).catch(() => []),
     ]).then(([desks, roster]) => {
       if (!live) return;

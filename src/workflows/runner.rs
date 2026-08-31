@@ -283,32 +283,11 @@ async fn run_workflow_inner(
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
     let mut graph = super::translate::translate(workflow);
-    // Issue #460: the company's `ApprovalPolicy` decides which `tool_call`
-    // nodes stop for an operator, and says so by marking them with the engine's
-    // own `requires_approval` flag — so a gated tool call inherits #395's whole
-    // pause → park → resume path instead of needing a second one. BEFORE
-    // `compile`, because the flag is read off the compiled node config.
-    //
-    // Skipped for a dry run: every effect is stubbed, so there is nothing to
-    // approve, and pausing would stop the dry run walking the rest of the graph
-    // — the one thing it exists to do. See `super::gate` for why the gate is
-    // not in the invoker, and for the deviations this takes deliberately.
-    let gated = if ctx.dry_run {
-        Vec::new()
-    } else {
-        super::gate::apply_policy_gates(
-            &mut graph,
-            record,
-            &workflow.id,
-            &ctx.run_id,
-            // Issue #1098: the company's live permission set, so a workflow the
-            // operator granted standing permission does not park again. Reached
-            // through the queue the rest of the approval round-trip already
-            // travels on, so nothing new threads through the runner.
-            &deps.approval_requests.grants(),
-        )
-        .await
-    };
+    // Policy-generated workflow HITL is disabled. Preserve an author's own
+    // `requires_approval = true`, but add no gates merely because a tool call
+    // matches company policy. Agent-driven approvals enter through explicit
+    // approval-producing tools instead.
+    let gated = super::gate::policy_hitl_disabled(&mut graph);
     // Issue #846: a node whose call already left the building in an earlier run
     // of this lineage replays its recorded result instead of calling again.
     // Driven entirely off the trigger input's ledger, so a first run rewrites
@@ -440,6 +419,7 @@ async fn run_workflow_inner(
             run_id: &run_id,
             run_request,
             trigger_input: &trigger_input,
+            started_by: ctx.started_by.clone(),
             dry_run,
             notices: notices.clone(),
             board: board.clone(),
@@ -470,6 +450,9 @@ async fn run_workflow_inner(
             workflow_id: workflow.id.clone(),
             run_id: run_id.clone(),
             scheduled: ctx.scheduled,
+            // Issue #1862 prerequisite: who triggered this run, stamped as a
+            // fact at start rather than guessed later at failure time.
+            started_by: Some(ctx.started_by.clone()),
         };
         if let Err(err) = events.append(&record.id, started).await {
             tracing::warn!(
@@ -868,6 +851,7 @@ async fn run_workflow_inner(
                 &run_id,
                 &trigger_input,
                 &blocked,
+                &ctx.started_by,
             )
             .await;
             return Ok(blocked_run(BlockedRun {
@@ -1118,6 +1102,7 @@ async fn run_workflow_inner(
             // Issue #617: the resolver's per-child gate record, so a namespaced
             // child gate's card can name the child's tool and reason.
             child_gates: &child_gates,
+            started_by: &ctx.started_by,
         },
     )
     .await;
@@ -1163,6 +1148,7 @@ async fn run_workflow_inner(
         &run_id,
         &trigger_input,
         &blocked_nodes,
+        &ctx.started_by,
     )
     .await;
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
@@ -1579,6 +1565,10 @@ struct PausedGates<'a> {
     /// gate (`sub::work`) is described from what the gate pass classified
     /// rather than falling back to an unclassified parent-graph lookup.
     child_gates: &'a super::caps::resolver::ChildGateRegistry,
+    /// Issue #1862 prerequisite: the paused run's own attribution, stamped on
+    /// every card this pass parks so `spawn_continuation` can carry it into the
+    /// continuation instead of resetting to `Operator`.
+    started_by: &'a crate::ports::types::StartedBy,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -1643,6 +1633,7 @@ async fn stash_blocked_agent_nodes(
     run_id: &str,
     trigger_input: &serde_json::Value,
     blocked: &[crate::ports::WorkflowBlockedNode],
+    started_by: &crate::ports::types::StartedBy,
 ) {
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         return;
@@ -1713,7 +1704,9 @@ async fn stash_blocked_agent_nodes(
                 );
                 return None;
             }
-            parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+            parking
+                .blocked_nodes
+                .arm(&turn, workflow_id, trigger_input, started_by);
             Some((turn, &node.node_id))
         })
         .collect();
@@ -1752,10 +1745,11 @@ async fn stash_blocked_agent_nodes(
         // still locate this run. Best-effort — a failed write leaves the
         // in-memory stash serving the no-restart case, and failing the settled
         // run over an approvals-queue write is the wrong trade (same stance as
-        // the park itself).
+        // the park itself). The in-memory arm itself (with `started_by`) already
+        // happened in the synchronous pass above that built `turns`.
         if let Err(error) = parking
             .journal
-            .record_blocked_node_stashed(&turn, workflow_id, trigger_input)
+            .record_blocked_node_stashed(&turn, workflow_id, trigger_input, started_by)
             .await
         {
             tracing::warn!(
@@ -1791,6 +1785,7 @@ async fn park_pending_gates(
         // Issue #617: the resolver's per-child gate record, for a namespaced
         // child gate's card.
         child_gates,
+        started_by,
     } = paused;
     if pending.is_empty() {
         return;
@@ -1931,6 +1926,18 @@ async fn park_pending_gates(
             edges,
             node_id,
         );
+        // Issue #1862 prerequisite: stamp the paused run's own attribution on
+        // the card, so approving it can carry the same `StartedBy` into the
+        // continuation instead of resetting to `Operator` (see
+        // `started_by_of`/`spawn_continuation`). Outside `is_same_gate`'s
+        // dedupe identity, same as the ledgers below it — the decision is the
+        // same decision however it later gets re-parked.
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(
+                crate::runtime::workflow_resume::PAYLOAD_STARTED_BY.to_string(),
+                serde_json::json!(started_by),
+            );
+        }
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(
                 company = %record.id,
@@ -3413,6 +3420,7 @@ to = "done"
             id: "bad".to_string(),
             name: "Bad".to_string(),
             description: None,
+            owner_desk: None,
             nodes: vec![WorkflowNodeDef {
                 id: "only".to_string(),
                 kind: WorkflowNodeKind::Output,
@@ -5631,10 +5639,16 @@ to = "gate"
                     run_id,
                     workflow_id,
                     scheduled,
+                    started_by,
                 } => {
                     assert_eq!(run_id, &ctx.run_id);
                     assert_eq!(workflow_id, "greet");
                     assert!(!scheduled, "a manual run is not flagged scheduled");
+                    assert_eq!(
+                        started_by,
+                        &Some(ctx.started_by.clone()),
+                        "the runner writes the context's started_by into the journal (issue #1862 prerequisite)"
+                    );
                 }
                 CompanyEvent::WorkflowNodeStarted {
                     run_id,
@@ -6841,15 +6855,29 @@ to = "done"
             crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
         // Simulates what `park_gated_calls` already did at real park time,
         // for both nodes, before this settle pass ever runs.
-        parking
-            .blocked_nodes
-            .arm(&first_turn, "wf-1", &trigger_input);
-        parking
-            .blocked_nodes
-            .arm(&second_turn, "wf-1", &trigger_input);
+        parking.blocked_nodes.arm(
+            &first_turn,
+            "wf-1",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        parking.blocked_nodes.arm(
+            &second_turn,
+            "wf-1",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
 
         let handle = tokio::spawn(async move {
-            stash_blocked_agent_nodes(Some(&deps), "wf-1", &run_id, &trigger_input, &blocked).await;
+            stash_blocked_agent_nodes(
+                Some(&deps),
+                "wf-1",
+                &run_id,
+                &trigger_input,
+                &blocked,
+                &crate::ports::types::StartedBy::Operator,
+            )
+            .await;
         });
 
         // Blocks until the store is genuinely suspended inside the first
@@ -6909,9 +6937,12 @@ to = "done"
         let turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "solo");
 
         // What `park_gated_calls` already did at real park time.
-        parking
-            .blocked_nodes
-            .arm(&turn, "wf-1825-p2d", &trigger_input);
+        parking.blocked_nodes.arm(
+            &turn,
+            "wf-1825-p2d",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
         // What deciding this turn's last card already did, in the window
         // before this settle pass got here: dispatched and retired.
         parking.blocked_nodes.release(&turn);
@@ -6933,6 +6964,7 @@ to = "done"
             &run_id,
             &trigger_input,
             &blocked,
+            &crate::ports::types::StartedBy::Operator,
         )
         .await;
 
@@ -7008,12 +7040,18 @@ to = "done"
             crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
         // What `park_gated_calls` already did for both, at real park time,
         // before this settle pass ever runs.
-        parking
-            .blocked_nodes
-            .arm(&first_turn, "wf-1825-p2e", &trigger_input);
-        parking
-            .blocked_nodes
-            .arm(&second_turn, "wf-1825-p2e", &trigger_input);
+        parking.blocked_nodes.arm(
+            &first_turn,
+            "wf-1825-p2e",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
+        parking.blocked_nodes.arm(
+            &second_turn,
+            "wf-1825-p2e",
+            &trigger_input,
+            &crate::ports::types::StartedBy::Operator,
+        );
 
         let handle = tokio::spawn(async move {
             stash_blocked_agent_nodes(
@@ -7022,6 +7060,7 @@ to = "done"
                 &run_id,
                 &trigger_input,
                 &blocked,
+                &crate::ports::types::StartedBy::Operator,
             )
             .await;
         });

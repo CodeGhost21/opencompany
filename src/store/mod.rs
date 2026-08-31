@@ -39,6 +39,14 @@ pub mod select;
 /// to the boundary instead of panicking the slice.
 pub(crate) mod text;
 
+/// The shared lexical ranker behind `ContextStore::search`.
+///
+/// Stood four times over in `mongodb.rs`, `fs.rs`, `sqlite.rs` and
+/// `tinycortex.rs`; three of those four copies carried the same two defects (a
+/// substring test scored 1.0, and truncation to `limit` before any sorting).
+/// One module, so the backends cannot drift apart again.
+pub mod lexical;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

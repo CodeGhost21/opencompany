@@ -88,9 +88,19 @@ export function defaultThreads(): Thread[] {
   ];
 }
 
-/** One `Thread` for a single `/desks` entry. */
-function deskThread(desk: DeskDto, i: number): Thread {
-  return {
+/**
+ * Build the chat list from the company's real desks (issue #53): the main line
+ * (the orchestrator) first, then one thread per desk keyed by its id.
+ *
+ * A company with no desks gets the main line and nothing else. It used to get
+ * {@link defaultThreads} — Strategy desk, Creative studio, Front desk — which
+ * put three threads in the list for desks the company had never declared and
+ * the host could not route to. `defaultThreads` is now only for a host that
+ * never answered at all (no `/desks` route, or a failed read): the shell's
+ * `.catch` leg, not this one. An empty answer is an answer.
+ */
+export function threadsFromDesks(desks: DeskDto[]): Thread[] {
+  const deskThreads: Thread[] = desks.map((desk, i) => ({
     id: desk.id,
     contact: {
       name: desk.name,
@@ -99,18 +109,8 @@ function deskThread(desk: DeskDto, i: number): Thread {
     },
     blurb: desk.description ?? "A desk of your company",
     messages: [],
-  };
-}
-
-/**
- * Build the chat list from the company's real desks (issue #53): the main line
- * (the orchestrator) first, then one thread per desk keyed by its id. Falls back
- * to {@link defaultThreads} when the company defines none, so the console
- * always renders something.
- */
-export function threadsFromDesks(desks: DeskDto[]): Thread[] {
-  if (desks.length === 0) return defaultThreads();
-  return [mainThread(), ...desks.map(deskThread)];
+  }));
+  return [mainThread(), ...deskThreads];
 }
 
 /**

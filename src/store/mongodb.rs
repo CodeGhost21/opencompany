@@ -1455,33 +1455,32 @@ impl ContextStore for MongoStore {
             .collect())
     }
 
+    /// Weighted token overlap rather than `body.find(query)` — see
+    /// [`crate::store::lexical`] for what was wrong and why the weighting is the
+    /// way it is.
+    ///
+    /// The cursor keeps streaming: each body goes through the [`Ranker`] and is
+    /// then dropped, so a company with a filled history does not put its whole
+    /// `context_chunks` collection in the service's memory. What has to be given
+    /// up is the early `break`: ranking is only possible once every candidate has
+    /// been seen — and that is the bug, not the price of it.
+    ///
+    /// [`Ranker`]: crate::store::lexical::Ranker
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
+        let mut ranker = crate::store::lexical::Ranker::new(query);
+        if ranker.matches_nothing() {
+            return Ok(Vec::new());
+        }
         let mut cursor = self
             .collection("context_chunks")
             .find(doc! {"company_id": id.as_ref()})
             .sort(doc! {"ord": 1})
             .await
             .map_err(mongo_err)?;
-        let mut hits = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            if hits.len() >= limit {
-                break;
-            }
-            let body = get_str(&doc, "body")?;
-            if let Some(pos) = body.find(query) {
-                // The ±24-byte window can land mid-codepoint on a multibyte
-                // body; widen to the boundary rather than panic the slice.
-                hits.push(ChunkHit {
-                    addr: ChunkAddr::new(get_str(&doc, "addr")?),
-                    snippet: slice_on_char_boundaries(
-                        &body,
-                        pos.saturating_sub(24)..pos + query.len() + 24,
-                    ),
-                    score: 1.0,
-                });
-            }
+            ranker.offer(&get_str(&doc, "addr")?, &get_str(&doc, "body")?);
         }
-        Ok(hits)
+        Ok(ranker.best(limit))
     }
 }
 
@@ -6094,6 +6093,15 @@ mod test {
     async fn conformance_run_store_workflow_join() {
         let Some(s) = store().await else { return };
         conformance::assert_run_store_workflow_join(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The same search semantics as every other backend. This is the production
+    /// backend, so this is the row that matters most.
+    #[tokio::test]
+    async fn conformance_context_search_ranking() {
+        let Some(s) = store().await else { return };
+        conformance::assert_context_search_ranking(s.clone()).await;
         drop_db(&s).await;
     }
 

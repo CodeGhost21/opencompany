@@ -2,12 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   Activity,
   // AppWindow,  // re-add with the Pages nav entry below
+  Brain,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
   MessagesSquare,
   Network,
-  Settings2,
   ShieldCheck,
   BookText,
   Wallet,
@@ -46,10 +46,10 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
+import { WindowControlsInset } from "@/components/window-chrome";
 import {
   RESTING_ROW,
-  SidebarCollapseButton,
-  SidebarControls,
+  SidebarUtilityBar,
 } from "@/components/sidebar-controls";
 import { SetupController } from "@/setup/SetupController";
 import {
@@ -78,7 +78,13 @@ import {
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
-import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
+import {
+  hasOtherOpenTurns,
+  mergeOpenTurns,
+  openTurnsFromRuns,
+  PendingSyncPosts,
+  type OpenTurn,
+} from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
   budgetProximityExpiresAt,
@@ -117,6 +123,7 @@ import {
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
+import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
@@ -126,7 +133,7 @@ import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
-import { OperatorOverview } from "@/views/OperatorOverview";
+import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { ChatView } from "@/views/ChatView";
@@ -168,6 +175,12 @@ const ObservatoryView = lazy(() =>
 // Pulls in the markdown renderer — load on demand.
 const WorkspaceView = lazy(() =>
   import("@/views/WorkspaceView").then((m) => ({ default: m.WorkspaceView })),
+);
+// The company's durable memory. Its own route since it left the settings rail;
+// lazy for the same reason its neighbours are — the shell should paint before a
+// page nobody has asked for yet is parsed.
+const MemoryView = lazy(() =>
+  import("@/views/MemoryView").then((m) => ({ default: m.MemoryView })),
 );
 // The Finance section: Overview (the ledger fold), Invoicing (Chargebee) and
 // Wallet (PayPal). Load on demand — its Overview page is Recharts-backed and
@@ -298,6 +311,11 @@ const NAV: NavItem[] = [
   // `NAV` for why this is one row rather than one per list or a tab strip.
   { view: "ledgers", label: "Work", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
+  // What the company remembers, beside what it keeps. It was a settings
+  // sub-page, which put a surface an operator *reads* behind the rail where
+  // they *change* things — and three clicks in front of "does it already know
+  // this". `#/settings/brain` and `#/memory` both rewrite onto this row.
+  { view: "brain", label: "Brain", icon: Brain },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   // Re-listed. Issue #302 parked the flat Finances page — a single ledger
   // projection with nowhere to go. What comes back is a section: that same
@@ -319,7 +337,13 @@ const NAV: NavItem[] = [
   // (issue #1311). Remove a nav row here and the surface is hidden; remove it
   // from `console-routes.ts` and the surface is gone.
   // { view: "pages", label: "Pages", icon: AppWindow },
-  { view: "settings", label: "Settings", icon: Settings2 },
+  // Settings is NOT here, and its absence is deliberate in the same way the
+  // Pages line above is. It is a utility, not a place an operator works, so it
+  // sits on the sidebar's utility bar with Feedback, Discord and Collapse
+  // (`SidebarUtilityBar`) — which still carries the `data-tour="nav-settings"`
+  // anchor the guided tour spotlights. `#/settings` keeps answering because of
+  // its entry in `@/lib/console-routes`; removing THAT is what would take the
+  // surface away.
 ];
 
 // The console is hash-routed, so a normal `href="#main-content"` would also
@@ -1380,8 +1404,12 @@ export function AppShell({
             return existing ? { ...t, messages: existing.messages } : t;
           });
         });
-        const chatDesks =
-          desks === null ? defaultDesks() : desks.length ? desks.map(deskFromDto) : defaultDesks();
+        // The host answered, so this is the company's desk list — empty
+        // included. `defaultDesks()` stands in only when `listDesks` itself
+        // failed (`desks === null`, from the `.catch(() => null)` above); a
+        // company that simply declares no `[[group_chat]]` used to be given
+        // three fabricated ones here.
+        const chatDesks = desks === null ? defaultDesks() : desks.map(deskFromDto);
         const roster = team.map(fromDto);
         // Keep the addressing this loop resolves, not just its side effect.
         //
@@ -1556,6 +1584,21 @@ export function AppShell({
   useEffect(() => {
     chatChannelByThreadRef.current = chatChannelByThread;
   }, [chatChannelByThread]);
+  /**
+   * Mirrors `openTurns` for the same reason `chatChannelByThreadRef` mirrors
+   * its map: `reReadSettledThread` needs the value as of *when its response
+   * lands*, not as of when the request started.
+   *
+   * What it guards is the live-row clear below. `settle` drops only the turn
+   * that ended and deliberately keeps a queued sibling watched, so a thread
+   * with more work still has an entry here — and a thread-wide clear that
+   * ignored it would delete the rows of a turn that is still running, on the
+   * wide window a history round trip opens (PR #1904 review).
+   */
+  const openTurnsRef = useRef(openTurns);
+  useEffect(() => {
+    openTurnsRef.current = openTurns;
+  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1609,7 +1652,7 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string) => {
+    (threadId: string, settledTurnId?: string) => {
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1626,6 +1669,29 @@ export function AppShell({
             scopeRef.current.client !== client
           ) return;
           const hydrated = fromHistory(entries);
+          // The turn is over, so its transient tool rows have served their
+          // purpose — the durable record just folded in is what stands now.
+          //
+          // `injectAgentReply` does this for a turn that *answered*, and for a
+          // long time that covered everything a console would see. A turn that
+          // settles **failed** journals a `TurnFailed` line and emits no
+          // `agent_reply`, so nothing cleared its rows: a detached POST has
+          // already resolved, `onSendEnd` has already run, and the live
+          // timeline sat under the channel claiming work was in flight until
+          // the next send or a reload (PR #1904 review). Harmless while ACP
+          // published no rows at all; not harmless now that it does.
+          //
+          // …but only when the thread has nothing else running. A thread can
+          // hold several detached turns, and `settle` keeps the queued ones
+          // watched; clearing unconditionally would wipe a *newer* turn's rows
+          // whenever its frames arrived while this history read was in flight,
+          // which on a round trip is a wide window. The newer turn's own
+          // settle clears them when it gets there.
+          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+            setLiveStepsByThread((prev) =>
+              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+            );
+          }
           setThreads((ts) =>
             ts.map((t) => {
               if (t.id !== threadId) return t;
@@ -1717,7 +1783,10 @@ export function AppShell({
       // Deliberately not awaited here, and deliberately not written inline —
       // see `reReadSettledThread` for why the re-read cannot live inside this
       // effect. The line above is what tears this effect down.
-      reReadSettledThread(threadId);
+      //
+      // The turn id goes with it: the re-read's own clear must not be fooled
+      // by a ref that has not caught up with the `setOpenTurns` above.
+      reReadSettledThread(threadId, turnId);
     };
 
     const poll = () => {
@@ -2197,9 +2266,25 @@ export function AppShell({
       // `onSendEnd` does this for a turn this console POSTed; a turn it did not
       // has no send to end, and without this its rows would sit under the
       // channel until the next turn on the same thread replaced them.
-      setLiveStepsByThread((prev) =>
-        prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
-      );
+      //
+      // Guarded on the same condition `reReadSettledThread` uses, and for the
+      // same reason (PR #1904 review): a thread can hold several detached
+      // turns, and this clear is thread-wide. An earlier turn's reply landing
+      // while a later one is still working would erase the rows of the turn
+      // that is *currently* running — which reads as a teammate that stopped,
+      // the exact appearance this timeline exists to prevent. The rows left
+      // standing belong to work that really happened, and the open turn's own
+      // settle clears them.
+      // No turn id to exclude here: a reply arriving over SSE and its turn
+      // settling on the poll are independent events, so the replying turn may
+      // still be listed. That only defers the clear to its own settle, which
+      // then runs the re-read above — the conservative direction, and the one
+      // that never erases a running turn's rows.
+      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+        setLiveStepsByThread((prev) =>
+          prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
+        );
+      }
     },
     // `useEvents` holds its callbacks in refs, so this identity churning as the
     // map lands cannot re-open the SSE stream.
@@ -2615,6 +2700,7 @@ export function AppShell({
         let idx = event.toolCallId
           ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
           : -1;
+        if (idx < 0 && event.toolCallId) return prev;
         if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
         const status = event.status === "error" ? ("error" as const) : ("ok" as const);
         if (idx >= 0) {
@@ -2622,6 +2708,15 @@ export function AppShell({
             ...rows[idx],
             status,
             detail: event.detail ?? rows[idx].detail,
+            // `result` is what came back — the summary `StepTimeline` renders
+            // under the label. Carried for the same reason `detail` is: the
+            // live row and the folded step it is replaced by should not say
+            // different amounts about the same call. It was dropped here while
+            // only the built-in harness streamed (its rows lean on `detail`,
+            // derived from the arguments); an ACP tool call carries its
+            // summary in `result` and nothing else, so a dropped `result` is
+            // the whole of what the row could have said.
+            result: event.result ?? rows[idx].result,
             elapsedMs: event.elapsedMs,
           };
         } else {
@@ -2630,6 +2725,7 @@ export function AppShell({
             status,
             label: event.label ?? "Working",
             detail: event.detail,
+            result: event.result,
             elapsedMs: event.elapsedMs,
             toolCallId: event.toolCallId,
           });
@@ -3094,12 +3190,19 @@ export function AppShell({
         </a>
       <Sidebar collapsible="icon">
         <SidebarHeader>
+          {/* macOS floats the traffic lights over this corner once the window
+              gives up its title bar, and this corner is the company switcher.
+              Reserve the strip they land in, and let it drag. Renders nothing
+              anywhere else — see `window-chrome.tsx`. */}
+          <WindowControlsInset />
           {/* The header is the column talking about itself: which host this
-              console is looking at, and whether the column is showing.
+              console is looking at, the utilities that act on the console
+              rather than on the company, and whether the column is showing.
               Everything BELOW it — the nav group and the footer's standing
-              controls — takes you somewhere. Collapse used to be the first row
-              under the switcher, which put a chrome control at the head of a
-              list of destinations and made it read as one (issue #1177).
+              controls — is the company. Collapse used to be the first row under
+              the switcher, which put a chrome control at the head of a list of
+              destinations and made it read as one (issue #1177); it now sits on
+              the utility bar with the three other controls of its kind.
 
               `flex-col` on the rail is not a preference. The collapsed column
               is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
@@ -3115,32 +3218,44 @@ export function AppShell({
                 `min-w-0` so the nameplate truncates instead of pushing the
                 button off the end of a 13.5rem column. */}
             <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
-              <HostSwitcher companyName={feed.status.name} />
+              <HostSwitcher
+                companyName={feed.status.name}
+                // The company's lifecycle, and every company on this host:
+                // both were rows in the sidebar footer, and both are facts
+                // about *which company you are in* — which is what this control
+                // is. See `HostSwitcher`'s `companyState` for why the lifecycle
+                // is not folded into the connection dot.
+                companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
+                companies={companies}
+                activeCompany={company}
+                onSwitchCompany={onSwitchCompany}
+                onBackToPicker={onBackToPicker}
+                onCreateCompany={onCreateCompany}
+                canCreateCompany={client.carriesPlatformBearer}
+              />
             </div>
-            <SidebarCollapseButton />
           </div>
+          {/* Directly under the switcher: Settings, Feedback, Discord and
+              Collapse, as one bar of icons rather than four full-width rows
+              spread across the nav and the footer. See `SidebarUtilityBar`. */}
+          <SidebarUtilityBar view={view} onNavigate={setView} />
         </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
         <SidebarFooter>
-          {/* Who you are signed in as, above the controls that act on the
-              company. It renders nothing where there is nobody to name — a host
-              with no sign-in, or a session that has just gone. */}
+          {/* Who you are signed in as, and nothing else.
+
+              The lifecycle row and the "Switch company" row that used to stand
+              here have both moved into the host switcher at the top of the
+              column — see its `companyState` and its Companies group. Both were
+              answers to "which company am I in, and how is it doing", asked at
+              the opposite end of the sidebar from the control that names it.
+
+              It renders nothing where there is nobody to name — a host with no
+              sign-in, or a session that has just gone. */}
           <ProfileRow client={client} company={company} />
-          <SidebarControls
-            lifecycleState={feed.status.lifecycle}
-            emergencyPaused={feed.status.emergency_paused}
-            companies={companies}
-            activeCompany={company}
-            onSwitchCompany={onSwitchCompany}
-            onBackToPicker={onBackToPicker}
-            onCreateCompany={onCreateCompany}
-            canCreateCompany={client.carriesPlatformBearer}
-            view={view}
-            onNavigate={setView}
-          />
         </SidebarFooter>
         </nav>
         <SidebarRail />
@@ -3167,17 +3282,16 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
+          {/* `#/overview` is the company graph again — the page #1321 swapped
+              out for the operator landing view. The graph keeps the
+              `#/company/graph` alias that issue gave it, so every link minted
+              while it lived there still resolves.
+
+              `OperatorOverview` is left in the tree, unrouted: its panels are
+              real work (#1015, #1700, #1745) and the decision about where they
+              belong is not this change's to make. Nothing renders it today. */}
           {(view === "overview" || view === "setup") && (
-            <OperatorOverview
-              client={client}
-              company={company}
-              feed={feed}
-              scope={scope}
-              // Issue #1015: re-read the run panels when a run parks or fails
-              // while this page stays open (the same tick TaskDetailView
-              // re-reads on).
-              attemptEventTick={attemptEventTick}
-            />
+            <Overview client={client} company={company} companyName={feed.status.name} />
           )}
           {view === "company" && (
             <CompanyView
@@ -3443,6 +3557,11 @@ export function AppShell({
                 // the host rather than this shell guessing here.
                 initialNodeId={sub}
               />
+            </Suspense>
+          )}
+          {view === "brain" && (
+            <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
+              <MemoryView client={client} company={company} />
             </Suspense>
           )}
           {view === "approvals" && (

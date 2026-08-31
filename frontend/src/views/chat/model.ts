@@ -2,7 +2,7 @@
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
 import type { ApprovalSummary, DeskDto, OperatorChannelDto, Verdict } from "@/api/types";
-import { isBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
+import { isAnyBudgetPauseNotice, parseBudgetPauseAgent } from "@/hooks/use-events";
 import {
   clearTaskCard,
   generalAwareChannel,
@@ -11,7 +11,6 @@ import {
   type Reaction,
 } from "@/lib/chat";
 import {
-  defaultDesks,
   deskClaimsGeneralChannel,
   GENERAL_CHANNEL,
   isGeneralChannel,
@@ -74,12 +73,25 @@ export type Transcripts = Record<string, ChatMessage[]>;
  * message's own `at` timestamp rather than by scan order, because iterating
  * one channel's array to completion before moving to the next would NOT
  * yield cross-channel chronological order on its own.
+ *
+ * Scanned with `isAnyBudgetPauseNotice`, NOT `isBudgetPauseNotice` (issue
+ * #1906). The narrow check is the render-time one — "does this notice get an
+ * Add-credits button" — and filtering the supersession map through it made
+ * every NO-RESEND notice invisible here, while the marker it parked still
+ * overwrote the previous one on the host. maya pauses on an interactive turn
+ * (redeemable notice N1, marker M1); an approval for maya is then approved,
+ * its continuation runs through `run_steered_background`, pauses, and parks M2
+ * (`background: true`) over M1 with a no-resend notice. N1 was still this
+ * map's answer for maya, so its CTA stayed enabled and clicking it sent
+ * `?id=M1.id` — a marker that no longer exists — for a `RedeemMatch::Stale`
+ * 409 that refreshing could never clear. A pause is a pause for supersession
+ * purposes whether or not the operator gets a button for it.
  */
 export function latestBudgetPauseMessageIdByAgent(transcripts: Transcripts): Map<string, string> {
   const latest = new Map<string, { messageId: string; at: number }>();
   for (const messages of Object.values(transcripts)) {
     for (const message of messages) {
-      if (!isBudgetPauseNotice(message.text)) continue;
+      if (!isAnyBudgetPauseNotice(message.text)) continue;
       const agentId = parseBudgetPauseAgent(message.text);
       if (agentId == null) continue;
       const seen = latest.get(agentId);
@@ -302,7 +314,11 @@ function generalChannel(members: TeamMember[]): Channel {
 
 export function buildChannels(
   members: TeamMember[],
-  desks: Desk[] = defaultDesks(),
+  // Defaults to no desks, not to the fabricated trio. The parameter exists so
+  // a caller that has not read `/desks` yet can still build the rail's roster
+  // half; standing in three desks the company never declared is the bug this
+  // default used to carry into every such caller.
+  desks: Desk[] = [],
   transcripts: Transcripts = {},
 ): ChannelSection[] {
   // A desk that answers to a General spelling owns the company-wide line, and

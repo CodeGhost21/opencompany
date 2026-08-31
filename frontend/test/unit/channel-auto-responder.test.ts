@@ -170,10 +170,13 @@ describe("channel creation guards (#1872 review)", () => {
   it("replaces the fallback desk set with the first real channel instead of appending beside it", () => {
     const src = chatView();
     // loadDesks marks when the rail is showing defaultDesks() rather than the
-    // host's own list — keyed on raw response length now that the Operator
-    // feed is its own surface (issue #1757 rework) and no longer an entry
-    // `list_desks` returns.
-    expect(src).toContain("desksAreFallback.current = dtos.length === 0;");
+    // host's own list. Since desk fabrication stopped standing in for an empty
+    // answer, that is the 404 leg alone — a host with no `/desks` route at all.
+    // An answered read is the company's own list, empty or not, and is never
+    // the fallback set.
+    expect(src).toContain("desksAreFallback.current = false;");
+    expect(src).toContain("desksAreFallback.current = true;");
+    expect(src).not.toContain("desksAreFallback.current = dtos.length === 0;");
     // …and onCreated replaces that set outright: the first real channel ends
     // the fallback's mandate, and appending beside it would keep fabricated
     // rows — one of which could share the new channel's id — until reload.

@@ -394,6 +394,15 @@ pub fn relay_text(card: &TaskRecord, responder: &str, orchestrator: &str) -> Str
 /// `steps` is empty by construction: a dispatched card has no chat bubble to
 /// render a timeline on, so its steps go into the note (and, once #190 lands,
 /// onto the task's own `task_id`-correlated timeline).
+///
+/// `task_id` carries the card's own id, for field-contract consistency with
+/// every other `OutboundMessage` producer — but `CompanyRuntime::
+/// journal_dispatch_replies` intentionally strips it back to `None` before
+/// journaling this bubble: the settle that already ran left a
+/// `DeskTaskCompleted` event pointed at this same thread, and carrying
+/// `task_id` here too would render a second "card opened" chip for a card
+/// that is not open by the time this bubble lands. It does not reach
+/// `AgentReply::task_id` and does not survive a transcript reload.
 pub fn relay_reply(
     card: &TaskRecord,
     responder: &str,
@@ -402,7 +411,7 @@ pub fn relay_reply(
 ) -> OutboundMessage {
     OutboundMessage {
         message_id: None,
-        task_id: None,
+        task_id: Some(card.id.clone()),
         channel: orchestrator.to_string(),
         agent: None,
         text: relay_text(card, responder, orchestrator),
@@ -515,6 +524,11 @@ mod test {
             relayed.reply_to.as_ref().map(|r| r.chat_id.as_str()),
             Some("strategy")
         );
+        // Issue #1852: the relay carries the card's own id for field-contract
+        // consistency, but `CompanyRuntime::journal_dispatch_replies` strips
+        // it back to `None` before journaling — the settle already left a
+        // `DeskTaskCompleted` link, and this would only duplicate it.
+        assert_eq!(relayed.task_id.as_deref(), Some("t-1"));
         assert!(
             relayed.text.contains("is ready for review"),
             "{}",

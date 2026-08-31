@@ -1383,7 +1383,14 @@ impl ContextStore for SqliteStore {
         Ok(removed > 0)
     }
 
+    /// Weighted token overlap rather than `body.find(query)` — see
+    /// [`crate::store::lexical`]. The same ranker as fs and mongo, so the
+    /// conformance suite can demand one search semantics from all three.
     async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
+        let mut ranker = crate::store::lexical::Ranker::new(query);
+        if ranker.matches_nothing() {
+            return Ok(Vec::new());
+        }
         let conn = self.conn();
         let mut stmt = conn
             .prepare("SELECT addr, body FROM context_chunks WHERE company_id = ?1 ORDER BY rowid")
@@ -1393,26 +1400,11 @@ impl ContextStore for SqliteStore {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })
             .map_err(sql_err)?;
-        let mut hits = Vec::new();
         for row in rows {
-            if hits.len() >= limit {
-                break;
-            }
             let (addr, body) = row.map_err(sql_err)?;
-            if let Some(pos) = body.find(query) {
-                // The ±24-byte window can land mid-codepoint on a multibyte
-                // body; widen to the boundary rather than panic the slice.
-                hits.push(ChunkHit {
-                    addr: ChunkAddr::new(addr),
-                    snippet: slice_on_char_boundaries(
-                        &body,
-                        pos.saturating_sub(24)..pos + query.len() + 24,
-                    ),
-                    score: 1.0,
-                });
-            }
+            ranker.offer(&addr, &body);
         }
-        Ok(hits)
+        Ok(ranker.best(limit))
     }
 }
 
@@ -4275,6 +4267,12 @@ mod test {
     #[tokio::test]
     async fn conformance_context_delete_label_survives_a_concurrent_identical_put() {
         conformance::assert_delete_label_survives_a_concurrent_identical_put(store()).await;
+    }
+
+    /// The same search semantics as every other backend.
+    #[tokio::test]
+    async fn conformance_context_search_ranking() {
+        conformance::assert_context_search_ranking(store()).await;
     }
 
     /// The migration path a fresh database never exercises.

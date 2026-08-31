@@ -170,8 +170,12 @@ pub enum ResolveOutcome {
 /// `[policy]` and holds the in-memory approval queue.
 pub struct ManifestApprovalGate {
     policy: RwLock<Policy>,
+    policy_hitl_enabled: AtomicBool,
     ttl_millis: AtomicU64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
+    /// Effects removed by TTL expiry, retained only until the runtime completes
+    /// their retirement transaction.
+    expired_effects: Mutex<HashMap<ApprovalId, Effect>>,
     /// The governance kill switch (issue #86).
     ///
     /// An `AtomicBool` rather than a lock because `evaluate` reads it on every
@@ -210,10 +214,19 @@ impl ManifestApprovalGate {
             .unwrap_or(DEFAULT_TTL_MILLIS);
         Self {
             policy: RwLock::new(policy),
+            policy_hitl_enabled: AtomicBool::new(true),
             ttl_millis: AtomicU64::new(ttl_millis),
             parked: Mutex::new(HashMap::new()),
+            expired_effects: Mutex::new(HashMap::new()),
             emergency: AtomicBool::new(false),
         }
+    }
+
+    /// Disables policy-generated approval decisions while leaving explicit
+    /// `park` calls and hard emergency/read-only denials available.
+    pub fn with_policy_hitl_disabled(self) -> Self {
+        self.policy_hitl_enabled.store(false, Ordering::Relaxed);
+        self
     }
 
     /// Engages (`true`) or releases (`false`) the emergency stop.
@@ -408,9 +421,23 @@ impl ManifestApprovalGate {
         expired.truncate(limit);
         let expired: Vec<ApprovalId> = expired.into_iter().map(|(_, id)| id).collect();
         for id in &expired {
-            map.remove(id);
+            if let Some(parked) = map.remove(id) {
+                self.expired_effects
+                    .lock()
+                    .expect("expired effects poisoned")
+                    .insert(id.clone(), parked.effect);
+            }
         }
         expired
+    }
+
+    /// Takes the effect removed by an expiry, if its runtime retirement has not
+    /// consumed it yet.
+    pub fn take_expired_effect(&self, id: &ApprovalId) -> Option<Effect> {
+        self.expired_effects
+            .lock()
+            .expect("expired effects poisoned")
+            .remove(id)
     }
 
     /// A clone of a parked effect without resolving it.
@@ -474,6 +501,10 @@ impl ManifestApprovalGate {
             return ResolveOutcome::NotParked;
         };
         if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
+            self.expired_effects
+                .lock()
+                .expect("expired effects poisoned")
+                .insert(id.clone(), parked.effect);
             return ResolveOutcome::Expired;
         }
         ResolveOutcome::Approved(amended)
@@ -500,6 +531,10 @@ impl ManifestApprovalGate {
             return ResolveOutcome::NotParked;
         };
         if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis() {
+            self.expired_effects
+                .lock()
+                .expect("expired effects poisoned")
+                .insert(id.clone(), parked.effect);
             return ResolveOutcome::Expired;
         }
         match verdict {
@@ -711,6 +746,16 @@ impl ApprovalGate for ManifestApprovalGate {
             return Ok(PolicyDecision::Deny);
         }
 
+        if !self.policy_hitl_enabled.load(Ordering::Relaxed) {
+            let policy = self.policy.read().expect("policy lock poisoned");
+            if policy.mode.eq_ignore_ascii_case("readonly")
+                && effect.kind != crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND
+            {
+                return Ok(PolicyDecision::Deny);
+            }
+            return Ok(PolicyDecision::Allow);
+        }
+
         // 1. `never_do` hard-deny — the delegation-rule compiler is a Phase-1
         //    stub, so this list is currently always empty.
 
@@ -824,6 +869,44 @@ mod test {
 
     async fn decide(gate: &ManifestApprovalGate, effect: &Effect) -> PolicyDecision {
         gate.evaluate(&company(), effect).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_hitl_allows_legacy_parks_but_keeps_hard_denials() {
+        let gate =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Allow
+        );
+
+        gate.set_emergency(true);
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
+        );
+
+        let readonly =
+            ManifestApprovalGate::new(policy("readonly", None)).with_policy_hitl_disabled();
+        assert_eq!(
+            decide(&readonly, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(&readonly, &effect("notification.post", EffectGroup::Other)).await,
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            decide(
+                &readonly,
+                &effect(
+                    crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND,
+                    EffectGroup::Other
+                )
+            )
+            .await,
+            PolicyDecision::Allow
+        );
     }
 
     #[tokio::test]

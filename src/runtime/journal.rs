@@ -34,8 +34,8 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
 use crate::ports::journal::{Durability, JournalStore};
-use crate::ports::types::{Actor, ApprovalId, CompanyId, Effect, EventSeq};
-use crate::runtime::grants::{GrantId, GrantedCall, StandingGrant};
+use crate::ports::types::{Actor, ApprovalId, CompanyId, Effect, EventSeq, StartedBy};
+use crate::runtime::grants::{ApprovalContinuation, GrantId, GrantedCall, StandingGrant};
 pub use crate::runtime::types::TaskLink;
 use crate::store::fs::FsJournalStore;
 
@@ -58,6 +58,13 @@ pub enum ExpiryReason {
     /// It sat unresolved past its `[policy].approval_ttl_hours` deadline.
     #[default]
     Ttl,
+}
+
+/// The pre-#1862 fallback for a [`JournalRecord::BlockedNodeStashed`] line
+/// written before that record carried `started_by` at all — never a live
+/// choice, only what a legacy row's `#[serde(default)]` decodes to.
+fn default_started_by_operator() -> StartedBy {
+    StartedBy::Operator
 }
 
 /// One durable journal record.
@@ -234,6 +241,34 @@ enum JournalRecord {
         /// The grant, whole.
         grant: GrantedCall,
     },
+    /// A follow-up turn owed after an agent explicitly asked the operator a
+    /// question. Unlike `ApprovalGranted`, this carries either verdict and
+    /// conveys no authority to execute a tool call.
+    ApprovalContinuationQueued {
+        /// The verdict and routing context, whole.
+        continuation: ApprovalContinuation,
+    },
+    /// An explicit decision follow-up is committed to one dispatch attempt.
+    /// Written before the agent turn starts so recovery never repeats external
+    /// actions from a continuation that may already have partially run.
+    ApprovalContinuationDispatched {
+        /// The approval whose follow-up was claimed.
+        id: ApprovalId,
+        /// Epoch-millis the dispatch was committed.
+        at_millis: u64,
+    },
+    /// An explicit approval continuation was delivered to its requesting agent.
+    ApprovalContinuationConsumed {
+        /// The approval whose follow-up completed.
+        id: ApprovalId,
+    },
+    /// An explicit approval continuation expired before it could be delivered.
+    ApprovalContinuationExpired {
+        /// The approval whose follow-up expired.
+        id: ApprovalId,
+        /// Epoch-millis the expiry was recorded.
+        at_millis: u64,
+    },
     /// A grant redeemed by its agent — the tool ran.
     GrantConsumed {
         /// The consumed grant's approval id.
@@ -357,6 +392,15 @@ enum JournalRecord {
         /// The paused run's own trigger input, replayed unchanged — the grant the
         /// approve minted is what lets the identical gated call pass on the re-run.
         input: Value,
+        /// The blocked run's own attribution (issue #1862 prerequisite), carried
+        /// so a restart between park and approve rehydrates the real trigger
+        /// instead of degrading every stash to [`StartedBy::Operator`] — see
+        /// [`BlockedNodeQueue::rearm`](crate::runtime::blocked_nodes::BlockedNodeQueue::rearm).
+        /// `#[serde(default)]` so a record written before this field existed
+        /// still replays: it degrades to `Operator`, the same fallback the
+        /// pre-#1862 code path always used.
+        #[serde(default = "default_started_by_operator")]
+        started_by: StartedBy,
         /// Epoch-millis the block was stashed.
         at_millis: u64,
     },
@@ -576,6 +620,19 @@ impl JournalRecord {
             // direction — the cost of the loss is an extra question, never an
             // extra call.
             Self::ApprovalGranted { .. } => Durability::Process,
+            // Conversation continuations carry no execution authority. Losing
+            // a queued one means the agent misses a verdict; losing a terminal
+            // line can repeat a model follow-up, but cannot repeat an effect.
+            // Losing the dispatch claim can replay an entire model turn whose
+            // earlier tool call already left the company. Host durability buys
+            // at-most-once dispatch; a crash after the claim but before the turn
+            // takes the safe at-most-once direction and may drop the follow-up.
+            // Losing the queue record after `ApprovalResolved` survived leaves
+            // a decided request with no card and no follow-up to recover.
+            Self::ApprovalContinuationQueued { .. }
+            | Self::ApprovalContinuationDispatched { .. } => Durability::Host,
+            Self::ApprovalContinuationConsumed { .. }
+            | Self::ApprovalContinuationExpired { .. } => Durability::Process,
             // The same direction as `ApprovalGranted`, one scope wider.
             Self::StandingGrantMinted { .. } => Durability::Process,
             // Deadline arithmetic rather than state: `replayed_standing_grants`
@@ -976,6 +1033,9 @@ struct State {
     /// consumed or expired entry here would re-arm a tool call that already ran
     /// (or that the operator was already told had lapsed) on every restart.
     grants: HashMap<ApprovalId, GrantedCall>,
+    /// Explicit approval follow-ups still owed after replay. Kept separate from
+    /// grants because a denial is a continuation, never executable authority.
+    approval_continuations: HashMap<ApprovalId, ApprovalContinuation>,
     /// Standing grants minted and not yet revoked or expired (issue #374).
     ///
     /// Removed from on both terminal records for the same reason as
@@ -1049,6 +1109,11 @@ struct State {
 struct BlockedStash {
     workflow_id: String,
     input: Value,
+    /// The blocked run's own attribution (issue #1862 prerequisite), carried
+    /// so [`blocked_stashes`](RuntimeJournal::blocked_stashes) can hand
+    /// [`BlockedNodeQueue::rearm`](crate::runtime::blocked_nodes::BlockedNodeQueue::rearm)
+    /// the real trigger instead of a hardcoded `Operator` default.
+    started_by: StartedBy,
     /// Whether this stash's `BlockedNodeStashed` append has actually landed
     /// (issue #1825, P1 — found by chatgpt-codex-connector).
     ///
@@ -1323,6 +1388,16 @@ impl RuntimeJournal {
             JournalRecord::ApprovalGranted { grant } => {
                 state.grants.insert(grant.approval_id.clone(), grant);
             }
+            JournalRecord::ApprovalContinuationQueued { continuation } => {
+                state
+                    .approval_continuations
+                    .insert(continuation.call.approval_id.clone(), continuation);
+            }
+            JournalRecord::ApprovalContinuationDispatched { id, .. }
+            | JournalRecord::ApprovalContinuationConsumed { id }
+            | JournalRecord::ApprovalContinuationExpired { id, .. } => {
+                state.approval_continuations.remove(&id);
+            }
             JournalRecord::GrantConsumed { id, effect } => {
                 state.grants.remove(&id);
                 // Absent only on a line written before the grant path was
@@ -1372,6 +1447,7 @@ impl RuntimeJournal {
                 turn,
                 workflow_id,
                 input,
+                started_by,
                 ..
             } => {
                 state.blocked_stashes.insert(
@@ -1379,6 +1455,7 @@ impl RuntimeJournal {
                     BlockedStash {
                         workflow_id,
                         input,
+                        started_by,
                         // A record `replay` folds is durable by construction —
                         // it was read back from the journal it describes.
                         durable: true,
@@ -1722,7 +1799,8 @@ impl RuntimeJournal {
     }
 
     /// Every blocked agent-node stash still awaiting re-dispatch, as
-    /// `(turn, workflow_id, input)` (issue #1816, Stage 2).
+    /// `(turn, workflow_id, input, started_by)` (issue #1816, Stage 2; the
+    /// `started_by` field added for issue #1862's prerequisite).
     ///
     /// The builder folds this at boot into the live
     /// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)
@@ -1731,13 +1809,20 @@ impl RuntimeJournal {
     /// [`pending`](Self::pending) feeds the gate queue's re-arm. Only stashes
     /// whose paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased)
     /// has not replayed are returned — a re-dispatched run does not come back.
-    pub fn blocked_stashes(&self) -> Vec<(String, String, Value)> {
+    pub fn blocked_stashes(&self) -> Vec<(String, String, Value, StartedBy)> {
         self.state
             .lock()
             .expect("journal state poisoned")
             .blocked_stashes
             .iter()
-            .map(|(turn, stash)| (turn.clone(), stash.workflow_id.clone(), stash.input.clone()))
+            .map(|(turn, stash)| {
+                (
+                    turn.clone(),
+                    stash.workflow_id.clone(),
+                    stash.input.clone(),
+                    stash.started_by.clone(),
+                )
+            })
             .collect()
     }
 
@@ -1780,6 +1865,7 @@ impl RuntimeJournal {
         turn: &str,
         workflow_id: &str,
         input: &Value,
+        started_by: &StartedBy,
     ) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
@@ -1805,6 +1891,7 @@ impl RuntimeJournal {
                         BlockedStash {
                             workflow_id: workflow_id.to_string(),
                             input: input.clone(),
+                            started_by: started_by.clone(),
                             durable: false,
                         },
                     );
@@ -1815,6 +1902,7 @@ impl RuntimeJournal {
             turn: turn.to_string(),
             workflow_id: workflow_id.to_string(),
             input: input.clone(),
+            started_by: started_by.clone(),
             at_millis: crate::ports::now_millis(),
         })
         .await?;
@@ -2230,6 +2318,72 @@ impl RuntimeJournal {
         .await
     }
 
+    /// Records a verdict-bearing explicit approval continuation before it is
+    /// armed in memory.
+    pub async fn record_approval_continuation(
+        &self,
+        continuation: &ApprovalContinuation,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .insert(continuation.call.approval_id.clone(), continuation.clone());
+        self.append(&JournalRecord::ApprovalContinuationQueued {
+            continuation: continuation.clone(),
+        })
+        .await
+    }
+
+    /// Records that an explicit approval continuation reached its agent.
+    pub async fn record_approval_continuation_consumed(&self, id: &ApprovalId) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationConsumed { id: id.clone() })
+            .await
+    }
+
+    /// Durably claims one explicit continuation before its agent turn starts.
+    /// Replay removes a claimed continuation from the recovery queue, choosing
+    /// a possibly missed follow-up over repeating an external action.
+    pub async fn record_approval_continuation_dispatched(
+        &self,
+        id: &ApprovalId,
+        at_millis: u64,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationDispatched {
+            id: id.clone(),
+            at_millis,
+        })
+        .await
+    }
+
+    /// Records that an explicit approval continuation expired undelivered.
+    pub async fn record_approval_continuation_expired(
+        &self,
+        id: &ApprovalId,
+        at_millis: u64,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
+            .remove(id);
+        self.append(&JournalRecord::ApprovalContinuationExpired {
+            id: id.clone(),
+            at_millis,
+        })
+        .await
+    }
+
     /// Records that a grant was redeemed — the agent re-issued the call and the
     /// tool ran. Removes it from the replay set so a restart cannot re-arm it.
     ///
@@ -2281,6 +2435,17 @@ impl RuntimeJournal {
             .lock()
             .expect("journal state poisoned")
             .grants
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Explicit approval continuations still owed according to journal replay.
+    pub fn replayed_approval_continuations(&self) -> Vec<ApprovalContinuation> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .approval_continuations
             .values()
             .cloned()
             .collect()
@@ -3549,6 +3714,56 @@ mod test {
         );
     }
 
+    #[tokio::test]
+    async fn a_denied_explicit_request_replays_only_as_a_verdict_continuation() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+        let continuation = ApprovalContinuation {
+            call: GrantedCall {
+                tool: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.into(),
+                ..grant("appr-denied", 1_000)
+            },
+            verdict: crate::ports::types::Verdict::Deny,
+            by: Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "operator".into(),
+            },
+        };
+
+        journal
+            .record_approval_continuation(&continuation)
+            .await
+            .unwrap();
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(
+            reloaded.replayed_grants().is_empty(),
+            "a denial must never replay as executable authority"
+        );
+        assert_eq!(
+            reloaded.replayed_approval_continuations(),
+            vec![continuation.clone()]
+        );
+
+        reloaded
+            .record_approval_continuation_dispatched(&continuation.call.approval_id, 2_000)
+            .await
+            .unwrap();
+        let after_dispatch = RuntimeJournal::new(&path);
+        after_dispatch.load().await.unwrap();
+        assert!(
+            after_dispatch.replayed_approval_continuations().is_empty(),
+            "a host-durable dispatch claim prevents restart from repeating the turn"
+        );
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(raw.contains("ApprovalContinuationQueued"));
+        assert!(raw.contains("ApprovalContinuationDispatched"));
+        assert!(!raw.contains("ApprovalGranted"));
+    }
+
     /// The other half, and the one that actually matters for safety: a grant
     /// that already fired — or that lapsed and was announced as lapsed — must
     /// NOT come back on replay.
@@ -4247,6 +4462,24 @@ mod test {
             JournalRecord::ApprovalGranted {
                 grant: grant("a", 4),
             },
+            JournalRecord::ApprovalContinuationQueued {
+                continuation: ApprovalContinuation {
+                    call: grant("continuation", 4),
+                    verdict: crate::ports::types::Verdict::Approve,
+                    by: revoker(),
+                },
+            },
+            JournalRecord::ApprovalContinuationDispatched {
+                id: ApprovalId::new("continuation"),
+                at_millis: 4,
+            },
+            JournalRecord::ApprovalContinuationConsumed {
+                id: ApprovalId::new("continuation"),
+            },
+            JournalRecord::ApprovalContinuationExpired {
+                id: ApprovalId::new("continuation"),
+                at_millis: 5,
+            },
             JournalRecord::GrantConsumed {
                 id: ApprovalId::new("a"),
                 effect: None,
@@ -4281,6 +4514,7 @@ mod test {
                 turn: "t".into(),
                 workflow_id: "w".into(),
                 input: serde_json::json!({}),
+                started_by: StartedBy::Operator,
                 at_millis: 10,
             },
             JournalRecord::BlockedNodeReleased { turn: "t".into() },
@@ -4321,12 +4555,12 @@ mod test {
     /// pinned separately below (issue #1145) — deliberately not by loosening
     /// this list, which is the assertion that would have stopped noticing.
     #[test]
-    fn host_durable_kinds_are_exactly_the_seven_that_could_repeat_an_action() {
+    fn host_durable_kinds_are_exactly_the_nine_that_protect_approval_work() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
             tags.len(),
-            17,
+            21,
             "every JournalRecord variant must appear once in every_record_kind"
         );
 
@@ -4339,6 +4573,8 @@ mod test {
         assert_eq!(
             host,
             vec![
+                "ApprovalContinuationDispatched".to_string(),
+                "ApprovalContinuationQueued".to_string(),
                 "BlockedNodeApproved".to_string(),
                 "BlockedNodeDispatched".to_string(),
                 "BlockedNodeReleased".to_string(),
@@ -4347,10 +4583,11 @@ mod test {
                 "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these seven kinds and nothing else; \
+            "the host-durable set is these nine kinds and nothing else; \
              widening it taxes the hot path, narrowing it lets an effect duplicate, \
-             a spent grant re-arm, or a blocked node's stash/approval/dispatch survive a \
-             process restart but not the host crash it also promises to survive"
+             a spent grant re-arm, an explicit follow-up repeat, or a blocked node's \
+             stash/approval/dispatch survive a process restart but not the host crash it also \
+             promises to survive"
         );
     }
 
@@ -4601,7 +4838,12 @@ mod test {
         let journal = RuntimeJournal::new(&path);
 
         journal
-            .record_blocked_node_stashed("turn-1", "wf-1", &serde_json::json!({}))
+            .record_blocked_node_stashed(
+                "turn-1",
+                "wf-1",
+                &serde_json::json!({}),
+                &StartedBy::Operator,
+            )
             .await
             .unwrap();
         journal
@@ -4647,7 +4889,12 @@ mod test {
         let journal = RuntimeJournal::new(&path);
 
         journal
-            .record_blocked_node_stashed("turn-1", "wf-1", &serde_json::json!({}))
+            .record_blocked_node_stashed(
+                "turn-1",
+                "wf-1",
+                &serde_json::json!({}),
+                &StartedBy::Operator,
+            )
             .await
             .unwrap();
         journal
@@ -4772,7 +5019,7 @@ mod test {
         // still has to be there for a fast resolve to release, so this must
         // not be lost even though the call itself reports an error.
         let first = journal
-            .record_blocked_node_stashed("turn-1", "wf-1", &input)
+            .record_blocked_node_stashed("turn-1", "wf-1", &input, &StartedBy::Operator)
             .await;
         assert!(
             first.is_err(),
@@ -4780,7 +5027,12 @@ mod test {
         );
         assert_eq!(
             journal.blocked_stashes(),
-            vec![("turn-1".to_string(), "wf-1".to_string(), input.clone())],
+            vec![(
+                "turn-1".to_string(),
+                "wf-1".to_string(),
+                input.clone(),
+                StartedBy::Operator
+            )],
             "the in-memory stash must still be there after a failed append — a resolve \
              landing before the next retry has to find it"
         );
@@ -4789,7 +5041,7 @@ mod test {
         // facts. The store is willing to succeed now — the fix must actually
         // retry the append instead of taking the early return.
         let second = journal
-            .record_blocked_node_stashed("turn-1", "wf-1", &input)
+            .record_blocked_node_stashed("turn-1", "wf-1", &input, &StartedBy::Operator)
             .await;
         assert!(
             second.is_ok(),
@@ -4804,9 +5056,55 @@ mod test {
         reloaded.load().await.unwrap();
         assert_eq!(
             reloaded.blocked_stashes(),
-            vec![("turn-1".to_string(), "wf-1".to_string(), input)],
+            vec![(
+                "turn-1".to_string(),
+                "wf-1".to_string(),
+                input,
+                StartedBy::Operator
+            )],
             "a restart must rehydrate this stash — the retried append is the only durable \
              record of it, and pre-fix it was never written at all"
+        );
+    }
+
+    /// Issue #1862 prerequisite (`CodeRabbit`, comment `3879554180`; also
+    /// raised by `chatgpt-codex-connector`, comment `3879402310`): a
+    /// `BlockedNodeStashed` line written before this issue added `started_by`
+    /// to the record must still replay — `#[serde(default)]` is what makes
+    /// that true, degrading to `Operator` rather than failing the whole
+    /// journal load, the same fallback the pre-#1862 code path always used.
+    #[tokio::test]
+    async fn a_pre_1862_blocked_node_stashed_line_replays_as_operator() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let legacy = serde_json::json!({
+            "record": "BlockedNodeStashed",
+            "turn": "turn-legacy",
+            "workflow_id": "wf-legacy",
+            "input": { "request": "before #1862" },
+            "at_millis": 1_000,
+        });
+        tokio::fs::write(&path, format!("{legacy}\n"))
+            .await
+            .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("a pre-#1862 line with no started_by field still replays");
+
+        let stashes = journal.blocked_stashes();
+        assert_eq!(stashes.len(), 1);
+        let (turn, workflow_id, input, started_by) = &stashes[0];
+        assert_eq!(turn, "turn-legacy");
+        assert_eq!(workflow_id, "wf-legacy");
+        assert_eq!(input, &serde_json::json!({ "request": "before #1862" }));
+        assert_eq!(
+            started_by,
+            &StartedBy::Operator,
+            "a legacy line with no started_by field degrades to Operator, the coarse \
+             pre-#1862 fallback — not a load failure"
         );
     }
 }

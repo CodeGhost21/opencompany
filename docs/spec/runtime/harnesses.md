@@ -148,59 +148,7 @@ expensive way to discover that `[harness.inference]` needs `kind = "built_in"`.
 
 ## ACP transports
 
-```toml
-[harness.acp]
-transport = "local"      # spawn an agent on this machine
-agent     = "claude"     # claude | codex
-
-[harness.acp]
-transport = "runner"     # reach one that dialed in
-runner    = "stevens_laptop"
-```
-
-**A remote runner is a transport, not a third kind.** `transport = "local"` and
-`transport = "runner"` resolve to the same `AcpAgent` port
-(`crate::ports::acp::AcpAgent`); only how bytes reach the agent differs.
-Modelling the runner as a third kind would add a resolution path that resolves
-to the same place.
-
-The transports differ in where they live, which is why `AcpAgent` is a **port**
-rather than an ACP client in the host crate: a subprocess over stdio belongs to
-the desktop shell, a WebSocket to the runner lane. The same inversion the
-storage ports use — and, concretely, why the port itself lives at
-`crate::ports::acp`, ungated, rather than under `crate::harness` (behind
-`openhuman`): the desktop shell that supplies the `local` implementation does
-not enable that feature. See that module's own docs for the full reasoning.
-
-`local` has a real implementation as of issue #1245 — `LocalAcpAgent`
-(`src-tauri/src/acp/local_agent.rs`), wired through `AppState::with_acp_agents`
-and `desktop::register`. `runner` does not yet: `src/runner/dispatch.rs`
-declares `RunnerDispatch`, but it does not implement `AcpAgent`, and nothing
-wires it into `lanes::build`. A `runner`-transport harness resolves
-`unavailable` on every build today, `local` included.
-
-### Readiness
-
-For `transport = "local"`, the desktop probes four states rather than two:
-
-| state | what to do |
-|---|---|
-| `NotInstalled` | install it |
-| `NotSignedIn` | sign in |
-| `Ready` | — |
-| `SpawnFailed` | read the reason |
-
-**Installed but not signed in** is the most common state on a fresh machine, and
-it looks identical to "not installed" if all you check is `which`. The fixes are
-completely different, so collapsing them tells someone to do the wrong thing.
-
-Sign-in is probed by looking for the harness's credential file, not by running
-it: asking a harness whether it is logged in means starting it, which is slow on
-a list refreshed whenever a settings pane opens, and for some prompts
-interactively. The probe can be wrong in one direction — a stale credential
-reads as signed in — and that is the acceptable direction, because the failure
-then surfaces on first use with the harness's own message, which is more
-accurate than anything guessed.
+Moved to [`harnesses-acp.md`](harnesses-acp.md) — this file was over the repository's 500-line limit. See that page for the two transports, the readiness states, session continuity across a restart, and live execution state.
 
 ---
 
@@ -442,8 +390,11 @@ running on an operator-supplied credential rather than a signed-in account.
 | per-agent dispatch | `src/harness/router.rs` |
 | building the lanes at boot, resolving `acp` engines | `src/harness/lanes.rs` |
 | the built-in engine | `src/harness/built_in/` |
-| the `AcpAgent`/`AcpAgentFactory` ports (ungated) | `src/ports/acp.rs` |
+| the `AcpAgent`/`AcpAgentFactory`/`AcpObserver` ports (ungated) | `src/ports/acp.rs` |
 | the ACP `RunTurn` (folds a port `AcpTurn` into `TurnStep`) | `src/harness/acp/run_turn.rs` |
+| live frames while an ACP turn runs (`live_frame_from`, `observer_for`) | `src/harness/acp/run_turn.rs` |
+| remembering + resuming a session (`session_record_path`, `resume_session`) | `src-tauri/src/acp/local_agent.rs` |
+| the transport's bounds on a tool call's title/result | `src-tauri/src/acp/local_agent.rs` (`MAX_TITLE_CHARS`, `MAX_RESULT_CHARS`) |
 | wiring an `AcpAgentFactory` onto a host | `AppState::with_acp_agents` (`src/app/types.rs`), consumed by `desktop::register` |
 | local transport: discovery, spawn, codec | `src-tauri/src/acp/` (`client.rs`, `discovery.rs`, `confine.rs`) |
 | the `local` `AcpAgentFactory` implementation | `src-tauri/src/acp/local_agent.rs` (`LocalAcpAgent`/`LocalAcpAgentFactory`) |

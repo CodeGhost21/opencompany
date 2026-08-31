@@ -340,6 +340,13 @@ export interface GraphDraft {
   id: string;
   name: string;
   description: string;
+  /**
+   * The owning desk (issue #1862 prerequisite), carried through unedited —
+   * see {@link WorkflowGraph.ownerDesk}. This dialog has no control for it;
+   * it exists on the draft purely so a Save round-trips whatever the loaded
+   * graph had instead of dropping it (issue #1882 review).
+   */
+  ownerDesk?: string;
   nodes: DraftNode[];
   edges: DraftEdge[];
 }
@@ -415,6 +422,9 @@ export function assembleGraph(draft: GraphDraft): AssembledGraph {
       id: draft.id.trim(),
       name: draft.name.trim(),
       description: draft.description.trim() || undefined,
+      // No control edits this — carried through exactly as loaded, so Save
+      // never clears an owner this dialog can't show (issue #1882 review).
+      ownerDesk: draft.ownerDesk,
       // Locally-built body; the conditional-write token is passed separately as
       // `expectedVersion`, so this carries none (issue #1013 makes it explicit).
       version: null,
@@ -774,6 +784,9 @@ export function WorkflowCreateDialog({
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  // No control in this dialog sets this — see {@link GraphDraft.ownerDesk}.
+  // Held purely so a Save carries forward whatever the loaded graph had.
+  const [ownerDesk, setOwnerDesk] = useState<string | undefined>(undefined);
   const [nodes, setNodes] = useState<DraftNode[]>(starterNodes());
   const [edges, setEdges] = useState<DraftEdge[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
@@ -953,6 +966,10 @@ export function WorkflowCreateDialog({
     let nextId = workflow?.id ?? "";
     let nextName = workflow?.name ?? "";
     let nextDescription = workflow?.description ?? "";
+    // No control edits this (see `ownerDesk` state above) — hydrated purely so
+    // Save round-trips it. `undefined` on a fresh create, same as every other
+    // field here.
+    let nextOwnerDesk = workflow?.ownerDesk;
     let nextNodes = workflow ? draftNodes(workflow) : starterNodes();
     let nextEdges = workflow ? draftEdges(workflow) : [];
     setError(null);
@@ -1008,6 +1025,7 @@ export function WorkflowCreateDialog({
     setId(nextId);
     setName(nextName);
     setDescription(nextDescription);
+    setOwnerDesk(nextOwnerDesk);
     setNodes(nextNodes);
     setEdges(nextEdges);
     // The baseline every later keystroke is compared against. A copilot
@@ -1155,6 +1173,7 @@ export function WorkflowCreateDialog({
     id,
     name,
     description,
+    ownerDesk,
     nodes,
     edges,
   }) : null;
@@ -1737,7 +1756,7 @@ export function WorkflowCreateDialog({
       // dialog's own `onOpenChange`. The operator was locked in the dialog, and
       // the only remaining exit, reloading the page, was the one that lost the
       // edit. Everything that can fail now clears `submitting` on the way out.
-      const assembled = assembleGraph({ id, name, description, nodes, edges });
+      const assembled = assembleGraph({ id, name, description, ownerDesk, nodes, edges });
       if (!assembled.ok) {
         // `validate()` already passed, so this is the form and the serializer
         // disagreeing — a defect, not something the author did. Say which node
