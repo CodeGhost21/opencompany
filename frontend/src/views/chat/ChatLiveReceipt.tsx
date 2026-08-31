@@ -113,7 +113,7 @@ export function ChatLiveReceipt({
   const elapsed = Math.max(0, clock - receipt.startedAt);
   // Soft and reversible: a lull with no frame, seeded from `startedAt`, cleared
   // by the next frame that bumps `lastFrameAt`. Not an error state.
-  const stalled = clock - receipt.lastFrameAt > RECEIPT_STALL_AFTER_MS;
+  const stalled = clock - receipt.lastFrameAt >= RECEIPT_STALL_AFTER_MS;
   const line = receiptStateLine(receipt, steps, agentNames, channel);
 
   return (

@@ -8,6 +8,7 @@ import type { TurnStep } from "@/api/types";
 import {
   ChatLiveReceipt,
   formatElapsed,
+  RECEIPT_STALL_AFTER_MS,
   type ChatReceipt,
 } from "@/views/chat/ChatLiveReceipt";
 import type { Channel } from "@/views/chat/model";
@@ -140,6 +141,20 @@ describe("ChatLiveReceipt", () => {
     await render({ receipt: { startedAt: BASE, lastFrameAt: BASE + 31_000 } });
     expect(receiptEl().dataset.stalled).toBe("false");
     expect(text()).not.toContain("No update for 30s");
+  });
+
+  it("is already stalled at exactly the 30s threshold, not a tick after (issue #1935 review)", async () => {
+    // coderabbit 3892517524: `clock - lastFrameAt > RECEIPT_STALL_AFTER_MS`
+    // reads exactly 30,000ms as "not yet stalled", so the notice appeared
+    // about a second late. `>=` is the fix under test.
+    const receipt: ChatReceipt = { startedAt: BASE, lastFrameAt: BASE };
+    await render({ receipt });
+
+    await act(async () => {
+      vi.advanceTimersByTime(RECEIPT_STALL_AFTER_MS);
+    });
+    expect(receiptEl().dataset.stalled).toBe("true");
+    expect(text()).toContain("No update for 30s");
   });
 
   it("advances the elapsed readout as its own clock ticks", async () => {
