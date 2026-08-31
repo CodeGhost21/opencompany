@@ -200,8 +200,8 @@ use crate::ports::types::{
     OverlayAgent, OverlayDesk, OverlayDeskMember, PolicyOverride, TurnStep,
 };
 use crate::ports::{
-    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, NotificationStore, SecretStore,
-    TaskStore, UsageMeter,
+    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
+    UsageMeter,
 };
 use crate::runtime::builder::agent_scoped_grants;
 
