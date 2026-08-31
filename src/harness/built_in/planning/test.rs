@@ -231,6 +231,7 @@ fn evidence() -> Evidence {
         skills: vec!["writing".to_string()],
         mail_configured: false,
         composio_credential: true,
+        native_capabilities: HashSet::new(),
     }
 }
 
@@ -579,6 +580,79 @@ fn composio_distinguishes_no_credential_from_no_account() {
         note.contains("no Composio credential"),
         "the operator needs to know which of the two things is missing: {note}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Native-first routing: a built-in tool pre-empts a Composio prerequisite
+// ---------------------------------------------------------------------------
+
+fn teammate_with_grants(id: &str, grants: &[&str]) -> TeammateBrief {
+    TeammateBrief {
+        id: id.to_string(),
+        role: "Role".to_string(),
+        description: None,
+        grants: grants.iter().map(|g| g.to_string()).collect(),
+        global: false,
+    }
+}
+
+/// A capability the company already serves with a built-in tool satisfies BOTH
+/// the `connection` and `composio` prerequisite kinds — with a note that says a
+/// built-in tool serves it and no Composio connection is needed — instead of
+/// parking the card on a connection it never needed.
+#[test]
+fn a_native_capability_pre_empts_both_composio_prerequisite_kinds() {
+    let mut e = evidence();
+    e.native_capabilities = HashSet::from(["search".to_string()]);
+
+    let (status, note) = verify_composio(&e, "search");
+    assert_eq!(status, PrereqStatus::Satisfied);
+    assert!(note.contains("built-in tool"), "{note}");
+    assert!(!note.contains("Connections tab"), "{note}");
+
+    let (status, note) = verify_connection(&e, "search");
+    assert_eq!(status, PrereqStatus::Satisfied);
+    assert!(note.contains("built-in tool"), "{note}");
+    assert!(!note.contains("Connections tab"), "{note}");
+}
+
+/// A prerequisite that is NOT a native capability and has no connection still
+/// parks — native-first widens nothing for a genuine third-party account.
+#[test]
+fn a_non_native_capability_without_a_connection_still_parks() {
+    let mut e = evidence();
+    e.native_capabilities = HashSet::from(["search".to_string()]);
+    assert_eq!(verify_composio(&e, "gmail").0, PrereqStatus::Missing);
+    assert_eq!(verify_connection(&e, "gmail").0, PrereqStatus::Missing);
+}
+
+/// The native branch is checked before the Composio-outage `unknown` guard, so
+/// a built-in capability stays satisfied even when the probe is down — while a
+/// genuine third-party name under the same outage still reads `unknown`.
+#[test]
+fn the_native_branch_wins_even_when_composio_is_unreachable() {
+    let mut e = evidence();
+    e.native_capabilities = HashSet::from(["search".to_string()]);
+    e.composio_reachable = false;
+    assert_eq!(verify_composio(&e, "search").0, PrereqStatus::Satisfied);
+    assert_eq!(verify_connection(&e, "search").0, PrereqStatus::Satisfied);
+    assert_eq!(verify_composio(&e, "gmail").0, PrereqStatus::Unknown);
+}
+
+/// The set is a union over the roster: an explicit `search` grant on any one
+/// teammate marks `search` native, while `*` or `composio` alone never confers
+/// the metered search family (and `composio` is not in the native vocabulary).
+#[test]
+fn native_capabilities_are_a_union_over_the_roster_grants() {
+    let set = native_capabilities_of(&[teammate_with_grants("maya", &["search"])]);
+    assert!(set.contains("search"));
+
+    let set = native_capabilities_of(&[
+        teammate_with_grants("ann", &["*"]),
+        teammate_with_grants("bob", &["composio"]),
+    ]);
+    assert!(!set.contains("search"));
+    assert!(!set.contains("composio"));
 }
 
 // ---------------------------------------------------------------------------
