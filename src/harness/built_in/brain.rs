@@ -1556,6 +1556,38 @@ impl HarnessBrain {
         }
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record().id, &card).await?;
+        // Issue #1883 (CodeRabbit review, PR #1883): the durable notification
+        // every other failed-dispatch path already files — `refuse_dispatch`
+        // below, the cycle's terminality backstop, and the workflow-builder
+        // failure path (`workflow_build.rs`) all call `notify_dispatch_failed`
+        // when a card bounces to To-do. This rich settle — the ordinary
+        // "an assigned card's turn failed" ending — stamped the bounce chip
+        // above but never filed the row, so a card with no `origin_chat_id`
+        // (nothing dispatched straight from a chat thread, so no relay to
+        // answer in) got neither a chat reply nor a durable notification: the
+        // failure was visible only to someone who happened to look at the
+        // board. The backstop cannot pick this up later either — it skips
+        // any run that is no longer active, and `settle_run` below is what
+        // terminalizes this one.
+        //
+        // `card.bounced.is_some()` is exactly `column_for_settled_run` having
+        // landed on `COLUMN_TODO` with a failure/cancellation status (the
+        // check `bounced_reason` above already made); the `settled ==
+        // RunStatus::Failed` guard narrows it to an actual failure — a card
+        // the responder or an operator deliberately cancelled is not a
+        // dispatch failure and must not page anyone.
+        if card.bounced.is_some()
+            && matches!(settled, RunStatus::Failed)
+            && let Some(notifications) = self.deps.notifications.as_deref()
+        {
+            crate::runtime::advance::notify_dispatch_failed(
+                notifications,
+                &self.record().id,
+                &card.id,
+                &result_text,
+            )
+            .await;
+        }
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
 
@@ -6439,6 +6471,66 @@ members = ["engineer"]
         // No turn ran on this offline fixture, so there is nothing to charge.
         assert_eq!(settled.step_count, 0);
         assert_eq!(settled.usage, TokenUsage::default());
+    }
+
+    /// Issue #1865 (CodeRabbit review, PR #1883 review comment 3892338104): an
+    /// ordinary assigned board card — no `origin_chat_id`, so no relay target
+    /// — whose turn genuinely fails (not a refusal) reaches this same
+    /// rich-settle tail with a bounce chip but, before this fix, filed no
+    /// `dispatch_failed` notification. `refuse_dispatch` files this
+    /// notification for an off-roster assignee, and the cycle's terminality
+    /// backstop files it for a crash-recovered dispatch — but the backstop
+    /// explicitly skips any run no longer active, and `settle_run` just above
+    /// this test's call site already terminalizes the attempt, so the
+    /// backstop never sees it either. That left an ordinary failed dispatch
+    /// with no origin chat completely silent: no chat reply, no badge,
+    /// nothing but the board itself.
+    #[tokio::test]
+    async fn an_ordinary_failed_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification()
+    {
+        use crate::ports::runs::NewRun;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks_notified(dir.path(), true);
+        let runs: Arc<dyn crate::ports::RunStore> = Arc::new(FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(&company, &card("t-1", "engineer"))
+            .await
+            .expect("seed");
+        runs.create_run(&company, NewRun::for_task("run-1", "t-1", "engineer"))
+            .await
+            .expect("mint");
+        let brain = brain.with_runs(Arc::clone(&runs));
+
+        brain.run_task("t-1", Some("run-1")).await.expect("run");
+
+        let settled = only_card(&tasks).await;
+        assert_eq!(settled.column, COLUMN_TODO);
+        assert!(
+            settled.bounced.is_some(),
+            "an ordinary turn failure must carry the bounce chip: {settled:?}"
+        );
+        assert!(
+            settled.origin_chat_id.is_none(),
+            "this is exactly the board-created shape with no relay target: {settled:?}"
+        );
+
+        let notes = crate::ports::notifications::NotificationStore::list(
+            tasks.as_ref(),
+            &company,
+            "anyone",
+        )
+        .await
+        .expect("list notifications");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.notification.kind == "dispatch_failed"
+                    && n.notification.subject.id == "t-1"),
+            "an ordinary failed dispatch with no origin chat must still file a \
+             dispatch_failed notification, got {notes:?}"
+        );
     }
 
     /// A refusal is an attempt too. It spends nothing and runs no turn, but it
