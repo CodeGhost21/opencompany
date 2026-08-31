@@ -7,6 +7,7 @@
 // stays a rendering concern.
 
 import { ApiError } from "@/api/types";
+import { base58ToBytes } from "@/lib/wallet";
 
 /** What the New-company form collects. */
 export interface ManifestInput {
@@ -122,23 +123,29 @@ export function buildManifestToml(input: ManifestInput): string {
 /**
  * A conservative sanity check on one wallet address, returning a problem string
  * or `null`. The host's `manifest_wallets` decoder stays authoritative — this
- * only catches the obvious typos (blank, non-base58 characters, an implausible
- * length) before the destructive archive leg on a reset, the same way
- * `adminEmailProblem` does for an email admin.
+ * decodes the same way `decode_wallet_address` (`src/ports/users.rs`) does and
+ * requires the same exact 32-byte result, so this catches a typo (blank,
+ * non-base58 characters, a wrong-length key) before the destructive archive
+ * leg on a reset, the same way `adminEmailProblem` does for an email admin.
  *
- * A base58 Ed25519 public key is 32 bytes, which encodes to 43 or 44 base58
- * characters; the bounds here are loose around that so a stricter server-side
- * check remains the real gate.
+ * A character-count range is not a substitute for decoding: base58 is not
+ * fixed-width per character (each digit carries log2(58) ≈ 5.858 bits, not a
+ * whole byte), so two strings of the same length can decode to different byte
+ * counts — 32 `z` characters decode to 24 bytes, not 32. A length-only check
+ * let a reset validate a key the host's `decode_wallet_address` goes on to
+ * refuse, archiving the old company before provisioning the replacement was
+ * ever going to succeed (codex review on #1943, PR comment 3894416376).
  */
 export function walletAddressProblem(address: string): string | null {
   const trimmed = address.trim();
   if (!trimmed) {
     return "Enter a wallet address, or nobody will be able to sign in to this company.";
   }
-  if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(trimmed)) {
+  const bytes = base58ToBytes(trimmed);
+  if (!bytes) {
     return "That doesn't look like a wallet address — it should be base58 (no 0, O, I, or l).";
   }
-  if (trimmed.length < 32 || trimmed.length > 48) {
+  if (bytes.length !== 32) {
     return "That doesn't look like a wallet address — it should be a 32-byte base58 public key.";
   }
   return null;

@@ -136,6 +136,19 @@ describe("walletAddressProblem", () => {
   it("accepts a plausible base58 address", () => {
     expect(walletAddressProblem("11111111111111111111111111111111")).toBeNull();
   });
+
+  it("rejects a same-length string that decodes to the wrong byte count (codex review on #1943, PR comment 3894416376)", () => {
+    // 32 `z` characters is within the old length-only bound (32-48) and every
+    // character is valid base58, but base58 is not fixed-width per character:
+    // this string decodes to 24 bytes, not 32 — which is exactly what the
+    // host's `decode_wallet_address` would refuse. A length-only check passed
+    // this and let a reset archive the old company before discovering
+    // provisioning could never have succeeded.
+    const address = "z".repeat(32);
+    const problem = walletAddressProblem(address);
+    expect(problem).not.toBeNull();
+    expect(problem).toMatch(/32-byte/i);
+  });
 });
 
 describe("describeProvisionError (issue #1807)", () => {
