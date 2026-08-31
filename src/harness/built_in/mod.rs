@@ -3922,10 +3922,18 @@ impl HarnessPool {
             // the local `message` only for a cycle with no `OperatorMessage`
             // at all (a workflow node's own background turn), which has no
             // raw/composed split — and no attachments — to begin with.
-            let park_message = redeem_context
-                .text
-                .clone()
-                .unwrap_or_else(|| message.to_string());
+            let park_message = redeem_context.text.clone().unwrap_or_else(|| {
+                // Issue #1890 E: the operator's own words, which is what this
+                // fallback has always claimed to hold. `message` here is the
+                // composed turn text, so it carries whatever the cycle appended
+                // — the open-work briefing, the settled-work one, the thread
+                // index — and parking that bakes a machine briefing into the
+                // request a redeem re-sends. It was already reachable through
+                // the #176 briefing whenever the agent had open cards; the
+                // thread index made it reachable on an ordinary channel, which
+                // is how `redeem_replays_the_markers_attachments` caught it.
+                crate::runtime::delegation::operator_words(message).to_string()
+            });
             let pauses = crate::runtime::grants::budget_pauses_for(company);
             let marker = if is_background {
                 pauses.park_background(
@@ -3970,10 +3978,12 @@ impl HarnessPool {
                 LiveStream::Workflow { .. } | LiveStream::Off => None,
             };
             let candidate_redeem = crate::runtime::grants::current_redeem_context();
-            let candidate_message = candidate_redeem
-                .text
-                .clone()
-                .unwrap_or_else(|| message.to_string());
+            let candidate_message = candidate_redeem.text.clone().unwrap_or_else(|| {
+                // Stripped on exactly the terms the park above is, or the
+                // retire-match would compare a briefing-laden candidate against
+                // a clean parked marker and never retire it (#1890 E).
+                crate::runtime::delegation::operator_words(message).to_string()
+            });
             crate::runtime::grants::budget_pauses_for(company).retire_if_message_matches(
                 agent_id,
                 &candidate_message,

@@ -40,7 +40,8 @@ use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, T
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::runtime::cycle::{
-    BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, SETTLED_WORK_ANNOTATION, assignment_matches,
+    BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, SETTLED_WORK_ANNOTATION, THREAD_INDEX_ANNOTATION,
+    assignment_matches,
 };
 
 /// One agent turn, abstracted so delegation orchestration never touches the
@@ -3587,6 +3588,7 @@ pub(crate) fn operator_words(message: &str) -> &str {
         message.find(OPEN_WORK_ANNOTATION),
         message.find(BUILDER_ANNOTATION),
         message.find(SETTLED_WORK_ANNOTATION),
+        message.find(THREAD_INDEX_ANNOTATION),
         message.find(crate::brain::medulla::effects::ATTACHMENT_MARKER_PREFIX),
     ]
     .into_iter()
@@ -4073,15 +4075,46 @@ the quarter — finished → To-do (the dispatch failed: provider timeout)\n]"
     fn operator_words_cuts_at_the_first_of_every_briefing() {
         let all = format!(
             "ship the audit{OPEN_WORK_ANNOTATION} …]{BUILDER_ANNOTATION} …]\
-{SETTLED_WORK_ANNOTATION} …]"
+{SETTLED_WORK_ANNOTATION} …]{THREAD_INDEX_ANNOTATION} …]"
         );
         assert_eq!(operator_words(&all), "ship the audit");
-        // …and with the settled block first, since nothing pins the order.
-        let settled_first = format!(
-            "ship the audit{SETTLED_WORK_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]\
-{BUILDER_ANNOTATION} …]"
+        // …and in every other order, since nothing pins which is appended
+        // first and the cut is a `min` rather than a chain.
+        for reordered in [
+            format!("ship the audit{SETTLED_WORK_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]"),
+            format!("ship the audit{THREAD_INDEX_ANNOTATION} …]{BUILDER_ANNOTATION} …]"),
+            format!("ship the audit{BUILDER_ANNOTATION} …]{THREAD_INDEX_ANNOTATION} …]"),
+        ] {
+            assert_eq!(operator_words(&reordered), "ship the audit");
+        }
+    }
+
+    /// Issue #1890 E: nor is the thread index.
+    ///
+    /// The fourth appended block, and the trap a fourth time. This one is a
+    /// list of other people's questions — the most work-shaped prose any of
+    /// the four carries, since every line is literally something an operator
+    /// asked for. Unstripped, a channel with a few live threads would open a
+    /// card on every "thanks!", and each card would settle and add a
+    /// `finished → …` line to the index that opened the next one.
+    #[test]
+    fn the_cycles_thread_index_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{THREAD_INDEX_ANNOTATION}, for reference only — do NOT read or answer from \
+them unless this message explicitly refers to one, and if a reference could mean more than one, \
+ask which):\n- \"draft the launch email\" — 4 replies\n- \"build the migration plan\" — \
+finished → In review\n]"
         );
-        assert_eq!(operator_words(&settled_first), "ship the audit");
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped index really does read as work — it is a list of \
+             requests — which is why the strip has to happen"
+        );
     }
 
     /// An attachment marker rides the same composed text the agent sees, and
