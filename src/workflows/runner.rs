@@ -3411,6 +3411,168 @@ to = "done"
         );
     }
 
+    /// A graph identical in shape to `STRUCTURED_REPLY_WF` above, but the
+    /// declared `field_present` targets the bare `json` root (not
+    /// `json.items`) and the scripted reply is a bare JSON scalar rather
+    /// than an object — see
+    /// `a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+    /// below for what this proves.
+    const SCALAR_REPLY_WF: &str = r#"
+id = "scalar_wf"
+name = "Scalar WF"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+
+[node.postcondition]
+require = "field_present"
+field = "json"
+
+[[node]]
+id = "reflect"
+kind = "transform"
+name = "Reflect"
+
+[node.config.set]
+wrapped = "=item.json"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "reflect"
+
+[[edge]]
+from = "reflect"
+to = "done"
+"#;
+
+    /// A [`RunTurn`] that always answers with the literal JSON text `"42"` —
+    /// a bare scalar, not an object or array.
+    struct ScalarJsonReplyTurn;
+
+    #[async_trait::async_trait]
+    impl crate::runtime::delegation::RunTurn for ScalarJsonReplyTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "42".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(
+                _company,
+                _agent_id,
+                _message,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+        }
+    }
+
+    /// Codex #3894162757 on #1937 — verified through the REAL engine, the
+    /// same technique that proved the original certify-vs-consume bug (see
+    /// `a_structured_agent_reply_is_readable_by_a_downstream_json_binding`
+    /// above). A prior round added an emission arm that replaced `value`
+    /// wholesale for a scalar reply too, mirroring the array case, and
+    /// asserted only `run_turn`'s OWN return value (`workflows::caps::tests`)
+    /// — which DID come back as the bare `42`. That test missed the actual
+    /// defect: tinyflows' own envelope construction
+    /// (`finish_agent_run`/`envelope::structured_of`, vendored) clamps
+    /// `AgentRunOutcome.json` to `Value::Null` for anything that is not an
+    /// `Object`/`Array` — "scalars carry no structure" is that crate's own
+    /// stated invariant. Run against the code as it stood after that round
+    /// (gate passes, `value` = `42`), this exact graph produced:
+    /// `ceo.items[0].json = {"json": null, "text": "42", "raw": 42, "meta":
+    /// {...}}` and `reflect.items[0].json.wrapped = null` — the gate had
+    /// certified `42`, and `=item.json` downstream got `null` anyway, one
+    /// layer further out than the original bug this PR started from.
+    ///
+    /// The fix moves to the gate itself: `field_present` on the bare `json`
+    /// root now refuses to certify a scalar at all (see
+    /// `postcondition::evaluate_postcondition`'s `field_present` arm), so
+    /// this run must fail outright rather than silently passing a value
+    /// nothing downstream can read.
+    #[tokio::test]
+    async fn a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(SCALAR_REPLY_WF).expect("workflow parses");
+
+        let result = run_workflow_lane_aware(
+            Arc::new(ScalarJsonReplyTurn),
+            deps(dir.path()),
+            &record(),
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await;
+
+        let err = result.expect_err(
+            "a bare scalar reply must not satisfy field_present on the bare `json` \
+             root — the run must halt at `ceo` rather than let `reflect` (and \
+             `done`) advance on a `wrapped` binding that resolves to null",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("ceo")
+                && message.contains("postcondition")
+                && message.contains("bare scalar"),
+            "the halting error should name the node and the reason: {message}"
+        );
+    }
+
     /// A GREET-shaped graph whose agent node carries a config `=`-expression
     /// pointing at a trigger field that does not exist (issue #1014). The engine
     /// resolves the expression to `null` and records a `NullResolution`, which
