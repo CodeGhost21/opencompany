@@ -4013,6 +4013,159 @@ mod tests {
         assert_eq!(outcome.reply, "42");
     }
 
+    /// Codex #3894038816 on #1937 — the silent-disable finding, traced
+    /// end-to-end rather than inferred. `postcondition` rides inside the
+    /// engine-resolved node config (`translate_node` writes it as an
+    /// ordinary config key, same as `on_error`/`retry` — see the module doc
+    /// above the function), so `tinyflows::expr::resolve` — the SAME
+    /// resolution `nodes::execution::resolve_config_traced` runs on the
+    /// whole node config before an agent node's turn — walks straight into
+    /// it. An authored `field = "=item.missing"` is an ordinary
+    /// `=`-expression as far as that resolver is concerned; it does not know
+    /// or care that this particular leaf is a safety policy rather than
+    /// ordinary data.
+    ///
+    /// Step 1 below proves `translate()` carries the expression through
+    /// UNRESOLVED (translation is not where resolution happens). Step 2
+    /// proves the mechanism concretely: running the real
+    /// `tinyflows::expr::resolve` against a scope whose `item` genuinely
+    /// lacks `missing` (the ordinary case the author meant to catch) turns
+    /// `postcondition.field` into a plain `Value::Null` — indistinguishable,
+    /// at that point, from no `field` having been authored at all. Step 3
+    /// feeds exactly that resolved shape to `run_turn`.
+    ///
+    /// `field = "=item.missing"` cannot reach this point through
+    /// `parse_workflow` today — `workflow_file::validate`'s bare-structured-
+    /// root check (`postcondition_field_with_a_bare_structured_root_is_rejected`)
+    /// rejects it as a byproduct, since no `=`-expression's first dotted
+    /// segment can ever equal `json`/`text`/`agent_ref`. This test builds the
+    /// node directly instead (the same technique
+    /// `agent_ref_survives_a_spoofing_config` in `workflows::translate` uses)
+    /// to isolate the SECOND, independent layer: `evaluate_postcondition`
+    /// must not silently pass just because *something upstream* — this
+    /// resolution step today, a future one tomorrow — turned a validated
+    /// `field` into null before `run_turn` ever saw it.
+    ///
+    /// RED on the code as it stood before the `evaluate_postcondition` fix:
+    /// `run_turn` returned `Ok`, for a reply ("just prose, no items here")
+    /// that plainly satisfies nothing — the gate silently did not run.
+    #[tokio::test]
+    async fn a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn() {
+        use crate::company::{
+            WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowPostconditionDef,
+        };
+        use crate::workflows::translate::translate;
+
+        // Step 1 — author `field = "=item.missing"` directly on the model
+        // (bypassing `parse_workflow`/`validate`, per the doc comment above),
+        // and confirm `translate()` carries it through as the literal
+        // expression string — translation does not resolve expressions.
+        let file = WorkflowFile {
+            global: false,
+            id: "wf".into(),
+            name: "WF".into(),
+            description: None,
+            owner_desk: None,
+            nodes: vec![WorkflowNodeDef {
+                id: "worker".into(),
+                kind: WorkflowNodeKind::Agent,
+                name: "Worker".into(),
+                summary: None,
+                agent: Some("researcher".into()),
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                repeatable: None,
+                destination: None,
+                postcondition: Some(WorkflowPostconditionDef {
+                    require: "field_present".to_string(),
+                    field: Some("=item.missing".to_string()),
+                }),
+            }],
+            edges: Vec::new(),
+        };
+        let graph = translate(&file);
+        let node_config = graph.nodes[0].config.clone();
+        assert_eq!(
+            node_config["postcondition"]["field"], "=item.missing",
+            "translate() must carry the authored expression through UNRESOLVED —              it is config resolution, not translate(), that evaluates it"
+        );
+
+        // Step 2 — run the SAME resolution the engine runs
+        // (`tinyflows::nodes::execution::resolve_config_traced` calls
+        // `tinyflows::expr::resolve` on the whole config tree) against a
+        // scope whose `item` genuinely has no `missing` key — the ordinary
+        // case `=item.missing` exists to catch.
+        let scope = json!({ "item": { "other_field": "present, but not the missing key" } });
+        let resolved_config = tinyflows::expr::resolve(&node_config, &scope);
+        assert_eq!(
+            resolved_config["postcondition"]["field"],
+            Value::Null,
+            "traced: config resolution turns the authored `=item.missing` into a              plain JSON null before run_turn ever sees it"
+        );
+
+        // Step 3 — feed exactly that resolved postcondition to `run_turn`,
+        // with a reply that plainly does not satisfy any real check.
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1937-expression-field-resolved-away-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "just prose, no items here".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1937h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937h"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1937h".to_string(),
+            "run-1937h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let request = json!({
+            "node_id": "worker",
+            "prompt": "say something",
+            "postcondition": resolved_config["postcondition"].clone(),
+        });
+
+        let result = runner.run_turn("researcher", request).await;
+
+        let err = result.expect_err(
+            "a postcondition whose `field` resolved away to null must halt the node —              the gate silently not running is worse than the gate certifying the wrong              value",
+        );
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("field_present"),
+            "the halting message should name the predicate that could not be              evaluated: {message}"
+        );
+    }
+
     /// Codex #3893619015 on #1937 — traces the underlying mechanism this
     /// finding names, at the layer `evaluate_postcondition`/`run_turn`
     /// operates on. `postcondition_field_into_reserved_json_key_is_rejected`
