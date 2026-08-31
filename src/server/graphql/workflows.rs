@@ -391,7 +391,7 @@ mod tests {
             agent = "ceo"
             [node.postcondition]
             require = "field_present"
-            field = "items"
+            field = "json.items"
             [[edge]]
             from = "start"
             to = "worker"
@@ -407,7 +407,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::to_value(&worker.postcondition.as_ref().unwrap().0).unwrap(),
-            json!({ "require": "field_present", "field": "items" })
+            json!({ "require": "field_present", "field": "json.items" })
         );
     }
 }

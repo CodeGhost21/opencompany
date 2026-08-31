@@ -613,7 +613,7 @@ mod tests {
             agent = "researcher"
             [node.postcondition]
             require = "field_present"
-            field = "items"
+            field = "json.items"
             [[edge]]
             from = "start"
             to = "worker"
@@ -621,7 +621,7 @@ mod tests {
         let graph = translate(&parse_workflow(src).expect("parses"));
         let worker = graph.nodes.iter().find(|n| n.id == "worker").unwrap();
         assert_eq!(worker.config["postcondition"]["require"], "field_present");
-        assert_eq!(worker.config["postcondition"]["field"], "items");
+        assert_eq!(worker.config["postcondition"]["field"], "json.items");
     }
 
     /// The other half of the same contract: a node with no `postcondition`
