@@ -277,6 +277,46 @@ indexing a string with a further path segment always comes back empty.
 only root with real structure to walk into (`json.items`, `json.result.count`,
 …).
 
+**The combination rule: `require`'s accepted value kinds ∩ `field`'s
+possible value kinds must be non-empty, or the gate can never pass.** Every
+rejection on this page — bare `items`, a `text.`/`agent_ref.` descendant,
+`non_empty_list` on `text`/`agent_ref` — is the same structural fact, not a
+list of unrelated special cases: `text` and `agent_ref` can only ever hold a
+string (the envelope guarantees it), `json` (bare or dotted) can hold
+anything the agent's reply parses to, and each `require` only accepts
+certain kinds back from its target. When a root's guaranteed kind and a
+predicate's accepted kinds don't overlap, no reply can ever satisfy the
+gate, and `parse_workflow` refuses it before it can save. The full
+satisfiability table, `field` (columns) against `require` (rows) — omitted
+means no `field` set at all:
+
+| `require` | omitted | `text` | `agent_ref` | `json` | `json.<path>` |
+| --- | --- | --- | --- | --- | --- |
+| `non_empty` | ✅ (ignores `field`) | ✅ (ignores `field`) | ✅ (ignores `field`) | ✅ (ignores `field`) | ✅ (ignores `field`) |
+| `field_present` | — (`field` required at author time) | ✅ always (never null) | ✅ always (never null) | ✅ if object/array/scalar reply — but a bare scalar is then refused at EVALUATION time (below), a delivery constraint the author-time kind check can't see | ✅ if the path resolves to non-null |
+| `non_empty_list` | ✅ if the reply is a bare array | ❌ never — `text` is never an array | ❌ never — `agent_ref` is never an array | ✅ if the reply is a bare array | ✅ if the path resolves to an array |
+
+`non_empty` ignores `field` entirely (a set-but-unused `field` alongside it
+is inert, not rejected — there is nothing for it to conflict with).
+`field_present` accepts any non-null kind, so it never conflicts with a
+root's fixed kind; the `json`-scalar cell is the one place a check beyond
+kind-intersection is needed, covered next. Only `non_empty_list`'s narrow
+"array only" acceptance ever collides with `text`/`agent_ref`'s fixed
+"always string" kind — the two ❌ cells above.
+
+**`field_present`'s bare-scalar-under-`json` refusal is a DIFFERENT check,
+at a different time, for a different reason.** The table above is about
+*author-time* kind compatibility (could a value of this KIND ever satisfy
+this predicate). A bare scalar reply passes that check for `field_present`
+on `json` (a scalar is a valid non-null kind) — the problem shows up only at
+*evaluation* time, and only about *delivery*: the engine's own envelope
+construction discards a scalar (see the emission section below), so
+certifying one would pass a gate whose value never reaches a downstream
+binding. That is why it is enforced in
+[`evaluate_postcondition`](../../../src/workflows/caps/postcondition.rs), not
+[`validate`](../../../src/company/workflow_file.rs) — it depends on the
+runtime value's actual shape, not the field path's static kind.
+
 **`field` is not the place for an `=`-expression.** `postcondition` lowers
 into the same engine-resolved node config as everything else in this
 document, so it is tempting to write `field = "=item.some_key"` the way
