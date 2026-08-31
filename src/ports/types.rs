@@ -9366,6 +9366,59 @@ mod test {
         );
     }
 
+    /// Issue #1781 review, Codex P2 follow-up: a direct, focused test of
+    /// `divert_operator_feed_permanently`/`is_operator_feed_diverted`
+    /// themselves, isolated from the HTTP route the desk- and teammate-
+    /// deletion regression tests exercise them through.
+    ///
+    /// The specific risk this closes: `divert_operator_feed_permanently`
+    /// tombstones through `retire_agent`, keyed on
+    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed") — a string
+    /// that fails the manifest agent-id format rule on its hyphen alone. If
+    /// `retire_agent` ever grew id validation (it does not today — it is a
+    /// bare idempotent push), that key would be silently rejected,
+    /// `is_operator_feed_diverted` would always read `false`, and the
+    /// tombstone this whole fix depends on would be a no-op with nothing
+    /// here to notice. Calling it on a record with **no live collision at
+    /// all** isolates exactly that: nothing but the divert call itself
+    /// explains the fallback staying live.
+    #[test]
+    fn divert_operator_feed_permanently_sticks_with_no_live_collision() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL,
+            "fixture must start on the literal address — nothing here collides \
+             with `operator` yet"
+        );
+        assert!(!record.is_operator_feed_diverted());
+
+        record.divert_operator_feed_permanently();
+
+        assert!(
+            record.is_operator_feed_diverted(),
+            "the tombstone must read back as set immediately after the call"
+        );
+        assert_eq!(
+            record.operator_feed_channel(),
+            crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK,
+            "operator_feed_channel must divert on the tombstone alone, with no \
+             live desk/agent collision in the record at all — proving \
+             `retire_agent` actually accepted the hyphenated fallback key \
+             rather than silently rejecting it"
+        );
+
+        // Idempotent, like `retire_agent` itself: calling it again must not
+        // duplicate the tombstone or otherwise change the outcome.
+        record.divert_operator_feed_permanently();
+        assert_eq!(
+            record.overlay_retired_agents.len(),
+            1,
+            "a second call must not push a duplicate tombstone entry"
+        );
+    }
+
     /// The third grandfather case (PR #1781 review, CodeRabbit): a real
     /// **desk** already owning `operator` must divert the feed exactly like
     /// the roster-teammate case above, not stay on the literal id. Left on
