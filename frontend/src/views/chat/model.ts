@@ -978,11 +978,88 @@ function distinctSenders(
 }
 
 /**
+ * Which first replies render **inline** in the channel rather than folding into
+ * their parent's summary row (issue #1890 D, part 2).
+ *
+ * # Why this exists at all
+ *
+ * Part 1 of #1890 D threads every answer under the message that opened it, so
+ * that `parent` is uniform and a thread means a *topic*. Fold every parented
+ * line, as this module did before, and the channel becomes a column of your own
+ * questions each wearing a "1 reply" chip — every answer deleted from the view.
+ *
+ * # Flat when nothing overlaps, threaded when it does
+ *
+ * A question answered with nothing in between is not a thread anyone opened; it
+ * is a normal exchange, and it reads as one. So its first reply is laid out
+ * inline, in its own chronological place. Only when something *else* arrived
+ * between the question and its answer does the pair collapse to the summary
+ * row — which is the case the fold was always for: two conversations racing in
+ * one channel, where inline rendering would interleave them into nonsense.
+ *
+ * # Decided here, never in the journal
+ *
+ * The tempting version stamps this at write time — "thread it only if another
+ * question arrived while I was working". That makes `parent` a function of race
+ * timing, and `parent` is permanent: two operators doing the identical thing
+ * would get permanently different transcripts on microseconds, and the console
+ * renders a reply as it streams, before the backend could know, so a bubble
+ * would render inline and jump into a thread on reload. Re-deciding
+ * presentation on every render costs nothing and writes nothing racy down.
+ *
+ * # What counts as "in between"
+ *
+ * Any message that is neither the root nor one of the root's own replies. That
+ * is deliberately wider than "another root": a sibling thread's reply landing
+ * between question and answer interleaves the two conversations on screen just
+ * as visibly as a new question does, and the rule is about what a reader sees.
+ *
+ * Returns the reply ids to render inline, so the caller can lay each out in its
+ * own place and leave the remainder on the parent's chip.
+ */
+function inlineFirstReplies(messages: ChatMessage[], replies: Map<string, ChatMessage[]>): Set<string> {
+  const position = new Map<string, number>();
+  const roots = new Set<string>();
+  messages.forEach((m, i) => {
+    position.set(m.id, i);
+    if (!m.parentId) roots.add(m.id);
+  });
+
+  const inline = new Set<string>();
+  for (const [rootId, bucket] of replies) {
+    // **Only a root's reply is ever promoted.** A reply-to-a-reply must render
+    // nowhere, and promoting one would give the console a second fold level —
+    // which is not a cosmetic difference: `cycle_conversation`
+    // (`src/runtime/cycle.rs`) parents an approval continuation to the thread
+    // *root* rather than to the message that raised it precisely because a
+    // grandchild is unrenderable, and #435's routing choice would quietly stop
+    // being necessary. Pinned by the one-level-deep test.
+    if (!roots.has(rootId)) continue;
+    const root = position.get(rootId);
+    const first = bucket[0];
+    const answer = first === undefined ? undefined : position.get(first.id);
+    // A reply whose parent is not in this channel folds nowhere and renders
+    // nowhere — the pre-existing rule, unchanged.
+    if (root === undefined || answer === undefined) continue;
+    const own = new Set(bucket.map((r) => r.id));
+    let interleaved = false;
+    for (let i = root + 1; i < answer; i += 1) {
+      if (!own.has(messages[i].id)) {
+        interleaved = true;
+        break;
+      }
+    }
+    if (!interleaved) inline.add(first.id);
+  }
+  return inline;
+}
+
+/**
  * Flatten a channel's messages into rows the timeline can render directly.
  *
- * Replies are folded into their parent rather than laid out inline: a parent
- * carries its own replies and renders a summary row, matching how a threaded
- * chat keeps the main channel readable.
+ * A thread's **first reply renders inline** when nothing interleaved between
+ * the question and it; everything else folds into the parent's summary row. See
+ * {@link inlineFirstReplies} for the rule and why it is the renderer's to make.
  */
 export function buildTimeline(
   messages: ChatMessage[],
@@ -998,12 +1075,13 @@ export function buildTimeline(
     if (bucket) bucket.push(m);
     else replies.set(m.parentId, [m]);
   }
+  const inline = inlineFirstReplies(messages, replies);
 
   const entries: TimelineEntry[] = [];
   let prev: TimelineEntry | undefined;
 
   for (const m of messages) {
-    if (m.parentId) continue;
+    if (m.parentId && !inline.has(m.id)) continue;
     const sender = senderOf(m, channel, members, youAvatar);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
@@ -1032,7 +1110,18 @@ export function buildTimeline(
       // a run is a claim that they are.
       !!prev.message.byPerson === !!m.byPerson;
 
-    const own = replies.get(m.id) ?? [];
+    // **Only a root carries a chip.** An inline reply is a rendered row, so
+    // hanging its own bucket off it would put the second fold level back on
+    // screen through the summary instead of through a row — the same
+    // one-level-deep invariant `inlineFirstReplies` guards, and just as
+    // invisible when it breaks.
+    //
+    // And the inline first reply is a row of its own, so it must not also count
+    // on its parent's chip: a reader would see the answer and be told there is
+    // one more thing to open, which there is not.
+    const own = m.parentId
+      ? []
+      : (replies.get(m.id) ?? []).filter((r) => !inline.has(r.id));
     const entry: TimelineEntry = {
       message: m,
       sender,
