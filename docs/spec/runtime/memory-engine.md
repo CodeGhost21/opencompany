@@ -26,6 +26,12 @@ mode were removed in #1568; a deployment that still sets
 naming the removed value. Only the `store` default, the hosted `remote` modes
 and `null` remain.
 
+Whether Cortex could return as a *hosted* engine under `remote` — the opposite
+question from #1568 — is investigated in
+[`memory-engine-cortex.md`](memory-engine-cortex.md), which records what a
+deployed CortexDB instance actually provides. Nothing there is implemented; it
+is a design record with open decisions.
+
 ## Choosing a hosted engine (`remote`)
 
 | Env var | Required | Notes |
