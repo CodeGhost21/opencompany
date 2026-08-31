@@ -312,6 +312,52 @@ pub struct WorkflowRunApprovalRow {
     pub approval_id: Option<String>,
 }
 
+/// How many of `pending_approvals`' **nodes** have no live-parked call left
+/// among `approvals` (issue #1865 Codex review).
+///
+/// This is the synchronous-response twin of
+/// [`workflow_verdict::stranded_approvals`](crate::ports::workflow_verdict::stranded_approvals):
+/// that one reconciles against the live approvals queue and is deliberately
+/// not run on the hot settle path (a guaranteed-zero JOIN microseconds after
+/// the park), so this one answers the same per-*node* question — "does this
+/// node have a live card left?" — from the structural receipts a run already
+/// carries in [`WorkflowRun::approvals`].
+///
+/// `pending_approvals` and `approvals` are counted in different units —
+/// one entry per **node** against one entry per **gated call** — so `count()`
+/// over `approvals.filter(unparkable)` is not this number: a node with one
+/// parked call and one failed park is not stranded (an operator can still act
+/// on it), and a node with two failed parks and zero parked ones is, but a
+/// call-level count cannot tell the two apart. Grouping by node first is what
+/// keeps this **never greater than `pending_approvals.len()`**, matching
+/// [`RunVerdictFacts::stranded_approvals`](crate::ports::workflow_verdict::RunVerdictFacts::stranded_approvals)'s
+/// own invariant.
+///
+/// **Absence of a receipt is not a failed park** (PR #1883 Codex review). A
+/// `requires_approval` gate `park_pending_gates` parks is never given an
+/// `approvals` row at all — that receipt shape is `park_gated_calls`'s alone,
+/// for a call gated inside an agent turn (see the module docs on
+/// [`WorkflowRunApprovalRow`] and `workflow_verdict`'s two-shapes note). A
+/// node in `pending_approvals` with zero rows here is therefore that ordinary
+/// gate shape, structurally silent by design, not a park that failed — so it
+/// must NOT count as stranded. Only a node that has at least one row, and
+/// none of them `Parked`, is one this function can actually see fail.
+pub fn stranded_approvals(
+    pending_approvals: &[String],
+    approvals: &[WorkflowRunApprovalRow],
+) -> usize {
+    pending_approvals
+        .iter()
+        .filter(|node_id| {
+            let mut rows = approvals
+                .iter()
+                .filter(|a| a.node_id.as_deref() == Some(node_id.as_str()))
+                .peekable();
+            rows.peek().is_some() && rows.all(|a| a.outcome != WorkflowApprovalOutcome::Parked)
+        })
+        .count()
+}
+
 /// One node's structural outcome inside a run (issue #542).
 ///
 /// The port-side twin of the HTTP layer's `WorkflowRunNode` and of a
@@ -956,6 +1002,85 @@ pub trait WorkflowRunner: Send + Sync {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    fn row(node: &str, outcome: WorkflowApprovalOutcome) -> WorkflowRunApprovalRow {
+        WorkflowRunApprovalRow {
+            node_id: Some(node.to_string()),
+            tool: Some("send_email".to_string()),
+            outcome,
+            approval_id: matches!(outcome, WorkflowApprovalOutcome::Parked)
+                .then(|| "appr-1".to_string()),
+        }
+    }
+
+    /// Codex review (#1865): a node with one live parked call and one failed
+    /// park is not stranded — an operator can still act on it — even though a
+    /// call-level count of unparkable rows would equal `pending_approvals.len()`
+    /// (1 node, 1 unparkable call) and wrongly report it as fully stranded.
+    #[test]
+    fn a_node_with_one_live_card_is_not_stranded_even_with_one_failed_park() {
+        let pending = vec!["gate".to_string()];
+        let approvals = vec![
+            row("gate", WorkflowApprovalOutcome::Parked),
+            row("gate", WorkflowApprovalOutcome::ParkFailed),
+        ];
+        assert_eq!(stranded_approvals(&pending, &approvals), 0);
+    }
+
+    /// The complementary case: a node whose every gated call failed to park
+    /// has no live card left, so it counts once — not twice, even though it
+    /// made two unparkable rows.
+    #[test]
+    fn a_node_with_every_call_unparkable_counts_once() {
+        let pending = vec!["gate".to_string()];
+        let approvals = vec![
+            row("gate", WorkflowApprovalOutcome::ParkFailed),
+            row("gate", WorkflowApprovalOutcome::Discarded),
+        ];
+        assert_eq!(stranded_approvals(&pending, &approvals), 1);
+    }
+
+    /// Never greater than `pending_approvals.len()` — the invariant
+    /// `RunVerdictFacts::stranded_approvals` documents. Two nodes, one fully
+    /// stranded and one with a live card, must read `1`, not `2` even though
+    /// three of the four rows are unparkable.
+    #[test]
+    fn mixed_nodes_stay_within_pending_approvals_count() {
+        let pending = vec!["gate-a".to_string(), "gate-b".to_string()];
+        let approvals = vec![
+            row("gate-a", WorkflowApprovalOutcome::Parked),
+            row("gate-a", WorkflowApprovalOutcome::ParkFailed),
+            row("gate-b", WorkflowApprovalOutcome::ParkFailed),
+            row("gate-b", WorkflowApprovalOutcome::Discarded),
+        ];
+        assert_eq!(stranded_approvals(&pending, &approvals), 1);
+    }
+
+    /// PR #1883 Codex review: a `requires_approval` gate `park_pending_gates`
+    /// parks — the ordinary authored/policy-raised gate shape, not a call
+    /// gated inside an agent turn — never gets an `approvals` row at all
+    /// (`park_pending_gates` writes straight to the approvals queue and
+    /// `WorkflowRun::approvals`, and never touches it). Before the fix this
+    /// read as `!approvals.iter().any(node_id && Parked)` — vacuously true
+    /// for a node with zero rows — so every ordinary gate reported stranded
+    /// on a run that never made a single failed park. A card is live and
+    /// waiting; `pending` alone, with no matching row, must count zero.
+    #[test]
+    fn a_node_with_no_approval_rows_at_all_is_not_stranded() {
+        let pending = vec!["gate".to_string()];
+        let approvals: Vec<WorkflowRunApprovalRow> = Vec::new();
+        assert_eq!(stranded_approvals(&pending, &approvals), 0);
+    }
+
+    /// The same shape, mixed with a genuinely gated-and-unparkable node: the
+    /// receipt-less gate must still not count, while the node with real
+    /// failed-park rows does.
+    #[test]
+    fn a_receiptless_gate_beside_a_genuinely_stranded_node_counts_only_the_latter() {
+        let pending = vec!["gate".to_string(), "agent-node".to_string()];
+        let approvals = vec![row("agent-node", WorkflowApprovalOutcome::ParkFailed)];
+        assert_eq!(stranded_approvals(&pending, &approvals), 1);
+    }
 
     /// A manual `new(false)` reads back [`StartedBy::Operator`] — the coarse
     /// default every call through `new`/`begin` gets unless overridden (issue

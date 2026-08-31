@@ -1048,13 +1048,22 @@ impl<'a> CycleRunner<'a> {
             )
             .await
             {
-                Ok(Some(column)) => tracing::info!(
-                    company = %company,
-                    run = %id,
-                    task = %task_id,
-                    column,
-                    "[runs] the terminality backstop returned a stranded card"
-                ),
+                Ok(Some(column)) => {
+                    tracing::info!(
+                        company = %company,
+                        run = %id,
+                        task = %task_id,
+                        column,
+                        "[runs] the terminality backstop returned a stranded card"
+                    );
+                    // Issue #1865: the common shape of "board dispatch failed"
+                    // — a brain that never answered `TaskDispatched`, or one
+                    // whose cycle errored, left silent until this backstop
+                    // caught it. See `CompanyRuntime::notify_dispatch_failed`.
+                    if column == crate::ports::tasks::COLUMN_TODO {
+                        self.rt.notify_dispatch_failed(task_id, &reason).await;
+                    }
+                }
                 Ok(None) => {}
                 // Best-effort, like every other write here: the attempt row is
                 // already settled and the cycle's own outcome must not be
@@ -3137,6 +3146,7 @@ impl<'a> CycleHostImpl<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -3254,6 +3264,7 @@ impl<'a> CycleHostImpl<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            bounced: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -4374,6 +4385,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -4401,6 +4413,30 @@ members = ["writer"]
         );
         let note = card.note.expect("the board must say why");
         assert!(note.contains(RUN_UNSETTLED_ERROR), "{note}");
+
+        // The caller-level backstop must announce the same bounce through the
+        // durable notification feed, not merely update the board.
+        let notifications = rt
+            .notifications()
+            .list(rt.id(), "owner")
+            .await
+            .expect("read notifications");
+        let notification = notifications
+            .iter()
+            .find(|n| n.notification.kind == "dispatch_failed")
+            .expect("a bounced To-do card emits a dispatch-failed notification");
+        assert_eq!(
+            notification.notification.subject.id, "t-1",
+            "the notification must point at the affected task"
+        );
+        assert!(
+            notification
+                .notification
+                .title
+                .contains(RUN_UNSETTLED_ERROR),
+            "the notification must carry the failure reason: {:?}",
+            notification.notification.title
+        );
     }
 
     /// The guard, at the backstop: a card an operator has already parked is
@@ -4436,6 +4472,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -8744,6 +8781,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await
@@ -8823,6 +8861,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    bounced: None,
                 },
             )
             .await

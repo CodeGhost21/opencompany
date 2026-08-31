@@ -1565,6 +1565,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -1594,6 +1595,56 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     assert!(tasks.delete(&alpha, "t1").await.unwrap());
     assert!(!tasks.delete(&alpha, "t1").await.unwrap());
     assert_eq!(tasks.list(&alpha).await.unwrap().len(), 1);
+
+    // Issue #1865: seed every recently-added optional field with a meaningful
+    // value. An empty/`None` fixture would let a backend silently drop the
+    // bounced marker, output lineage, or workflow proposal without failing.
+    let populated = TaskRecord {
+        note: Some("retry after the transport failed".to_string()),
+        origin_chat_id: Some("chat-1".to_string()),
+        parent_task_id: Some("parent-1".to_string()),
+        output: Some(crate::ports::tasks::TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "run-1".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 10,
+            artifacts: vec![crate::ports::tasks::TaskOutputArtifact {
+                artifact_id: "artifact-1".to_string(),
+                version: 3,
+                title: "Release notes".to_string(),
+                kind: crate::ports::ArtifactKind::Markdown,
+            }],
+            workflows: vec![crate::ports::tasks::TaskOutputWorkflow {
+                workflow_id: "release".to_string(),
+                run_id: Some("run-1".to_string()),
+                action: crate::ports::tasks::TaskOutputAction::Ran,
+            }],
+        }),
+        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
+        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
+            summary: "Publish the release notes".to_string(),
+            ops: serde_json::json!({"id": "release", "nodes": []}),
+            generated_at_millis: 11,
+            run_id: "run-1".to_string(),
+        }),
+        origin_run_id: Some("run-1".to_string()),
+        origin_workflow_id: Some("release".to_string()),
+        bounced: Some("the previous dispatch failed".to_string()),
+        ..task("t-populated", "todo", 12)
+    };
+    tasks.upsert(&alpha, &populated).await.unwrap();
+    let populated_back = tasks
+        .list(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == populated.id)
+        .expect("the populated card persists");
+    assert_eq!(
+        populated_back, populated,
+        "all populated fields must survive"
+    );
 
     // Issue #337: a card carrying a full plan round-trips **byte-identically**
     // on every backend.

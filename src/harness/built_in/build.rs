@@ -1009,6 +1009,7 @@ pub fn build_agent(
             manifest_agent.id.clone(),
             manifest_agent.tools.clone(),
             grants.to_vec(),
+            deps.notifications.clone(),
         ));
     }
     // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
@@ -1933,6 +1934,7 @@ mod tests {
         let mcp_home = Some(root.join("mcp"));
         let audit_root = root;
         HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),

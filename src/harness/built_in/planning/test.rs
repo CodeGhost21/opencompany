@@ -1012,6 +1012,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         output: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        bounced: None,
     }
 }
 

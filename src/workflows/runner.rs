@@ -390,6 +390,12 @@ async fn run_workflow_inner(
     // survive that. An approval card is durable the moment it is written, so a
     // run that ended badly must still be able to say it opened one.
     let blocks = super::caps::RunBlocks::default();
+    // Issue #1865: the sideways channel an agent node's turn reports through
+    // when it truncates at the `max_tool_iterations` cap — owned out here like
+    // `blocks`, for the same reason: the node's attempt row already settles
+    // `Failed` for this, and the run-level row must be told to agree before the
+    // capability bundle (and the fact it is carrying) drops.
+    let capped = super::caps::RunCappedNodes::default();
     let approvals = super::caps::RunApprovals::default();
     // Card-less files written by agent nodes. Kept outside the capability
     // bundle so a failed/blocked engine future cannot drop the capture before
@@ -424,6 +430,7 @@ async fn run_workflow_inner(
             notices: notices.clone(),
             board: board.clone(),
             blocks: blocks.clone(),
+            capped: capped.clone(),
             approvals: approvals.clone(),
             artifacts: run_artifacts.clone(),
             // A dry run records nothing: it makes no effects, so an attempt row
@@ -761,7 +768,26 @@ async fn run_workflow_inner(
                 merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
                 &captured_artifacts,
             );
-            if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
+            // `only_blocked_nodes_errored` reads `nodes[].status == Error` to
+            // decide whether every errored row belongs to a blocked node, so it
+            // MUST run before the capped-node reclassification below: a capped
+            // node's row is still `Ok` at this point, and reclassifying first
+            // would add its fresh `Error` row to this check and misread an
+            // otherwise-clean block as a genuine failure.
+            let is_genuine_failure =
+                blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked);
+            // Issue #1865 (PR #1883 review): the sibling reclassification the
+            // clean-finish arm applies near the bottom of this function, reached
+            // here too — both branches below are early returns that used to skip
+            // straight past that sole `capped.take()` and reconciliation. A node
+            // that only truncated at the iteration cap (or paused for budget)
+            // alongside a genuinely failed or blocked sibling kept its `Ok` row
+            // forever even though its own attempt already settled `Failed`; this
+            // closes that gap for both of this arm's exits, not only the one the
+            // unit tests around `reclassify_capped_nodes` already covered.
+            let mut nodes = nodes;
+            reclassify_capped_nodes(&mut nodes, &capped.take());
+            if is_genuine_failure {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
                 if !persist_run_output(
@@ -918,6 +944,17 @@ async fn run_workflow_inner(
         {
             notices.push(run_output_persist_failed_notice());
         }
+        // Issue #1865 (PR #1883 review): the third sibling reclassification —
+        // `94c8e0507` closed this gap on the genuine-failure/blocked `Err` arm
+        // above, but a clean node-boundary cancel is its own early return with
+        // its own `nodes`, reached without ever passing through that arm or the
+        // clean-finish arm at the bottom of this function. A node that only
+        // truncated at the iteration cap (or paused for budget) before an
+        // operator cancelled a later/parallel node kept its `Ok` row here too,
+        // even though its own attempt already settled `Failed` — the same
+        // disagreement, a third exit.
+        let mut nodes = nodes;
+        reclassify_capped_nodes(&mut nodes, &capped.take());
         return Ok(WorkflowRun {
             output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
@@ -1138,6 +1175,15 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #1865: the sibling reclassification — a node whose turn truncated
+    // at the `max_tool_iterations` cap reports `Success` at the engine
+    // boundary (see `RunCappedNodes`), so its row lands here as `Ok` while its
+    // attempt already settled `Failed`. Relabel it `Error` so the two agree,
+    // exactly as `reclassify_blocked` relabels a parked node `Blocked` so ITS
+    // row agrees with what actually happened. Ordered after `reclassify_blocked`
+    // but the two cannot collide: `run_turn` returns `Err` on the blocked arm
+    // before it ever reaches the iteration-cap check, so no node is ever both.
+    reclassify_capped_nodes(&mut nodes, &capped.take());
     // Issue #899 (Stage 1): stash the workflow id and trigger input each blocked
     // agent node's continuation needs, keyed by the same per-(run, node) turn key
     // its parked calls armed `ContinuationQueue` under. The resolve path releases
@@ -1159,6 +1205,20 @@ async fn run_workflow_inner(
     // cannot drift into disagreement about what a block reads as.
     for b in &blocked_nodes {
         notices.push(blocked_notice(b));
+    }
+    // Issue #1865: a node under `on_error = "continue"`/`"route"` errors and
+    // the graph keeps going — the run reaches this arm (not `blocked_run`)
+    // carrying an `Error` row the reclassification above deliberately left
+    // alone, because it is not waiting on anyone. `WorkflowRunVerdict::of`
+    // now folds that into a `degraded` verdict, but a verdict is one word —
+    // this is the sentence naming *which* node, so an operator does not have
+    // to open the canvas to find the red chip. One notice per errored node,
+    // in the order the nodes finished, the same order `nodes` already carries.
+    for row in nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Error)
+    {
+        notices.push(errored_node_notice(&row.node_id));
     }
 
     Ok(WorkflowRun {
@@ -1238,6 +1298,45 @@ fn reclassify_blocked(
     for b in blocked {
         if !pending_approvals.contains(&b.node_id) {
             pending_approvals.push(b.node_id.clone());
+        }
+    }
+}
+
+/// Relabels a capped agent node's row `Error` so it agrees with its attempt
+/// (issue #1865).
+///
+/// Host-side, exactly on [`reclassify_blocked`]'s terms and right beside it:
+/// `tinyflows::observability` reports `StepStatus::Success` for a turn that
+/// truncated at the `max_tool_iterations` cap — the model produced a reply,
+/// the node "finished" from the engine's point of view — so the row this
+/// function receives already carries [`WorkflowNodeStatus::Ok`]. Only the
+/// host, via [`super::caps::RunCappedNodes`], knows the reply was a partial
+/// checkpoint rather than a completed answer, which is the same shape of gap
+/// `reclassify_blocked` closes for a parked node: the engine reported the only
+/// thing it could see, and the host relabels the row on the way out rather
+/// than rewriting the engine's own account of what happened.
+///
+/// `capped` names node ids, not rows with a status to overwrite — unlike
+/// `blocked`, which carries [`WorkflowBlockedNode`](crate::ports::WorkflowBlockedNode)
+/// structs the caller already built. A plain id list is all
+/// [`RunCappedNodes`](super::caps::RunCappedNodes) needs to carry: there is no
+/// second fact about a capped node the run-level record is missing, the way
+/// `blocked_nodes` carries `tools`/`approval_ids` for the notice
+/// `blocked_notice` composes.
+fn reclassify_capped_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], capped: &[String]) {
+    if capped.is_empty() {
+        return;
+    }
+    for row in nodes.iter_mut() {
+        // `Blocked` is deliberately never overridden here, even though
+        // `run_turn` structurally never puts one node in both lists (see this
+        // function's own doc): a node waiting on a person is the more
+        // specific fact, and a future caller that somehow did name one in
+        // both must not have this flip hide the approval behind a plain
+        // failure — the same direction `only_blocked_nodes_errored`'s guard
+        // already leans in.
+        if row.status != WorkflowNodeStatus::Blocked && capped.iter().any(|id| id == &row.node_id) {
+            row.status = WorkflowNodeStatus::Error;
         }
     }
 }
@@ -1386,6 +1485,29 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
         "The step \"{}\" needed your approval for {tools}, so it produced nothing and the steps \
          after it did not run.{tail}",
         blocked.node_id
+    )
+}
+
+/// Names a step that settled `Error` on a run that otherwise kept going (issue
+/// #1865) — a node under `on_error = "continue"`/`"route"` whose capability
+/// genuinely errored, or an agent node whose turn was relabelled `Error`
+/// because it truncated at the `max_tool_iterations` cap (see
+/// `reclassify_capped_nodes`). Both settle the run without an `error`, and
+/// both are exactly what `Degraded` exists to stop hiding.
+///
+/// The sentence half of `degraded`: `WorkflowRunVerdict::Degraded` says one
+/// word about the whole run, and this says which node — mirroring how
+/// `blocked_notice` is the sentence behind a `blocked`/`stranded` verdict.
+/// Worded to cover either cause without claiming which one it was, since the
+/// row carries no reason text (issue #371's no-`String`-arm invariant). Called
+/// once per errored, non-blocked row in `nodes`, in finish order, so a graph
+/// with more than one recovering branch names every one of them rather than
+/// only the first — the console's `failedNodeOf` picks one node for a
+/// *stopped* run's headline, but this run did not stop.
+fn errored_node_notice(node_id: &str) -> String {
+    format!(
+        "The step \"{node_id}\" did not finish cleanly, and the run continued past it — check \
+         its output for details."
     )
 }
 
@@ -2179,6 +2301,73 @@ mod tests {
     use crate::ports::run_output::WorkflowRunOutputStore;
     use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
+    /// One node row, for the reclassification tests below — the three
+    /// structural scalars only, matching what `reclassify_capped_nodes` and
+    /// `reclassify_blocked` both read and write.
+    fn node_row(id: &str, status: WorkflowNodeStatus) -> crate::ports::WorkflowRunNodeRow {
+        crate::ports::WorkflowRunNodeRow {
+            node_id: id.to_string(),
+            status,
+            elapsed_ms: 10,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// Issue #1865: the run-level half of the iteration-cap reconciliation —
+    /// `caps::mod`'s own test
+    /// (`a_capped_turn_settles_failed_and_feeds_run_capped_nodes`) pins that a
+    /// capped turn feeds the node id into `RunCappedNodes`; this pins that
+    /// `reclassify_capped_nodes` turns that id into the row flip the run's
+    /// verdict needs (`WorkflowRunVerdict::of` reads `Error`, never a node
+    /// id list).
+    #[test]
+    fn reclassify_capped_nodes_flips_the_capped_row_to_error() {
+        let mut nodes = vec![
+            node_row("fetch", WorkflowNodeStatus::Ok),
+            node_row("summarize", WorkflowNodeStatus::Ok),
+        ];
+        reclassify_capped_nodes(&mut nodes, &["summarize".to_string()]);
+        assert_eq!(nodes[0].status, WorkflowNodeStatus::Ok, "untouched sibling");
+        assert_eq!(
+            nodes[1].status,
+            WorkflowNodeStatus::Error,
+            "the capped node's row must read Error, agreeing with its attempt"
+        );
+    }
+
+    /// An empty capped list is a no-op — every row keeps whatever status the
+    /// engine (or `reclassify_blocked`) already gave it. The common case: most
+    /// runs cap no node at all.
+    #[test]
+    fn reclassify_capped_nodes_is_a_no_op_when_nothing_capped() {
+        let mut nodes = vec![
+            node_row("fetch", WorkflowNodeStatus::Ok),
+            node_row("gate", WorkflowNodeStatus::Blocked),
+        ];
+        let before = nodes.clone();
+        reclassify_capped_nodes(&mut nodes, &[]);
+        assert_eq!(nodes, before);
+    }
+
+    /// The two reclassifications are structurally exclusive (a blocked node's
+    /// turn returns `Err` before the iteration-cap check is ever reached — see
+    /// `run_turn`'s `#881` block above the cap check), so this can never fire
+    /// against a real run. The guard is defensive anyway: a node the blocked
+    /// pass already relabelled must never be re-flipped by this one, because
+    /// `Blocked` is the more specific fact — a future caller that somehow
+    /// named one node in both lists must not have this hide a real approval
+    /// wait behind a plain failure.
+    #[test]
+    fn reclassify_capped_nodes_never_overrides_an_already_blocked_row() {
+        let mut nodes = vec![node_row("gate", WorkflowNodeStatus::Blocked)];
+        reclassify_capped_nodes(&mut nodes, &["gate".to_string()]);
+        assert_eq!(
+            nodes[0].status,
+            WorkflowNodeStatus::Blocked,
+            "a blocked node must never be relabelled Error"
+        );
+    }
+
     /// A workflow lane that records which agent it served. Its reply names the
     /// lane so the run output proves the same routing decision as the call log.
     struct RecordingLane {
@@ -2386,6 +2575,395 @@ to = "done"
         assert_partial_run_artifact(true).await;
     }
 
+    /// A turn double for a two-node chain: `capped_agent` always truncates at
+    /// the iteration cap (`Ok`, `hit_iteration_cap: true` — the same signal
+    /// [`reclassify_capped_nodes`] reconciles), and `tail_agent` either fails
+    /// outright or parks an approval, depending on `blocked`. The chain is
+    /// strictly sequential (`start -> capped_work -> tail_work`), so
+    /// `capped_work` always settles — and pushes into `RunCappedNodes` — before
+    /// `tail_work` runs, with no race to arrange.
+    struct CappedThenSettlingTurn {
+        approvals: crate::harness::policy::ApprovalRequestQueue,
+        blocked: bool,
+    }
+
+    impl CappedThenSettlingTurn {
+        async fn execute(&self, agent_id: &str) -> Result<crate::harness::TurnOutcome> {
+            if agent_id == "capped_agent" {
+                return Ok(crate::harness::TurnOutcome {
+                    reply: "partial answer, still going".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: true,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                });
+            }
+            if !self.blocked {
+                return Err(OpenCompanyError::Harness(
+                    "synthetic failure after a capped sibling already settled".to_string(),
+                ));
+            }
+            self.approvals
+                .push(crate::harness::policy::ApprovalRequest {
+                    tool: "shell".to_string(),
+                    reason: "synthetic approval after a capped sibling already settled".to_string(),
+                    effect: crate::ports::types::Effect {
+                        kind: "shell".to_string(),
+                        group: crate::ports::types::EffectGroup::Other,
+                        amount_usd: None,
+                        established_thread: false,
+                        first_time_counterparty: false,
+                        payload: serde_json::json!({ "command": "finish-report" }),
+                        agent: Some(agent_id.to_string()),
+                        run_id: None,
+                    },
+                });
+            Ok(crate::harness::TurnOutcome {
+                reply: "Waiting for approval.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for CappedThenSettlingTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+    }
+
+    fn capped_then_settling_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "capped_then_settling"
+name = "Capped then settling"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "capped_work"
+kind = "agent"
+name = "Capped work"
+summary = "Loop until the iteration cap."
+agent = "capped_agent"
+[[node]]
+id = "tail_work"
+kind = "agent"
+name = "Tail work"
+summary = "Fail or block, depending on the test."
+agent = "tail_agent"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "capped_work"
+[[edge]]
+from = "capped_work"
+to = "tail_work"
+[[edge]]
+from = "tail_work"
+to = "done"
+"#,
+        )
+        .expect("capped-then-settling graph parses")
+    }
+
+    /// PR #1883 review (Codex #3877606126): `reclassify_capped_nodes` is only
+    /// ever called on the clean-settle arm at the bottom of
+    /// `run_workflow_inner` — the genuine-failure and blocked early returns a
+    /// few hundred lines above it build their `nodes`/`WorkflowRun` straight
+    /// from the collector's raw rows and return before that call is ever
+    /// reached. So a node upstream of the one that fails or blocks the run,
+    /// which itself only truncated at the iteration cap, keeps its `Ok` row
+    /// forever even though its own attempt already settled `Failed` — the
+    /// exact disagreement issue #1865 exists to close, just reachable from a
+    /// different exit than the one its unit tests cover.
+    async fn assert_capped_sibling_reclassified_before_early_return(blocked: bool) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedThenSettlingTurn {
+            approvals: deps.approval_requests.clone(),
+            blocked,
+        });
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &capped_then_settling_graph(),
+            serde_json::json!({ "request": "go" }),
+            &ctx,
+        )
+        .await;
+
+        let nodes = if blocked {
+            let run = result.expect("an approval-blocked run settles successfully");
+            assert!(
+                run.blocked_nodes.iter().any(|n| n.node_id == "tail_work"),
+                "tail_work must block: {run:?}"
+            );
+            run.nodes
+        } else {
+            let err = result.expect_err("the synthetic failure must fail the run");
+            let partial = err
+                .partial_run()
+                .expect("a genuine failure carries a partial run");
+            partial.nodes.clone()
+        };
+
+        let capped_row = nodes
+            .iter()
+            .find(|n| n.node_id == "capped_work")
+            .expect("the capped node's row must be in the partial run");
+        assert_eq!(
+            capped_row.status,
+            WorkflowNodeStatus::Error,
+            "a capped sibling's row must be reclassified Error even when the run leaves \
+             through an early return (genuine failure or block), not only on the \
+             clean-finish arm — {nodes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capped_node_is_reclassified_even_when_a_later_node_fails_the_run() {
+        assert_capped_sibling_reclassified_before_early_return(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_capped_node_is_reclassified_even_when_a_later_node_blocks_the_run() {
+        assert_capped_sibling_reclassified_before_early_return(true).await;
+    }
+
+    /// A turn double for `start -> capped_work -> gated_work -> done`:
+    /// `capped_work` always truncates at the iteration cap like
+    /// `CappedThenSettlingTurn`'s node of the same name, and `gated_work`
+    /// announces arrival on `entered` and then blocks on `release` — the same
+    /// hold-and-release shape [`GatedProvider`] uses for the clean-cancel
+    /// keystone test, just at the `RunTurn` layer instead of `ChatModel`, so
+    /// this test does not need a `HarnessPool`.
+    struct CappedThenGatedTurn {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl CappedThenGatedTurn {
+        async fn execute(&self, agent_id: &str) -> Result<crate::harness::TurnOutcome> {
+            if agent_id == "capped_agent" {
+                return Ok(crate::harness::TurnOutcome {
+                    reply: "partial answer, still going".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: true,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                });
+            }
+            // `gated_agent`: announce arrival, then wait to be released. The
+            // test cancels and releases in that order, so the token is already
+            // flipped by the time this turn resolves and the engine winds down
+            // at the next boundary instead of starting `done`.
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Ok(crate::harness::TurnOutcome {
+                reply: "acknowledged".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for CappedThenGatedTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.execute(agent_id).await
+        }
+    }
+
+    fn capped_then_gated_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "capped_then_gated"
+name = "Capped then gated"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "capped_work"
+kind = "agent"
+name = "Capped work"
+summary = "Loop until the iteration cap."
+agent = "capped_agent"
+[[node]]
+id = "gated_work"
+kind = "agent"
+name = "Gated work"
+summary = "Hold until released, after the operator cancels."
+agent = "gated_agent"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "capped_work"
+[[edge]]
+from = "capped_work"
+to = "gated_work"
+[[edge]]
+from = "gated_work"
+to = "done"
+"#,
+        )
+        .expect("capped-then-gated graph parses")
+    }
+
+    /// PR #1883 review (Codex #3878277996): the clean node-boundary cancel arm
+    /// (`if outcome.cancelled` in `run_workflow_inner`) is a THIRD early return
+    /// that built its `WorkflowRun` straight from the collector's raw `nodes`,
+    /// never calling `reclassify_capped_nodes` — distinct from the
+    /// genuine-failure/blocked `Err` arm `94c8e0507` already fixed, and from
+    /// the clean-finish arm the original unit tests covered. A node upstream of
+    /// where the operator cancels, which itself only truncated at the
+    /// iteration cap, kept its `Ok` row on a stopped run even though its own
+    /// attempt already settled `Failed`.
+    #[tokio::test]
+    async fn a_capped_node_is_reclassified_when_the_run_is_cleanly_cancelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let turn = Arc::new(CappedThenGatedTurn {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+        let reached_gated = entered.notified();
+        let graph = capped_then_gated_graph();
+
+        let mut run = Box::pin(run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &graph,
+            serde_json::json!({ "request": "go" }),
+            &ctx,
+        ));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished before the gated node was reached"),
+            () = reached_gated => {}
+        }
+
+        // Stop the run, THEN let the gated node complete — the token is
+        // already flipped by the time `gated_work` resolves, so the engine
+        // winds down at the boundary before `done` runs.
+        cancel.cancel();
+        release.notify_one();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cleanly cancelled run never returned")
+            .expect("a cancelled run is Ok, not Err");
+
+        assert!(run.cancelled, "the run must report that it was stopped");
+        assert!(
+            !run.nodes.iter().any(|n| n.node_id == "done"),
+            "the node past the cancel boundary must never run: {:?}",
+            run.nodes
+        );
+        let capped_row = run
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "capped_work")
+            .expect("the capped node's row must be in the cancelled run");
+        assert_eq!(
+            capped_row.status,
+            WorkflowNodeStatus::Error,
+            "a capped sibling's row must be reclassified Error on the clean-cancel arm too, not \
+             only the genuine-failure/blocked early returns and the clean-finish arm — \
+             {:?}",
+            run.nodes
+        );
+    }
+
     #[async_trait]
     impl crate::runtime::delegation::RunTurn for RecordingLane {
         async fn run(
@@ -2479,6 +3057,7 @@ description = "Runs Acme."
 
     fn deps(dir: &std::path::Path) -> HarnessDeps {
         HarnessDeps {
+            notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
