@@ -132,6 +132,17 @@ export function CreateCompanyDialog({
   // The preflight could not be read, so the mode is unknown. Submit refuses
   // before the destructive archive leg rather than archiving blind.
   const [preflightFailed, setPreflightFailed] = useState(false);
+  // The preflight is still in flight — `authMode` above is still on its
+  // "email" default, not a confirmed answer. Starts `true` so the very first
+  // render (before either `useEffect` below has run) already treats the mode
+  // as unconfirmed, not "email". Without this, a wallet-mode host with a
+  // slow preflight left the name field pre-filled and the submit button
+  // enabled while `authMode` still read its email default and
+  // `preflightFailed` was still false — an operator who typed an email and
+  // submitted before the promise settled archived the existing company and
+  // only then learned, from the provisioning response, that this host never
+  // took an email at all (codex review on #1943, PR comment 3894416362).
+  const [preflightPending, setPreflightPending] = useState(true);
   const [policyMode, setPolicyMode] = useState(DEFAULT_POLICY_MODE);
   const [explicitId, setExplicitId] = useState("");
   const [advanced, setAdvanced] = useState(false);
@@ -193,6 +204,11 @@ export function CreateCompanyDialog({
     setWallet("");
     setAuthMode("email");
     setPreflightFailed(false);
+    // Re-armed on every open, gated the same way the fetch effect below is:
+    // a client with no platform bearer never runs that fetch (its trigger
+    // is already disabled per `canCreateCompanies`), so nothing will ever
+    // resolve this — leaving it `true` would refuse every submit forever.
+    setPreflightPending(canCreateCompanies(client));
     setPolicyMode(DEFAULT_POLICY_MODE);
     // Reset pre-seeds a fresh id rather than leaving this blank: the name
     // field above is pre-filled with the archived company's own name, and an
@@ -214,7 +230,7 @@ export function CreateCompanyDialog({
     setArchiveMaybe(false);
     setCreateMaybe(false);
     setIdTouched(false);
-  }, [request]);
+  }, [request, client]);
 
   // Read the host's sign-in mode on open, so the form asks for a wallet address
   // on a wallet-mode host and an admin email otherwise — and so a wallet-mode
@@ -227,10 +243,16 @@ export function CreateCompanyDialog({
     client
       .provisioningInfo()
       .then((info) => {
-        if (!cancelled) setAuthMode(info.auth_mode);
+        if (!cancelled) {
+          setAuthMode(info.auth_mode);
+          setPreflightPending(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setPreflightFailed(true);
+        if (!cancelled) {
+          setPreflightFailed(true);
+          setPreflightPending(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -265,6 +287,18 @@ export function CreateCompanyDialog({
     // reset that is destructive: the usable old company is archived before
     // its now-inaccessible replacement exists (codex review on #1828, PR
     // comment 3864885200).
+    // The preflight hasn't settled yet, so `authMode` is still on its "email"
+    // default rather than a confirmed answer — the button is disabled for
+    // this too (see the JSX below), but `submit` is reachable directly from a
+    // still-in-flight click handler, and this is the check that actually
+    // stops the destructive archive leg from racing the preflight promise.
+    if (preflightPending) {
+      setError(
+        "Still checking this host's sign-in mode — try again in a moment.",
+      );
+      return;
+    }
+
     // A preflight we could not read leaves the host's sign-in mode unknown, so
     // refuse before archiving rather than committing the destructive leg and
     // discovering the mode only when provisioning is refused.
@@ -790,7 +824,7 @@ export function CreateCompanyDialog({
               isReset ? "destructive" : name.trim() ? "default" : "secondary"
             }
             onClick={() => void submit()}
-            disabled={busy || !name.trim()}
+            disabled={busy || !name.trim() || preflightPending}
           >
             {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
             {submitLabel}
