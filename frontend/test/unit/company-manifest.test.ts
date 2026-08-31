@@ -7,6 +7,7 @@ import {
   describeProvisionError,
   explicitIdProblem,
   resetReplacementId,
+  walletAddressProblem,
   wasAmbiguousProvisionOutcome,
 } from "@/lib/company-manifest";
 
@@ -77,6 +78,76 @@ describe("buildManifestToml (issue #1807)", () => {
     const supervised = buildManifestToml({ name: "Acme", policyMode: "supervised" });
     expect(supervised).toContain("[policy]");
     expect(supervised).toContain('mode = "supervised"');
+  });
+
+  it("emits wallet mode with mode = \"wallet\" and a wallets list when wallets are given", () => {
+    const toml = buildManifestToml({
+      name: "Acme",
+      wallets: ["11111111111111111111111111111111"],
+    });
+    expect(toml).toContain("[users]");
+    // The host's manifest validator only reads `[users].wallets` when the
+    // manifest itself declares wallet mode.
+    expect(toml).toContain('mode = "wallet"');
+    expect(toml).toContain('wallets = ["11111111111111111111111111111111"]');
+  });
+
+  it("prefers wallets over an admin email so the two lists never share a [users] block", () => {
+    const toml = buildManifestToml({
+      name: "Acme",
+      adminEmail: "ceo@acme.test",
+      wallets: ["11111111111111111111111111111111", "22222222222222222222222222222222"],
+    });
+    // Wallet mode never reads `admins`, and the validator refuses `admins`
+    // alongside wallet mode — so only the wallets are emitted.
+    expect(toml).toContain('mode = "wallet"');
+    expect(toml).toContain(
+      'wallets = ["11111111111111111111111111111111", "22222222222222222222222222222222"]',
+    );
+    expect(toml).not.toContain("admins");
+    expect(toml).not.toContain("ceo@acme.test");
+  });
+
+  it("ignores blank wallet entries and falls back to email mode when none survive", () => {
+    const toml = buildManifestToml({
+      name: "Acme",
+      adminEmail: "ceo@acme.test",
+      wallets: ["   ", ""],
+    });
+    expect(toml).not.toContain("wallet");
+    expect(toml).toContain('admins = ["ceo@acme.test"]');
+  });
+});
+
+describe("walletAddressProblem", () => {
+  it("rejects a blank address", () => {
+    expect(walletAddressProblem("   ")).toMatch(/wallet address/i);
+  });
+
+  it("rejects non-base58 characters", () => {
+    // `0`, `O`, `I`, `l` are not in the base58 alphabet.
+    expect(walletAddressProblem("0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl")).toMatch(/base58/i);
+  });
+
+  it("rejects an implausibly short address", () => {
+    expect(walletAddressProblem("abc")).toMatch(/32-byte/i);
+  });
+
+  it("accepts a plausible base58 address", () => {
+    expect(walletAddressProblem("11111111111111111111111111111111")).toBeNull();
+  });
+
+  it("rejects a same-length string that decodes to the wrong byte count (codex review on #1943, PR comment 3894416376)", () => {
+    // 32 `z` characters is within the old length-only bound (32-48) and every
+    // character is valid base58, but base58 is not fixed-width per character:
+    // this string decodes to 24 bytes, not 32 — which is exactly what the
+    // host's `decode_wallet_address` would refuse. A length-only check passed
+    // this and let a reset archive the old company before discovering
+    // provisioning could never have succeeded.
+    const address = "z".repeat(32);
+    const problem = walletAddressProblem(address);
+    expect(problem).not.toBeNull();
+    expect(problem).toMatch(/32-byte/i);
   });
 });
 

@@ -507,6 +507,7 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
             // twice. An operator sets it afterwards through the write route.
             repeatable: None,
             destination: n.destination.clone(),
+            postcondition: None,
         });
     }
     Ok(RawWorkflow {
@@ -2704,6 +2705,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -2718,6 +2720,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -2732,6 +2735,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![
@@ -3065,6 +3069,7 @@ to = "done"
                 requires_approval: None,
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             });
         }
         assert!(draft.nodes.len() > MAX_WORKFLOW_NODES);
@@ -4729,6 +4734,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "call".to_string(),
@@ -4743,6 +4749,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -5586,6 +5593,7 @@ to = "done"
             requires_approval: None,
             repeatable: None,
             destination: None,
+            postcondition: None,
         };
         RawWorkflow {
             id: "wf".to_string(),
@@ -5726,6 +5734,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 RawNode {
                     id: "fetch".to_string(),
@@ -5740,6 +5749,7 @@ to = "done"
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -6700,6 +6710,7 @@ to = "done"
             requires_approval: None,
             repeatable: None,
             destination: None,
+            postcondition: None,
         }
     }
 

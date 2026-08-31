@@ -37,6 +37,7 @@ function stubClient(opts: {
 }) {
   return {
     carriesPlatformBearer: true,
+    provisioningInfo: vi.fn(() => Promise.resolve({ auth_mode: "email", wallets_required: false })),
     lifecycle: vi.fn(() => Promise.resolve()),
     provisionCompany: opts.provisionCompany,
     status: opts.status,

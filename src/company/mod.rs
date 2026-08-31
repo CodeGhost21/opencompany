@@ -191,16 +191,17 @@ pub use types::{
     ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES,
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
     TOOL_PROVIDERS, Tools, creation_default_grants, grants_chargebee_explicit,
-    grants_composio_explicit, grants_files_or_docs, grants_hosting_explicit, grants_media_explicit,
-    grants_paypal_explicit, grants_search_explicit, grants_workspace_write_explicit,
-    orchestrator_id,
+    grants_composio_explicit, grants_confer_native, grants_files_or_docs, grants_hosting_explicit,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
+    grants_workspace_write_explicit, native_capability_namespaces, orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
-    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, destination_is_reachable,
-    list_source_workflows, list_workflows_union, list_workflows_with_globals,
-    load_company_workflows, load_workflow_union, load_workflow_with_globals, parse_workflow,
+    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowPostconditionDef, WorkflowRetryDef,
+    destination_is_reachable, list_source_workflows, list_workflows_union,
+    list_workflows_with_globals, load_company_workflows, load_workflow_union,
+    load_workflow_with_globals, parse_workflow,
 };
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through

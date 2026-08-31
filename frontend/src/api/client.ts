@@ -50,6 +50,7 @@ import {
   type InboxMessageDto,
   type OperatorChannelDto,
   type PageManifestDto,
+  type ProvisioningInfo,
   type ResolveReceipt,
   type SetBudgetInput,
   type StandingGrant,
@@ -1312,6 +1313,21 @@ export class OpenCompanyClient {
    */
   provisionCompany(body: { manifest_toml: string; id?: string }): Promise<CompanyStatus> {
     return this.request<CompanyStatus>("POST", "/api/v1/companies", body);
+  }
+
+  /**
+   * The auth-mode preflight: the sign-in mode a company
+   * provisioned on this host right now would land in, and whether wallet
+   * addresses are required.
+   *
+   * Platform-scoped like {@link provisionCompany}, so a client that carries a
+   * platform bearer ({@link carriesPlatformBearer}) can read it. The create /
+   * reset dialog calls this on open so it can render the mode's identity field
+   * — an email admin or a wallet address — before it builds a manifest, rather
+   * than provisioning an `admins`-only manifest a `wallet`-mode host refuses.
+   */
+  provisioningInfo(): Promise<ProvisioningInfo> {
+    return this.request<ProvisioningInfo>("GET", "/api/v1/companies/provisioning");
   }
 
   /** Platform lifecycle control (requires a scoped company id). */

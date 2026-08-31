@@ -95,10 +95,10 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
-    WorkflowNodeDef, WorkflowRetryDef, courtesy_validate_draft, create_company_workflow,
-    delete_company_workflow, list_workflows_with_globals, load_workflow_with_globals,
-    rollback_company_workflow, seed_file_exists, set_company_workflow_enabled,
-    update_company_workflow, workflow_version,
+    WorkflowNodeDef, WorkflowPostconditionDef, WorkflowRetryDef, courtesy_validate_draft,
+    create_company_workflow, delete_company_workflow, list_workflows_with_globals,
+    load_workflow_with_globals, rollback_company_workflow, seed_file_exists,
+    set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -389,6 +389,12 @@ struct WorkflowNode {
     /// camelCase gap to bridge and no second shape to drift from.
     #[serde(skip_serializing_if = "Option::is_none")]
     destination: Option<WorkflowDestinationDef>,
+    /// A node's declared deterministic postcondition (issue #1866), reused
+    /// verbatim like `destination` above. Round-tripped so a `GET` → edit →
+    /// `PUT` cycle in the console does not silently clear an existing gate —
+    /// see [`WorkflowPostconditionDef`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    postcondition: Option<WorkflowPostconditionDef>,
 }
 
 /// The camelCase retry policy shape the console reads back (`maxAttempts` /
@@ -430,6 +436,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             requires_approval: n.requires_approval,
             repeatable: n.repeatable,
             destination: n.destination,
+            postcondition: n.postcondition,
         }
     }
 }
@@ -675,6 +682,13 @@ struct CreateNode {
     /// `parse_workflow` before anything is persisted.
     #[serde(default)]
     destination: Option<WorkflowDestinationDef>,
+    /// A node's declared deterministic postcondition (issue #1866): `{require:
+    /// "non_empty"|"field_present"|"non_empty_list", field?: "…"}`, checked
+    /// against the node's output before it is allowed to flow downstream.
+    /// Carried through create/validate/update so a caller-declared gate is not
+    /// silently discarded — see [`WorkflowPostconditionDef`].
+    #[serde(default)]
+    postcondition: Option<WorkflowPostconditionDef>,
 }
 
 /// The camelCase retry policy the create body carries (`maxAttempts` /
@@ -740,6 +754,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 requires_approval: n.requires_approval,
                 repeatable: n.repeatable,
                 destination: n.destination,
+                postcondition: n.postcondition,
             });
         }
         Ok(Self {
@@ -2396,20 +2411,28 @@ async fn fix_from_run(
         &wid,
     )?
     .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
-    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`
-    // field on `WorkflowNodeSpec` (the builder never authors them — see its
-    // own doc comment), so a node that had any of the three set loses it
-    // silently once the operator saves the correction. `repeatable` is the
-    // safety declaration issue #850 exists to protect — a correction that
-    // drops it with no warning can leave a continuation free to replay a call
-    // its author explicitly marked non-repeatable. Correlating this policy
-    // across a copilot rewrite that may rename or drop nodes is the harder
-    // problem this PR does not take on; naming it in a note at least makes the
-    // loss visible instead of silent.
+    // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`/
+    // `postcondition` field on `WorkflowNodeSpec` (the builder never authors
+    // any of the four — see its own doc comment), so a node that had any of
+    // them set loses it silently once the operator saves the correction.
+    // `repeatable` is the safety declaration issue #850 exists to protect;
+    // `postcondition` (issue #1866) is the deterministic run-safety gate —
+    // a correction that drops either with no warning can leave a
+    // continuation free to replay a call its author explicitly marked
+    // non-repeatable, or let an insufficient output flow downstream past a
+    // gate the operator declared. Correlating this policy across a copilot
+    // rewrite that may rename or drop nodes is the harder problem this PR
+    // does not take on; naming it in a note at least makes the loss visible
+    // instead of silent.
     let dropped_policy_nodes: Vec<String> = file
         .nodes
         .iter()
-        .filter(|n| n.on_error.is_some() || n.retry.is_some() || n.repeatable.is_some())
+        .filter(|n| {
+            n.on_error.is_some()
+                || n.retry.is_some()
+                || n.repeatable.is_some()
+                || n.postcondition.is_some()
+        })
         .map(|n| n.name.clone())
         .collect();
     let spec = crate::company::workflow_spec_from_graph(file);
@@ -2456,9 +2479,9 @@ async fn fix_from_run(
             let (ok, advisories) = workflow_readiness(&spec);
             if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry/repeatable on {} — this correction does not carry these \
-                     per-node policies through; reapply them after reviewing if the node is \
-                     still there.",
+                    "on_error/retry/repeatable/postcondition on {} — this correction does not \
+                     carry these per-node policies through; reapply them after reviewing if the \
+                     node is still there.",
                     dropped_policy_nodes.join(", ")
                 ));
             }
@@ -4029,6 +4052,7 @@ mod tests {
                 requires_approval: Some(true),
                 repeatable: None,
                 destination: None,
+                postcondition: None,
             }],
             edges: Vec::new(),
         };
@@ -4072,6 +4096,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: Some(false),
                     destination: None,
+                    postcondition: None,
                 },
                 WorkflowNodeDef {
                     id: "read".into(),
@@ -4086,6 +4111,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: Vec::new(),
@@ -4281,6 +4307,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
                 WorkflowNodeDef {
                     id: "done".into(),
@@ -4295,6 +4322,7 @@ mod tests {
                     requires_approval: None,
                     repeatable: None,
                     destination: None,
+                    postcondition: None,
                 },
             ],
             edges: Vec::new(),
@@ -5560,6 +5588,85 @@ mod tests {
                 .unwrap()
         }
 
+        /// [`create_body`] with `done` turned into an `agent` node naming the
+        /// roster teammate [`desk_manifest`] declares (`ceo`), carrying a
+        /// declared `postcondition` — the shape a real create/edit sends.
+        fn body_with_postcondition() -> serde_json::Value {
+            let mut body = create_body();
+            body["nodes"][1]["kind"] = serde_json::json!("agent");
+            body["nodes"][1]["agent"] = serde_json::json!("ceo");
+            body["nodes"][1]["postcondition"] = serde_json::json!({ "require": "non_empty" });
+            body
+        }
+
+        /// Codex review on #1937 (issue #1866, thread 1) — the RED-on-old
+        /// proof for BOTH halves the finding names: `CreateNode` never
+        /// deserialized `postcondition` (a caller's declared gate was
+        /// silently discarded on save), and `WorkflowNode` never serialized
+        /// it back out (a `GET` → edit → `PUT` round trip would clear any
+        /// postcondition already present, since the editor never even saw it
+        /// to carry forward).
+        ///
+        /// This is a genuine round trip through the real HTTP handlers: POST
+        /// create, GET and assert the field survived the write AND the read,
+        /// then PUT back the **exact GET body** unchanged (the shape a
+        /// console editor sends when nothing else on the node changed) and
+        /// GET once more to prove the postcondition is still there — not
+        /// silently cleared by the round trip. On the code as it stood
+        /// before this fix, the first GET's `nodes[1]["postcondition"]`
+        /// assertion already fails: `WorkflowNode` had no such field to
+        /// serialize.
+        #[tokio::test]
+        async fn a_postcondition_survives_create_get_put_get() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let created = post_create(state.clone(), body_with_postcondition()).await;
+            assert_eq!(created.status(), StatusCode::OK, "{:?}", created);
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut graph = json_body(response).await;
+            assert_eq!(
+                graph["nodes"][1]["postcondition"],
+                serde_json::json!({ "require": "non_empty" }),
+                "a postcondition declared on create must be readable back: {graph}"
+            );
+
+            // The console's edit flow: take exactly what GET returned, add the
+            // version token it must echo back, and PUT it — unchanged — as a
+            // no-op save.
+            let version = graph["version"]
+                .as_str()
+                .expect("GET returns a version")
+                .to_string();
+            graph["expectedVersion"] = serde_json::json!(version);
+            let put_response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(graph),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(put_response.status(), StatusCode::OK, "{:?}", put_response);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph_after_put = json_body(response).await;
+            assert_eq!(
+                graph_after_put["nodes"][1]["postcondition"],
+                serde_json::json!({ "require": "non_empty" }),
+                "a GET -> PUT round trip must not silently clear an existing \
+                 postcondition: {graph_after_put}"
+            );
+        }
+
         /// **The #981 story, resolved by #1757.** `operator` was in the picker
         /// the console showed the author while delivery refused it by name — so
         /// the graph saved, ran green, and dropped its report. Now `operator` is a
@@ -6255,6 +6362,111 @@ mod tests {
                     .as_str()
                     .is_some_and(|s| s.contains("repeatable") && s.contains("Publish"))),
                 "notes must name the dropped repeatable declaration on `Publish`: {body}"
+            );
+        }
+
+        /// CodeRabbit review on #1937 (issue #1866): the same drop the sibling
+        /// test above pins for `repeatable` also applies to `postcondition` —
+        /// `WorkflowNodeSpec` has no field for it either, so a node's declared
+        /// run-safety gate is silently dropped by a fix-from-run correction
+        /// unless `fix_from_run` names it in `notes`. Without this, an operator
+        /// who saves a copilot correction over a workflow whose agent node
+        /// declared a `postcondition` loses that gate with no warning — the
+        /// SAME defect class as thread 1's GET -> PUT erasure, but reached
+        /// through the agent-authored correction path instead of a REST edit.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn fix_from_run_notes_a_dropped_postcondition_declaration() {
+            use crate::harness::provider::HarnessModel;
+            use crate::harness::workflow_build::WorkflowBuilder;
+            use crate::harness::workflow_build::test::{
+                NativeCopilotModel, NativeStep, agent_deps, propose_step,
+            };
+
+            let home_dir = home();
+            let id = CompanyId::new("acme");
+            let state = desk_state(home_dir.path()).await;
+
+            let model = NativeCopilotModel::scripting(vec![
+                propose_step(
+                    "dropped the unwired step",
+                    serde_json::json!({
+                        "name": "Greeter",
+                        "nodes": [
+                            { "id": "start", "kind": "trigger", "name": "Start" },
+                            { "id": "done", "kind": "output", "name": "Report" }
+                        ],
+                        "edges": [ { "from": "start", "to": "done" } ]
+                    }),
+                ),
+                NativeStep::done("Corrected the workflow."),
+            ]);
+            {
+                let mut runtime =
+                    std::sync::Arc::into_inner(state.registry().remove(&id).expect("registered"))
+                        .expect("uniquely held in this test");
+                let deps = agent_deps(&runtime, model.clone() as std::sync::Arc<dyn HarnessModel>);
+                runtime.set_builder(std::sync::Arc::new(WorkflowBuilder::new(
+                    model as std::sync::Arc<dyn HarnessModel>,
+                    "test-model",
+                )));
+                runtime.set_workflow_harness_deps(deps);
+                state
+                    .registry()
+                    .insert(id.clone(), std::sync::Arc::new(runtime));
+            }
+
+            // Seed a workflow whose middle node is an agent naming the roster
+            // teammate `desk_manifest` declares (`ceo`) and carries a
+            // `postcondition` — the exact declaration `fix_from_run`'s
+            // correction cannot carry through the builder's `WorkflowNodeSpec`.
+            let mut body = create_body();
+            body["nodes"].as_array_mut().unwrap().insert(
+                1,
+                serde_json::json!({
+                    "id": "ask",
+                    "kind": "agent",
+                    "name": "Ask",
+                    "agent": "ceo",
+                    "postcondition": { "require": "non_empty" }
+                }),
+            );
+            body["edges"] = serde_json::json!([
+                { "from": "start", "to": "ask" },
+                { "from": "ask", "to": "done" }
+            ]);
+            let created = router(state.clone())
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+
+            journal_run_with_id(
+                &state,
+                &id,
+                "greeter",
+                "run-1",
+                "the tool `web_search` is not wired on this deployment",
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/fix-from-run",
+                    Some(serde_json::json!({ "runId": "run-1" })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            let notes = body["notes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                notes.iter().any(|n| n
+                    .as_str()
+                    .is_some_and(|s| s.contains("postcondition") && s.contains("Ask"))),
+                "notes must name the dropped postcondition declaration on `Ask`: {body}"
             );
         }
 

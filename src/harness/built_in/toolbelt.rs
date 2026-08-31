@@ -726,6 +726,24 @@ pub fn filter_by_capabilities(
     }
 }
 
+/// The native capability namespaces actually present on a built tool belt.
+///
+/// Derived the same way [`filter_by_capabilities`] reads the belt — each tool's
+/// [`namespace_of`] — kept to the shared native vocabulary
+/// ([`native_capability_namespaces`](crate::company::native_capability_namespaces)),
+/// so a tool that was wired makes its namespace show up here and one that was
+/// not never does. Sorted and unique for a stable system-prompt rendering.
+pub fn native_capabilities_on_belt(
+    tools: &[Box<dyn Tool>],
+) -> std::collections::BTreeSet<&'static str> {
+    let native = crate::company::native_capability_namespaces();
+    tools
+        .iter()
+        .filter_map(|tool| namespace_of(tool.name()))
+        .filter(|ns| native.contains(ns))
+        .collect()
+}
+
 /// Whether a [`CapabilityFilter`] denies a given namespace — the same test
 /// [`filter_by_capabilities`] applies per tool, exposed standalone so a
 /// caller that needs the outcome without a tool vector in hand (the sandbox
@@ -1104,6 +1122,54 @@ mod tests {
             GATEABLE_NAMESPACES.contains(&"search"),
             "the metered search namespace must be gateable (issue #238)"
         );
+    }
+
+    /// Every namespace `namespace_of` can emit that is neither the Composio
+    /// connection path nor the raw-HTTP `web` family must be in the shared
+    /// native vocabulary — otherwise a future native tool would be wired but
+    /// invisible to native-first routing (the brief and the classifier both key
+    /// off that vocabulary).
+    #[test]
+    fn native_vocabulary_covers_every_native_mapped_namespace() {
+        let mapped = [
+            "shell",
+            "read_workspace_state",
+            "apply_patch",
+            "git_operations",
+            "csv_export",
+            "web_fetch",
+            "http_request",
+            "curl",
+            "image_info",
+            "media_generate_image",
+            "media_generate_video",
+            "media_list_models",
+            "composio_list_toolkits",
+            "composio_list_connections",
+            "composio_list_tools",
+            "composio_authorize",
+            "composio_execute",
+            "web_search",
+            "exa_find_similar",
+            "exa_get_contents",
+            "brave_news_search",
+            "brave_image_search",
+            "brave_video_search",
+        ];
+        let native: std::collections::HashSet<&str> =
+            crate::company::native_capability_namespaces()
+                .into_iter()
+                .collect();
+        for tool in mapped {
+            let ns = namespace_of(tool).expect("mapped tool has a namespace");
+            if ns == "composio" || ns == "web" {
+                continue;
+            }
+            assert!(
+                native.contains(ns),
+                "native namespace `{ns}` (from `{tool}`) is not in the native vocabulary"
+            );
+        }
     }
 
     #[test]

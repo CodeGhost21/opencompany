@@ -348,6 +348,103 @@ async fn retrying_after_a_wallet_mode_refusal_with_a_wallet_listed_succeeds() {
     assert_eq!(body["id"], "acme");
 }
 
+/// With no host-wide auth override, the preflight reports `email` — each
+/// company's own `[users].mode` decides, and the console builds an `email`
+/// manifest by default.
+#[tokio::test]
+async fn provisioning_info_reports_email_by_default() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    let response = app
+        .oneshot(get_req(
+            "/api/v1/companies/provisioning",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["auth_mode"], "email");
+    assert_eq!(body["wallets_required"], false);
+}
+
+/// A host whose override forces `wallet` reports it, so the create/reset dialog
+/// collects wallet addresses before it builds a manifest the backend would
+/// otherwise refuse with `auth_mode_wallet_no_wallets`.
+#[tokio::test]
+async fn provisioning_info_reports_wallet_when_overridden() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    state.set_auth_mode_override(Some(AuthMode::Wallet));
+    let app = router(state);
+
+    let response = app
+        .oneshot(get_req(
+            "/api/v1/companies/provisioning",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["auth_mode"], "wallet");
+    assert_eq!(body["wallets_required"], true);
+}
+
+/// The preflight is a `PlatformScope` route: a session cookie can never reach
+/// it (401), and a tenant token without the platform scope is refused (403).
+#[tokio::test]
+async fn provisioning_info_requires_platform_scope() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    let unauthorized = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/provisioning", None))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let token = tenant_token("tenant:acme", &["operator"]);
+    let forbidden = app
+        .oneshot(get_req("/api/v1/companies/provisioning", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+}
+
+/// A wallet-mode host provisions a manifest that lists `[users].wallets` (and
+/// declares `mode = "wallet"`, which `manifest.validate()` requires before it
+/// reads the wallets) — the positive counterpart to the empty-wallets refusal.
+#[tokio::test]
+async fn provisioning_a_wallet_manifest_on_a_wallet_mode_host_succeeds() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    state.set_auth_mode_override(Some(AuthMode::Wallet));
+    let app = router(state);
+
+    let wallet_address = bs58::encode([7u8; 32]).into_string();
+    let toml = format!(
+        "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\nwallets = [\"{wallet_address}\"]\n"
+    );
+    let response = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), &toml))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json_body(response).await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert_eq!(body["id"], "acme");
+    assert_eq!(body["lifecycle"], "running");
+}
+
 /// Builds a JSON-envelope provision request naming an explicit id.
 fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> Request<Body> {
     let body = serde_json::json!({ "manifest_toml": toml, "id": id }).to_string();
@@ -2216,5 +2313,173 @@ async fn archive_reconciliation_read_gives_up_after_its_attempt_budget_and_leave
         "every reconciliation attempt was made to fail — a request this inconclusive must not \
          run cleanup (the registry entry stays), but must also return promptly rather than \
          retrying without bound"
+    );
+}
+
+// ── codex review on #1943, PR comment 3894439358: durable ownership before ─
+// ── the irreversible registry removal ────────────────────────────────────
+// ── codex review on #1943, PR comment 3894439351: conditional eviction ────
+// ── against a runtime that has since replaced the one confirmed archived ──
+//
+// Both tests below call `evict_registry_and_ownership` directly — the
+// sequencing `evict_archived_company` delegates to — rather than through the
+// HTTP `archive` route. Constructing the exact race each finding describes
+// (a persisted-store failure landing mid-eviction; a rebuild swap landing in
+// the window between a caller observing `"archived"` and eviction actually
+// running) through the router would mean synchronizing two concurrent
+// requests around one specific await point — the direct call lets the test
+// construct each "the race already happened" state deterministically instead.
+
+/// An [`OwnershipStore`](crate::store::select::OwnershipStore) whose
+/// `remove_owner` always fails — models a persisted-store hiccup landing
+/// exactly on eviction's durable ownership cleanup step.
+struct FailingOwnershipRemoval {
+    remove_owner_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FailingOwnershipRemoval {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            remove_owner_calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::store::select::OwnershipStore for FailingOwnershipRemoval {
+    async fn set_owner(&self, _id: &CompanyId, _tenant: &str) -> crate::Result<()> {
+        Ok(())
+    }
+    async fn remove_owner(&self, _id: &CompanyId) -> crate::Result<()> {
+        self.remove_owner_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(crate::error::OpenCompanyError::Config(
+            "transient ownership removal failure".into(),
+        ))
+    }
+    async fn owners(&self) -> crate::Result<Vec<(CompanyId, String)>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A bare, registered `CompanyRuntime` for the eviction unit tests below —
+/// its own tempdir so two calls for the "same" id never share a durable
+/// record, which would blur two instances that must stay distinct `Arc`s.
+async fn evict_test_runtime(id: &CompanyId) -> Arc<crate::runtime::CompanyRuntime> {
+    let home_dir = home();
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    Arc::new(
+        RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .expect("runtime builds"),
+    )
+}
+
+/// #3894439358: a failed persisted-ownership removal must leave the company
+/// registered, not de-registered-with-an-orphaned-row. `MaintenanceTicker::tick`
+/// (`src/runtime/maintenance.rs`) only retries a company it can still see in
+/// `CompanyRegistry::list` — removing the registry entry BEFORE confirming
+/// the durable ownership row is actually gone strands that row the moment the
+/// removal fails, with nothing left registered to ever trigger a retry.
+#[tokio::test]
+async fn a_failed_persisted_ownership_removal_leaves_the_company_registered_for_retry() {
+    let id = CompanyId::new("acme");
+    let runtime = evict_test_runtime(&id).await;
+
+    let registry = crate::runtime::CompanyRegistry::new();
+    registry.insert(id.clone(), runtime.clone());
+
+    let failing = FailingOwnershipRemoval::new();
+    let ownership: Option<Arc<dyn crate::store::select::OwnershipStore>> =
+        Some(failing.clone() as Arc<dyn crate::store::select::OwnershipStore>);
+
+    let removed = super::evict_registry_and_ownership(&registry, &ownership, &id, &runtime).await;
+
+    assert!(
+        !removed,
+        "the persisted ownership removal was made to fail — eviction must report that it did \
+         not complete"
+    );
+    assert!(
+        registry.get(&id).is_some(),
+        "a failed durable ownership removal must leave the company registered so the next \
+         maintenance tick can retry the whole eviction — removing it here would orphan the \
+         ownership row with nothing left registered to ever revisit it"
+    );
+    assert_eq!(
+        failing
+            .remove_owner_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one removal attempt for this call"
+    );
+}
+
+/// #3894439351: eviction must not remove a runtime that has since replaced
+/// the one it confirmed archived. `CompanyRegistry::insert` — the one choke
+/// point every registration goes through, including a rebuild swap
+/// (`runtime::rebuild::rebuild_company`) — can land a fresh runtime under the
+/// same id in the window between a caller observing `"archived"` and the
+/// eviction call actually running. This constructs that race deterministically:
+/// `expected` names the ORIGINAL runtime, but the registry now holds a
+/// DIFFERENT one under the same id, as if the swap had already landed.
+#[tokio::test]
+async fn eviction_preserves_a_runtime_that_replaced_the_one_confirmed_archived() {
+    let id = CompanyId::new("acme");
+    let original = evict_test_runtime(&id).await;
+    let replacement = evict_test_runtime(&id).await;
+    assert!(
+        !Arc::ptr_eq(&original, &replacement),
+        "sanity: these must be two distinct runtime instances"
+    );
+
+    let registry = crate::runtime::CompanyRegistry::new();
+    // The replacement is what's actually registered — as if a rebuild swap
+    // landed after `original` was observed archived but before eviction ran.
+    registry.insert(id.clone(), replacement.clone());
+
+    let ownership: Option<Arc<dyn crate::store::select::OwnershipStore>> = None;
+    let removed = super::evict_registry_and_ownership(&registry, &ownership, &id, &original).await;
+
+    assert!(
+        removed,
+        "no persisted ownership store was configured, so the durable half trivially succeeds \
+         — only the registry conditional is under test here"
+    );
+    let still_registered = registry.get(&id);
+    assert!(
+        still_registered.is_some(),
+        "the id must still be registered — eviction must not have removed it outright"
+    );
+    assert!(
+        Arc::ptr_eq(still_registered.as_ref().unwrap(), &replacement),
+        "eviction confirmed `original` archived, but `replacement` is what was actually \
+         registered by the time it ran — removing by id alone would have deregistered the live \
+         replacement instead of doing nothing"
+    );
+}
+
+/// The ordinary case, for contrast with the two failure-mode tests above:
+/// nothing raced, ownership removal succeeds (trivially — no store
+/// configured), and eviction actually removes the matching registered
+/// runtime.
+#[tokio::test]
+async fn eviction_removes_the_registered_runtime_when_nothing_raced() {
+    let id = CompanyId::new("acme");
+    let runtime = evict_test_runtime(&id).await;
+
+    let registry = crate::runtime::CompanyRegistry::new();
+    registry.insert(id.clone(), runtime.clone());
+
+    let ownership: Option<Arc<dyn crate::store::select::OwnershipStore>> = None;
+    let removed = super::evict_registry_and_ownership(&registry, &ownership, &id, &runtime).await;
+
+    assert!(removed);
+    assert!(
+        registry.get(&id).is_none(),
+        "the runtime confirmed archived is the one actually registered, so eviction must \
+         remove it"
     );
 }

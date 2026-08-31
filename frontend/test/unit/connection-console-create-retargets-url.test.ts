@@ -93,6 +93,7 @@ function stubClient(opts: { initial: CompanyStatus; provisioned: CompanyStatus }
   const provisionCompany = vi.fn(() => Promise.resolve(opts.provisioned));
   const client = {
     carriesPlatformBearer: true,
+    provisioningInfo: vi.fn(() => Promise.resolve({ auth_mode: "email", wallets_required: false })),
     spec: async () => spec(),
     listCompanies: async () => [opts.initial],
     status: vi.fn((id: string | null) =>

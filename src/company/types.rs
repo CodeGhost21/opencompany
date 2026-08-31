@@ -315,6 +315,37 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "search" || grant.starts_with("search."))
 }
 
+/// The [`GATEABLE_NAMESPACES`] a built-in tool can serve directly — the shared
+/// native-capability vocabulary both native-first routing levers key off.
+///
+/// It is `GATEABLE_NAMESPACES` minus `composio` (the third-party connection
+/// path, never a built-in tool) and minus `web` (the raw-HTTP family the
+/// Composio deflection guardrail governs). A future native tool flows into both
+/// levers by its [`namespace_of`](crate::harness::toolbelt::namespace_of) arm
+/// landing in this set; nothing here is a literal capability name.
+pub fn native_capability_namespaces() -> Vec<&'static str> {
+    GATEABLE_NAMESPACES
+        .iter()
+        .copied()
+        .filter(|ns| *ns != "composio" && *ns != "web")
+        .collect()
+}
+
+/// Whether a grant list confers the native namespace `ns`, mirroring the
+/// harness wiring gate: the real-money `search`/`media` families through their
+/// explicit grant helpers (the catch-all `*` never confers them), and every
+/// other namespace through the ordinary namespace rule a bare `*` satisfies.
+pub fn grants_confer_native(grants: &[String], ns: &str) -> bool {
+    use crate::runtime::tools::{NAMESPACE_SEPARATORS, extends_on_boundary};
+    match ns {
+        "search" => grants_search_explicit(grants),
+        "media" => grants_media_explicit(grants),
+        _ => grants
+            .iter()
+            .any(|grant| grant == "*" || extends_on_boundary(grant, ns, NAMESPACE_SEPARATORS)),
+    }
+}
+
 /// Whether a tool-grant list confers the **publishing** capability (issue #244)
 /// — the `files`/`docs` namespace on which both an agent's file tools and
 /// `publish_artifact` ride.
@@ -1734,6 +1765,41 @@ pub struct Schedule {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The shared native vocabulary is exactly `GATEABLE_NAMESPACES` minus the
+    /// third-party connection path (`composio`) and the raw-HTTP family the S2
+    /// deflection governs (`web`).
+    #[test]
+    fn native_capability_vocabulary_is_gateable_minus_composio_and_web() {
+        let native: std::collections::HashSet<&str> =
+            native_capability_namespaces().into_iter().collect();
+        let expected: std::collections::HashSet<&str> = GATEABLE_NAMESPACES
+            .iter()
+            .copied()
+            .filter(|ns| *ns != "composio" && *ns != "web")
+            .collect();
+        assert_eq!(native, expected);
+        assert!(!native.contains("composio"));
+        assert!(!native.contains("web"));
+    }
+
+    /// `grants_confer_native` mirrors the harness wiring gate: the real-money
+    /// `search`/`media` families need their explicit grant (a bare `*` confers
+    /// neither), and every other native namespace rides the ordinary rule a `*`
+    /// satisfies.
+    #[test]
+    fn grants_confer_native_mirrors_the_wiring_gate() {
+        assert!(grants_confer_native(&["search".into()], "search"));
+        assert!(!grants_confer_native(&["*".into()], "search"));
+        assert!(!grants_confer_native(&["composio".into()], "search"));
+
+        assert!(grants_confer_native(&["media".into()], "media"));
+        assert!(!grants_confer_native(&["*".into()], "media"));
+
+        assert!(grants_confer_native(&["*".into()], "shell"));
+        assert!(grants_confer_native(&["shell".into()], "shell"));
+        assert!(!grants_confer_native(&["search".into()], "shell"));
+    }
 
     /// **T10 (issue #971).** A manifest that never mentions
     /// `approval_ttl_hours` parses to `None` and serializes without the key —

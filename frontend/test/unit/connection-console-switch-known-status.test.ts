@@ -68,6 +68,7 @@ function stubClient(provisioned: CompanyStatus) {
   );
   const client = {
     carriesPlatformBearer: true,
+    provisioningInfo: vi.fn(() => Promise.resolve({ auth_mode: "email", wallets_required: false })),
     spec: async () => spec(),
     listCompanies: async () => [],
     status: statusSpy,

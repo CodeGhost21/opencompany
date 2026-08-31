@@ -4803,6 +4803,7 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
                 // which is the operator's to make, not the agent's to author.
                 repeatable: None,
                 destination: n.destination,
+                postcondition: None,
             });
         }
         Ok(Self {

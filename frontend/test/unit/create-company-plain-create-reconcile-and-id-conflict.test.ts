@@ -38,6 +38,7 @@ function stubClient(opts: {
 }) {
   return {
     carriesPlatformBearer: true,
+    provisioningInfo: vi.fn(() => Promise.resolve({ auth_mode: "email", wallets_required: false })),
     lifecycle: vi.fn(() => Promise.resolve({ id: "acme" } as unknown as CompanyStatus)),
     provisionCompany: opts.provisionCompany,
     status: opts.status ?? vi.fn(() => Promise.reject(new Error("status not stubbed"))),
