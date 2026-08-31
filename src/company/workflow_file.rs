@@ -1500,6 +1500,34 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                     "{label} has an unknown `postcondition.require` `{other}` — use one of non_empty, field_present, non_empty_list."
                 )),
             }
+            // Codex #3893619015 review: `text` and `agent_ref` are the two
+            // reserved top-level keys the emitted output always carries —
+            // `HarnessAgentRunner::run_turn` inserts the raw reply string
+            // under `text` and the real roster id under `agent_ref` FIRST,
+            // then merges the parsed reply's own fields in with `or_insert`
+            // (base wins on any collision), the same guarantee
+            // `delivery.rs::report_text` depends on to find prose in a
+            // delivered report rather than the literal string "null". A
+            // `field` that drills into the PARSED reply's own `json.text` or
+            // `json.agent_ref` key can therefore never be validated
+            // consistently with what a downstream binding reads: the gate
+            // checks the parsed value (which could be any shape the model
+            // chose), but `item.json.text`/`item.json.agent_ref` always stays
+            // the raw reply string / real agent ref — a type- and
+            // value-mismatch between what passed and what a `=item.json.text`
+            // binding actually resolves to. Refused at author time, the same
+            // way `field_present` with no `field` is refused above, rather
+            // than left as a silent runtime divergence.
+            if let Some(field) = postcondition.field.as_deref() {
+                let mut segments = field.split('.');
+                if segments.next() == Some("json")
+                    && matches!(segments.next(), Some("text") | Some("agent_ref"))
+                {
+                    problems.push(format!(
+                        "{label} has a `postcondition.field` of `{field}` — `json.text` and `json.agent_ref` are reserved: the emitted output always carries the raw reply under `text` and the roster id under `agent_ref`, so a dotted path into the parsed reply's OWN `text`/`agent_ref` key can never match what a downstream binding reads. Name a different field, or drop `field` on `non_empty_list` to check the whole parsed reply instead."
+                    ));
+                }
+            }
         }
 
         // Reserved config keys: the first-class fields above are written into
@@ -2766,6 +2794,92 @@ mod tests {
         "#;
         let err = parse_workflow(src).unwrap_err();
         assert!(err.to_string().contains("but no `field`"), "{err}");
+    }
+
+    /// Codex #3893619015 on #1937: `text`/`agent_ref` are the two top-level
+    /// keys the emitted output always carries (`run_turn` inserts the raw
+    /// reply string / real roster id, then merges the parsed reply's own
+    /// fields in with `or_insert` — base wins on any collision, so
+    /// `delivery.rs::report_text` keeps finding prose in the overwhelming
+    /// majority of nodes whose reply isn't structured at all). A `field`
+    /// drilling into the parsed reply's OWN `json.text`/`json.agent_ref` key
+    /// can never be validated consistently with what a downstream binding
+    /// reads — the gate would check whatever shape the model chose to put
+    /// under that key, but the emitted value stays the raw string / real
+    /// roster id regardless. Refused at author time rather than left as a
+    /// silent runtime divergence a workflow could actually ship with.
+    #[test]
+    fn postcondition_field_into_reserved_json_key_is_rejected() {
+        for field in ["json.text", "json.agent_ref", "json.text.nested"] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            let err = parse_workflow(&src)
+                .expect_err(&format!("field `{field}` collides with a reserved key"));
+            assert!(
+                err.to_string().contains("reserved"),
+                "field `{field}`: {err}"
+            );
+        }
+    }
+
+    /// Companion GREEN: a `field` that does NOT collide with either reserved
+    /// key — including one that merely starts with `text`/`agent_ref` as a
+    /// substring, or names the outer envelope's own `text` (not
+    /// `json.text`) — still parses. The rejection is exactly the two
+    /// reserved dotted paths, not a blanket ban on the words `text` or
+    /// `agent_ref` anywhere in a `field`.
+    #[test]
+    fn postcondition_field_that_merely_resembles_a_reserved_key_still_parses() {
+        for field in [
+            "json.items",
+            "json.text_summary",
+            "json.agent_reference",
+            "text",
+        ] {
+            let src = format!(
+                r#"
+                id = "wf"
+                name = "WF"
+                [[node]]
+                id = "start"
+                kind = "trigger"
+                name = "Start"
+                [[node]]
+                id = "worker"
+                kind = "agent"
+                name = "Worker"
+                agent = "ceo"
+                [node.postcondition]
+                require = "field_present"
+                field = "{field}"
+                [[edge]]
+                from = "start"
+                to = "worker"
+            "#
+            );
+            parse_workflow(&src).unwrap_or_else(|err| {
+                panic!("field `{field}` does not collide with a reserved key: {err}")
+            });
+        }
     }
 
     #[test]
