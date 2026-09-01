@@ -780,6 +780,93 @@ allow = ["media"]
     );
 }
 
+/// `runtime.workflow_harness_deps.tenant_search` is a boot-time snapshot —
+/// only `HarnessPool::ensure` re-resolves the live BYO search connection, and
+/// only into the pool's own local `fresh_deps` used to build the roster, never
+/// written back onto `runtime.workflow_harness_deps`. A company that pastes a
+/// BYO key in the console after startup therefore gets a roster with a live
+/// `web_search` tool while this evidence, read straight off the stale
+/// snapshot, still says `search` is not natively wired — parking the card on a
+/// missing `connection: search` prerequisite the belt does not actually have.
+/// `gather_evidence` now re-resolves the same way `HarnessPool::ensure` does
+/// when the boot snapshot has nothing, so the two cannot diverge.
+#[tokio::test]
+async fn native_search_evidence_reflects_a_byo_key_added_after_boot() {
+    let manifest: CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Researcher"
+tools = ["search"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["search"]
+"#,
+    )
+    .expect("fixture manifest parses");
+
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-planning-search-")
+        .tempdir()
+        .expect("tempdir");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme-search"))
+        .build()
+        .await
+        .expect("runtime");
+
+    // The boot-time snapshot: no BYO search configured yet.
+    let mut deps = crate::harness::workflow_wiring_deps(
+        &runtime,
+        None,
+        crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        None,
+    );
+    deps.tenant_search = None;
+    runtime.set_workflow_harness_deps(deps);
+
+    let runtime = Arc::new(runtime);
+
+    // The company pastes a BYO key in the console after startup — landing
+    // straight in the secret store, the way the console route does, with no
+    // `HarnessPool::ensure` in between to refresh `workflow_harness_deps`.
+    runtime
+        .secrets()
+        .set(
+            runtime.id(),
+            crate::company::search::PROVIDER_SECRET,
+            crate::ports::types::SecretValue("brave".to_string()),
+        )
+        .await
+        .expect("write provider");
+    runtime
+        .secrets()
+        .set(
+            runtime.id(),
+            crate::company::search::API_KEY_SECRET,
+            crate::ports::types::SecretValue("test-key".to_string()),
+        )
+        .await
+        .expect("write key");
+
+    let evidence = gather_evidence(&runtime, &card("c1", "maya"))
+        .await
+        .expect("evidence");
+
+    assert!(
+        evidence.native_capabilities.contains("search"),
+        "a BYO search key added after boot must reach the evidence the same live \
+         way it reaches the roster, not stay hidden behind the stale boot snapshot: {:?}",
+        evidence.native_capabilities
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #886: the evidence pack's Composio credential is the resolver's answer
 // ---------------------------------------------------------------------------

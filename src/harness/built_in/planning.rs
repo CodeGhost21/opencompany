@@ -1204,20 +1204,37 @@ async fn gather_evidence(
     // decide the answer instead of the roster union. Both read off the SAME
     // `record`/`teammates` this pass already built, before either is moved
     // into `Evidence` below.
-    let (search_backend_configured, media_backend_configured) = runtime
-        .workflow_harness_deps
-        .as_ref()
-        .map(|deps| {
-            (
-                deps.search.is_some() || deps.tenant_search.is_some(),
-                deps.media
+    let (search_backend_configured, media_backend_configured) =
+        match runtime.workflow_harness_deps.as_ref() {
+            Some(deps) => {
+                let media_backend_configured = deps
+                    .media
                     .as_ref()
-                    .is_some_and(|backend| backend.is_https()),
-            )
-        })
-        // No deps attached means no deployment to ask — fail closed rather
-        // than crediting a backend this pass cannot confirm exists.
-        .unwrap_or((false, false));
+                    .is_some_and(|backend| backend.is_https());
+                // `deps.tenant_search` is the boot-time snapshot on
+                // `runtime.workflow_harness_deps`, which nothing re-writes once a
+                // company adds a BYO key after startup — only `HarnessPool::ensure`
+                // re-resolves it, and only into the pool's own local `fresh_deps`
+                // used to build the roster. Ask the live store the same way
+                // `HarnessPool::resolve_tenant_search` does, so this evidence and
+                // the belt a freshly-dispatched agent actually gets agree.
+                let search_backend_configured = deps.search.is_some()
+                    || (crate::company::grants_search_explicit(&allow)
+                        && match crate::harness::search_byo::TenantSearch::resolve(
+                            runtime.secrets(),
+                            runtime.id(),
+                        )
+                        .await
+                        {
+                            Ok(resolved) => resolved.is_some(),
+                            Err(_) => deps.tenant_search.is_some(),
+                        });
+                (search_backend_configured, media_backend_configured)
+            }
+            // No deps attached means no deployment to ask — fail closed rather
+            // than crediting a backend this pass cannot confirm exists.
+            None => (false, false),
+        };
     let fixed_assignee = resolve_working_teammate(&record, &teammates, &card.assignee);
     let native_capabilities = native_capabilities_of(
         &teammates,
