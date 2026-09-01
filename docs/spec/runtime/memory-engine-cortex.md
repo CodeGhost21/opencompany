@@ -121,10 +121,31 @@ pass `audit_capabilities` cleanly, and then return empty on every read — insid
 tenant, at the moment the memory is needed, which is the exact harm the audit
 exists to prevent.
 
-**Requirement for the driver plan:** `provides()` must be derived from *observed
-layer contents*, not from configuration or engine self-report. This is stronger
-than the conformance suite (tinymemory#18 §E1) currently implies and should be an
-explicit acceptance gate.
+**Requirement for the driver plan:** `provides()` must be established against
+the *live engine*, not from configuration, route availability, or engine
+self-report.
+
+Observed contents alone are not sufficient, and it is worth being precise about
+why: on a freshly provisioned per-tenant instance **every** layer is legitimately
+empty, so a rule of "advertise only what currently holds records" would refuse
+every family on day one. Emptiness is ambiguous — it means "new" and "inert"
+equally.
+
+What distinguishes them has to be a positive signal that the family *functions*,
+not that it currently holds data. For Cortex the available signal is that a
+build endpoint reports work done against a store that stays empty
+(`/v1/beliefs/build` returning `built: 0` with `no_facts_in_scope`, while
+`derivation/status` claims success). That is engine-specific, which means the
+discriminator belongs in each adapter rather than in the host — and therefore in
+the conformance suite (tinymemory#18 §E1), which runs against a live engine and
+would cover every driver by construction.
+
+The acceptance gate must include **a freshly provisioned, entirely empty
+instance**: the driver must advertise its working families and withhold its
+broken ones with no records anywhere to inspect. That case is the whole
+difficulty, and a suite that only tests a populated instance would pass a driver
+that fails it. Tracked generally as
+[#1968](https://github.com/tinyhumansai/opencompany/issues/1968).
 
 Two upstream defects sit behind this: concept reflection cannot resolve the
 router two other lanes use, and facts never extract, so beliefs can never build.
@@ -192,7 +213,7 @@ Worth stating separately because it is much of what would justify preferring
 Cortex over the drivers we already have. Tested directly: three events
 establishing an owner, then two contradicting them.
 
-```
+```text
 POST /v1/beliefs/build
 {"built":0,"facts_scanned":0,"events_scanned":5,"belief_events_found":0,
  "reasons":{"no_belief_shaped_events":1,"no_facts_in_scope":1}}
@@ -217,7 +238,8 @@ any derived layer had built:
   business days`
 
 Tenant separation also holds. Scopes are slash-delimited `type:id` paths
-(`^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}(/…){0,31}$`), which maps cleanly onto
+(`^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}(/[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}){0,31}$`),
+which maps cleanly onto
 `BoundMemory`'s injective sanitize-plus-hash derivation from `&CompanyId`. Writes
 to one scope never surfaced in another across every test run.
 
@@ -267,7 +289,7 @@ Other operational notes:
 
 ## Licensing permits this
 
-Checked against the licence text rather than the release README's one-line
+Checked against the license text rather than the release README's one-line
 summary, which is lossy in a way that matters. **CortexDB Community License
 v1.0 clause 2** explicitly allows what this design does:
 
@@ -290,8 +312,12 @@ Two obligations follow, neither of them a gate:
 - **Never hand a tenant its own Cortex endpoint or credential.** Under
   instance-per-tenant that would be easy to do casually — a BYO-engine feature,
   or exposing the URL in a console — and it is precisely what (a) forbids. The
-  seam's existing redaction already prevents it; keep it that way.
-- **Attribute CortexDB in product documentation** where reasonable (clause 2b).
+  seam's existing redaction already prevents it, so this is a **provisioning
+  gate**: no surface that returns a tenant its own engine URL or key ships
+  without re-reading clause 2. Phase 2 owns enforcing it.
+- **Attribute CortexDB in product documentation** (clause 2b). A **release
+  gate**, not a nicety: the attribution has to exist before the first tenant is
+  served, not after someone remembers.
 
 Clause 3 permits mirroring the binary on an internal artifact store for our own
 use, which instance-per-tenant provisioning needs. Clause 5 points source access
@@ -315,8 +341,9 @@ adapter work can satisfy. Acceptance, once unblocked:
 - failure-path tests for error mapping and malformed responses, as the existing
   remote adapters carry;
 - **a bind refusal when the engine reports the mock embedding provider**;
-- **`provides()` derived from observed layer contents**, with a test that an
-  engine reporting a family it cannot serve fails the bind.
+- **`provides()` established against the live engine**, with two tests: an
+  engine reporting a family it cannot serve fails the bind, and a freshly
+  provisioned empty instance still advertises its working families.
 
 **Phase 2 — provisioning.** Per-tenant instance lifecycle through
 opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existing
