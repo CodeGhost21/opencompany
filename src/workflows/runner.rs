@@ -821,6 +821,22 @@ async fn run_workflow_inner(
             let mut nodes = nodes;
             reclassify_capped_nodes(&mut nodes, &capped.take());
             reclassify_halted_nodes(&mut nodes, &halted_nodes);
+            // Codex review on #1990 (#3904894275): scrubbed and noticed here,
+            // before branching on `is_genuine_failure`, not only in the
+            // halt-only/halt-plus-block exits below. A halted sibling that
+            // shares this run with a genuinely failed node still gets its row
+            // reclassified `Declined` two lines up, but until this moved up
+            // here the `partial_output` this arm persists and returns kept
+            // the halted node's rejected reply verbatim — the failed run's
+            // snapshot presented that reply as produced output with no
+            // `Declined` explanation, unlike every other exit from this
+            // function.
+            let partial_output = without_node_ids(partial_output, &halted_nodes);
+            for node_id in &halted_nodes {
+                notices.push(format!(
+                    "The step \"{node_id}\" concluded that no further work was needed."
+                ));
+            }
             if is_genuine_failure {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
@@ -870,22 +886,6 @@ async fn run_workflow_inner(
                         approvals: approvals.take(),
                     }),
                 });
-            }
-            // Coderabbit review on #1990: scrubbed and noticed here, ONCE,
-            // before branching on whether a block also happened this run —
-            // not only inside the `blocked.is_empty()` arm below. A halted
-            // node's row is settled the same way whether or not a sibling
-            // branch also blocked, so both exits must treat it the same way;
-            // the halt-only exit previously carried its own copy of this and
-            // the halt-plus-block exit below had none, leaving a halted
-            // sibling's rejected reply in the persisted snapshot and its
-            // "no further work needed" notice unraised whenever a run halted
-            // one branch and blocked another.
-            let partial_output = without_node_ids(partial_output, &halted_nodes);
-            for node_id in &halted_nodes {
-                notices.push(format!(
-                    "The step \"{node_id}\" concluded that no further work was needed."
-                ));
             }
             if blocked.is_empty() {
                 if !persist_run_output(
@@ -2997,6 +2997,157 @@ to = "done"
     #[tokio::test]
     async fn a_capped_node_is_reclassified_even_when_a_later_node_blocks_the_run() {
         assert_capped_sibling_reclassified_before_early_return(true).await;
+    }
+
+    /// A turn double for `start -> ok_branch (-> done)`, in parallel with a
+    /// `bad_branch` tool_call that fails on its own (unknown slug, no model
+    /// call involved). `ok_branch`'s turn always reports a real, non-empty
+    /// reply; the scripted judge behind `deps.provider` is what answers
+    /// `halt_benign` for it.
+    struct HaltOkTurn;
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for HaltOkTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "The requested report was already delivered last week.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    fn halt_plus_fail_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "halt_plus_fail"
+name = "Halt plus fail"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "ok_branch"
+kind = "agent"
+name = "Ok branch"
+summary = "Check whether the report is already done."
+agent = "ok_agent"
+[node.verify]
+criteria = "The report must be delivered."
+[[node]]
+id = "bad_branch"
+kind = "tool_call"
+name = "Bad branch"
+[node.config]
+slug = "bogus_tool"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "ok_branch"
+[[edge]]
+from = "start"
+to = "bad_branch"
+[[edge]]
+from = "ok_branch"
+to = "done"
+[[edge]]
+from = "bad_branch"
+to = "done"
+"#,
+        )
+        .expect("halt-plus-fail graph parses")
+    }
+
+    /// Codex review on #1990 (#3904894275): when parallel branches contain
+    /// both a benign halt and a genuine node failure, the `is_genuine_failure`
+    /// early return must scrub the halted node's output and raise its notice
+    /// exactly like the halt-only and halt-plus-block exits reached lower in
+    /// the same function — before this fix it reclassified the halted row but
+    /// persisted and returned the ORIGINAL `partial_output`, so the failed
+    /// run's snapshot presented `ok_branch`'s rejected reply as produced
+    /// output with no `Declined` explanation.
+    #[tokio::test]
+    async fn a_genuine_failure_scrubs_a_benign_halt_sibling_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(HaltOkTurn);
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &halt_plus_fail_graph(),
+            serde_json::json!({ "request": "go" }),
+            &ctx,
+        )
+        .await;
+
+        let err = result.expect_err("a genuine sibling failure must fail the run");
+        let partial = err
+            .partial_run()
+            .expect("a genuine failure carries the partial run");
+
+        assert!(
+            partial
+                .notices
+                .iter()
+                .any(|n| n.contains("ok_branch") && n.contains("no further work was needed")),
+            "the halted sibling's benign-stop notice must be raised even when a real \
+             failure ends the run: {:?}",
+            partial.notices
+        );
+        let nodes = partial
+            .output
+            .as_object()
+            .expect("partial output is a node-keyed object");
+        assert!(
+            !nodes.contains_key("ok_branch"),
+            "the halted sibling's rejected reply must be scrubbed from the persisted \
+             snapshot, exactly like the halt-only and halt-plus-block exits: {:?}",
+            partial.output
+        );
     }
 
     /// A turn double for `start -> capped_work -> gated_work -> done`:
