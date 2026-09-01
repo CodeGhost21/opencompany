@@ -36,6 +36,37 @@ import { isDesktopRuntime } from "@/api/transport";
 export const WINDOW_CHROME_HEIGHT = 28;
 
 /**
+ * Height of the console's own title row, in px.
+ *
+ * Not a taste value — it is derived from where macOS draws the traffic lights,
+ * because the row centres its contents on the lights' centre line and the
+ * lights are the one item in it this code cannot move.
+ *
+ * `trafficLightPosition.y` in `tauri.conf.json` is 16 and the buttons are the
+ * standard 12px, so they occupy y ∈ [16, 28] and their centre line is at 22.
+ * A row of height H laid out with `align-items: center` centres its contents
+ * at H/2, so H = 44 is the height — and the only height — at which the
+ * switcher, the profile control and the lights share one centre line.
+ *
+ * The two therefore move together: change `trafficLightPosition.y` to Y and
+ * this must become `2 * (Y + 6)`, or the lights sit off the row's centre. It is
+ * also comfortably taller than the 36px switcher trigger it carries, which
+ * 28px — the height of the sidebar strip this row replaced — was not.
+ */
+export const WINDOW_TITLE_BAR_HEIGHT = 52;
+
+/**
+ * How far into the window the traffic lights reach, in px.
+ *
+ * `trafficLightPosition.x` is 20 and macOS draws three 12px buttons on a 20px
+ * pitch, so the last one ends at 20 + 2*20 + 12 = 72. This is that number and
+ * not a pixel more: the clearance between the lights and whatever stands beside
+ * them is the title row's own padding, so this constant stays a statement about
+ * where the OS draws and the spacing stays a statement about the layout.
+ */
+export const WINDOW_CONTROLS_WIDTH = 72;
+
+/**
  * Whether this build is drawing its own window chrome.
  *
  * Deliberately a runtime check rather than a build-time one: the same bundle is
@@ -83,19 +114,23 @@ export function WindowDragBar({ className }: { className?: string }) {
 }
 
 /**
- * The vertical space the traffic lights sit in, at the top of the sidebar.
+ * The space the traffic lights sit in, at the left end of the title row.
  *
- * OpenHuman's expanded sidebar dodges the lights by right-aligning its header
- * icons, leaving the top-left empty. This console cannot: the top-left is the
- * company switcher, a 48px nameplate that names where you are and is the first
- * thing the column should answer. So the strip is reserved instead and the
- * header starts below it — which is exactly what OpenHuman's own *collapsed*
- * rail does for the same reason, its narrow column having no empty left space
- * to give away either.
+ * It used to reserve a strip *above* the company switcher, because the switcher
+ * was the top-left of the sidebar and the lights were landing on it. The
+ * switcher now stands in a full-width title row instead, so the collision is
+ * horizontal rather than vertical and so is the answer: the lights take the
+ * first {@link WINDOW_CONTROLS_WIDTH} pixels of the row and everything else
+ * starts to their right.
  *
- * It is draggable as well as reserved. The alternative is a 28px band of dead
- * window above a control an operator will try to grab, and a title bar you
- * cannot drag is stranger than no title bar at all.
+ * That is the whole reason this is a spacer and not a margin on the switcher.
+ * The row centres every item on one line with a single `items-center`, and a
+ * per-item offset is exactly the thing that stops being right the moment
+ * another item joins the row or a font loads late.
+ *
+ * It is draggable as well as reserved. The alternative is a band of dead window
+ * beside a control an operator will try to grab, and a title bar you cannot
+ * drag is stranger than no title bar at all.
  */
 export function WindowControlsInset() {
   if (!usesOverlayTitleBar()) return null;
@@ -104,8 +139,8 @@ export function WindowControlsInset() {
       data-tauri-drag-region
       data-testid="window-controls-inset"
       aria-hidden="true"
-      className="w-full flex-none"
-      style={{ height: WINDOW_CHROME_HEIGHT }}
+      className="h-full flex-none"
+      style={{ width: WINDOW_CONTROLS_WIDTH }}
     />
   );
 }

@@ -76,5 +76,5 @@ test("a run refused for a missing inference provider shows a persistent, linked 
   // …and it links the operator to where they fix it.
   const cta = page.getByTestId("workflow-run-inference-cta");
   await expect(cta).toBeVisible();
-  await expect(cta).toHaveAttribute("href", "#/settings/oauth");
+  await expect(cta).toHaveAttribute("href", "#/settings/inference");
 });

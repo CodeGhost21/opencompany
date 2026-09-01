@@ -366,6 +366,31 @@ jobs:
       - name: Assert desktop feature sets agree
         run: scripts/ci/assert-desktop-features.sh
 
+  # The 500-line Markdown cap, asserted rather than trusted (issue #695), in a
+  # job that always runs (issue #1974).
+  #
+  # This used to ride `Console` because that job is Node-only and cheap. But
+  # `Console` is gated on the `frontend` path filter, and `docs/**` is not in
+  # it — so the Markdown cap skipped on exactly the pull requests that change
+  # Markdown. A docs-only PR could add a 900-line file and go green.
+  #
+  # That is the same failure the `frontend` filter's own comment records for
+  # `scripts/ci/**`: "a guard that asserts nothing merges green. That is how
+  # the broken `assert-single-tauri-app.sh` got in." Adding `**/*.md` to the
+  # frontend filter would close it too, but it would keep a repository-wide
+  # rule hostage to a console path list — which is what created the gap. A
+  # policy check with no toolchain belongs in a job with no gate.
+  markdown-cap:
+    name: Markdown line cap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: ./scripts/ci/assert-md-line-cap.sh
+
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
@@ -1578,15 +1603,6 @@ jobs:
       # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
-      # The 500-line Markdown cap, asserted rather than trusted (issue #695).
-      #
-      # `CLAUDE.md` has stated the rule since the beginning and nothing measured
-      # it, so three files drifted past — one to 699 lines — a paragraph at a
-      # time. Same family as the check above: a policy grep, no toolchain
-      # needed, and a separate step so a failure is named as a policy failure
-      # rather than a build one. It rides the Console job because that job is
-      # Node-only and cheap; the rule itself is repository-wide.
-      - run: ./scripts/ci/assert-md-line-cap.sh
 
       # The release-notes generator, which is otherwise only ever exercised by a
       # `workflow_dispatch` release — the one moment nobody wants to discover a
