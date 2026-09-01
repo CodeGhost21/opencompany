@@ -137,11 +137,22 @@ fn resolve_acp_engine(
 /// canonicalise a chat selector without a store — see
 /// [`AcpRunTurn::session_key`](crate::harness::acp::run_turn).
 fn declared_desks(record: &CompanyRecord) -> Vec<(String, String)> {
+    // Manifest desks **and overlay desks**: a desk created from the console
+    // lives only in `overlay_desks`, and `resolve_desk_id` / `GET .../desks`
+    // both treat it as a routable desk, so leaving it out would mint two ACP
+    // sessions for it under its two spellings — the exact split this snapshot
+    // exists to prevent (codex + coderabbit on #1972).
     record
         .manifest
         .group_chats
         .iter()
         .map(|chat| (chat.id.clone(), chat.name.clone()))
+        .chain(
+            record
+                .overlay_desks
+                .iter()
+                .map(|overlay| (overlay.id.clone(), overlay.name.clone())),
+        )
         .collect()
 }
 
@@ -439,6 +450,39 @@ pub fn company_of(record: &CompanyRecord) -> &CompanyId {
 mod tests {
     use super::*;
     use crate::ports::types::OverlayAgent;
+
+    /// The ACP session-key snapshot carries **every** routable desk.
+    ///
+    /// A desk created from the console lives only in `overlay_desks`, so a
+    /// manifest-only snapshot left it out — and the ACP key then split its two
+    /// spellings into two durable sessions in the external agent, which is the
+    /// context loss the canonicalisation exists to prevent (coderabbit + codex
+    /// on #1972).
+    #[test]
+    fn the_desk_snapshot_includes_console_created_desks() {
+        let mut record = record();
+        record
+            .manifest
+            .group_chats
+            .push(toml::from_str("id = \"growth_desk\"\nname = \"Growth\"").expect("a desk"));
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops_desk".to_string(),
+            name: "Operations".to_string(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        let desks = declared_desks(&record);
+        assert!(
+            desks.contains(&("growth_desk".to_string(), "Growth".to_string())),
+            "the manifest desk: {desks:?}"
+        );
+        assert!(
+            desks.contains(&("ops_desk".to_string(), "Operations".to_string())),
+            "and the console-created one: {desks:?}"
+        );
+    }
 
     /// A two-harness company with a console-created overlay teammate.
     fn record() -> CompanyRecord {

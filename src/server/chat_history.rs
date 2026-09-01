@@ -96,13 +96,37 @@ pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, S
         return resolved;
     }
     let desk = chat_id.unwrap_or(GENERAL_DESK);
-    record
+    // **Through `resolve_desk_id`, not a second lookup of its own** (codex +
+    // coderabbit on #1972). That function already answers "which desk is this
+    // key", and it answers two things a one-pass `id == key || name == key`
+    // find gets wrong: an **overlay desk** — one created from the console, which
+    // lives in `overlay_desks` and not in the manifest at all — is a routable
+    // desk, and an **exact id beats a display-name alias**, because desk
+    // creation enforces unique ids but not unique names, so `{id: "ops", name:
+    // "sales"}` can sit ahead of `{id: "sales", …}` and answer for it. Getting
+    // that wrong here does not merely miss lines, it *merges* two desks: `owns`
+    // would then be handed one desk's id and another's name.
+    let Some(id) = record.resolve_desk_id(desk) else {
+        // Not a desk this company declares — an ad-hoc thread id or a DM. It
+        // still owns everything journaled under that exact string, which is
+        // what the verbatim pair says.
+        return (desk.to_string(), desk.to_string());
+    };
+    let name = record
         .manifest
         .group_chats
         .iter()
-        .find(|chat| chat.id.eq_ignore_ascii_case(desk) || chat.name.eq_ignore_ascii_case(desk))
-        .map(|chat| (chat.id.clone(), chat.name.clone()))
-        .unwrap_or_else(|| (desk.to_string(), desk.to_string()))
+        .find(|chat| chat.id == id)
+        .map(|chat| chat.name.clone())
+        .or_else(|| {
+            record
+                .overlay_desks
+                .iter()
+                .find(|overlay| overlay.id == id)
+                .map(|overlay| overlay.name.clone())
+        })
+        .unwrap_or_else(|| id.clone());
+    (id, name)
 }
 
 /// The two selectors that resolve without consulting a manifest at all.
@@ -2788,10 +2812,20 @@ mod dead_card_test {
             .expect("audit");
         assert_eq!(as_admin.replies, 2, "an admin's count must count both rows");
     }
+}
+
+/// How a chat selector becomes the `(desk id, desk name)` pair [`owns`] filters
+/// on — the one answer to "which desk is this", shared by the seed, the cycle's
+/// briefings and `read_thread`.
+#[cfg(test)]
+mod desk_resolution_test {
+    use std::sync::Arc;
 
     use async_trait::async_trait;
 
-    // ---- resolve_seed_desk ------------------------------------------------
+    use super::*;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::{CompanyId, CompanyRecord};
 
     struct RecordStore(Option<CompanyRecord>);
 
@@ -2865,6 +2899,58 @@ name = "{name}"
     async fn resolve(store: RecordStore, chat_id: Option<&str>) -> (String, String) {
         let store: Arc<dyn CompanyStore> = Arc::new(store);
         resolve_seed_desk(&store, &CompanyId::new("acme"), chat_id).await
+    }
+
+    /// A desk created from the console is a desk.
+    ///
+    /// It lives in `overlay_desks` and never in the manifest, so a lookup that
+    /// reads only `group_chats` fell through to the verbatim selector — and
+    /// every line journaled under the desk's *other* spelling was orphaned from
+    /// the thread index, `read_thread` and the seed alike (coderabbit + codex
+    /// on #1972).
+    #[test]
+    fn an_overlay_desk_resolves_by_either_spelling() {
+        let mut record = record_with_group_chat("growth_desk", "Growth");
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops_desk".to_string(),
+            name: "Operations".to_string(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        for spelling in ["ops_desk", "Operations"] {
+            assert_eq!(
+                desk_aliases(&record, Some(spelling)),
+                ("ops_desk".to_string(), "Operations".to_string()),
+                "{spelling:?} is the console-created desk"
+            );
+        }
+    }
+
+    /// An exact id beats another desk's display name.
+    ///
+    /// Desk creation enforces unique ids but **not** unique names, so
+    /// `{id: "ops_desk", name: "sales"}` is valid and can sit ahead of
+    /// `{id: "sales", …}`. A single pass matching `id == key || name == key`
+    /// answers with whichever came first, so asking for the desk `sales` got
+    /// `ops_desk` — and since this returns a *pair*, the damage is worse than a
+    /// miss: `owns` would be handed one desk's id and another's name, merging
+    /// two conversations that have nothing to do with each other.
+    ///
+    /// The precedence itself is `CompanyRecord::resolve_desk_id`'s, which this
+    /// now defers to rather than keeping a second, laxer copy of.
+    #[test]
+    fn an_exact_id_wins_over_an_earlier_desks_display_name() {
+        let mut record = record_with_group_chat("ops_desk", "sales");
+        record
+            .manifest
+            .group_chats
+            .push(toml::from_str("id = \"sales\"\nname = \"Sales\"").expect("a desk"));
+        assert_eq!(
+            desk_aliases(&record, Some("sales")).0,
+            "sales",
+            "the desk whose id is `sales` owns that key"
+        );
     }
 
     #[tokio::test]

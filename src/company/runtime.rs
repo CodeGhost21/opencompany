@@ -6498,6 +6498,9 @@ mod tests {
             assignee: origin.to_string(),
             updated_at_millis: 0,
             origin_chat_id: Some(origin.to_string()),
+            // Channel-level, like every card this test raises: it is about
+            // which surface a relay lands on, not which thread (#1890).
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,
