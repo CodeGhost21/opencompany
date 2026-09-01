@@ -2747,32 +2747,38 @@ fn is_zero(n: &usize) -> bool {
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
+///
+/// `pub(crate)` since issue #1859: [`fold_run_events`] and the fields below are
+/// the journal-fold surface the `read_run` orchestrator tool summarizes a
+/// workflow run's verdict/nodes/pending-approvals from — see that tool's
+/// doc comment for why it reads this rather than the full console history
+/// route's shape.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkflowRunOutcome {
+pub(crate) struct WorkflowRunOutcome {
     /// The journal sequence position — a stable, monotonic row key.
     seq: u64,
     /// Epoch-millis the outcome was journaled.
-    at_millis: u64,
-    workflow_id: String,
+    pub(crate) at_millis: u64,
+    pub(crate) workflow_id: String,
     /// Whether a cron started this run rather than an operator. The console
     /// shows the distinction because a scheduled run is the one nobody watched.
     scheduled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
+    pub(crate) run_id: Option<String>,
     /// The same delivery rows a manual run's response carries — including
     /// `target`, which the run response already ships to this same console.
     deliveries: Vec<crate::ports::DeliveryReport>,
-    pending_approvals: Vec<String>,
+    pub(crate) pending_approvals: Vec<String>,
     /// Set when the run failed outright instead of finishing with rows.
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     /// Per-node progress for this run, in the order the nodes finished (issue
     /// #371). Empty for a run journaled before #371, and for one whose nodes all
     /// failed to journal — so an empty list means "no per-node trail", never
     /// "the run did nothing".
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    nodes: Vec<WorkflowRunNode>,
+    pub(crate) nodes: Vec<WorkflowRunNode>,
     /// The nodes this run has *begun* executing, in start order (issue #1010),
     /// folded from `WorkflowNodeStarted` (issue #382).
     ///
@@ -2805,7 +2811,7 @@ struct WorkflowRunOutcome {
     /// start, so nothing sits here spinning forever. Omitted when false, which
     /// keeps every settled row's wire shape as short as it was.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    running: bool,
+    pub(crate) running: bool,
     /// `true` for a run an operator stopped (issue #383).
     ///
     /// Separate from [`error`](Self::error) because it is a separate outcome: a
@@ -2815,7 +2821,7 @@ struct WorkflowRunOutcome {
     /// failed, interrupted by a host restart, stopped by an operator. Omitted
     /// when false, like `running`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    cancelled: bool,
+    pub(crate) cancelled: bool,
     /// System notices raised about this run (issue #638) — today, that a node
     /// gated more tool calls than the per-batch cap allows and the excess was
     /// discarded.
@@ -2850,7 +2856,7 @@ struct WorkflowRunOutcome {
     /// rows arrive relabelled too — see the settle arm in [`list_runs`], which
     /// flips each blocked node's journaled `error` status to `blocked`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    pub(crate) blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
     /// The approvals this run parked (issue #880) — a receipt of what it
     /// opened, the failed parks included.
     ///
@@ -2896,7 +2902,7 @@ struct WorkflowRunOutcome {
     /// re-score on deploy with no migration — and, as issue #981 notes, anyone
     /// counting successful runs off this endpoint will see their rate drop with
     /// no change in behaviour, because the dropped reports were always there.
-    verdict: WorkflowRunVerdict,
+    pub(crate) verdict: WorkflowRunVerdict,
 }
 
 impl WorkflowRunOutcome {
@@ -2904,7 +2910,19 @@ impl WorkflowRunOutcome {
     ///
     /// Called once per row, in a pass over the whole page, after everything
     /// that can still change its inputs has run. See [`Self::verdict`].
-    fn derive_verdict(&self) -> WorkflowRunVerdict {
+    ///
+    /// `pub(crate)` since issue #1859: [`fold_run_events`] never calls this
+    /// itself (the field it derives from the `#1189` stranded-approvals join
+    /// runs *after* the fold, in [`list_runs`]), so `read_run` — which folds
+    /// a single run straight out of the journal with no such join — calls
+    /// this explicitly rather than trusting the placeholder [`Self::verdict`]
+    /// the fold construction sites leave on the row (always
+    /// [`WorkflowRunVerdict::Running`], since the fold never resolves it).
+    /// `read_run` accepts the one gap this leaves: without the live-queue
+    /// join, a run whose only remaining approval was orphaned reads as
+    /// `AwaitingApproval` rather than `Stranded` — a lesser distinction for a
+    /// chat answer than for the console's own history panel.
+    pub(crate) fn derive_verdict(&self) -> WorkflowRunVerdict {
         WorkflowRunVerdict::of(RunVerdictFacts {
             running: self.running,
             error: self.error.as_deref(),
@@ -2949,9 +2967,9 @@ impl WorkflowRunOutcome {
 /// appear here either.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkflowRunNode {
-    node_id: String,
-    status: WorkflowNodeStatus,
+pub(crate) struct WorkflowRunNode {
+    pub(crate) node_id: String,
+    pub(crate) status: WorkflowNodeStatus,
     elapsed_ms: u64,
     /// The node's null-resolved config paths (issue #1014) — the engine's own
     /// broken-wiring list, projected verbatim from the port row. Paths only, no
@@ -3018,7 +3036,20 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
 /// caller does that), and the highest `seq` seen among EVERY row, matched or
 /// not — the `read_through` high-water mark [`list_runs`]'s #1009 cross-check
 /// resumes reading from.
-fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<WorkflowRunOutcome>, u64) {
+///
+/// `pub(crate)` since issue #1859: the orchestrator's `read_run` tool reuses
+/// this same fold — reading the whole company journal, exactly like
+/// [`QueryCompanyTool`](crate::harness::built_in::orchestrator::QueryCompanyTool)
+/// already does for its recent-activity section — rather than re-deriving a
+/// second, drifting notion of "what a workflow run adds up to". It does not
+/// take on `list_runs`'s backward-paging or its #1009 live-run cross-check:
+/// a chat tool answering "what happened on this run" tolerates the rare
+/// eternal-spinner edge case that cross-check exists for, and paging the
+/// whole journal once is the same cost `QueryCompanyTool` already pays.
+pub(crate) fn fold_run_events(
+    rows: Vec<StoredEvent>,
+    wanted: Option<&str>,
+) -> (Vec<WorkflowRunOutcome>, u64) {
     let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
