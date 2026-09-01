@@ -13,6 +13,41 @@ pub struct WorkflowCheckpointStore {
     inner: FileCheckpointer<Value>,
 }
 
+/// Whether `thread_id` is safe to use as a single filesystem path component.
+///
+/// Every `thread_id` this store actually sees is minted by
+/// [`crate::ports::generate_id`] — `{millis-hex}-{counter-hex}` — via a
+/// run's own id (`WorkflowRunContext::new`) or, on a checkpoint resume, an
+/// earlier run's id carried forward through `PAYLOAD_THREAD_ID` / a blocked
+/// node's stash (see `crate::workflows::runner::run_workflow_inner` and
+/// `crate::runtime::workflow_resume`). No producer in this codebase threads a
+/// workflow name, node id, or other operator/agent-controlled text into it.
+/// `tinyflows`' own `FileCheckpointer` also percent-encodes every byte outside
+/// `[a-z0-9._-]` before it ever reaches a path, so `/` and `\` cannot survive
+/// into a filename there either.
+///
+/// This check is the same property enforced a layer earlier, in the code this
+/// crate owns rather than the vendored one, so a malformed thread id is
+/// refused before it reaches the checkpoint backend at all rather than relying
+/// solely on that backend's own escaping.
+fn validate_thread_id(thread_id: &str) -> tinyflows::graph::Result<()> {
+    let safe = !thread_id.is_empty()
+        && thread_id != "."
+        && thread_id != ".."
+        && !thread_id.contains("..")
+        && thread_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if safe {
+        Ok(())
+    } else {
+        Err(tinyflows::graph::GraphError::Checkpoint(format!(
+            "refusing to use `{thread_id:?}` as a checkpoint thread id — it is not a plain \
+             alphanumeric/`.`/`_`/`-` filesystem component"
+        )))
+    }
+}
+
 impl WorkflowCheckpointStore {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -44,6 +79,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         &self,
         checkpoint: Checkpoint<Value>,
     ) -> tinyflows::graph::Result<tinyflows::graph::ids::CheckpointId> {
+        validate_thread_id(&checkpoint.thread_id)?;
         self.inner.put(checkpoint).await
     }
 
@@ -52,6 +88,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         thread_id: &str,
         checkpoint_id: Option<&str>,
     ) -> tinyflows::graph::Result<Option<Checkpoint<Value>>> {
+        validate_thread_id(thread_id)?;
         self.inner.get(thread_id, checkpoint_id).await
     }
 
@@ -61,6 +98,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         checkpoint_id: Option<&str>,
         namespace: &[String],
     ) -> tinyflows::graph::Result<Option<Checkpoint<Value>>> {
+        validate_thread_id(thread_id)?;
         Ok(self
             .inner
             .get_thread(thread_id)
@@ -74,6 +112,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
     }
 
     async fn list(&self, thread_id: &str) -> tinyflows::graph::Result<Vec<CheckpointMetadata>> {
+        validate_thread_id(thread_id)?;
         self.inner.list(thread_id).await
     }
 
@@ -82,6 +121,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         config: &CheckpointConfig,
         writes: &[PendingWrite],
     ) -> tinyflows::graph::Result<()> {
+        validate_thread_id(&config.thread_id)?;
         self.inner.put_writes(config, writes).await
     }
 
@@ -89,6 +129,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         &self,
         config: &CheckpointConfig,
     ) -> tinyflows::graph::Result<Vec<PendingWrite>> {
+        validate_thread_id(&config.thread_id)?;
         self.inner.get_writes(config).await
     }
 
@@ -96,6 +137,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         &self,
         thread_id: &str,
     ) -> tinyflows::graph::Result<Vec<Checkpoint<Value>>> {
+        validate_thread_id(thread_id)?;
         self.inner.get_thread(thread_id).await
     }
 
@@ -105,6 +147,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         namespace: &[String],
         limit: Option<usize>,
     ) -> tinyflows::graph::Result<Vec<CheckpointTuple<Value>>> {
+        validate_thread_id(thread_id)?;
         self.inner.state_history(thread_id, namespace, limit).await
     }
 
@@ -113,6 +156,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
     }
 
     async fn delete_thread(&self, thread_id: &str) -> tinyflows::graph::Result<()> {
+        validate_thread_id(thread_id)?;
         self.inner.delete_thread(thread_id).await
     }
 
@@ -121,6 +165,7 @@ impl Checkpointer<Value> for WorkflowCheckpointStore {
         thread_id: &str,
         ids: &[String],
     ) -> tinyflows::graph::Result<usize> {
+        validate_thread_id(thread_id)?;
         self.inner.delete_checkpoints(thread_id, ids).await
     }
 }
@@ -154,6 +199,90 @@ mod tests {
             barrier_arrivals: Vec::new(),
             metadata: Value::Null,
         }
+    }
+
+    /// [`checkpoint`], with an explicit `thread_id` rather than the hardcoded
+    /// `"lineage"` — for the thread-id validation tests below, where the
+    /// thread id itself is what is under test.
+    fn checkpoint_for_thread(thread_id: &str, id: &str) -> Checkpoint<Value> {
+        Checkpoint {
+            thread_id: thread_id.to_string(),
+            checkpoint_id: id.to_string(),
+            run_id: Some("attempt".to_string()),
+            parent_checkpoint_id: None,
+            namespace: Vec::new(),
+            state: json!({ "value": 1 }),
+            next_nodes: vec![NodeId::new("next")],
+            completed_tasks: Vec::new(),
+            pending_writes: Vec::new(),
+            interrupts: Vec::new(),
+            pending_activations: None,
+            barrier_arrivals: Vec::new(),
+            metadata: Value::Null,
+        }
+    }
+
+    /// PR #1991 review (`3903802623`, `tinysweeper/security`). Every producer
+    /// in this codebase mints `thread_id` from
+    /// [`crate::ports::generate_id`] (see `validate_thread_id`'s doc
+    /// comment for the traced call sites), so this is defence-in-depth rather
+    /// than a live path — but it is cheap, and it is the failing gate, so it
+    /// gets enforced here too rather than resting solely on
+    /// `FileCheckpointer`'s own percent-encoding.
+    #[tokio::test]
+    async fn a_path_traversal_thread_id_is_refused_before_touching_the_filesystem() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = WorkflowCheckpointStore::new(temp.path());
+        let escape_target = temp
+            .path()
+            .parent()
+            .expect("tempdir has a parent")
+            .join("escaped-checkpoint-marker.jsonl");
+
+        for hostile in [
+            "../../../../../../../tmp/escaped-checkpoint-marker",
+            "..",
+            ".",
+            "a/b",
+            "a\\b",
+            "thread/../../escape",
+            "",
+        ] {
+            let err = store
+                .get(hostile, None)
+                .await
+                .expect_err("a hostile thread id must be refused, not resolved to a path");
+            assert!(
+                err.to_string().contains("thread id"),
+                "hostile={hostile:?} err={err}"
+            );
+
+            let err = store
+                .put(checkpoint_for_thread(hostile, "c1"))
+                .await
+                .expect_err("put must refuse the same way get does");
+            assert!(err.to_string().contains("thread id"), "{err}");
+        }
+
+        assert!(
+            !escape_target.exists(),
+            "no file may ever be written outside the store's base_dir"
+        );
+    }
+
+    /// The validation must not reject the shape every real `thread_id` in
+    /// this codebase actually has — a plain run id.
+    #[tokio::test]
+    async fn an_ordinary_generated_thread_id_still_round_trips() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = WorkflowCheckpointStore::new(temp.path());
+        let thread_id = crate::ports::generate_id();
+
+        store
+            .put(checkpoint_for_thread(&thread_id, "c1"))
+            .await
+            .expect("an ordinary generated thread id must still be accepted");
+        assert!(store.has_resume_point(&thread_id).await.unwrap());
     }
 
     #[tokio::test]
