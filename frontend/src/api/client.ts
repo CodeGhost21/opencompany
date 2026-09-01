@@ -902,17 +902,22 @@ export class OpenCompanyClient {
    * {@link resolveApproval} settles.
    *
    * `chatId` is the origin conversation (the channel/desk id) whose in-review
-   * card this settles. Hosts predating the route return 404 — callers roll back
-   * their optimistic move.
+   * card this settles; `taskId` is the specific card the operator clicked —
+   * a desk can have more than one card `in_review` at once, so the host
+   * validates the verdict against that card rather than resolving by `chatId`
+   * alone. Hosts predating the route return 404 — callers roll back their
+   * optimistic move.
    */
   reviewCard(
     chatId: string,
+    taskId: string,
     decision: "approve" | "revise",
     note?: string,
     company?: string | null,
   ): Promise<ChatReviewReceipt> {
-    const body: { chatId: string; decision: string; note?: string } = {
+    const body: { chatId: string; taskId: string; decision: string; note?: string } = {
       chatId,
+      taskId,
       decision,
     };
     if (note) body.note = note;

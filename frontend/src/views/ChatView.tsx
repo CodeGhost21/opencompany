@@ -1822,14 +1822,15 @@ export function ChatView({
    * The board move is left to the host's own `task_card_changed` over the SSE
    * feed — the same path a drag settles through — so the Approve control drops
    * off the pill the moment the card leaves `in_review`. This only carries the
-   * verdict and its busy state; `taskId` is the pill's card, used to gate that
-   * busy state, while the host resolves the card from the thread.
+   * verdict and its busy state; `taskId` is the pill's card, sent so the host
+   * settles that specific card rather than whichever one it would otherwise
+   * pick for the thread.
    */
   async function reviewCard(taskId: string, decision: "approve" | "revise") {
     if (reviewingCardId || activeThreadId === undefined) return;
     setReviewingCardId(taskId);
     try {
-      await client.reviewCard(activeThreadId, decision, undefined, company);
+      await client.reviewCard(activeThreadId, taskId, decision, undefined, company);
       toast.success(decision === "approve" ? "Card approved." : "Sent for another pass.");
     } catch (error) {
       toast.error(

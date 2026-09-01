@@ -3579,7 +3579,11 @@ impl CompanyRuntime {
     /// The card with id `task_id`, but only when it is an `in_review`
     /// dispatch-origin card whose origin conversation is `desk`.
     #[cfg(feature = "openhuman")]
-    async fn review_card_in_review(&self, task_id: &str, desk: &str) -> Option<TaskRecord> {
+    pub(crate) async fn review_card_in_review(
+        &self,
+        task_id: &str,
+        desk: &str,
+    ) -> Option<TaskRecord> {
         let card = self
             .ops
             .tasks
@@ -3589,20 +3593,6 @@ impl CompanyRuntime {
             .into_iter()
             .find(|t| t.id == task_id)?;
         is_review_target(&card, desk).then_some(card)
-    }
-
-    /// The card a thread-scoped review action settles: the most-recently-updated
-    /// `in_review` dispatch-origin card whose origin conversation is `desk`.
-    /// `list` returns newest-updated first, so the first match is that card.
-    #[cfg(feature = "openhuman")]
-    pub(crate) async fn review_card_for_desk(&self, desk: &str) -> Option<TaskRecord> {
-        self.ops
-            .tasks
-            .list(&self.id)
-            .await
-            .ok()?
-            .into_iter()
-            .find(|card| is_review_target(card, desk))
     }
 
     /// Appends the operator's review feedback to `card`'s note as a
@@ -7395,7 +7385,7 @@ mod tests {
     #[cfg(feature = "openhuman")]
     mod review {
         use crate::ports::TaskRecord;
-        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_TODO};
+        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW};
         use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
         use std::sync::Arc;
         use tempfile::TempDir;
@@ -7607,22 +7597,6 @@ mod tests {
 
             let after = stored(&rt, "t-1").await;
             assert_eq!(after.column, COLUMN_DONE);
-        }
-
-        #[tokio::test]
-        async fn review_card_for_desk_finds_the_in_review_card() {
-            let (rt, _home) = runtime().await;
-            seed(&rt, &card("t-done", "strategy", COLUMN_DONE)).await;
-            seed(&rt, &card("t-todo", "strategy", COLUMN_TODO)).await;
-            seed(&rt, &card("t-review", "strategy", COLUMN_IN_REVIEW)).await;
-
-            let found = rt.review_card_for_desk("strategy").await;
-            assert_eq!(found.map(|c| c.id), Some("t-review".to_string()));
-
-            assert!(
-                rt.review_card_for_desk("marketing").await.is_none(),
-                "a desk with no in-review card resolves nothing"
-            );
         }
     }
 }

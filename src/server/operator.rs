@@ -3842,6 +3842,10 @@ struct ChatReviewRequest {
     /// The origin conversation — the desk/channel id — whose in-review
     /// dispatch card this verdict settles.
     chat_id: String,
+    /// The clicked pill's card id. A desk can have more than one card
+    /// `in_review` at once, so the verdict is bound to this specific card
+    /// rather than resolved by picking the desk's most-recently-updated one.
+    task_id: String,
     /// `approve` finishes the card; `revise` re-runs it with `note`, on the
     /// same path a chat reply of feedback takes.
     decision: String,
@@ -3879,7 +3883,7 @@ async fn review_card(
         })?;
     let card = scope
         .runtime
-        .review_card_for_desk(&body.chat_id)
+        .review_card_in_review(&body.task_id, &body.chat_id)
         .await
         .ok_or_else(|| {
             ApiError(crate::error::OpenCompanyError::NotFound(
@@ -13211,5 +13215,147 @@ mode = "full"
 
         assert!(refreshed_is_admin(&runtime, None, true).await);
         assert!(!refreshed_is_admin(&runtime, None, false).await);
+    }
+
+    /// Two cards can be `in_review` on the same desk at once. Approving the
+    /// pill the operator actually clicked must move that card and leave the
+    /// other alone — resolving the desk's most-recently-updated card instead
+    /// (Codex #3903031183) moves the wrong one whenever the older pill is
+    /// clicked after a newer card has settled.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_settles_the_clicked_task_not_the_desks_latest() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        for (task_id, updated_at_millis) in [("t-old", 1u64), ("t-new", 2u64)] {
+            runtime
+                .tasks()
+                .upsert(
+                    runtime.id(),
+                    &crate::ports::tasks::TaskRecord {
+                        id: task_id.to_string(),
+                        title: "Ship it".to_string(),
+                        note: None,
+                        column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                        priority: "medium".to_string(),
+                        assignee: "ceo".to_string(),
+                        updated_at_millis,
+                        origin_chat_id: Some("strategy".to_string()),
+                        origin_parent: None,
+                        parent_task_id: None,
+                        output: None,
+                        plan: None,
+                        planning_attempts: Vec::new(),
+                        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                        workflow_proposal: None,
+                        origin_run_id: None,
+                        origin_workflow_id: None,
+                        bounced: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let receipt = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-old".to_string(),
+                decision: "approve".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect("the clicked card is settled")
+        .0;
+        assert_eq!(receipt.task_id, "t-old");
+        assert_eq!(receipt.column, crate::ports::tasks::COLUMN_DONE);
+
+        let cards = runtime.tasks().list(runtime.id()).await.unwrap();
+        let old = cards.iter().find(|t| t.id == "t-old").unwrap();
+        let new = cards.iter().find(|t| t.id == "t-new").unwrap();
+        assert_eq!(
+            old.column,
+            crate::ports::tasks::COLUMN_DONE,
+            "the clicked pill's card must settle"
+        );
+        assert_eq!(
+            new.column,
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "the desk's newer card must be untouched by a verdict on the older pill"
+        );
+    }
+
+    /// A `task_id` naming a card outside the reviewed desk (or one that has
+    /// already left `in_review`) must not resolve to some other card in the
+    /// conversation — the request is rejected rather than silently falling
+    /// back to "whatever is in review here".
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_rejects_a_task_id_not_in_review_on_this_desk() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-review".to_string(),
+                    title: "Ship it".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let err = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "does-not-exist".to_string(),
+                decision: "approve".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("an unknown task id must not fall back to the desk's own card");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }
