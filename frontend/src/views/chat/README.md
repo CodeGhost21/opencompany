@@ -180,8 +180,8 @@ loss.
 ### A read-only channel offers no new reaction (#1986)
 
 Issue #1986 was opened as a product question — is reacting to a read-only feed
-of workflow reports legitimate acknowledgement, or the same defect #1757 and
-#1984 fixed for the members pane and the composer? The operator's ruling is
+of workflow reports legitimate acknowledgement, or the same defect that #1757
+and #1984 fixed for the members pane and the composer? The operator's ruling is
 **no**. Reacting writes into the company's transcript exactly as sending does,
 and the host authorizes it through the very same gate (`chat_actor`,
 `src/server/operator.rs`, whose own doc says reacting "can be neither easier nor
