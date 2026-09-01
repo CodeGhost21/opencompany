@@ -234,6 +234,7 @@ async fn a_workflow_node_assigns_an_existing_card_without_moving_it() {
         assignee: String::new(),
         updated_at_millis: 1,
         origin_chat_id: None,
+        origin_parent: None,
         parent_task_id: None,
         output: None,
         plan: None,

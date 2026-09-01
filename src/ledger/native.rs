@@ -106,6 +106,7 @@ mod test {
             assignee: "ops".to_string(),
             updated_at_millis: updated,
             origin_chat_id: None,
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,

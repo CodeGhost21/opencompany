@@ -6923,6 +6923,7 @@ members = ["legal_counsel"]
                 column: "done".to_string(),
                 artifact_ids: Vec::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             at_millis: 30,
         });

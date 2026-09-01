@@ -43,7 +43,7 @@ use crate::harness::orchestrator::Delegation;
 use crate::harness::run_turn::HarnessRunTurn;
 use crate::harness::{HarnessDeps, HarnessPool};
 use crate::runtime::assignee;
-use crate::runtime::delegation::{self, DelegationRunner, RunTurn};
+use crate::runtime::delegation::{self, ChatTarget, DelegationRunner, RunTurn};
 
 /// The most operator redirects honored within a single task dispatch (issue
 /// #111). A redirect re-runs the turn in-loop with the fresh instruction
@@ -760,7 +760,12 @@ impl HarnessBrain {
             && let Err(err) = self
                 .record_conversation_publishes(
                     &grant.agent,
-                    grant.origin_thread.as_deref(),
+                    // Both halves of the conversation the approval was raised
+                    // in (#1890), the same pair the delegation drain below is
+                    // bound to — a grant has recorded `origin_parent` beside
+                    // `origin_thread` since A, and this site was reading only
+                    // one of them.
+                    ChatTarget::in_thread(grant.origin_thread.as_deref(), grant.origin_parent),
                     published,
                 )
                 .await
@@ -2014,6 +2019,13 @@ impl HarnessBrain {
                     // card carries `None` and gets no channel marker: no
                     // conversation raised it.
                     origin_chat_id: card.origin_chat_id.clone(),
+                    // Issue #1890 B: the thread inside that channel, captured
+                    // off the card on exactly the terms above. This is the
+                    // whole of what B repairs — without it the terminal names a
+                    // channel and no thread, so a card raised inside a thread
+                    // settled flat in the channel and the thread that asked for
+                    // the work never showed it finishing.
+                    origin_parent: card.origin_parent,
                 },
             )
             .await
@@ -2415,7 +2427,7 @@ impl HarnessBrain {
         &self,
         responder: &str,
         spawned_task: Option<&str>,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         claimed: bool,
         published: Vec<publish::PendingPublish>,
         operator_reply: &mut String,
@@ -2442,11 +2454,11 @@ impl HarnessBrain {
         // inside `file_publishes_on_card` for a card deleted mid-turn.
         let filed = match spawned_task {
             Some(card_id) => {
-                self.file_publishes_on_card(card_id, &publisher, chat_id, published)
+                self.file_publishes_on_card(card_id, &publisher, chat, published)
                     .await
             }
             None => {
-                self.record_conversation_publishes(&publisher, chat_id, published)
+                self.record_conversation_publishes(&publisher, chat, published)
                     .await
             }
         };
@@ -2507,14 +2519,17 @@ impl HarnessBrain {
     /// links the operator's reply to it and sending them to an id that no
     /// longer resolves is the bug this whole change is about.
     ///
-    /// `chat_id` is carried into that fallback so a minted replacement points
+    /// `chat` is carried into that fallback so a minted replacement points
     /// back at the same conversation the no-card-in-scope path's card does;
-    /// two minting paths must not differ in where their card posts back.
+    /// two minting paths must not differ in where their card posts back. One
+    /// [`ChatTarget`] rather than a channel and a root side by side (#1890 B):
+    /// the pair travels four frames down this chain, and two bare `Option`s
+    /// beside each other is the mis-pairing hazard that type exists to remove.
     async fn file_publishes_on_card(
         &self,
         card_id: &str,
         agent: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         published: Vec<publish::PendingPublish>,
     ) -> Result<String> {
         let Some(tasks) = self.deps.tasks.as_ref() else {
@@ -2535,7 +2550,7 @@ impl HarnessBrain {
                  instead of dropping it"
             );
             return self
-                .record_conversation_publishes(agent, chat_id, published)
+                .record_conversation_publishes(agent, chat, published)
                 .await;
         };
 
@@ -2599,7 +2614,7 @@ impl HarnessBrain {
     async fn record_conversation_publishes(
         &self,
         responder: &str,
-        chat_id: Option<&str>,
+        chat: ChatTarget<'_>,
         published: Vec<publish::PendingPublish>,
     ) -> Result<String> {
         let Some(tasks) = self.deps.tasks.as_ref() else {
@@ -2624,7 +2639,13 @@ impl HarnessBrain {
             updated_at_millis: now_millis(),
             // The conversation this came out of, so the card points back at the
             // thread that produced it (#151 §3.2's field, same meaning).
-            origin_chat_id: chat_id.map(str::to_string),
+            origin_chat_id: chat.chat_id.map(str::to_string),
+            // Issue #1890 B: and the thread inside it, so a file published
+            // inside a thread leaves its card pointing at that thread rather
+            // than at the channel around it. `None` is the channel-level
+            // conversation, which is where every publish landed before threads
+            // were part of the key.
+            origin_parent: chat.thread_root,
             // A chat turn has no card in scope, so this is a lineage root —
             // the same `None` a `spawn_task` from an ordinary chat turn writes.
             parent_task_id: None,
@@ -3655,7 +3676,9 @@ impl HarnessBrain {
                         .file_conversation_batch(
                             &responder,
                             turn.spawned_task.as_deref(),
-                            chat_id,
+                            // Issue #1890 B: the same conversation this turn
+                            // answers in, thread and all — `parent` IS the root.
+                            ChatTarget::in_thread(chat_id, *parent),
                             publish_claim.is_some(),
                             published,
                             &mut operator_reply,
@@ -3711,7 +3734,7 @@ impl HarnessBrain {
                                 .file_conversation_batch(
                                     &responder,
                                     turn.spawned_task.as_deref(),
-                                    chat_id,
+                                    ChatTarget::in_thread(chat_id, *parent),
                                     publish_claim.is_some(),
                                     nudge_published,
                                     &mut operator_reply,
@@ -4018,7 +4041,10 @@ impl HarnessBrain {
                         .file_conversation_batch(
                             &responder,
                             spawned_task.as_deref(),
-                            Some(crate::server::ops::language::DEFAULT_DESK),
+                            // Nothing threaded a scheduled turn: it posts into
+                            // the General desk's channel-level conversation,
+                            // which is what the bare id meant before #1890 B.
+                            ChatTarget::channel(Some(crate::server::ops::language::DEFAULT_DESK)),
                             publish_claim.is_some(),
                             published,
                             &mut responses[0].text,
@@ -4053,7 +4079,9 @@ impl HarnessBrain {
                                 .file_conversation_batch(
                                     &responder,
                                     spawned_task.as_deref(),
-                                    Some(crate::server::ops::language::DEFAULT_DESK),
+                                    ChatTarget::channel(Some(
+                                        crate::server::ops::language::DEFAULT_DESK,
+                                    )),
                                     publish_claim.is_some(),
                                     nudge_published,
                                     &mut responses[0].text,
@@ -4783,6 +4811,18 @@ description = "Builds it."
         brain_with_tasks_notified(dir, false)
     }
 
+    /// As [`brain_with_tasks`], but with the journal wired too — so a test can
+    /// seed a card, settle it, and read back the `DeskTaskCompleted` the settle
+    /// wrote (issue #1890 B). [`FsOps`] is not an [`EventLog`], so the log is a
+    /// second store over the same directory.
+    fn brain_with_tasks_and_events(
+        dir: &std::path::Path,
+    ) -> (HarnessBrain, Arc<FsOps>, Arc<dyn crate::ports::EventLog>) {
+        let events: Arc<dyn crate::ports::EventLog> = Arc::new(crate::store::FsEventLog::new(dir));
+        let (brain, tasks) = brain_with_tasks_notified_logging(dir, false, Some(events.clone()));
+        (brain, tasks, events)
+    }
+
     /// Same as [`brain_with_tasks`], but also wires the task store as the
     /// notification store (issue #1865, PR #1883 review comment 3878668326):
     /// [`FsOps`] implements both, so a test can seed a card, drive a cycle,
@@ -4790,6 +4830,20 @@ description = "Builds it."
     fn brain_with_tasks_notified(
         dir: &std::path::Path,
         notify: bool,
+    ) -> (HarnessBrain, Arc<FsOps>) {
+        brain_with_tasks_notified_logging(dir, notify, None)
+    }
+
+    /// As [`brain_with_tasks_notified`], but with the journal optionally wired
+    /// — so a test can seed a card, settle it, and read back the
+    /// `DeskTaskCompleted` the settle wrote (issue #1890 B). `None` is the
+    /// shape every caller had before, and `HarnessBrain` holds its deps behind
+    /// an `Arc`, so this has to be a build-time choice rather than a mutation
+    /// after the fact.
+    fn brain_with_tasks_notified_logging(
+        dir: &std::path::Path,
+        notify: bool,
+        events: Option<Arc<dyn crate::ports::EventLog>>,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
@@ -4815,7 +4869,7 @@ description = "Builds it."
             default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
-            events: None,
+            events,
             delegations: orchestrator::DelegationQueue::default(),
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
@@ -5729,6 +5783,7 @@ members = ["engineer"]
             assignee: assignee.to_string(),
             updated_at_millis: 0,
             origin_chat_id: None,
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -5823,6 +5878,85 @@ members = ["engineer"]
         );
         // A dispatched card discards its steps into the note.
         assert!(posted.steps.is_empty());
+    }
+
+    /// Issue #1890 B: and the **terminal** carries both halves of that origin.
+    ///
+    /// The relay bubble above answers in the origin thread on its own; the
+    /// marker is the structural half, and it is the one that was landing in the
+    /// wrong place. `desk` is a responder id and a channel is a desk id, so
+    /// nothing on this event could recover either half — it is captured off the
+    /// card at the single settle emission point every dispatch ending passes
+    /// through, which is why capturing it there cannot miss a path.
+    #[tokio::test]
+    async fn a_settled_card_journals_the_thread_it_was_raised_in() {
+        use crate::ports::EventSeq;
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks, events) = brain_with_tasks_and_events(dir.path());
+        let mut c = card("t-threaded", "engineer");
+        c.origin_chat_id = Some("strategy".to_string());
+        c.origin_parent = Some(EventSeq::new(41));
+        tasks
+            .upsert(&CompanyId::new("acme"), &c)
+            .await
+            .expect("seed");
+
+        brain.run_task("t-threaded", None).await.expect("run");
+
+        let logged = events
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        let terminal = logged
+            .iter()
+            .find_map(|e| match &e.event {
+                CompanyEvent::DeskTaskCompleted {
+                    origin_chat_id,
+                    origin_parent,
+                    ..
+                } => Some((origin_chat_id.clone(), *origin_parent)),
+                _ => None,
+            })
+            .expect("the settle journals a terminal");
+        assert_eq!(
+            terminal,
+            (Some("strategy".to_string()), Some(EventSeq::new(41))),
+            "the terminal carries the channel AND the thread the card recorded",
+        );
+    }
+
+    /// …and a card raised at channel level still settles flat there. `None` is
+    /// the channel-level conversation, not a lost id, and a marker that started
+    /// threading itself onto an unrelated root would be worse than no marker.
+    #[tokio::test]
+    async fn a_settled_channel_level_card_journals_no_thread() {
+        use crate::ports::EventSeq;
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks, events) = brain_with_tasks_and_events(dir.path());
+        let mut c = card("t-flat", "engineer");
+        c.origin_chat_id = Some("strategy".to_string());
+        tasks
+            .upsert(&CompanyId::new("acme"), &c)
+            .await
+            .expect("seed");
+
+        brain.run_task("t-flat", None).await.expect("run");
+
+        let logged = events
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read events");
+        assert!(
+            logged.iter().any(|e| matches!(
+                &e.event,
+                CompanyEvent::DeskTaskCompleted {
+                    origin_chat_id,
+                    origin_parent: None,
+                    ..
+                } if origin_chat_id.as_deref() == Some("strategy")
+            )),
+            "an unthreaded settle names its channel and no thread: {logged:?}"
+        );
     }
 
     async fn only_card(tasks: &Arc<FsOps>) -> TaskRecord {
@@ -6218,7 +6352,7 @@ members = ["engineer"]
             .file_publishes_on_card(
                 "t-open",
                 "writer",
-                None,
+                ChatTarget::default(),
                 vec![PendingPublish {
                     agent: "writer".to_string(),
                     source: "memo.md".to_string(),
@@ -6275,7 +6409,7 @@ members = ["engineer"]
             .file_publishes_on_card(
                 "t-owned",
                 "writer",
-                None,
+                ChatTarget::default(),
                 vec![PendingPublish {
                     agent: "writer".to_string(),
                     source: "memo.md".to_string(),
@@ -6306,7 +6440,7 @@ members = ["engineer"]
             .file_publishes_on_card(
                 "t-gone",
                 "writer",
-                Some("strategy"),
+                ChatTarget::channel(Some("strategy")),
                 vec![PendingPublish {
                     agent: "writer".to_string(),
                     source: "memo.md".to_string(),
@@ -9757,6 +9891,7 @@ members = ["eng1", "eng2"]
             assignee: "ceo".to_string(),
             updated_at_millis: now_millis(),
             origin_chat_id: None,
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,

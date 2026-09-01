@@ -152,6 +152,15 @@ export type CompanyStreamEvent =
       column: string;
       /** The channel the card was raised in; absent for a board-created card. */
       chatId?: string;
+      /**
+       * The thread inside that channel the card was raised in (issue #1890 B);
+       * absent for one raised at channel level, which is most of them.
+       *
+       * A host message id, matching what `chat/history` renders as a line's
+       * `parentId` — so the live marker and its rehydrated twin land in the
+       * same place.
+       */
+      parentId?: string;
     }
   | {
       type: "mcp_call_failed";

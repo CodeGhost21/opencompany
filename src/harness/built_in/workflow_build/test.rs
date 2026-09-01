@@ -924,6 +924,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         assignee: "maya".to_string(),
         updated_at_millis: 7,
         origin_chat_id: None,
+        origin_parent: None,
         parent_task_id: None,
         output: None,
         plan,
