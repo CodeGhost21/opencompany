@@ -1080,6 +1080,17 @@ async fn spawn_continuation(
             denied.to_vec(),
         )
     } else {
+        // Issue #1991 review (`3904304781`): this fallback starts a fresh
+        // trigger run rather than resuming `checkpoint_thread_id`'s lineage —
+        // whether because no checkpoint was ever taken (a no-op prune below)
+        // or because `graph_unchanged_since_park` just rejected a stale one
+        // (a real lineage nothing else will ever come back for). Pruning here
+        // closes the same leak `resume_run`'s all-denied arm already closes
+        // for its own terminal exit: an edit-while-gated run that lands here
+        // must not leave an unreachable lineage under `workflow-checkpoints`.
+        if let Some(thread_id) = checkpoint_thread_id {
+            prune_checkpoint_lineage(runtime, thread_id).await;
+        }
         ctx.with_resume_semantic(crate::ports::ResumeSemantic::ReRunFromTrigger)
     };
     let (run_id, _handle) = ws.spawn_admitted(ctx, guard, workflow, input, false);
@@ -3027,6 +3038,108 @@ mode = "full"
             remaining.is_empty(),
             "a wholly refused batch starts no continuation, so its checkpoint lineage must be \
              pruned: {remaining:?}"
+        );
+    }
+
+    /// Issue #1991 review (`3904304781`): `spawn_continuation`'s fallback to a
+    /// trigger re-run — reached here because
+    /// `graph_unchanged_since_park` just rejected a stale checkpoint — used to
+    /// leave `checkpoint_thread_id`'s lineage on disk forever: nothing else
+    /// ever comes back for it once this run re-dispatches on the trigger
+    /// input instead. Same leak class `an_all_denied_batch_prunes_its_checkpoint_lineage`
+    /// already covers for the wholly-refused exit; this is the fingerprint-
+    /// rejection exit.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_gate_refuses_a_stale_checkpoint_after_the_graph_is_edited_and_prunes_it() {
+        use tinyflows::graph::Checkpointer;
+
+        let home = seed_home();
+        let parked_fingerprint = crate::company::parse_workflow(GATED_TOML)
+            .expect("parses")
+            .content_fingerprint();
+        let mut rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+            .with_seed_dir(home.path().to_path_buf())
+            .build()
+            .await
+            .expect("runtime builds");
+        let runner = Arc::new(RecordingRunner::default());
+        rt.set_workflow_runner(runner.clone());
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                home.path().join("checkpoints"),
+            ),
+        );
+        checkpoints
+            .put(tinyflows::graph::Checkpoint {
+                thread_id: "run-that-paused".to_string(),
+                checkpoint_id: "c1".to_string(),
+                run_id: Some("run-that-paused".to_string()),
+                parent_checkpoint_id: None,
+                namespace: Vec::new(),
+                state: json!({}),
+                next_nodes: vec![tinyflows::graph::ids::NodeId::new("gate")],
+                completed_tasks: Vec::new(),
+                pending_writes: Vec::new(),
+                interrupts: Vec::new(),
+                pending_activations: None,
+                barrier_arrivals: Vec::new(),
+                metadata: Value::Null,
+            })
+            .await
+            .expect("seed checkpoint");
+        rt.set_workflow_checkpoints(checkpoints.clone());
+        let rt = Arc::new(rt);
+
+        // The edit: an author renames the gate node while this approval sits
+        // pending.
+        std::fs::write(
+            home.path().join("workflows").join("gated.toml"),
+            GATED_TOML.replace("name = \"Gate\"", "name = \"Gate — renamed\""),
+        )
+        .expect("edit graph on disk");
+
+        let turn = workflow_turn_key("run-that-paused");
+        let mut effect = gate_effect(
+            "gated",
+            "gate",
+            &json!({ "request": "x" }),
+            "run-that-paused",
+            &[],
+            &[],
+            None,
+        );
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(PAYLOAD_THREAD_ID.to_string(), json!("run-that-paused"));
+            payload.insert(
+                PAYLOAD_WORKFLOW_FINGERPRINT.to_string(),
+                json!(parked_fingerprint),
+            );
+        }
+        let id = ApprovalId::new("gate-1");
+        rt.workflow_gates().arm(&turn, &id, &effect);
+        rt.workflow_gates().decide(&turn, &id, Verdict::Approve);
+
+        resume_run(&rt, &turn)
+            .await
+            .expect("an approved batch still starts a continuation, just not a checkpoint resume");
+
+        let started = wait_for_runs(&runner, 1).await;
+        assert_eq!(started.len(), 1, "exactly one continuation run must start");
+        assert_eq!(
+            started[0].resume_semantic,
+            Some(crate::ports::ResumeSemantic::ReRunFromTrigger),
+            "the graph changed since this gate parked, so the stale checkpoint must be refused"
+        );
+
+        let remaining = checkpoints
+            .get_thread("run-that-paused")
+            .await
+            .expect("checkpoint read");
+        assert!(
+            remaining.is_empty(),
+            "the refused lineage is unreachable from here on, so it must be pruned rather than \
+             leaked: {remaining:?}"
         );
     }
 
