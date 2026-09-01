@@ -3457,9 +3457,10 @@ export function AppShell({
           />
         }
         overview={
-          // The console's front page, as a glyph. It was a labelled sidebar row;
-          // in a chrome band a labelled button reads as content, so the name
-          // moves to `aria-label` and `title`. First thing the row drops as the
+          // The console's front page, as a glyph. `NAV` still carries the
+          // labelled row and will until the sidebar restructure removes it; in a
+          // chrome band a labelled button reads as content, so the name moves
+          // here to `aria-label` and `title`. First thing the row drops as the
           // window narrows — see `TITLE_BAR_LADDER`.
           <OverviewButton
             active={isNavigationActive("overview", view)}
