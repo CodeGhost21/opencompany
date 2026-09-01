@@ -325,6 +325,10 @@ pub struct CompanyRuntime {
     /// so the default build simply leaves it `None` and the run route reports
     /// "not wired".
     pub(crate) workflow_runner: Option<Arc<dyn crate::ports::WorkflowRunner>>,
+    /// Durable engine checkpoints for this company's workflow lineages.
+    #[cfg(feature = "openhuman")]
+    pub(crate) workflow_checkpoints:
+        Option<Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>>,
     /// Issue #111: the registry of in-flight, steerable runs. The operator steer
     /// routes (`GET …/tasks/inflight`, `POST …/tasks/{key}/steer`) read and write
     /// it; the harness brain registers a dispatched task / desk delegation here
@@ -566,6 +570,8 @@ impl CompanyRuntime {
             source_dir: None,
             auth_mode: AuthMode::default(),
             workflow_runner: None,
+            #[cfg(feature = "openhuman")]
+            workflow_checkpoints: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
             grants,
@@ -1776,6 +1782,21 @@ impl CompanyRuntime {
         self.blocked_nodes = blocked_nodes;
     }
 
+    #[cfg(feature = "openhuman")]
+    pub fn set_workflow_checkpoints(
+        &mut self,
+        checkpoints: Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>,
+    ) {
+        self.workflow_checkpoints = Some(checkpoints);
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn workflow_checkpoints(
+        &self,
+    ) -> Option<&Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>> {
+        self.workflow_checkpoints.as_ref()
+    }
+
     /// The blocked-agent-node stash, for the workflow-node continuation fork in
     /// [`continue_turn`](Self::continue_turn) (issue #899, Stage 1).
     pub fn blocked_nodes(&self) -> &BlockedNodeQueue {
@@ -2733,6 +2754,12 @@ impl CompanyRuntime {
                 "[approval] every gated call on this blocked node was refused or expired, so no \
                  continuation runs"
             );
+            // Issue #1991 review (`3903797619`): a wholly refused block is
+            // terminal — nothing here or in `resume_run`'s twin arm ever comes
+            // back for this lineage — so its checkpoint thread is prunable
+            // exactly like the runner's own settle arms.
+            self.prune_checkpoint_lineage_of_stash(stashed.as_ref())
+                .await;
             self.retire_blocked_stash(turn).await;
             return Ok(CycleRunner::new(self).already_resolved_report());
         }
@@ -2800,6 +2827,8 @@ impl CompanyRuntime {
             &stashed.workflow_id,
             stashed.input,
             stashed.started_by,
+            stashed.thread_id,
+            stashed.workflow_fingerprint,
         )
         .await
         {
@@ -2918,6 +2947,38 @@ impl CompanyRuntime {
     /// stance — the in-memory drop is what this cycle acts on, and a lost
     /// release record at worst rehydrates a stash whose approvals are already
     /// resolved, which no resolve event will ever release again.
+    /// Prunes the checkpoint lineage a blocked-node stash names, when it has
+    /// one and this build has a checkpoint store wired.
+    ///
+    /// The blocked-node counterpart to `workflow_resume::prune_checkpoint_lineage_for_effect`
+    /// — the same idea, just reading the thread id off a
+    /// [`StashedBlock`](crate::runtime::blocked_nodes::StashedBlock) instead
+    /// of an [`Effect`](crate::ports::types::Effect)'s payload, because a
+    /// blocked node's continuation facts live there rather than on a parked
+    /// card.
+    #[cfg(feature = "openhuman")]
+    async fn prune_checkpoint_lineage_of_stash(
+        &self,
+        stashed: Option<&crate::runtime::blocked_nodes::StashedBlock>,
+    ) {
+        let Some(store) = self.workflow_checkpoints() else {
+            return;
+        };
+        let Some(thread_id) = stashed.and_then(|s| s.thread_id.as_deref()) else {
+            return;
+        };
+        if let Err(error) = store.prune_settled(thread_id).await {
+            tracing::warn!(%thread_id, %error, "workflow: failed to prune settled checkpoints");
+        }
+    }
+
+    #[cfg(not(feature = "openhuman"))]
+    async fn prune_checkpoint_lineage_of_stash(
+        &self,
+        _stashed: Option<&crate::runtime::blocked_nodes::StashedBlock>,
+    ) {
+    }
+
     async fn retire_blocked_stash(&self, turn: &str) {
         self.blocked_nodes.release(turn);
         if let Err(error) = self.journal.record_blocked_node_released(turn).await {
@@ -8139,5 +8200,80 @@ mod tests {
             let after = stored(&rt, "t-1").await;
             assert_eq!(after.column, COLUMN_DONE);
         }
+    }
+
+    /// A blocked agent node whose whole gated-call batch is refused starts no
+    /// continuation — the blocked-node twin of `resume_run`'s all-denied case
+    /// — and, since PR #1991's review (`3903797619`), must also stop leaving
+    /// that lineage's checkpoint on disk forever: nothing else ever comes back
+    /// for a wholly refused block's thread id.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_wholly_refused_blocked_node_prunes_its_checkpoint_lineage() {
+        use tinyflows::graph::Checkpointer;
+
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\n\
+             mode = \"full\"\n",
+        )
+        .expect("manifest");
+        let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect("runtime");
+        let checkpoints = std::sync::Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                home.path().join("checkpoints"),
+            ),
+        );
+        checkpoints
+            .put(tinyflows::graph::Checkpoint {
+                thread_id: "blocked-thread".to_string(),
+                checkpoint_id: "c1".to_string(),
+                run_id: Some("blocked-thread".to_string()),
+                parent_checkpoint_id: None,
+                namespace: Vec::new(),
+                state: serde_json::json!({}),
+                next_nodes: vec![tinyflows::graph::ids::NodeId::new("agent")],
+                completed_tasks: Vec::new(),
+                pending_writes: Vec::new(),
+                interrupts: Vec::new(),
+                pending_activations: None,
+                barrier_arrivals: Vec::new(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("seed checkpoint");
+        runtime.set_workflow_checkpoints(checkpoints.clone());
+
+        let turn = "blocked-turn";
+        runtime.blocked_nodes.arm_checkpointed(
+            turn,
+            "gated",
+            &serde_json::json!({}),
+            &crate::ports::types::StartedBy::Operator,
+            Some("blocked-thread"),
+            None,
+        );
+
+        runtime
+            .resume_blocked_agent_node(
+                &crate::ports::types::ApprovalId::new("call-1"),
+                turn,
+                Vec::new(),
+            )
+            .await
+            .expect("an all-refused block does not error");
+
+        let remaining = checkpoints
+            .get_thread("blocked-thread")
+            .await
+            .expect("checkpoint read");
+        assert!(
+            remaining.is_empty(),
+            "a wholly refused blocked node starts no continuation, so its checkpoint lineage \
+             must be pruned: {remaining:?}"
+        );
     }
 }

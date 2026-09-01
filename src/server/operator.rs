@@ -1673,6 +1673,7 @@ fn project_event_for_viewer(
             run_id,
             scheduled,
             started_by,
+            ..
         } => {
             let mut o = envelope("workflow_run_started");
             o["workflowId"] = json!(workflow_id);
@@ -11466,6 +11467,7 @@ mode = "full"
             run_id: "run-1".into(),
             scheduled: true,
             started_by: None,
+            resume_semantic: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(started["type"], "workflow_run_started");
@@ -11484,6 +11486,7 @@ mode = "full"
             run_id: "run-1".into(),
             scheduled: false,
             started_by: Some(crate::ports::types::StartedBy::Agent("ceo".into())),
+            resume_semantic: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(

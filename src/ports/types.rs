@@ -1753,6 +1753,9 @@ pub enum CompanyEvent {
         /// existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_by: Option<StartedBy>,
+        /// Whether this attempt continued at a node boundary or re-ran from its trigger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_semantic: Option<crate::ports::ResumeSemantic>,
     },
     /// One non-trigger node of a workflow run began executing (issue #382),
     /// reported by the engine's `RunObserver` immediately before the node's
@@ -8871,6 +8874,7 @@ mod test {
             run_id: "run-1".to_string(),
             scheduled: true,
             started_by: Some(StartedBy::Operator),
+            resume_semantic: None,
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -8889,6 +8893,7 @@ mod test {
                 run_id: "run-1".to_string(),
                 scheduled: matches!(started_by, StartedBy::Schedule),
                 started_by: Some(started_by.clone()),
+                resume_semantic: None,
             };
             assert_eq!(
                 round_trip(&event),
@@ -9016,6 +9021,7 @@ mod test {
             run_id: "run-1".to_string(),
             scheduled: false,
             started_by: None,
+            resume_semantic: None,
         })
         .expect("serialize");
         assert_eq!(
