@@ -5984,6 +5984,24 @@ mod tests {
         assert_eq!(decision_name(&d), "park");
     }
 
+    /// `curl` is declared `EffectGroup::Other`, so the irreversible-group rule
+    /// does not reach it, and it is declared, so the undeclared-tool rule does
+    /// not either. `judge`'s `UNBOUNDED` list is the only remaining gate once
+    /// `PolicyMode::Full` has already returned `Allow` above — and `curl`
+    /// writes an arbitrary response into the workspace `downloads/` directory,
+    /// which this layer cannot bound. It must still park on a `full` desk.
+    #[tokio::test]
+    async fn curl_still_parks_under_full_via_the_judgement_arm() {
+        let p = policy("full", &[], None);
+        let d = p
+            .check(&request(
+                "curl",
+                serde_json::json!({ "url": "https://example.com/report.csv" }),
+            ))
+            .await;
+        assert_eq!(decision_name(&d), "park", "`curl` must stop under full");
+    }
+
     /// Every stop reaches the operator. A `RequireApproval` that skipped
     /// `require_approval` would refuse the tool without ever queueing anything
     /// to park — the bug issue #172 closed — so the new arm is checked to go

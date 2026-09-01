@@ -290,6 +290,9 @@ const UNBOUNDED: &[&str] = &[
     // An arbitrary address, with the tenant's own credentials and a mutating
     // method.
     "http_request",
+    // Writes an arbitrary response body into the workspace `downloads/`
+    // directory — a write this layer cannot bound.
+    "curl",
     // Can push to a configured remote — an address this layer does not see.
     // The declaration table already singles it out for that, refusing it the
     // standing grant its filesystem siblings get.
