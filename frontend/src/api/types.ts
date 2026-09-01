@@ -436,6 +436,15 @@ export interface ChatResponse {
    * field.
    */
   outcome?: ResolveOutcome;
+  /**
+   * Set when a thread reply was intercepted as review feedback on an
+   * `in_review` dispatch card and re-dispatched it instead of answering with
+   * `responses` here. The re-run's own reply still arrives later on the event
+   * stream and in `chat/history` — this only tells the console not to read an
+   * empty `responses` as "the turn produced nothing." Absent on every other
+   * answer, and on a host that predates the field.
+   */
+  reviewFeedbackApplied?: boolean;
 }
 
 /** Where a reviewed card lands: `done` on approve, `in_progress` on revise. */

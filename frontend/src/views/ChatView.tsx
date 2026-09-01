@@ -1671,7 +1671,9 @@ export function ChatView({
               mentions: r.mentions,
             }),
           )
-        : [makeMessage("system", "(no reply)", { parentId })];
+        : reply.reviewFeedbackApplied
+          ? []
+          : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
       // The synchronous response predates mention metadata on some hosts. A
       // reply is already journaled by the time this response arrives, so fetch

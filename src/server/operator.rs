@@ -2010,6 +2010,17 @@ struct ChatResponse {
     /// exactly as it did before rather than guessing.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
+    /// Set when a thread reply was intercepted as review feedback on an
+    /// `in_review` dispatch card and re-dispatched it, rather than answered
+    /// with `responses` here (Codex #3903907771). The re-run's own reply
+    /// still arrives later on the event stream and in `chat/history` — this
+    /// only tells the console not to read an empty `responses` as "the turn
+    /// produced nothing."
+    ///
+    /// Omitted (not `false`) on every other response, so a host predating
+    /// this field is indistinguishable from one that never took this branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_feedback_applied: Option<bool>,
 }
 
 /// The `detach: true` response (issue #983): the turn's id and the durable id of
@@ -2881,6 +2892,7 @@ async fn chat_and_emit(
                 still_awaiting: None,
                 turn_id,
                 outcome: None,
+                review_feedback_applied: Some(true),
             })));
         }
     }
@@ -2984,6 +2996,7 @@ async fn chat_and_emit(
         turn_id,
         // …and it resolves nothing, so there is no resolve outcome to report.
         outcome: None,
+        review_feedback_applied: None,
     })))
 }
 
@@ -4339,6 +4352,7 @@ async fn run_resolve(
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
+        review_feedback_applied: None,
         // A resolve runs a follow-up cycle, not an operator turn, so it opens no
         // turn row of its own.
         turn_id: None,
@@ -13514,6 +13528,122 @@ mode = "full"
             .unwrap();
         let note = after.note.expect("note");
         assert!(note.contains("tighten the intro"), "{note}");
+    }
+
+    /// A thread reply intercepted as review feedback re-dispatches its card
+    /// instead of answering with `responses` here. Codex #3903907771:
+    /// `ChatView.send` reads an empty `responses` as "the turn produced
+    /// nothing" and renders a synthetic "(no reply)" bubble underneath the
+    /// operator's own feedback, even though the card was re-dispatched and
+    /// will answer through its later relay. `reviewFeedbackApplied` is what
+    /// tells the console this empty `responses` is expected.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn thread_reply_review_feedback_marks_the_response_not_empty_handed() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: "Ship it".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::DeskTaskCompleted {
+                    task_id: "t-1".to_string(),
+                    desk: "ceo".to_string(),
+                    output: "done".to_string(),
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    artifact_ids: Vec::new(),
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                },
+            )
+            .await
+            .unwrap();
+        let relay_seq = runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::AgentReply {
+                    chat_id: "strategy".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "Here is the draft.".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        let message = ChatMessage {
+            text: "needs another pass".to_string(),
+            chat: Some("strategy".to_string()),
+            parent: Some(relay_seq.value().to_string()),
+            deliverable: None,
+            detach: false,
+            mentions: None,
+            attachments: Vec::new(),
+        };
+
+        let outcome = chat_and_emit(&state, &id, runtime.clone(), message, None)
+            .await
+            .expect("review feedback applies");
+        let ChatOk::Settled(body) = outcome else {
+            panic!("a synchronous review-feedback intercept must not detach");
+        };
+        assert!(body.responses.is_empty());
+        assert_eq!(
+            body.review_feedback_applied,
+            Some(true),
+            "an empty `responses` here must be marked expected, not read as \
+             a silent turn"
+        );
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        assert_eq!(
+            after.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the reply still re-dispatches the card"
+        );
     }
 
     /// An unrecognized `decision` string rejects with `InvalidRequest` (400)
