@@ -757,6 +757,16 @@ async fn run_workflow_inner(
             &observer,
         ))
     };
+    // Set only on the checkpointed-initial-run branch of the cancel arm below,
+    // where `token.cancel()` is a no-op against the checkpointer engine call
+    // (see `resuming`'s doc comment above). When that is the branch taken, a
+    // finish inside the grace window comes back as an ordinary successful
+    // `RunOutcome` — the engine was never told to stop — so `outcome.cancelled`
+    // alone cannot be trusted to say whether this cancel actually landed. The
+    // match on `outcome_opt` below consults this flag to still honour the
+    // cancel instead of falling through to delivery as though it never
+    // happened.
+    let mut cancel_raced_noop_checkpointer_token = false;
     let outcome_opt = tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => {
@@ -768,6 +778,7 @@ async fn run_workflow_inner(
             // the grace returns its real `cancelled` outcome; a wedged one times
             // out — the `Err` becomes `None`, falling through to the hard abort
             // below.
+            cancel_raced_noop_checkpointer_token = checkpointed;
             token.cancel();
             tokio::time::timeout(CANCEL_HARD_ABORT_GRACE, &mut engine)
                 .await
@@ -858,7 +869,20 @@ async fn run_workflow_inner(
     // `cancelled_run()` reports the stop with an empty body, and the trail is the
     // journal, not this return.
     let outcome = match outcome_opt {
-        Some(Ok(outcome)) => outcome,
+        Some(Ok(mut outcome)) => {
+            // The checkpointed-initial-run race (issue #1991 review): the
+            // token above never reached the engine, so a finish inside the
+            // grace window settles as an ordinary success with
+            // `outcome.cancelled == false` even though the operator asked to
+            // stop. Overriding it here routes into the `outcome.cancelled`
+            // arm below — partial output persisted, no deliveries, no
+            // pending approvals listed — instead of treating an operator's
+            // cancel as though it never happened.
+            if cancel_raced_noop_checkpointer_token && !outcome.cancelled {
+                outcome.cancelled = true;
+            }
+            outcome
+        }
         // Issue #881: the engine failed the run. Before deciding that is what
         // happened, ask whether every node that errored was one the host
         // *blocked* on an approval — because `on_error` defaults to `"stop"`,
@@ -7439,6 +7463,174 @@ to = "ceo"
             })
             .collect();
         assert_eq!(nodes, vec!["shape".to_string()]);
+    }
+
+    /// A model that announces it was reached, then waits to be released before
+    /// answering. The lever for the race below: unlike [`StallingProvider`],
+    /// this one is meant to finish — quickly, and only once the test says so —
+    /// so the cancelled run's grace window can be won by the engine's own
+    /// completion rather than by outlasting it.
+    struct ReleasableProvider {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for ReleasableProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Ok(tinyagents::harness::model::ModelResponse::assistant(
+                "released".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for ReleasableProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "releasable".to_string()
+        }
+    }
+
+    /// `start → shape → ceo → done`, same shape as [`STALLS`] but `done` routes
+    /// to a desk channel — so a run that reaches it actually sends something a
+    /// test can catch.
+    const RELEASABLE_THEN_DELIVERS: &str = r#"
+id = "releasable"
+name = "Releasable"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "shape"
+kind = "transform"
+name = "Shape"
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+prompt = "Think about it."
+[[node]]
+id = "done"
+kind = "output"
+name = "Owner summary"
+[node.destination]
+kind = "channel"
+target = "engineering"
+[[edge]]
+from = "start"
+to = "shape"
+[[edge]]
+from = "shape"
+to = "ceo"
+[[edge]]
+from = "ceo"
+to = "done"
+"#;
+
+    /// **The race the grace window can lose (PR #1991 review, `3903797606`).**
+    /// A checkpointed *initial* run's cancellation token is a no-op —
+    /// `run_with_checkpointer_journaled_observed` takes no `CancellationToken`
+    /// — so the grace window this runner spends before dropping the future is
+    /// not racing the operator's cancel against the node; it is racing it
+    /// against nothing. If the agent node answers inside the grace window (as
+    /// one genuinely close to finishing would), the engine hands back an
+    /// ordinary successful `RunOutcome` with `cancelled == false`. Without the
+    /// override in `run_workflow_inner`, that outcome falls straight through
+    /// to the delivery routing at the bottom of the function — a cancelled run
+    /// mailing its report as though the cancel never happened.
+    #[tokio::test]
+    async fn a_cancelled_checkpointed_initial_run_that_finishes_inside_grace_does_not_deliver() {
+        use crate::runtime::channel::RecordingChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let channel = RecordingChannel::new("engineering");
+        let mut deps = deps(dir.path());
+        deps.provider = Arc::new(ReleasableProvider {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        deps.provider_slug = "releasable".to_string();
+        deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
+            users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
+            channels: vec![Arc::new(channel.clone())],
+            parking: None,
+            events: Arc::new(crate::store::FsEventLog::new(dir.path())),
+        });
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
+        );
+        let file = parse_workflow(RELEASABLE_THEN_DELIVERS).expect("workflow parses");
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                dir.path().join("checkpoints"),
+            ),
+        );
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+        let reached_the_agent = entered.notified();
+
+        let mut run = Box::pin(run_workflow_lane_aware_checkpointed(
+            turn,
+            deps,
+            &rec,
+            &file,
+            Value::Null,
+            &ctx,
+            Some(checkpoints),
+        ));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished, so the agent node did not stall"),
+            () = reached_the_agent => {}
+        }
+
+        let pressed = std::time::Instant::now();
+        cancel.cancel();
+        // Release the node's answer immediately after the cancel: the whole
+        // point is that the engine settles well inside the grace window by
+        // finishing on its own, not by outlasting it.
+        release.notify_one();
+        let run = tokio::time::timeout(CANCEL_HARD_ABORT_GRACE, run)
+            .await
+            .expect("the cancelled run never returned")
+            .expect("a cancelled checkpointed run is not a failure");
+        let elapsed = pressed.elapsed();
+
+        assert!(
+            elapsed < CANCEL_HARD_ABORT_GRACE,
+            "the node answered almost immediately after cancel — {elapsed:?} to settle means \
+             this run reached the grace-window timeout instead of racing the engine's own \
+             completion, which defeats the point of this test"
+        );
+        assert!(
+            run.cancelled,
+            "a run cancelled mid-flight must report that it was stopped even when the \
+             checkpointer's no-op token let the engine finish anyway"
+        );
+        assert!(
+            run.deliveries.is_empty(),
+            "a cancelled run must not proceed to delivery just because its no-op-token engine \
+             call happened to finish inside the grace window: {:?}",
+            run.deliveries
+        );
+        assert!(
+            channel.sent().is_empty(),
+            "the desk channel must never receive a report from a run the operator cancelled"
+        );
     }
 
     /// The same stop works with **no journal wired** — the default-build shape,
