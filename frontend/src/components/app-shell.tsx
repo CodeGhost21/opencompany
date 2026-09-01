@@ -145,6 +145,7 @@ import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { UnknownRouteView } from "@/views/UnknownRouteView";
+import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -1031,8 +1032,8 @@ export function AppShell({
   // Runs once; StrictMode's double invoke is harmless because the first run
   // clears the params the second reads.
   //
-  // The accounts page is `#/settings/oauth` since the Connections split, so the
-  // bounce-back lands there rather than on a top-level view.
+  // The accounts page is `#/connections/apps` since it left the settings rail
+  // for the Connections section, so the bounce-back lands there.
   //
   // Before issue #300 the host answered a cancelled or expired handshake with a
   // JSON body, which the browser rendered as the page — a dead end with no way
@@ -1055,7 +1056,7 @@ export function AppShell({
       "",
       window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
-    setView("settings", "oauth");
+    setView("connections", "apps");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
     const providerName = providerId
@@ -3833,6 +3834,14 @@ export function AppShell({
                 onNavigate={(page) => navigate("finances", page)}
               />
             </Suspense>
+          )}
+          {view === "connections" && (
+            <ConnectionsSection
+              client={client}
+              company={company}
+              sub={sub}
+              onNavigate={(page) => navigate("connections", page)}
+            />
           )}
           {view === "settings" && (
             <SettingsSection

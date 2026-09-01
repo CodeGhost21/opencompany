@@ -145,9 +145,15 @@ describe("resolving an address", () => {
   // has a real replacement; asserting the replacement (and that the address bar
   // follows it) is what keeps a bookmark or habit written before the move alive.
   it.each([
-    ["#/connections", "settings", "oauth"],
-    ["#/oauth", "settings", "oauth"],
-    ["#/mcp", "settings", "mcp"],
+    // Apps and MCP Servers left the settings rail for the Connections section.
+    // Four addresses reach them from before that move: the two bare aliases
+    // that predate the original Connections split, and the two settings
+    // addresses they answered at for as long as they were sub-pages — which are
+    // the ones an operator is most likely to have bookmarked.
+    ["#/oauth", "connections", "apps"],
+    ["#/mcp", "connections", "mcp"],
+    ["#/settings/oauth", "connections", "apps"],
+    ["#/settings/mcp", "connections", "mcp"],
     ["#/people", "settings", "people"],
     ["#/work", "ledgers", "tasks"],
     ["#/settings/not-a-page", "settings", "general"],
@@ -172,6 +178,41 @@ describe("resolving an address", () => {
       expect(window.location.hash).toBe("#/brain");
     },
   );
+
+  // The two addresses that rewrite onto the *section* rather than one of its
+  // pages, so the replacement hash is bare.
+  //
+  // `#/settings/connections` is the dead link this section was built over. It
+  // named the pre-split Connections page, matched no `SETTINGS_PAGES` id after
+  // the split, and so was repaired onto **General** by the branch above — an
+  // operator following it landed on a real page that was not the one the link
+  // promised, which is worse than a 404 because it looks like it worked. It was
+  // still live in four places in the setup flow. It answers again now.
+  //
+  // `#/connections/not-a-page` is the same rule one level down: the section
+  // owns a fixed table of sub-pages, so a segment naming none is repaired to
+  // the section rather than silently rendering Apps under an address that says
+  // something else.
+  it.each(["#/settings/connections", "#/connections/not-a-page"])(
+    "rewrites %s onto the Connections section itself",
+    async (hash) => {
+      rewrite = REWRITE_RETIRED;
+      await visit(hash);
+      expect(seen).toEqual(["connections", null]);
+      expect(window.location.hash).toBe("#/connections");
+    },
+  );
+
+  // `#/connections` is a real address rather than a rewrite now, which is the
+  // load-bearing half of this move: it used to be sent to `#/settings/oauth`.
+  // Named on its own so a regression reads as "the section stopped answering"
+  // rather than as one row of the `VIEWS` loop above.
+  it("answers #/connections as the section itself, not as a rewrite", async () => {
+    rewrite = REWRITE_RETIRED;
+    await visit("#/connections");
+    expect(seen).toEqual(["connections", null]);
+    expect(window.location.hash).toBe("#/connections");
+  });
 
   // #1867 review: `#/work` is a bare-only alias onto the ledgers board — the
   // Work surface's real sub-pages are addressed under `#/ledgers/...` (for
