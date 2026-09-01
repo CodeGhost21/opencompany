@@ -31,8 +31,8 @@ use crate::error::OpenCompanyError;
 use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
-use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::runs::{RunFilter, RunOutcome, RunStatus};
+use crate::ports::tasks::{COLUMN_TODO, TaskRecord, column_label};
 use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
@@ -80,7 +80,13 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// **An operator message is not only what the operator typed.** For a message
 /// addressed to a desk or teammate, the cycle appends a briefing of that
 /// target's open cards before the brain ever sees it — so `text` arrives as
-/// `<what the operator wrote>` + this marker + `<a list of card titles>`.
+/// `<what the operator wrote>` + this marker + `<a list of card lines>`.
+///
+/// Since issue #1859 each line carries more than a title: the card's board
+/// column ([`column_label`]) and, when at least one attempt has run, the
+/// latest attempt's 1-based ordinal and [`RunStatus`] — so the briefing (and
+/// the model reading it) can distinguish "todo, never attempted" from "paused
+/// on its second attempt" instead of rendering every open card identically.
 ///
 /// This exists as a shared constant because issue #442 needs to read the
 /// operator's own words back out of that: it decides whether a message asks for
@@ -96,6 +102,17 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// builds its input from this constant so a wording change fails the test rather
 /// than silently un-splitting the message.
 pub(crate) const OPEN_WORK_ANNOTATION: &str = "\n\n[Open work already handed to you";
+
+/// Cap on how many of a target's open cards get a `list_runs` attempt lookup
+/// while building the handed-task briefing (issue #176).
+///
+/// The lookup runs once per matching card while the per-agent/serial cycle
+/// guard is held, so an assignee with many open cards would otherwise pay one
+/// store round trip per card, in sequence, before the brain even sees the
+/// message. Bounding it keeps the worst case constant regardless of board
+/// size; cards past the cap still render with their column, just without an
+/// attempt clause — the same shape a never-attempted card already renders as.
+const HANDED_TASK_ATTEMPT_LOOKUP_CAP: usize = 8;
 
 /// Where the thread index begins on an operator message (issue #1890 E,
 /// written by [`inject_thread_index`](CycleRunner::inject_thread_index)).
@@ -1328,16 +1345,53 @@ impl<'a> CycleRunner<'a> {
             // Bound before the borrow of `text` below, since both briefings
             // append to it.
             let thread = *parent;
-            let mut lines: Vec<String> = open
+            let mut lines: Vec<String> = Vec::new();
+            for (idx, c) in open
                 .iter()
                 .filter(|c| assignment_matches(record, target.as_str(), &c.assignee))
-                .map(|c| match &c.note {
-                    Some(note) if !note.trim().is_empty() => {
-                        format!("- {} — {}", c.title, first_line(note, 120))
+                .enumerate()
+            {
+                // The latest attempt's ordinal + status, when one has run.
+                // `list_runs` orders newest-first, so the first row is the
+                // latest attempt. A card nobody has attempted yet omits the
+                // clause; a run-history read failure marks it unavailable
+                // rather than looking indistinguishable from no attempt.
+                //
+                // Bounded to `HANDED_TASK_ATTEMPT_LOOKUP_CAP` lookups: past
+                // the cap a card renders with no attempt clause, same as one
+                // nobody has attempted, rather than paying another guarded
+                // round trip.
+                let attempt_clause = if idx < HANDED_TASK_ATTEMPT_LOOKUP_CAP {
+                    match self
+                        .rt
+                        .runs()
+                        .list_runs(
+                            &self.rt.id,
+                            &RunFilter::for_task(c.id.as_str()).with_limit(1),
+                        )
+                        .await
+                    {
+                        Ok(runs) => match runs.first() {
+                            Some(run) => {
+                                format!(" · attempt {} {}", run.attempt, run.status.as_str())
+                            }
+                            None => String::new(),
+                        },
+                        Err(_) => " · attempt status unavailable".to_string(),
                     }
-                    _ => format!("- {}", c.title),
-                })
-                .collect();
+                } else {
+                    String::new()
+                };
+                let column = column_label(&c.column);
+                lines.push(match &c.note {
+                    Some(note) if !note.trim().is_empty() => format!(
+                        "- {} [{column}{attempt_clause}] — {}",
+                        c.title,
+                        first_line(note, 120)
+                    ),
+                    _ => format!("- {} [{column}{attempt_clause}]", c.title),
+                });
+            }
             if !lines.is_empty() {
                 lines.sort();
                 text.push_str(&format!(
@@ -4084,6 +4138,408 @@ mod test {
             );
         }
         assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
+    }
+
+    /// Issue #1859: the handed-task briefing distinguishes real board state
+    /// instead of rendering every open card as a bare title. Two cards, two
+    /// different shapes: a paused card with two attempts (the latest failed)
+    /// renders `[Paused · attempt 2 failed]` — the LATEST attempt, not the
+    /// first, which succeeded; a to-do card nobody has attempted yet renders
+    /// `[To-do]` with the attempt clause omitted entirely rather than
+    /// claiming an attempt that never happened.
+    #[tokio::test]
+    async fn handed_task_briefing_carries_column_and_attempt_status() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let card = |id: &str, title: &str, column: &str| TaskRecord {
+            id: id.to_string(),
+            title: title.to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            origin_parent: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        rt.tasks()
+            .upsert(
+                rt.id(),
+                &card(
+                    "t-paused",
+                    "Investigate the flaky nightly job",
+                    crate::ports::tasks::COLUMN_PAUSED,
+                ),
+            )
+            .await
+            .unwrap();
+        rt.tasks()
+            .upsert(
+                rt.id(),
+                &card("t-todo", "Draft the launch memo", COLUMN_TODO),
+            )
+            .await
+            .unwrap();
+
+        // Two attempts at the paused card: the first succeeded, the second
+        // (newest) failed — the briefing must report the LATEST.
+        let mut r1 = rt
+            .runs()
+            .create_run(
+                rt.id(),
+                crate::ports::runs::NewRun::for_task("r1", "t-paused", "ceo"),
+            )
+            .await
+            .unwrap();
+        r1.status = RunStatus::Succeeded;
+        rt.runs().put_run(rt.id(), &r1).await.unwrap();
+        let mut r2 = rt
+            .runs()
+            .create_run(
+                rt.id(),
+                crate::ports::runs::NewRun::for_task("r2", "t-paused", "ceo"),
+            )
+            .await
+            .unwrap();
+        r2.status = RunStatus::Failed;
+        rt.runs().put_run(rt.id(), &r2).await.unwrap();
+        // t-todo gets no run at all.
+
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            text: "what are you working on?".into(),
+            by: Some(operator()),
+            chat: Some("ceo".into()),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }];
+
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(rt.id()).await.expect("list"),
+            )
+            .await;
+
+        let CompanyEvent::OperatorMessage { text, .. } = &events[0] else {
+            unreachable!("fixture is an operator message");
+        };
+        assert!(
+            text.contains("- Investigate the flaky nightly job [Paused · attempt 2 failed]"),
+            "the paused card must show its column and its LATEST attempt's status: {text}"
+        );
+        assert!(
+            text.contains("- Draft the launch memo [To-do]"),
+            "a never-attempted card must show its column with no attempt clause: {text}"
+        );
+        assert!(
+            !text.contains("Draft the launch memo [To-do · attempt"),
+            "a card with zero runs must never claim an attempt: {text}"
+        );
+    }
+
+    /// Wraps a real [`crate::ports::RunStore`] but fails every `list_runs`
+    /// call, to prove a run-history read failure surfaces distinctly from "no
+    /// attempts" instead of being silently swallowed into an empty result.
+    struct FailingRunHistory(Arc<dyn crate::ports::RunStore>);
+
+    #[async_trait]
+    impl crate::ports::RunStore for FailingRunHistory {
+        async fn create_run(
+            &self,
+            company: &CompanyId,
+            spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<crate::ports::runs::RunRecord> {
+            self.0.create_run(company, spec).await
+        }
+
+        async fn get_run(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> crate::Result<Option<crate::ports::runs::RunRecord>> {
+            self.0.get_run(company, id).await
+        }
+
+        async fn put_run(
+            &self,
+            company: &CompanyId,
+            run: &crate::ports::runs::RunRecord,
+        ) -> crate::Result<()> {
+            self.0.put_run(company, run).await
+        }
+
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<crate::ports::runs::RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-history read failure".into(),
+            ))
+        }
+
+        async fn append_run_step(
+            &self,
+            company: &CompanyId,
+            step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            self.0.append_run_step(company, step).await
+        }
+
+        async fn list_run_steps(
+            &self,
+            company: &CompanyId,
+            run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            self.0.list_run_steps(company, run_id).await
+        }
+    }
+
+    /// A run-history read failure, not "no attempts": the briefing must mark
+    /// the card's attempt status unavailable rather than rendering it
+    /// identically to a card nobody has ever attempted.
+    #[tokio::test]
+    async fn handed_task_briefing_marks_attempt_status_unavailable_on_a_run_history_read_failure() {
+        let home_dir = tmp_home();
+        let runs_backing: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(home_dir.path().to_path_buf()));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_runs(Arc::new(FailingRunHistory(runs_backing)))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        rt.tasks()
+            .upsert(
+                rt.id(),
+                &TaskRecord {
+                    id: "t-paused".to_string(),
+                    title: "Investigate the flaky nightly job".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    origin_parent: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            text: "what are you working on?".into(),
+            by: Some(operator()),
+            chat: Some("ceo".into()),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }];
+
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(rt.id()).await.expect("list"),
+            )
+            .await;
+
+        let CompanyEvent::OperatorMessage { text, .. } = &events[0] else {
+            unreachable!("fixture is an operator message");
+        };
+        assert!(
+            text.contains("attempt status unavailable"),
+            "a run-history read failure must be marked unavailable: {text}"
+        );
+        assert!(
+            !text.contains("[Paused]"),
+            "must not render identically to a card with no attempt clause at all: {text}"
+        );
+    }
+
+    /// Wraps a real [`crate::ports::RunStore`] and counts `list_runs` calls,
+    /// to prove the handed-task briefing's per-card attempt lookup is bounded
+    /// rather than growing with however many cards an assignee has open.
+    struct CountingRunHistory {
+        inner: Arc<dyn crate::ports::RunStore>,
+        list_runs_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::ports::RunStore for CountingRunHistory {
+        async fn create_run(
+            &self,
+            company: &CompanyId,
+            spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<crate::ports::runs::RunRecord> {
+            self.inner.create_run(company, spec).await
+        }
+
+        async fn get_run(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> crate::Result<Option<crate::ports::runs::RunRecord>> {
+            self.inner.get_run(company, id).await
+        }
+
+        async fn put_run(
+            &self,
+            company: &CompanyId,
+            run: &crate::ports::runs::RunRecord,
+        ) -> crate::Result<()> {
+            self.inner.put_run(company, run).await
+        }
+
+        async fn list_runs(
+            &self,
+            company: &CompanyId,
+            filter: &RunFilter,
+        ) -> crate::Result<Vec<crate::ports::runs::RunRecord>> {
+            self.list_runs_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.list_runs(company, filter).await
+        }
+
+        async fn append_run_step(
+            &self,
+            company: &CompanyId,
+            step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            self.inner.append_run_step(company, step).await
+        }
+
+        async fn list_run_steps(
+            &self,
+            company: &CompanyId,
+            run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            self.inner.list_run_steps(company, run_id).await
+        }
+    }
+
+    /// An assignee with more open cards than [`HANDED_TASK_ATTEMPT_LOOKUP_CAP`]
+    /// must not pay one `list_runs` round trip per card while the cycle guard
+    /// is held — the lookup is bounded, and cards past the cap still render
+    /// (with no attempt clause) rather than being dropped from the briefing.
+    #[tokio::test]
+    async fn handed_task_briefing_bounds_attempt_lookups_regardless_of_open_card_count() {
+        let home_dir = tmp_home();
+        let runs_backing: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(home_dir.path().to_path_buf()));
+        let counting = Arc::new(CountingRunHistory {
+            inner: runs_backing,
+            list_runs_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_runs(counting.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let card_count = HANDED_TASK_ATTEMPT_LOOKUP_CAP + 4;
+        for n in 0..card_count {
+            rt.tasks()
+                .upsert(
+                    rt.id(),
+                    &TaskRecord {
+                        id: format!("t-{n}"),
+                        title: format!("Card {n}"),
+                        note: None,
+                        column: COLUMN_TODO.to_string(),
+                        priority: "medium".to_string(),
+                        assignee: "ceo".to_string(),
+                        updated_at_millis: 1,
+                        origin_chat_id: None,
+                        origin_parent: None,
+                        parent_task_id: None,
+                        output: None,
+                        plan: None,
+                        planning_attempts: Vec::new(),
+                        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                        workflow_proposal: None,
+                        origin_run_id: None,
+                        origin_workflow_id: None,
+                        bounced: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            text: "what are you working on?".into(),
+            by: Some(operator()),
+            chat: Some("ceo".into()),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }];
+
+        let baseline = counting
+            .list_runs_calls
+            .load(std::sync::atomic::Ordering::Relaxed);
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(rt.id()).await.expect("list"),
+            )
+            .await;
+
+        assert_eq!(
+            counting
+                .list_runs_calls
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - baseline,
+            HANDED_TASK_ATTEMPT_LOOKUP_CAP,
+            "the attempt lookup must not run once per open card — it must stop at the cap"
+        );
+        let CompanyEvent::OperatorMessage { text, .. } = &events[0] else {
+            unreachable!("fixture is an operator message");
+        };
+        for n in 0..card_count {
+            assert!(
+                text.contains(&format!("Card {n}")),
+                "every open card must still render, even past the lookup cap: {text}"
+            );
+        }
     }
 
     // ── Issue #1725: a bare greeting must not run the agentic loop ──
