@@ -6493,6 +6493,7 @@ mod tests {
             agent_id: &str,
             message: &str,
             _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
             _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
         ) -> crate::Result<crate::harness::TurnOutcome> {
             self.run(
