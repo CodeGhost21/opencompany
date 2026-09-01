@@ -76,10 +76,14 @@ export const SETTINGS_PAGES = [
   // Skills, which is the other half of the same pair: what teammates are told
   // to do, and what they did.
   //
-  // Only the index lives at `#/settings/observatory`. A single run keeps its
-  // own top-level address, `#/observatory/<runId>`, because workflow rows,
-  // approval cards and chat all link straight to one — burying that behind a
-  // settings rail would break every link that names a run.
+  // This row is a doorway, not the address. `#/settings/observatory` is
+  // rewritten straight back onto `#/observatory` by `console-route-rewrites.ts`
+  // — the Observatory reads four query keys off the hash and keys them on its
+  // head being `observatory`, so under `#/settings/…` its analytics tab and its
+  // agent/turn selection stop being addressable. A single run keeps the same
+  // top-level shape, `#/observatory/<runId>`, because workflow rows, approval
+  // cards and chat all link straight to one — burying that behind a settings
+  // rail would break every link that names a run.
   { id: "observatory", label: "Observatory", icon: Activity, hint: "What your teammates actually did", group: "capability" },
   // Brain is NOT here: it has its own nav row (`#/brain`). It was the one page
   // on this rail an operator came to *read* rather than to change — settings

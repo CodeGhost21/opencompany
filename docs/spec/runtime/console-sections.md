@@ -54,7 +54,7 @@ Selecting a section swaps the block **below** them; it does not expand a row in
 place and does not displace a row's siblings. Exactly one section's contents are
 on screen at a time.
 
-```
+```text
 ┌─────────────────┐
 │ ■ Room          │  the four, fixed — they do not
 │   Company       │  move when you switch section
