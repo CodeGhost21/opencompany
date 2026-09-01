@@ -1214,11 +1214,11 @@ impl<'a> CycleRunner<'a> {
                 .iter()
                 .filter(|c| assignment_matches(record, target.as_str(), &c.assignee))
             {
-                // Issue #1859: the latest attempt's ordinal + status, when one
-                // has run. `list_runs` orders newest-first, so the first row is
-                // the latest attempt; a card nobody has attempted yet queries
-                // clean and simply omits the clause rather than claiming an
-                // attempt that never happened.
+                // The latest attempt's ordinal + status, when one has run.
+                // `list_runs` orders newest-first, so the first row is the
+                // latest attempt. A card nobody has attempted yet omits the
+                // clause; a run-history read failure marks it unavailable
+                // rather than looking indistinguishable from no attempt.
                 let attempt_clause = match self
                     .rt
                     .runs()
@@ -1227,11 +1227,14 @@ impl<'a> CycleRunner<'a> {
                         &RunFilter::for_task(c.id.as_str()).with_limit(1),
                     )
                     .await
-                    .unwrap_or_default()
-                    .first()
                 {
-                    Some(run) => format!(" · attempt {} {}", run.attempt, run.status.as_str()),
-                    None => String::new(),
+                    Ok(runs) => match runs.first() {
+                        Some(run) => {
+                            format!(" · attempt {} {}", run.attempt, run.status.as_str())
+                        }
+                        None => String::new(),
+                    },
+                    Err(_) => " · attempt status unavailable".to_string(),
                 };
                 let column = column_label(&c.column);
                 lines.push(match &c.note {
@@ -3697,6 +3700,134 @@ mod test {
         assert!(
             !text.contains("Draft the launch memo [To-do · attempt"),
             "a card with zero runs must never claim an attempt: {text}"
+        );
+    }
+
+    /// Wraps a real [`crate::ports::RunStore`] but fails every `list_runs`
+    /// call, to prove a run-history read failure surfaces distinctly from "no
+    /// attempts" instead of being silently swallowed into an empty result.
+    struct FailingRunHistory(Arc<dyn crate::ports::RunStore>);
+
+    #[async_trait]
+    impl crate::ports::RunStore for FailingRunHistory {
+        async fn create_run(
+            &self,
+            company: &CompanyId,
+            spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<crate::ports::runs::RunRecord> {
+            self.0.create_run(company, spec).await
+        }
+
+        async fn get_run(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> crate::Result<Option<crate::ports::runs::RunRecord>> {
+            self.0.get_run(company, id).await
+        }
+
+        async fn put_run(
+            &self,
+            company: &CompanyId,
+            run: &crate::ports::runs::RunRecord,
+        ) -> crate::Result<()> {
+            self.0.put_run(company, run).await
+        }
+
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<crate::ports::runs::RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-history read failure".into(),
+            ))
+        }
+
+        async fn append_run_step(
+            &self,
+            company: &CompanyId,
+            step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            self.0.append_run_step(company, step).await
+        }
+
+        async fn list_run_steps(
+            &self,
+            company: &CompanyId,
+            run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            self.0.list_run_steps(company, run_id).await
+        }
+    }
+
+    /// A run-history read failure, not "no attempts": the briefing must mark
+    /// the card's attempt status unavailable rather than rendering it
+    /// identically to a card nobody has ever attempted.
+    #[tokio::test]
+    async fn handed_task_briefing_marks_attempt_status_unavailable_on_a_run_history_read_failure() {
+        let home_dir = tmp_home();
+        let runs_backing: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(home_dir.path().to_path_buf()));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .with_runs(Arc::new(FailingRunHistory(runs_backing)))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        rt.tasks()
+            .upsert(
+                rt.id(),
+                &TaskRecord {
+                    id: "t-paused".to_string(),
+                    title: "Investigate the flaky nightly job".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            text: "what are you working on?".into(),
+            by: Some(operator()),
+            chat: Some("ceo".into()),
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }];
+
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(&record, &mut events)
+            .await;
+
+        let CompanyEvent::OperatorMessage { text, .. } = &events[0] else {
+            unreachable!("fixture is an operator message");
+        };
+        assert!(
+            text.contains("attempt status unavailable"),
+            "a run-history read failure must be marked unavailable: {text}"
+        );
+        assert!(
+            !text.contains("[Paused]"),
+            "must not render identically to a card with no attempt clause at all: {text}"
         );
     }
 

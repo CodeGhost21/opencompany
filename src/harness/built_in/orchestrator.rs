@@ -1642,51 +1642,56 @@ impl Tool for QueryCompanyTool {
         let mut board_open_count = 0usize;
         md.push_str("\n## Board\n");
         match &self.tasks {
-            Some(tasks) => {
-                let cards = tasks.list(&self.company).await.unwrap_or_default();
-                let total_open = cards.iter().filter(|c| c.column != COLUMN_DONE).count();
-                if total_open == 0 {
-                    md.push_str("_No open cards._\n");
-                } else {
-                    let mut shown = 0usize;
-                    for column in BOARD_COLUMNS {
-                        if column == COLUMN_DONE {
-                            continue;
-                        }
-                        let in_column: Vec<&TaskRecord> =
-                            cards.iter().filter(|c| c.column == column).collect();
-                        if in_column.is_empty() {
-                            continue;
-                        }
-                        let mut titles: Vec<&str> = Vec::new();
-                        for c in &in_column {
-                            if shown >= LIST_TASKS_LIMIT {
-                                break;
+            Some(tasks) => match tasks.list(&self.company).await {
+                Ok(cards) => {
+                    let total_open = cards.iter().filter(|c| c.column != COLUMN_DONE).count();
+                    if total_open == 0 {
+                        md.push_str("_No open cards._\n");
+                    } else {
+                        let mut shown = 0usize;
+                        for column in BOARD_COLUMNS {
+                            if column == COLUMN_DONE {
+                                continue;
                             }
-                            titles.push(c.title.as_str());
-                            shown += 1;
-                        }
-                        md.push_str(&format!(
-                            "- **{}** ({}): {}\n",
-                            column_label(column),
-                            in_column.len(),
-                            if titles.is_empty() {
-                                "…".to_string()
-                            } else {
-                                titles.join("; ")
+                            let in_column: Vec<&TaskRecord> =
+                                cards.iter().filter(|c| c.column == column).collect();
+                            if in_column.is_empty() {
+                                continue;
                             }
-                        ));
+                            let mut titles: Vec<&str> = Vec::new();
+                            for c in &in_column {
+                                if shown >= LIST_TASKS_LIMIT {
+                                    break;
+                                }
+                                titles.push(c.title.as_str());
+                                shown += 1;
+                            }
+                            md.push_str(&format!(
+                                "- **{}** ({}): {}\n",
+                                column_label(column),
+                                in_column.len(),
+                                if titles.is_empty() {
+                                    "…".to_string()
+                                } else {
+                                    titles.join("; ")
+                                }
+                            ));
+                        }
+                        if shown < total_open {
+                            md.push_str(&format!(
+                                "\n[TRUNCATED — {} more open card(s) not shown here. Use \
+                                 `{LIST_TASKS_TOOL}` to page through the rest.]\n",
+                                total_open - shown
+                            ));
+                        }
                     }
-                    if shown < total_open {
-                        md.push_str(&format!(
-                            "\n[TRUNCATED — {} more open card(s) not shown here. Use \
-                             `{LIST_TASKS_TOOL}` to page through the rest.]\n",
-                            total_open - shown
-                        ));
-                    }
+                    board_open_count = total_open;
                 }
-                board_open_count = total_open;
-            }
+                Err(err) => {
+                    tracing::debug!(company = %self.company, error = %err, "query_company: board read failed");
+                    md.push_str("_Board unavailable._\n");
+                }
+            },
             None => md.push_str("_Board unavailable._\n"),
         }
 
@@ -1813,7 +1818,15 @@ impl Tool for ListTasksTool {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let mut cards = tasks.list(&self.company).await.unwrap_or_default();
+        let mut cards = match tasks.list(&self.company).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                tracing::debug!(company = %self.company, error = %err, "list_tasks: board read failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the task board: {err}"
+                )));
+            }
+        };
         cards.retain(|c| match column_filter {
             Some(col) => c.column == col,
             None => c.column != COLUMN_DONE,
@@ -1966,7 +1979,15 @@ impl Tool for ReadTaskTool {
             ));
         };
 
-        let cards = tasks.list(&self.company).await.unwrap_or_default();
+        let cards = match tasks.list(&self.company).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                tracing::debug!(company = %self.company, error = %err, "read_task: board read failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the task board: {err}"
+                )));
+            }
+        };
         let Some(card) = cards.into_iter().find(|c| c.id == task_id) else {
             return Ok(ToolResult::error(format!(
                 "No card `{task_id}` on this board. Call `{LIST_TASKS_TOOL}` for the current ids."
@@ -2040,10 +2061,6 @@ impl Tool for ReadTaskTool {
                     }
                 }
             }
-            // No artifact store wired: fall back to the card's own recorded
-            // output stamp rather than reaching for the journal — see
-            // `TaskRecord::output`'s docs for what it means for a card to
-            // carry one.
             None => match &card.output {
                 Some(output) => match output.source.run_id() {
                     Some(run_id) => md.push_str(&format!(
@@ -11997,6 +12014,84 @@ name = "Morning"
         assert!(
             board_at > desks_at,
             "Board must render after Desks, never before: {out}"
+        );
+    }
+
+    /// A task board that cannot answer, so a read failure never collapses
+    /// into an empty or missing board.
+    struct BrokenTaskStore;
+
+    #[async_trait]
+    impl TaskStore for BrokenTaskStore {
+        async fn list(&self, _company: &CompanyId) -> crate::Result<Vec<TaskRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated board read failure".into(),
+            ))
+        }
+        async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn list_tasks_reports_a_read_failure_instead_of_an_empty_board() {
+        let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
+        let tool = ListTasksTool::new(CompanyId::new("acme"), Some(tasks), None);
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(
+            result.is_error,
+            "a board read failure must be a refusal, not a silently empty board"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No matching cards"),
+            "must not claim the board is simply empty: {text}"
+        );
+        assert!(text.contains("Couldn't read the task board"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn read_task_reports_a_read_failure_instead_of_a_missing_card() {
+        let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool.execute(json!({ "task_id": "t-1" })).await.unwrap();
+        assert!(
+            result.is_error,
+            "a board read failure must be a refusal, not a fabricated missing-card error"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No card `t-1`"),
+            "must not claim the card doesn't exist when the board couldn't be read: {text}"
+        );
+        assert!(text.contains("Couldn't read the task board"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn query_company_board_section_reports_unavailable_on_a_read_failure_not_empty() {
+        let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
+        let tool =
+            QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, Some(tasks));
+        let result = tool.execute(json!({})).await.unwrap();
+        assert!(!result.is_error, "the whole tool must still answer");
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No open cards"),
+            "must not claim the board is empty when it could not be read: {text}"
+        );
+        assert!(text.contains("Board unavailable"), "{text}");
+
+        let payload = match &result.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("expected a JSON content block, got {other:?}"),
+        };
+        assert_eq!(
+            payload["board_open"], 0,
+            "board_open must stay at zero on a read failure, not report a fabricated count: \
+             {payload}"
         );
     }
 }
