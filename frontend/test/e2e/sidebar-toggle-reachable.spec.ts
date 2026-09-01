@@ -80,10 +80,16 @@ test.describe("sidebar toggle reachability", () => {
     await page.goto("/#/overview");
     await dismissTour(page);
 
+    // `toBeHidden`, not `toHaveCount(0)`: the gate is CSS (`hidden md:block`),
+    // matching the `md:hidden` on the mobile trigger it defers to, so the node
+    // stays in the DOM with `display: none`. That is the whole claim, because
+    // `display: none` also takes an element out of the accessibility tree and
+    // out of the tab order — which the role query on the next line is what
+    // actually proves.
     await expect(
       page.getByTestId("sidebar-collapse"),
-      "the seam control does not render below md",
-    ).toHaveCount(0);
+      "the seam control is not shown below md",
+    ).toBeHidden();
     await expect(
       page.getByRole("button", { name: "Collapse sidebar", exact: true }),
       "…so nothing here claims it collapses a column that is a sheet",
@@ -97,9 +103,12 @@ test.describe("sidebar toggle reachability", () => {
     await expect(page.getByRole("dialog", { name: "Sidebar" })).toBeVisible();
 
     // And it comes back at `md`, which is what stops this being satisfied by a
-    // control that was deleted rather than gated.
+    // control that was deleted, or hidden at every width, rather than gated.
     await page.setViewportSize({ width: 1024, height: 800 });
-    await expect(page.getByTestId("sidebar-collapse")).toHaveCount(1);
+    await expect(page.getByTestId("sidebar-collapse")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Collapse sidebar", exact: true }),
+    ).toHaveCount(1);
   });
 
   test("the mobile sheet closes after selecting a destination", async ({ page }) => {
