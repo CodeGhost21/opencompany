@@ -396,6 +396,8 @@ mod tests {
             [node.postcondition]
             require = "field_present"
             field = "json.items"
+            [node.verify]
+            criteria = "Name the evidence."
             [[edge]]
             from = "start"
             to = "worker"
@@ -412,6 +414,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&worker.postcondition.as_ref().unwrap().0).unwrap(),
             json!({ "require": "field_present", "field": "json.items" })
+        );
+        assert_eq!(
+            serde_json::to_value(&worker.verify.as_ref().unwrap().0).unwrap(),
+            json!({ "criteria": "Name the evidence." })
         );
     }
 }
