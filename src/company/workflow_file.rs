@@ -421,6 +421,10 @@ pub struct WorkflowNodeDef {
     /// slice — see [`WorkflowPostconditionDef`]. `None` (every legacy graph)
     /// keeps the pre-#1866 behaviour: quality is assumed, never checked.
     pub postcondition: Option<WorkflowPostconditionDef>,
+    /// A semantic sufficiency check run after the deterministic postcondition.
+    /// Agent nodes only. Presence opts the node into one bounded, tool-less
+    /// judge pass; absent keeps the legacy path unchanged.
+    pub verify: Option<WorkflowJudgeDef>,
 }
 
 /// Where an `output` node's report goes when the run completes.
@@ -497,6 +501,14 @@ pub struct WorkflowPostconditionDef {
     /// output); unused by `non_empty`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+}
+
+/// A node's semantic sufficiency policy.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WorkflowJudgeDef {
+    /// An optional author-supplied standard in addition to the node's own ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criteria: Option<String>,
 }
 
 /// A directed edge between two nodes.
@@ -597,6 +609,8 @@ pub(crate) struct RawNode {
     /// above — kept beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) postcondition: Option<WorkflowPostconditionDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) verify: Option<WorkflowJudgeDef>,
     /// Kept LAST in the struct: `toml::to_string` refuses to emit a scalar after
     /// a table, so a table-valued field must not be followed by a scalar one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -769,6 +783,12 @@ pub(crate) fn project_workflow_spec(raw: &RawWorkflow) -> WorkflowSpecProjection
                 serde_json::to_string(postcondition).unwrap_or_else(|_| "set".to_string()),
             ));
         }
+        if let Some(verify) = &node.verify {
+            fields.push((
+                "verify",
+                serde_json::to_string(verify).unwrap_or_else(|_| "set".to_string()),
+            ));
+        }
         if !fields.is_empty() {
             unexpressible.push((node.id.clone(), fields));
         }
@@ -882,6 +902,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 repeatable: node.repeatable,
                 destination: node.destination,
                 postcondition: node.postcondition,
+                verify: node.verify,
             })
             .collect(),
         edges: raw
@@ -1654,6 +1675,24 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
             }
         }
 
+        if let Some(verify) = &node.verify {
+            if kind != Some(WorkflowNodeKind::Agent) {
+                problems.push(format!(
+                    "{label} sets `verify` but is a `{}` node — only `agent` nodes carry semantic verification today.",
+                    node.kind
+                ));
+            }
+            if verify
+                .criteria
+                .as_deref()
+                .is_some_and(|criteria| criteria.trim().is_empty())
+            {
+                problems.push(format!(
+                    "{label} has blank `verify.criteria` — state the semantic standard or omit `criteria`."
+                ));
+            }
+        }
+
         // Reserved config keys: the first-class fields above are written into
         // the engine config LAST, so a `config` entry naming one would be
         // silently ignored — reject it as a footgun instead. `destination` is
@@ -1670,6 +1709,7 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 "destination",
                 "repeatable",
                 "postcondition",
+                "verify",
             ] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
@@ -2330,6 +2370,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -2345,6 +2386,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -2391,6 +2433,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -2409,6 +2452,7 @@ mod tests {
                         require: "field_present".to_string(),
                         field: Some("json.items".to_string()),
                     }),
+                    verify: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -2463,6 +2507,7 @@ mod tests {
                     require: "non_empty".to_string(),
                     field: None,
                 }),
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -2513,6 +2558,7 @@ mod tests {
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: vec![],
         };
@@ -2869,6 +2915,52 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("only `agent` nodes carry a postcondition"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn semantic_verify_parses_only_on_agent_nodes() {
+        let valid = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.verify]
+            criteria = "Name one recommendation and its evidence."
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let file = parse_workflow(valid).expect("semantic verification is valid on an agent");
+        assert_eq!(
+            file.nodes[1]
+                .verify
+                .as_ref()
+                .and_then(|verify| verify.criteria.as_deref()),
+            Some("Name one recommendation and its evidence.")
+        );
+
+        let invalid = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.verify]
+        "#;
+        let err = parse_workflow(invalid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only `agent` nodes carry semantic verification"),
             "{err}"
         );
     }
@@ -4385,6 +4477,7 @@ to = "to_channel"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -4403,6 +4496,7 @@ to = "to_channel"
                         target: Some("ada@example.com".to_string()),
                     }),
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -4442,6 +4536,7 @@ to = "to_channel"
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -4475,6 +4570,7 @@ to = "to_channel"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -4490,6 +4586,7 @@ to = "to_channel"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -4709,6 +4806,7 @@ to = "to_channel"
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -4744,6 +4842,7 @@ to = "to_channel"
                     repeatable: None,
                     destination: n.destination.clone(),
                     postcondition: None,
+                    verify: None,
                 })
                 .collect(),
             edges: Vec::new(),

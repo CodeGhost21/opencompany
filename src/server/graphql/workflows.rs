@@ -15,7 +15,8 @@ use async_graphql::{Context, ID, SimpleObject};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::company::{
-    WorkflowFile, WorkflowPostconditionDef, list_workflows_with_globals, load_workflow_with_globals,
+    WorkflowFile, WorkflowJudgeDef, WorkflowPostconditionDef, list_workflows_with_globals,
+    load_workflow_with_globals,
 };
 use crate::ports::types::OverlayWorkflow;
 
@@ -85,6 +86,8 @@ pub struct WorkflowNodeGql {
     /// scalar for the same reason `destination` is — `require`/`field` are
     /// single words, so no camelCase mirror is needed.
     pub postcondition: Option<async_graphql::Json<WorkflowPostconditionDef>>,
+    /// Optional semantic sufficiency policy, exposed as JSON like postcondition.
+    pub verify: Option<async_graphql::Json<WorkflowJudgeDef>>,
 }
 
 /// The camelCase retry shape the console reads back over GraphQL, mirroring the
@@ -143,6 +146,7 @@ impl From<WorkflowFile> for WorkflowGql {
                     requires_approval: node.requires_approval,
                     destination: node.destination.map(async_graphql::Json),
                     postcondition: node.postcondition.map(async_graphql::Json),
+                    verify: node.verify.map(async_graphql::Json),
                 })
                 .collect(),
             edges: file

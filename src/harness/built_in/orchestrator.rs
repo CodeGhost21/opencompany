@@ -4804,6 +4804,7 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
                 repeatable: None,
                 destination: n.destination,
                 postcondition: None,
+                verify: None,
             });
         }
         Ok(Self {
