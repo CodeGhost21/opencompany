@@ -691,6 +691,13 @@ async fn run_workflow_inner(
     // `tokio::pin!`ed local is not.
     let token = tinyflows::engine::CancellationToken::new();
     let checkpointed = checkpoint_store.is_some() && !dry_run;
+    // Only an actual resume lacks a cancellation path into the engine —
+    // `resume_with_checkpointer_journaled_observed` takes no token. A
+    // checkpointed *initial* run still goes through the grace-then-drop wait
+    // below: the token itself is a no-op against the checkpointer engine
+    // call, but the wait still lets a node that is genuinely close to
+    // finishing (not wedged) settle before the future is dropped.
+    let resuming = checkpointed && ctx.checkpoint_resume.is_some();
     let mut engine: std::pin::Pin<
         Box<
             dyn std::future::Future<
@@ -753,7 +760,7 @@ async fn run_workflow_inner(
     let outcome_opt = tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => {
-            if checkpointed {
+            if resuming {
                 None
             } else {
             // Node-boundary stop: flip the engine's token so it winds down
@@ -7290,6 +7297,83 @@ to = "ceo"
             })
             .collect();
         assert_eq!(completed, vec!["gate", "shape"]);
+    }
+
+    /// A checkpointed **initial** run (no `checkpoint_resume`) is not a resume,
+    /// but production always attaches a checkpoint store — see
+    /// `RuntimeBuilder`, which installs one unconditionally per company and
+    /// hands it to every `HarnessWorkflowRunner` it builds. Cancelling a run
+    /// like this must still spend the grace window before dropping the engine
+    /// future, the same as an unchequered run: an immediate drop would
+    /// interrupt whatever the current node's external effect was mid-request.
+    #[tokio::test]
+    async fn a_checkpointed_initial_run_still_gets_the_grace_window_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (mut deps, events) = deps_with_events(dir.path());
+        deps.provider = Arc::new(StallingProvider {
+            entered: entered.clone(),
+        });
+        deps.provider_slug = "stalling".to_string();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
+        );
+        let file = parse_workflow(STALLS).expect("workflow parses");
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                dir.path().join("checkpoints"),
+            ),
+        );
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+        let reached_the_agent = entered.notified();
+
+        let mut run = Box::pin(run_workflow_lane_aware_checkpointed(
+            turn,
+            deps,
+            &rec,
+            &file,
+            Value::Null,
+            &ctx,
+            Some(checkpoints),
+        ));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished, so the agent node did not stall"),
+            () = reached_the_agent => {}
+        }
+
+        let pressed = std::time::Instant::now();
+        cancel.cancel();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cancelled checkpointed run never returned")
+            .expect("a cancelled checkpointed run is not a failure");
+        let elapsed = pressed.elapsed();
+
+        assert!(run.cancelled, "the run must report that it was stopped");
+        assert!(
+            elapsed >= CANCEL_HARD_ABORT_GRACE,
+            "cancelling took {elapsed:?} — an immediate hard-abort skipped the grace window that \
+             gives an in-flight node on a checkpointed initial run a chance to finish before its \
+             outcome is discarded"
+        );
+        assert!(
+            elapsed < CANCEL_HARD_ABORT_GRACE + std::time::Duration::from_secs(2),
+            "cancelling took {elapsed:?} — past the grace the run did not settle quickly"
+        );
+
+        let nodes: Vec<String> = journaled(&events, &rec.id)
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                CompanyEvent::WorkflowNodeFinished { node_id, .. } => Some(node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nodes, vec!["shape".to_string()]);
     }
 
     /// The same stop works with **no journal wired** — the default-build shape,
