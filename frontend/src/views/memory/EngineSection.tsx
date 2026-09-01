@@ -50,8 +50,16 @@ interface Props {
 }
 
 /** The probe line under the picker. */
-function healthLabel(healthy: boolean | undefined): string {
-  if (healthy === true) return "answering";
+/// The standing status line beside the engine name.
+///
+/// `healthy` alone is not the whole verdict: a bound engine can be answering
+/// and still have had a family time out, and that state is invisible if the row
+/// reads only the boolean. Refused families never reach here -- apply rejects
+/// those -- so the only caveat to carry is slowness.
+function healthLabel(healthy: boolean | undefined, slow?: string[]): string {
+  if (healthy === true) {
+    return slow?.length ? `answering, but ${slow.join(", ")} timed out at the last probe` : "answering";
+  }
   if (healthy === false) return "not answering — check the endpoint and key";
   return "no probe — this engine has no health check to ask";
 }
@@ -156,6 +164,15 @@ export function EngineSection({ client, company, onApplied }: Props) {
         toast.warning(
           `Saved, but ${applied.restartRequiredFor.join(", ")} could not be rebuilt — restart the host for ${applied.restartRequiredFor.length > 1 ? "them" : "it"}.`,
         );
+      } else if (applied.engineState.slowFamilies?.length) {
+        // Bound, but the probe did not get an answer from every family inside
+        // its budget. Apply deliberately does not refuse over that -- slow is
+        // not the same verdict as refused -- so the caveat has to reach the
+        // operator here. A bare success toast would let an operator who never
+        // pressed Test conclude the reads are fine when they just timed out.
+        toast.warning(
+          `Memory is now on ${applied.engine}, but ${applied.engineState.slowFamilies.join(", ")} did not answer inside the probe budget.`,
+        );
       } else {
         toast.success(`Memory is now on ${applied.engine}.`);
       }
@@ -213,7 +230,7 @@ export function EngineSection({ client, company, onApplied }: Props) {
               )}
             />
             <span className="font-medium">{state.active}</span>
-            <span className="text-muted-foreground">· {healthLabel(state.healthy)}</span>
+            <span className="text-muted-foreground">· {healthLabel(state.healthy, state.slowFamilies)}</span>
           </span>
           {state.capabilities.length > 0 && (
             <span className="flex flex-wrap items-center gap-1.5">

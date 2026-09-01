@@ -553,7 +553,7 @@ async fn test_engine(
         Ok(Some(overlay)) => {
             let unreachable = overlay.descriptor.unreachable_families.clone();
             let slow = overlay.descriptor.slow_families.clone();
-            let refused = unreachable.as_ref().is_some_and(|f| !f.is_empty());
+            let refused = refused_families(unreachable.as_deref()).is_some();
             // `healthy` is what the console branches on, and it must mean "you
             // can bind this". An engine that answers `/health` but refuses the
             // families the knowledge ports are built on is not bindable — apply
@@ -563,7 +563,7 @@ async fn test_engine(
             //
             // `None` means there was no provider seam to ask (the in-pod
             // engine overlay). It opened, so it is usable.
-            let healthy = overlay.descriptor.healthy.unwrap_or(true) && !refused;
+            let healthy = probe_is_bindable(overlay.descriptor.healthy, unreachable.as_deref());
             let detail = if overlay.descriptor.healthy == Some(false) {
                 Some("the engine did not answer a health check".to_string())
             } else if refused {
@@ -603,6 +603,26 @@ async fn test_engine(
     }
 }
 
+/// The one predicate both surfaces read.
+///
+/// `test` and `apply` must agree about a candidate: reporting one bindable and
+/// then rejecting it puts the reason in the branch the console discards (it
+/// shows `detail` only when `healthy` is false). Deriving both answers from
+/// here is what makes them agree by construction rather than by two authors
+/// remembering to.
+fn refused_families(unreachable: Option<&[String]>) -> Option<&[String]> {
+    unreachable.filter(|families| !families.is_empty())
+}
+
+/// Whether `test` may report a probed candidate as bindable.
+///
+/// `healthy` is what the console branches on, so it has to mean "apply will
+/// accept this", not merely "it answered". `None` means there was no provider
+/// seam to ask — the in-pod overlay — which opened, so it is usable.
+fn probe_is_bindable(health: Option<bool>, unreachable: Option<&[String]>) -> bool {
+    health.unwrap_or(true) && refused_families(unreachable).is_none()
+}
+
 /// The apply route's family verdict, extracted so it is testable without a
 /// live engine that answers health and refuses a read.
 ///
@@ -611,7 +631,7 @@ async fn test_engine(
 /// reported rather than blocking, because the route budget is tighter than
 /// boot's and nothing in the console sends `?force=true`.
 fn family_refusal(engine: &str, unreachable: Option<&[String]>) -> Option<String> {
-    let families = unreachable.filter(|f| !f.is_empty())?;
+    let families = refused_families(unreachable)?;
     Some(format!(
         "`{engine}` answered a health check but refused {}, so it was not bound and your \
          current engine is untouched. Reads against those families would fail once a company \

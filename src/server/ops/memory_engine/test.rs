@@ -399,25 +399,36 @@ fn a_refused_family_blocks_a_bind_and_a_slow_one_does_not() {
     );
 }
 
-/// Test and Apply must agree. A candidate `apply` would reject must not come
-/// back from `test` as healthy.
+/// Test and Apply must agree: a candidate `apply` rejects must not come back
+/// from `test` as bindable.
 ///
-/// The console branches on `probe.healthy` alone and shows `detail` only on the
-/// failure branch, so reporting a refusing engine as healthy would put the
-/// reason in the branch that discards it: green toast from Test, 409 from
-/// Apply, and the scarier-looking action is the one telling the truth.
+/// Both answers derive from `refused_families`, and this drives the two real
+/// functions rather than restating their logic — an earlier version of this
+/// test recomputed `true && refused.is_empty()` locally, which is a constant
+/// and passed no matter what the route did.
 #[test]
 fn test_and_apply_agree_about_a_refusing_candidate() {
     let refused = ["recall".to_string()];
-    let blocks = super::family_refusal("supermemory", Some(&refused)).is_some();
-    // `test` composes `healthy` as `health_ok && !refused`; this asserts the
-    // two surfaces read the same list rather than diverging.
-    let reports_healthy = true && refused.is_empty();
-    assert!(blocks, "apply must reject this candidate");
+
     assert!(
-        !reports_healthy,
-        "test must not report healthy for a candidate apply rejects"
+        !super::probe_is_bindable(Some(true), Some(&refused)),
+        "test must not report a candidate bindable when apply will reject it"
     );
+    assert!(
+        super::family_refusal("supermemory", Some(&refused)).is_some(),
+        "apply must reject the same candidate"
+    );
+
+    // The other direction, so the two cannot drift into disagreeing by both
+    // becoming permissive: nothing refused means bindable and no refusal.
+    assert!(super::probe_is_bindable(Some(true), Some(&[])));
+    assert!(super::family_refusal("supermemory", Some(&[])).is_none());
+
+    // Health still dominates: an engine that did not answer at all is not
+    // bindable regardless of the family list.
+    assert!(!super::probe_is_bindable(Some(false), Some(&[])));
+    // And an unprobed overlay -- no provider seam to ask -- stays bindable.
+    assert!(super::probe_is_bindable(None, None));
 }
 
 /// The refusal this surface exists for: a deployment that injects
