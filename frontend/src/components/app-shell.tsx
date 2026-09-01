@@ -27,9 +27,8 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarGroup,
-  SidebarHeader,
+  SidebarFooter,
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
@@ -46,8 +45,10 @@ import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
-import { WindowControlsInset } from "@/components/window-chrome";
+import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
+import { WindowTitleBar } from "@/components/window-title-bar";
 import {
+  SidebarCollapseButton,
   RESTING_ROW,
   SidebarUtilityBar,
 } from "@/components/sidebar-controls";
@@ -107,6 +108,8 @@ import {
   type PendingAcknowledgement,
 } from "@/lib/operational-notifications";
 import { usePresence } from "@/hooks/use-presence";
+import { useAutonomy } from "@/hooks/use-autonomy";
+import { AutonomyPill } from "@/components/autonomy-pill";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
@@ -773,6 +776,17 @@ export function AppShell({
   // after a walk to Approvals — that must keep using the last channel even
   // while the rail is what's on screen (#1768 codex review).
   const chatPaneVisibleRef = useRef(true);
+  // Which thread panel is open in that channel, or `null` for none (#1890 B).
+  //
+  // A third condition on "is this completion's marker actually on screen",
+  // beside the channel and the pane. Since a card records the thread it was
+  // raised in, a threaded settle's marker is folded into its root's replies by
+  // `buildTimeline` and does **not** render in the channel timeline — so the
+  // channel being open is no longer proof the operator can see it. Without
+  // this the toast is suppressed on the channel match and the marker is
+  // nowhere: the exact "suppressed a toast for a marker the operator cannot
+  // see" defect #1768's review established the rule against.
+  const openThreadRootRef = useRef<string | null>(null);
   const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
     chatPaneVisibleRef.current = visible;
   }, []);
@@ -1227,6 +1241,7 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+    openThreadRootRef.current = null;
     // Another company's transcripts are another namespace too: a channel id
     // is this company's desk id or a `dm:<roster-id>`, and a provisioned
     // company is built from the same manifests, so ids recur across
@@ -2115,6 +2130,9 @@ export function AppShell({
       advanceChannelRead = true,
     ) => {
       activeChatChannelRef.current = channelId;
+      // #1890 B. `ChatView` re-reports on every open/close (its effect lists
+      // `openThreadId`), so this ref tracks the panel rather than lagging it.
+      openThreadRootRef.current = openThreadId ?? null;
       if (mentionFeedRevision === undefined) return;
       // Clear only THIS channel's mentions, and only once its history is
       // actually on screen. A mention is durable and there is no
@@ -2712,6 +2730,11 @@ export function AppShell({
   // the state they feed has to live where that stream is read.
   const presence = usePresence(client, company);
   const typing = useTyping(client, company);
+  // The standing autonomy tier, for the title row. Shell-owned because the row
+  // is: it outlives every view, so the read has to sit above all of them. It is
+  // the same `GET {scope}/policy` the settings page makes, so the pill and the
+  // page that changes it cannot disagree about which tier is in force.
+  const autonomy = useAutonomy(client, company);
   /**
    * The coarse "near your credit limit" warning (issue #1846), off the live
    * `budget_proximity` frame. Shell-owned for the same reason presence/typing
@@ -3076,8 +3099,17 @@ export function AppShell({
         // completion from that channel must not suppress its toast while the
         // operator cannot actually see the inline marker (#1768 codex review).
         if (!chatPaneVisibleRef.current) return false;
-        const origin = dispatchMarkerPlacement(event, chatChannelByThread)?.channelId;
-        return origin != null && activeChatChannelRef.current === origin;
+        const placement = dispatchMarkerPlacement(event, chatChannelByThread);
+        const origin = placement?.channelId;
+        if (origin == null || activeChatChannelRef.current !== origin) return false;
+        // #1890 B: a card raised in a thread settles into that thread, and
+        // `buildTimeline` folds every parented line into its root's replies —
+        // so the marker is NOT in the channel timeline and the channel being
+        // open proves nothing. It is visible only while that thread's panel is
+        // the one open. An unparented marker still renders inline, so the
+        // channel check alone remains right for it.
+        const root = placement?.message.parentId;
+        return root == null || openThreadRootRef.current === root;
       },
       [view, chatChannelByThread],
     ),
@@ -3366,8 +3398,14 @@ export function AppShell({
       {setupController}
 
       {/* `SidebarProvider` paints the chrome layer itself — see its own note on
-          why that fill lives there and not here (issue #1178). */}
-      <SidebarProvider className="h-svh overflow-hidden">
+          why that fill lives there and not here (issue #1178).
+
+          `flex-col`, because the shell is now a title row above a
+          sidebar-and-content row rather than a bare row of two columns. The
+          provider stays the outermost box — the title row holds the profile
+          control, which is inside this context — so the direction is flipped
+          here rather than by wrapping the provider in another element. */}
+      <SidebarProvider className="h-svh flex-col overflow-hidden">
         <a
           href={`#${MAIN_CONTENT_ID}`}
           className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
@@ -3378,74 +3416,89 @@ export function AppShell({
         >
           Skip to content
         </a>
-      <Sidebar collapsible="icon">
-        <SidebarHeader>
-          {/* macOS floats the traffic lights over this corner once the window
-              gives up its title bar, and this corner is the company switcher.
-              Reserve the strip they land in, and let it drag. Renders nothing
-              anywhere else — see `window-chrome.tsx`. */}
-          <WindowControlsInset />
-          {/* The header is the column talking about itself: which host this
-              console is looking at, the utilities that act on the console
-              rather than on the company, and whether the column is showing.
-              Everything BELOW it — the nav group and the footer's standing
-              controls — is the company. Collapse used to be the first row under
-              the switcher, which put a chrome control at the head of a list of
-              destinations and made it read as one (issue #1177); it now sits on
-              the utility bar with the three other controls of its kind.
+      {/* The window's one title row, above the sidebar and above the content
+          and spanning the full width of the window. It carries the two controls
+          that are about the *console* rather than about the page: which company
+          you are in, and who you are signed in as. Both used to sit in the
+          sidebar column — the switcher at its head under a reserved strip for
+          the traffic lights, the profile row in its footer — which put them at
+          opposite ends of a 13.5rem column and left the lights overlapping a
+          narrow column instead of insetting a bar. See `window-title-bar.tsx`,
+          which owns the geometry including the traffic-light inset. */}
+      <WindowTitleBar
+        switcher={
+          <HostSwitcher
+            variant="titlebar"
+            companyName={feed.status.name}
+            // The company's lifecycle, and every company on this host: both
+            // were rows in the sidebar footer, and both are facts about *which
+            // company you are in* — which is what this control is. See
+            // `HostSwitcher`'s `companyState` for why the lifecycle is not
+            // folded into the connection dot.
+            companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
+            companies={companies}
+            activeCompany={company}
+            onSwitchCompany={onSwitchCompany}
+            onBackToPicker={onBackToPicker}
+            onCreateCompany={onCreateCompany}
+            canCreateCompany={client.carriesPlatformBearer}
+          />
+        }
+        autonomy={
+          // What the agents in this company are allowed to do without asking.
+          // Renders nothing until the host has said, rather than guessing a
+          // tier — see `useAutonomy`.
+          //
+          // `canManage` is the role this shell already knows. Both write
+          // routes behind the pill call `require_admin`
+          // (`src/server/ops/policy.rs:309,427`), so without it a member was
+          // offered a menu whose every selection ends in a 403. The pill still
+          // STATES the tier for them — standing policy is a fact about what
+          // the agents around you may do, not an admin setting — it simply
+          // stops pretending to be a control. `null` while `fetchMe` is in
+          // flight reads as read-only, which is the safe direction: it hides
+          // an affordance for one round trip rather than offering one that
+          // cannot work.
+          <AutonomyPill status={autonomy} canManage={isGateAdmin} />
+        }
+        profile={
+          // Who you are signed in as, and nothing else. It renders nothing
+          // where there is nobody to name — a host with no sign-in, or a
+          // session that has just gone — and the row simply closes up.
+          <ProfileRow variant="titlebar" client={client} company={company} />
+        }
+      />
 
-              `flex-col` on the rail is not a preference. The collapsed column
-              is `--sidebar-width-icon` (3rem) and this block is `p-2`, leaving
-              32px — the exact width of the switcher's glyph, with nothing left
-              over to put beside it. See `SidebarCollapseButton`. */}
-          <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1">
-            {/* Which host, and how every host is doing. It leads because it
-                names where you are — the first thing the column should answer
-                — and it is the only control here that can take you somewhere
-                else entirely. See `host-switcher.tsx`; it replaced the icon
-                rail that used to stand outside this sidebar (issue #1142).
+      {/* The shell proper, below the title row: the sidebar column and the
+          content column, still flex siblings so the sidebar's `peer` selectors
+          and its in-flow width gap keep working. */}
+      <div className="flex w-full min-h-0 flex-1">
+      <Sidebar
+        collapsible="icon"
+        // The sidebar's container is `fixed inset-y-0 h-svh` — it positions
+        // against the VIEWPORT, so a title row placed above it in the flow does
+        // not push it down and the column would slide underneath the bar. This
+        // is the offset that puts it back, as inline style rather than a class
+        // because `top-*` and `h-*` would be fighting `inset-y-0` and `h-svh`
+        // on the same element and the winner would come down to stylesheet
+        // order.
+        style={{
+          top: WINDOW_TITLE_BAR_HEIGHT,
+          height: `calc(100svh - ${WINDOW_TITLE_BAR_HEIGHT}px)`,
+        }}
+      >
 
-                `min-w-0` so the nameplate truncates instead of pushing the
-                button off the end of a 13.5rem column. */}
-            <div className="min-w-0 flex-1 group-data-[collapsible=icon]:w-full group-data-[collapsible=icon]:flex-none">
-              <HostSwitcher
-                companyName={feed.status.name}
-                // The company's lifecycle, and every company on this host:
-                // both were rows in the sidebar footer, and both are facts
-                // about *which company you are in* — which is what this control
-                // is. See `HostSwitcher`'s `companyState` for why the lifecycle
-                // is not folded into the connection dot.
-                companyState={lifecycle(feed.status.lifecycle, feed.status.emergency_paused)}
-                companies={companies}
-                activeCompany={company}
-                onSwitchCompany={onSwitchCompany}
-                onBackToPicker={onBackToPicker}
-                onCreateCompany={onCreateCompany}
-                canCreateCompany={client.carriesPlatformBearer}
-              />
-            </div>
-          </div>
-          {/* Directly under the switcher: Settings, Feedback, Discord and
-              Collapse, as one bar of icons rather than four full-width rows
-              spread across the nav and the footer. See `SidebarUtilityBar`. */}
-          <SidebarUtilityBar view={view} onNavigate={setView} />
-        </SidebarHeader>
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
+        {/* The console's own utilities sit at the FOOT of the column, under the
+            destinations rather than over them. They act on the console, not on
+            the company, so they belong after the list of places you can go —
+            and the header they used to occupy is gone entirely now that the
+            switcher lives in the window's title row. */}
         <SidebarFooter>
-          {/* Who you are signed in as, and nothing else.
-
-              The lifecycle row and the "Switch company" row that used to stand
-              here have both moved into the host switcher at the top of the
-              column — see its `companyState` and its Companies group. Both were
-              answers to "which company am I in, and how is it doing", asked at
-              the opposite end of the sidebar from the control that names it.
-
-              It renders nothing where there is nobody to name — a host with no
-              sign-in, or a session that has just gone. */}
-          <ProfileRow client={client} company={company} />
+          <SidebarUtilityBar view={view} onNavigate={setView} />
         </SidebarFooter>
         </nav>
         <SidebarRail />
@@ -3460,6 +3513,46 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
+          {/* Show/hide the sidebar, on the corner it acts on.
+
+              It used to sit in the sidebar's own header, which put the control
+              that *hides* a panel inside the panel it hides — collapsing the
+              column took the button with it. On the inset's leading corner it
+              stays put through both states and points at the edge that moves.
+
+              Here rather than inside `ContentSurface`: this control needs
+              `useSidebar`, and that card is deliberately free of sidebar
+              context — every page renders it, including ones with no sidebar at
+              all. Centred ON the card's leading border, not inside it:
+              `left-(--frame-inset)` puts it at the edge and `-translate-x-1/2`
+              straddles it. Inside the card it sat over the page's own heading
+              and read as part of the content; on the seam it reads as chrome
+              belonging to the boundary it moves. Absolutely positioned, so it
+              costs the page no layout and no view makes room for it.
+
+              `hidden md:block` — desktop only, and the breakpoint is not an
+              approximation. `useIsMobile` flips at exactly 768px, which is
+              Tailwind's `md`, so this gate is the precise complement of the
+              `!isMobile` that `SidebarCollapseButton` already reasons about:
+              the two agree by construction rather than by coincidence.
+
+              Below it the sidebar is a sheet, not a column, and it already has
+              a control — the `md:hidden` "Toggle sidebar" bar at the foot of
+              this inset. Leaving this one on made that two controls for one
+              job on one viewport, and the second one was wrong in both of its
+              halves: `SidebarCollapseButton` deliberately treats mobile as
+              not-collapsed, so with the sheet closed it read "Collapse
+              sidebar" and showed the close icon while pressing it OPENED the
+              sheet. Teaching it `openMobile` and retiring the bar was the
+              other way out and is the worse one — this button is absolutely
+              positioned over the content, and issue #1265 moved the mobile
+              trigger into a reserved row precisely to stop a floating control
+              winning the hit-test in that corner. */}
+          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 hidden -translate-x-1/2 md:block">
+            <div className="pointer-events-auto">
+              <SidebarCollapseButton />
+            </div>
+          </div>
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
@@ -3908,6 +4001,7 @@ export function AppShell({
           <SidebarTrigger aria-label="Toggle sidebar" />
         </div>
       </SidebarInset>
+      </div>
 
       <FeedbackDialog
         client={client}

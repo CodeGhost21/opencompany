@@ -49,6 +49,11 @@ Supporting docs:
     `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
     interrupted-run sweep, and operator stop/cancel semantics (issues
     #371/#382/#383/#398)
+  - [events-settle-marker.md](events-settle-marker.md) — the card-linked
+    marker a settled dispatch leaves in the conversation that raised it: the
+    captured origin (channel and, since #1890, thread), why `None` means no
+    conversation rather than the General desk, and the identity dedupe that
+    keeps the live line and its rehydrated twin one line (issues #377/#1890)
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge

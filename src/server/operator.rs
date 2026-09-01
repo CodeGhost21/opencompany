@@ -1393,6 +1393,7 @@ fn project_event_for_viewer(
             desk,
             column,
             origin_chat_id,
+            origin_parent,
             ..
         } => {
             let mut o = envelope("desk_task_completed");
@@ -1401,6 +1402,20 @@ fn project_event_for_viewer(
             o["column"] = json!(column);
             if let Some(chat_id) = origin_chat_id {
                 o["chatId"] = json!(chat_id);
+            }
+            // **Widened again** by #1890 B, with the thread inside that
+            // channel. Omitted rather than null on exactly the terms `chatId`
+            // is, and read the same way: absent means the channel-level
+            // conversation, which is where every marker landed before.
+            //
+            // The live frame and `chat/history`'s rehydrated twin must agree on
+            // this or the marker would render inline live and jump into a
+            // thread on reload — the split the `h<seq>` identity dedupe exists
+            // to prevent. Stringified for the same reason the history
+            // projection's `parentId` is: the console keys threads by message
+            // id, and a message id is a string there.
+            if let Some(parent) = origin_parent {
+                o["parentId"] = json!(parent.value().to_string());
             }
             o
         }
@@ -2277,6 +2292,12 @@ async fn run_chat(
             // changes. `None` for an unaddressed message, which is every card
             // this site opened before and therefore no change for one.
             origin_chat_id: message.chat.clone(),
+            // Issue #1890 B: the thread inside that channel. A message's own
+            // `parent` IS its root — a reply is parented to its question's
+            // parent, never to the question — so this needs no walk, and an
+            // unparented message carries `None` and stays on the channel-level
+            // conversation exactly as every card this site opened before.
+            origin_parent: accepted.thread_root(),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -2343,6 +2364,30 @@ struct AcceptedTurn {
     /// store refused — the turn still runs, untracked, because record-keeping
     /// does not get to fail the work it records.
     turn_id: Option<String>,
+}
+
+impl AcceptedTurn {
+    /// The thread this turn was typed in (issue #1890 B) — `None` is the
+    /// channel-level conversation.
+    ///
+    /// Read off the **journaled event**, not off the request body, for the same
+    /// reason [`run_chat`] takes this type rather than a loose parent: the body
+    /// names a parent by id as a string and this is the parsed, validated fact
+    /// the append actually recorded. Two readings of one thread root is how the
+    /// board and the transcript drift.
+    ///
+    /// A message's own `parent` IS its root — a reply is parented to its
+    /// question's parent, never to the question — so there is no chain to walk.
+    fn thread_root(&self) -> Option<EventSeq> {
+        match &self.message_event {
+            CompanyEvent::OperatorMessage { parent, .. } => *parent,
+            // Unreachable: `accept_chat_turn` journals an `OperatorMessage` and
+            // nothing else. An arm rather than an `unwrap`, because the honest
+            // answer for any other event is "no thread", not a panic on a path
+            // that owes the operator a reply.
+            _ => None,
+        }
+    }
 }
 
 /// Journals an operator message and mints the turn owed for it (issue #983).
@@ -4839,13 +4884,26 @@ mode = "full"
 
     /// One chat request, optionally addressed to a thread.
     fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
+        chat_in_thread(text, chat, None)
+    }
+
+    /// The same send, typed inside a thread — `parent` is the root the console
+    /// sends when the operator answers in an open thread (#1890 B).
+    fn chat_in_thread(text: &str, chat: Option<&str>, parent: Option<u64>) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/api/v1/company/chat")
             .header("cookie", crate::server::test_support::fixed_cookie("acme"))
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::json!({ "text": text, "chat": chat }).to_string(),
+                serde_json::json!({
+                    "text": text,
+                    "chat": chat,
+                    // A string, like every other message id on this API — the
+                    // field's own note says so, and a number is a 422.
+                    "parent": parent.map(|seq| seq.to_string()),
+                })
+                .to_string(),
             ))
             .unwrap()
     }
@@ -5023,6 +5081,40 @@ mode = "full"
         assert_eq!(
             unaddressed.origin_chat_id, None,
             "an unaddressed message has no thread to answer in"
+        );
+        assert_eq!(
+            tasks[0].origin_parent, None,
+            "and a message typed at channel level opens a channel-level card",
+        );
+    }
+
+    /// Issue #1890 B: the card remembers **which thread** inside that channel.
+    ///
+    /// The channel alone was never enough — a channel holds any number of live
+    /// threads, and a settle filed against the channel surfaces in none of
+    /// them. A message's own `parent` IS its root (a reply is parented to its
+    /// question's parent, never to the question), so the route reads it
+    /// straight off the send with no walk.
+    #[tokio::test]
+    async fn a_chat_card_remembers_the_thread_inside_the_channel() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_in_thread(CROSSED, Some("dm:designer"), Some(41)))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks[0].origin_chat_id.as_deref(), Some("dm:designer"));
+        assert_eq!(
+            tasks[0].origin_parent,
+            Some(crate::ports::types::EventSeq::new(41)),
+            "the root the operator was answering in",
         );
     }
 
@@ -7680,6 +7772,7 @@ mode = "full"
                     assignee: String::new(),
                     updated_at_millis: 1,
                     origin_chat_id: None,
+                    origin_parent: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -10641,6 +10734,7 @@ mode = "full"
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: Some("engineering".into()),
+            origin_parent: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
@@ -10670,6 +10764,7 @@ mode = "full"
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: Some("engineering".into()),
+            origin_parent: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert!(v.get("output").is_none(), "{v}");
@@ -10691,10 +10786,53 @@ mode = "full"
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: None,
+            origin_parent: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert!(v.get("chatId").is_none(), "{v}");
         assert_eq!(v["column"], serde_json::json!("in_review"));
+    }
+
+    /// Issue #1890 B: the thread inside the channel, on exactly the terms
+    /// `chatId` rides on.
+    ///
+    /// Stringified, because the console keys threads by message id and a
+    /// message id is a string there — `chat/history` renders the same root the
+    /// same way, and the two must agree or the marker would render inline live
+    /// and jump into a thread on reload.
+    #[test]
+    fn desk_task_completed_projects_the_thread_its_card_was_raised_in() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+            origin_parent: Some(crate::ports::types::EventSeq::new(41)),
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert_eq!(v["chatId"], serde_json::json!("engineering"));
+        assert_eq!(v["parentId"], serde_json::json!("41"));
+    }
+
+    /// A card raised straight into a channel omits `parentId` rather than
+    /// sending null — the same presence-check shape `chatId` takes, so the
+    /// console reads "channel level" without a null check.
+    #[test]
+    fn desk_task_completed_omits_the_parent_for_a_channel_level_card() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+            origin_parent: None,
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert_eq!(v["chatId"], serde_json::json!("engineering"));
+        assert!(v.get("parentId").is_none(), "{v}");
     }
 
     #[test]

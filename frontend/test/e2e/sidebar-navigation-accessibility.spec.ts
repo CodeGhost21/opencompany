@@ -43,18 +43,39 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   await expect(navigation).toBeVisible();
   await expect(navigation.getByRole("button", { name: "Overview", exact: true })).toBeVisible();
 
-  // Settings, Feedback, Discord and Collapse are utilities, not destinations an
-  // operator works out of, so they sit on their own named bar in the sidebar's
-  // header rather than as four rows inside this landmark. Each is icon-only in
-  // both sidebar states, which makes the accessible name the only name it has
-  // — exactly the thing a styling pass drops without breaking a render.
+  // Settings, Feedback and Discord are utilities: things you do to the console
+  // rather than the places an operator works out of. They keep a named group of
+  // their own, and it is now in the sidebar's FOOTER — the header the bar used
+  // to sit in is gone, along with the host switcher that shared it, both moved
+  // into the window's title row.
+  //
+  // THREE, not four. The collapse control left this group entirely and now sits
+  // on the content card's leading seam, outside the sidebar; it is pinned there
+  // by `sidebar-toggle-reachable.spec.ts`, and asserted below only to the extent
+  // that it is no longer here.
   const utilities = page.getByRole("group", { name: "Console utilities", exact: true });
   await expect(utilities).toBeVisible();
-  for (const name of ["Settings", "Feedback", "Join our Discord", "Collapse sidebar"]) {
-    await expect(utilities.getByRole(name === "Join our Discord" ? "link" : "button", { name, exact: true })).toBeVisible();
+  for (const name of ["Settings", "Feedback", "Join our Discord"]) {
+    await expect(
+      utilities.getByRole(name === "Join our Discord" ? "link" : "button", { name, exact: true }),
+    ).toBeVisible();
   }
-  // And they are NOT in the navigation landmark, which is the point of moving
-  // them: it lists the places you go, and these four are not places.
-  await expect(navigation.getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
-  await expect(navigation.getByRole("button", { name: "Feedback", exact: true })).toHaveCount(0);
+  await expect(
+    utilities.getByRole("button", { name: /sidebar$/ }),
+    "the collapse control is not one of the console's utilities any more",
+  ).toHaveCount(0);
+
+  // And they are not interleaved with the destinations. The three now carry
+  // visible labels and `aria-current`, so they belong INSIDE the navigation
+  // landmark in a way the old icon-only bar did not — what still has to hold is
+  // that they are a separate, separately named group under the list of places
+  // you go, rather than three more rows in it. `sidebar-content` is that list;
+  // `sidebar-footer` is the group.
+  const destinations = page.locator("[data-slot=sidebar-content]");
+  await expect(destinations.getByRole("button", { name: "Overview", exact: true })).toBeVisible();
+  await expect(destinations.getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
+  await expect(destinations.getByRole("button", { name: "Feedback", exact: true })).toHaveCount(0);
+  await expect(
+    page.locator("[data-slot=sidebar-footer]").getByTestId("sidebar-utilities"),
+  ).toHaveCount(1);
 });
