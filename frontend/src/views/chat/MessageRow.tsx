@@ -235,7 +235,7 @@ export function MessageRow({
   latestBudgetPauseMessageIdByAgent,
   readOnly,
 }: Props) {
-  const { message, sender, continuation, replies } = entry;
+  const { message, sender, continuation, replies, isLatestSettlePill } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
   // Issue #1986. Separate from `actionsUnavailable` on purpose: that one speaks
@@ -260,7 +260,7 @@ export function MessageRow({
         message={message}
         reviewInFlight={reviewingCardId === message.taskId}
         onReviewCard={
-          isTaskInReview(taskStatus) ? onReviewCard : undefined
+          isTaskInReview(taskStatus) && isLatestSettlePill !== false ? onReviewCard : undefined
         }
         onRedeemBudgetPause={onRedeemBudgetPause}
         redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}

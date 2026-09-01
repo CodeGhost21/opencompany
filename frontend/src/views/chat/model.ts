@@ -1021,6 +1021,13 @@ export interface TimelineEntry {
    * replied four times is still one face.
    */
   replySenders: Sender[];
+  /**
+   * For a system settle pill, whether it is the most recent one carrying its
+   * `taskId`. A card that has re-run since parks an older pill in history
+   * with the same id; only the latest should offer Approve. Meaningless (and
+   * left `undefined`) for any other row.
+   */
+  isLatestSettlePill?: boolean;
 }
 
 /**
@@ -1194,6 +1201,11 @@ export function buildTimeline(
   }
   const inline = inlineFirstReplies(messages, replies);
 
+  const latestPillIdByTaskId = new Map<string, string>();
+  for (const m of messages) {
+    if (m.from === "system" && m.taskId !== undefined) latestPillIdByTaskId.set(m.taskId, m.id);
+  }
+
   const entries: TimelineEntry[] = [];
   let prev: TimelineEntry | undefined;
 
@@ -1246,6 +1258,10 @@ export function buildTimeline(
       dayLabel: newDay ? formatDay(m.at) : undefined,
       replies: own,
       replySenders: distinctSenders(own, channel, members, youAvatar),
+      isLatestSettlePill:
+        m.from === "system" && m.taskId !== undefined
+          ? latestPillIdByTaskId.get(m.taskId) === m.id
+          : undefined,
     };
     entries.push(entry);
     prev = entry;

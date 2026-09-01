@@ -85,9 +85,9 @@ function render(element: ReturnType<typeof createElement>) {
   act(() => root.render(element));
 }
 
-function systemEntry(message: ChatMessage): TimelineEntry {
+function systemEntry(message: ChatMessage, isLatestSettlePill = true): TimelineEntry {
   const sender: Sender = { key: "system", name: "System", kind: "system" };
-  return { message, sender, continuation: false, replies: [], replySenders: [] };
+  return { message, sender, continuation: false, replies: [], replySenders: [], isLatestSettlePill };
 }
 
 beforeEach(() => {
@@ -161,5 +161,21 @@ describe("the settle pill's Approve control", () => {
       approveButton()?.click();
     });
     expect(calls).toEqual([["t-1", "approve"]]);
+  });
+
+  it("hides Approve on an earlier pass's pill once a later pass is the one in review", () => {
+    render(
+      createElement(MessageRow, {
+        entry: systemEntry(pill, false),
+        threadOpen: false,
+        onOpenThread: () => {},
+        onReact: () => {},
+        onDismissCard: () => {},
+        dismissingCardId: null,
+        onReviewCard: () => {},
+        taskStatusByTaskId: IN_REVIEW,
+      }),
+    );
+    expect(approveButton()).toBeFalsy();
   });
 });
