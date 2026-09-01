@@ -206,6 +206,15 @@ export function leadSentence(description: string): string {
  * in both places, for the same reason: pulling capability back is what an
  * operator does in a hurry.
  *
+ * **It is a control only for the people who can actually use it.** The two
+ * write routes behind it — `PUT` and `DELETE {scope}/policy` — both call
+ * `require_admin` (`src/server/ops/policy.rs:309,427`), so a member picking a
+ * tier here was guaranteed a 403 and a red toast. `read_policy` carries no such
+ * guard, and deliberately: the standing policy is a fact about what the agents
+ * around you may do, and the people living under it are exactly who should be
+ * able to read it. So a member gets the pill, the tier and the host's sentence,
+ * and no menu — see the `canManage` prop.
+ *
  * `client` and `company` come from {@link useConsole} rather than props: the
  * shell mounts this element inside its own `ConsoleProvider`, and the title row
  * between them (`WindowTitleBar`) is a pure layout component that takes the
@@ -222,14 +231,46 @@ const TRIGGER_ID = "autonomy-pill-trigger";
 
 export function AutonomyPill({
   status,
+  canManage = null,
   className,
 }: {
   /** The effective policy, or `null` when it is not known. */
   status: PolicyStatus | null;
+  /**
+   * Whether this operator may actually change the policy — the shell's
+   * `isGateAdmin`, passed straight through.
+   *
+   * **Three states, and `null` is read-only.** `set_policy` and `clear_policy`
+   * both call `require_admin` (`src/server/ops/policy.rs:309,427`), so every
+   * selection a member makes is a guaranteed 403; offering the menu to one is
+   * a control that exists only to fail. `read_policy` has no such guard, which
+   * is why the tier is still *stated* — hiding standing policy from the people
+   * living under it would be the worse regression, and this component exists to
+   * state it.
+   *
+   * `null` — the role read is still in flight — is treated as read-only rather
+   * than as permission, for the same reason the tier itself renders nothing
+   * while it is unknown (see `useAutonomy`): a control on screen is a
+   * claim that you may use it, and the console does not yet know that. The
+   * window is one `fetchMe` round trip, after which an admin's menu appears;
+   * the alternative direction hands a member a menu and a 403.
+   */
+  canManage?: boolean | null;
   className?: string;
 }) {
   const { client, company } = useConsole();
   const [saving, setSaving] = useState(false);
+  /**
+   * Whether this pill is a control at all, as opposed to a statement.
+   *
+   * Two independent reasons it may not be, and they are deliberately folded
+   * into one flag because they produce the same rendering: there is nobody to
+   * write as (no authenticated client — a styleguide page, or a session that
+   * has gone), or the person signed in is not an admin and the host would
+   * refuse. `saving` is NOT folded in: an in-flight write disables the trigger
+   * without making the pill a non-control, so the chevron stays.
+   */
+  const writable = Boolean(client) && canManage === true;
   /**
    * The wider tier the operator picked and has not yet agreed to, or `null`.
    *
@@ -242,7 +283,14 @@ export function AutonomyPill({
     PolicyStatus["tiers"][number] | null
   >(null);
   const write = async (mode: string): Promise<boolean> => {
-    if (!status || !client || saving || mode === status.mode) return false;
+    // `!writable` is the real guard, and covers `!client` and a non-admin
+    // alike. Belt and braces with the disabled trigger: the menu is
+    // unreachable for a read-only pill, so this is what holds if a future
+    // refactor makes it reachable.
+    //
+    // `!client` is restated only so TypeScript narrows it for the `setPolicy`
+    // calls below — a boolean derived from it carries no narrowing.
+    if (!status || !writable || !client || saving || mode === status.mode) return false;
     setSaving(true);
     try {
       // Only `mode` is sent. An omitted field is left alone by the host, so
@@ -298,7 +346,7 @@ export function AutonomyPill({
     // Selecting what is already in force is a no-op, not a redundant write: the
     // PUT is attributed and durable, so it would record an operator "changing"
     // the policy to the value it already had.
-    if (!status || !client || saving || tier.value === status.mode) return;
+    if (!status || !writable || saving || tier.value === status.mode) return;
     if (widensAutonomy(status.tiers, status.mode, tier.value)) {
       setConfirming(tier);
       return;
@@ -320,11 +368,17 @@ export function AutonomyPill({
         <DropdownMenuTrigger
           id={TRIGGER_ID}
           data-testid="autonomy-pill"
-          // No client means no authenticated write — the pill still states the
-          // tier, it just cannot change it. Disabled rather than hidden, for the
-          // reason the switcher's "New company" row is: a control that vanishes
-          // teaches nothing.
-          disabled={!client || saving}
+          // No client, or not an admin — the pill still states the tier, it
+          // just cannot change it. Disabled rather than hidden, for the reason
+          // the switcher's "New company" row is: a control that vanishes
+          // teaches nothing, and a member who cannot see the standing policy
+          // cannot know what the agents around them are allowed to do.
+          disabled={!writable || saving}
+          // So a test — and a screen reader, through `aria-disabled`, which
+          // Base UI's trigger sets from `disabled` — can tell "states the
+          // policy" apart from "changes it" without inferring it from the
+          // absence of a chevron.
+          data-readonly={writable ? undefined : "true"}
           // The host's full sentence, unabridged, for the tier in force. A native
           // `title` rather than the tooltip component: the trigger already owns a
           // popup, and a tooltip on the same element fights it for the press.
@@ -364,10 +418,16 @@ export function AutonomyPill({
               {leadSentence(description)}
             </span>
           )}
-          {/* The only thing on the pill that says it is a control. It never
-              drops: the affordance has to survive the narrow window that already
-              hid the sentence. */}
-          <ChevronDown aria-hidden="true" className="size-3 flex-none opacity-60" />
+          {/* The only thing on the pill that says it is a control — so it is
+              drawn exactly when the pill IS one. It never drops for width: the
+              affordance has to survive the narrow window that already hid the
+              sentence. It does drop when there is nothing behind it, because a
+              chevron on a pill that opens no menu is the affordance lying, and
+              a member who presses it learns only that the console offered them
+              something the host refuses. */}
+          {writable && (
+            <ChevronDown aria-hidden="true" className="size-3 flex-none opacity-60" />
+          )}
         </DropdownMenuTrigger>
         {/* `align="end"`: the pill sits at the right-hand end of the row, beside
             the profile control, and a menu this wide anchored to its start would

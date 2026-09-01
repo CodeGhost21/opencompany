@@ -226,7 +226,7 @@ describe("the pill", () => {
     // element: `WindowTitleBar` carries a dedicated `flex-1 self-stretch`
     // spacer that opts in on its own, and that spacer — not the pill — is the
     // elastic part of the row.
-    render(createElement(AutonomyPill, { status: policy() }));
+    render(createElement(AutonomyPill, { status: policy(), canManage: true }));
     expect(pill()!.tagName).toBe("BUTTON");
     expect(pill()!.hasAttribute("data-tauri-drag-region")).toBe(false);
     // Nothing inside it may swallow the press before the trigger sees it.
@@ -276,7 +276,11 @@ describe("the pill", () => {
     // Rendered outside a `ConsoleProvider` — a styleguide page, or a console
     // whose session has gone. It still STATES the tier; it just cannot change
     // it. Disabled rather than hidden, so the capability stays discoverable.
-    render(createElement(AutonomyPill, { status: policy() }));
+    //
+    // `canManage: true` on purpose: it isolates the CLIENT as the reason. With
+    // the role left unstated this would pass against a component that had
+    // stopped checking for a client at all.
+    render(createElement(AutonomyPill, { status: policy(), canManage: true }));
     expect((pill() as HTMLButtonElement).disabled).toBe(true);
   });
 });
@@ -304,19 +308,32 @@ function client(over: {
   } as unknown as OpenCompanyClient;
 }
 
-/** The shell's wiring, in miniature: the poll feeds the pill inside the scope. */
-function Harness({ api }: { api: OpenCompanyClient }): ReactNode {
+/**
+ * The shell's wiring, in miniature: the poll feeds the pill inside the scope.
+ *
+ * `canManage` defaults to `true` — an admin — because that is what the
+ * switcher tests below are about. It is threaded rather than hard-coded so the
+ * read-only cases can drive the same loop with the same host; the shell passes
+ * its own `isGateAdmin` here.
+ */
+function Harness({
+  api,
+  canManage = true,
+}: {
+  api: OpenCompanyClient;
+  canManage?: boolean | null;
+}): ReactNode {
   const status = useAutonomy(api, "acme");
   return createElement(ConsoleProvider, {
     client: api,
     company: "acme",
-    children: createElement(AutonomyPill, { status }),
+    children: createElement(AutonomyPill, { status, canManage }),
   });
 }
 
-async function mount(api: OpenCompanyClient) {
+async function mount(api: OpenCompanyClient, canManage: boolean | null = true) {
   await act(async () => {
-    root!.render(createElement(Harness, { api }));
+    root!.render(createElement(Harness, { api, canManage }));
   });
 }
 
@@ -689,5 +706,75 @@ describe("widening the tier from the title bar", () => {
     expect(confirmButton()).not.toBeNull();
     expect(pill()!.textContent).toContain("Supervised");
     expect(toasts.error).toHaveBeenCalledWith("Only an admin can change the policy.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Who may change it. The pill states standing policy to everyone and offers
+// the menu to the people the host will actually accept a write from.
+// ---------------------------------------------------------------------------
+
+/**
+ * Both write routes behind this control call `require_admin`
+ * (`src/server/ops/policy.rs:309` and `:427`), so every selection a member
+ * makes is a guaranteed 403 and a red toast — a control that exists only to
+ * fail. `read_policy` carries no such guard, deliberately: the standing policy
+ * is a fact about what the agents around you may do, and hiding it from the
+ * people living under it would be the worse regression. So the tier stays and
+ * the menu goes.
+ */
+describe("the policy as read-only", () => {
+  for (const [who, canManage] of [
+    ["a member the host would refuse", false],
+    ["an operator whose role has not been read yet", null],
+  ] as [string, boolean | null][]) {
+    describe(who, () => {
+      it("still states the tier and the host's sentence", async () => {
+        // The half that must NOT be lost. A member who cannot see the standing
+        // policy cannot know what the agents around them are allowed to do.
+        const api = client({ get: () => Promise.resolve(policy({ mode: "supervised" })) });
+        await mount(api, canManage);
+        expect(pill()).not.toBeNull();
+        expect(pill()!.textContent).toContain("Supervised");
+        expect(pill()!.textContent).toContain("Conservative execution restrictions.");
+        expect(pill()!.getAttribute("title")).toBe(TIERS[1].description);
+      });
+
+      it("is not offered as a control", async () => {
+        const api = client({});
+        await mount(api, canManage);
+        expect((pill() as HTMLButtonElement).disabled).toBe(true);
+        expect(pill()!.getAttribute("data-readonly")).toBe("true");
+        // The chevron is documented as the one thing on the pill that says it
+        // is a control. Drawing it over a menu that will not open is the
+        // affordance lying.
+        expect(pill()!.querySelector("svg.lucide-chevron-down")).toBeNull();
+      });
+
+      it("opens no menu and writes nothing when it is pressed anyway", async () => {
+        // Not just "the trigger is disabled" — that is a styling claim. This
+        // presses it and proves no tier row appears and no PUT is issued.
+        const api = client({ get: () => Promise.resolve(policy({ mode: "supervised" })) });
+        await mount(api, canManage);
+        await openMenu();
+        for (const tier of TIERS) {
+          expect(row(tier.value), `${tier.value} must not be offered`).toBeNull();
+        }
+        expect(api.put).not.toHaveBeenCalled();
+        expect(toasts.error).not.toHaveBeenCalled();
+      });
+    });
+  }
+
+  it("is a full control for an admin, chevron and menu and all", async () => {
+    // The discriminating half: without it every assertion above would pass
+    // against a pill that had simply stopped being a control for everyone.
+    const api = client({ get: () => Promise.resolve(policy({ mode: "supervised" })) });
+    await mount(api, true);
+    expect((pill() as HTMLButtonElement).disabled).toBe(false);
+    expect(pill()!.hasAttribute("data-readonly")).toBe(false);
+    expect(pill()!.querySelector("svg.lucide-chevron-down")).not.toBeNull();
+    await openMenu();
+    expect(row("full")).not.toBeNull();
   });
 });

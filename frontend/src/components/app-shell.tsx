@@ -3424,7 +3424,18 @@ export function AppShell({
           // What the agents in this company are allowed to do without asking.
           // Renders nothing until the host has said, rather than guessing a
           // tier — see `useAutonomy`.
-          <AutonomyPill status={autonomy} />
+          //
+          // `canManage` is the role this shell already knows. Both write
+          // routes behind the pill call `require_admin`
+          // (`src/server/ops/policy.rs:309,427`), so without it a member was
+          // offered a menu whose every selection ends in a 403. The pill still
+          // STATES the tier for them — standing policy is a fact about what
+          // the agents around you may do, not an admin setting — it simply
+          // stops pretending to be a control. `null` while `fetchMe` is in
+          // flight reads as read-only, which is the safe direction: it hides
+          // an affordance for one round trip rather than offering one that
+          // cannot work.
+          <AutonomyPill status={autonomy} canManage={isGateAdmin} />
         }
         profile={
           // Who you are signed in as, and nothing else. It renders nothing
