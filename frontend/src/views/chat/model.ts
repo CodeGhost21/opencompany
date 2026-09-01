@@ -1070,7 +1070,22 @@ function inlineFirstReplies(
     if (!roots.has(rootId)) continue;
     const root = position.get(rootId);
     const first = bucket[0];
-    const answer = first === undefined ? undefined : position.get(first.id);
+    // **Only the runtime's own answer is ever promoted** (codex on #1972).
+    //
+    // `bucket[0]` is merely the earliest reply, and that is the *operator's*
+    // own follow-up whenever they wrote again before the agent answered — a
+    // thread they deliberately opened, flattened back into the channel, with
+    // the answer they were waiting for still folded behind the root's chip. The
+    // reader sees their own words twice and the reply not at all, which is the
+    // failure this promotion exists to prevent, in the one case where a person
+    // was demonstrably treating the exchange as a thread.
+    //
+    // A `system` line is excluded on the same terms: a settle marker is
+    // runtime-generated but it is not an answer, and #1890 B put markers in the
+    // thread that raised the card on purpose. Promoting one back into the
+    // channel would undo that from the render side.
+    if (first === undefined || first.from !== "company") continue;
+    const answer = position.get(first.id);
     if (root === undefined || answer === undefined) continue;
     const own = new Set(bucket.map((r) => r.id));
     let interleaved = false;
