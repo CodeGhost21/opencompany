@@ -865,6 +865,22 @@ impl RunHaltedNodes {
             .any(|id| id == node_id)
     }
 
+    /// Drops any earlier record of `node_id`.
+    ///
+    /// Codex review on #1990: when `retry.max_attempts > 1`, tinyflows re-runs
+    /// this node's whole turn on the same [`HarnessAgentRunner`] — the same
+    /// `self.halted` an earlier attempt may have already pushed into if that
+    /// attempt's judge answered `halt_benign`. Called at the start of every
+    /// fresh attempt for a node, so a later attempt that actually succeeds is
+    /// never shadowed by a stale benign-halt marker a prior, retried attempt
+    /// left behind.
+    pub fn retract(&self, node_id: &str) {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .retain(|id| id != node_id);
+    }
+
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.inner.lock().expect("run halted-nodes poisoned"))
     }
@@ -2141,6 +2157,14 @@ impl HarnessAgentRunner {
         // `park_and_journal`; the runner arms the sibling stash that carries the
         // workflow id and trigger input the release needs.
         let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
+        // Codex review on #1990: a fresh attempt at this node — whether this is
+        // the node's first attempt ever, or `retry.max_attempts > 1` re-running
+        // it after an earlier attempt's judge answered `halt_benign` — must not
+        // inherit that earlier attempt's benign-halt marker. Left in place, a
+        // later attempt that genuinely succeeds would still have its row
+        // relabeled Declined by `reclassify_halted_nodes` reading the stale
+        // entry. Re-added below only if THIS attempt halts too.
+        self.halted.retract(&lineage_node);
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
         // The node runs in its roster agent's sandbox, not the workflow tool
@@ -3729,6 +3753,80 @@ mod tests {
             halted.take().is_empty(),
             "a capped/truncated turn must never be recorded as an intentional benign halt, \
              regardless of what the judge answers"
+        );
+    }
+
+    /// Codex review on #1990 (issue #1866): `RunHaltedNodes` is shared across
+    /// every attempt `HarnessAgentRunner` makes for a run, and tinyflows
+    /// re-runs a node's whole turn when `retry.max_attempts > 1`. This drives
+    /// the exact sequence: attempt 1's judge answers `halt_benign` (pushing the
+    /// node id), attempt 2 (the retry) succeeds outright. Without retracting
+    /// the stale entry, `reclassify_halted_nodes` would relabel attempt 2's
+    /// genuinely successful row `Declined` using a marker left over from the
+    /// attempt that failed.
+    #[tokio::test]
+    async fn a_later_successful_attempt_is_not_shadowed_by_an_earlier_benign_halt() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-retry-halt-")
+            .tempdir()
+            .expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990h"));
+        let halted = RunHaltedNodes::default();
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990h".to_string(),
+            "run-1990h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_halted(halted.clone());
+        let node = json!({
+            "node_id": "flaky",
+            "prompt": "go",
+            "verify": { "criteria": "must finish" }
+        });
+
+        let first = runner.run_turn("researcher", node.clone()).await;
+        assert!(
+            first.is_err(),
+            "attempt 1's halt_benign verdict must gate the node"
+        );
+        assert!(
+            halted.contains("flaky"),
+            "attempt 1 must record the benign halt while it is the node's only outcome"
+        );
+
+        let second = runner.run_turn("researcher", node).await;
+        assert!(
+            second.is_ok(),
+            "attempt 2's continue verdict must let the node through"
+        );
+        assert!(
+            !halted.contains("flaky"),
+            "attempt 2 succeeded outright; attempt 1's stale benign-halt marker must not survive \
+             to shadow it"
         );
     }
 
