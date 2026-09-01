@@ -1225,15 +1225,39 @@ async fn gather_evidence(
     // decide the answer instead of the roster union. Both read off the SAME
     // `record`/`teammates` this pass already built, before either is moved
     // into `Evidence` below.
-    // The active capability-tier filter for this deployment. [`HarnessDeps::capabilities`]
-    // is what [`toolbelt::filter_by_capabilities`] strips the live belt with each
-    // turn; `AllowAll` (denies nothing) is the correct fallback for the no-deps
-    // case below, matching the [`HarnessDeps`] default everywhere else.
-    let capabilities = runtime
-        .workflow_harness_deps
-        .as_ref()
-        .map(|deps| &deps.capabilities)
-        .unwrap_or(&toolbelt::CapabilityFilter::AllowAll);
+    // The active capability-tier filter for this deployment, resolved the same
+    // live per-call way `HarnessPool::ensure_impl` resolves it before every
+    // turn (`resolve_capability_filter` → `capability_budget::resolve_filter`
+    // when a `[plan]` is set), not read off `deps.capabilities`. That field is
+    // the boot-time snapshot `RuntimeBuilder` seeds as `AllowAll` — with a plan
+    // attached, `HarnessPool::ensure` re-resolves the tenant's spend against the
+    // meter each turn and installs the result only onto its own local
+    // `fresh_deps` used to build the roster, never writing it back onto
+    // `runtime.workflow_harness_deps`. Reading the stale field here means a
+    // namespace whose budget has since been exhausted (or a meter that started
+    // failing closed) still reports that namespace's prerequisite native, while
+    // the next dispatched agent has the tool actually stripped. Re-resolving
+    // through the same plan/meter path `HarnessPool` uses is what keeps this
+    // evidence and the belt a freshly-dispatched agent gets from disagreeing —
+    // the same fix `search_backend_configured` above already applies to the
+    // tenant-search seam. `AllowAll` (denies nothing) is the correct fallback
+    // for the no-deps case, matching the [`HarnessDeps`] default everywhere
+    // else.
+    let capabilities = match runtime.workflow_harness_deps.as_ref() {
+        Some(deps) => match &deps.plan {
+            Some(plan) => {
+                crate::harness::built_in::capability_budget::resolve_filter(
+                    plan,
+                    deps.meter.as_deref(),
+                    runtime.id(),
+                    now_millis(),
+                )
+                .await
+            }
+            None => deps.capabilities.clone(),
+        },
+        None => toolbelt::CapabilityFilter::AllowAll,
+    };
 
     let (search_backend_configured, media_backend_configured) =
         match runtime.workflow_harness_deps.as_ref() {
@@ -1279,7 +1303,7 @@ async fn gather_evidence(
         fixed_assignee,
         search_backend_configured,
         media_backend_configured,
-        capabilities,
+        &capabilities,
     );
 
     Ok(Evidence {

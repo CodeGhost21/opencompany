@@ -983,6 +983,121 @@ allow = ["shell"]
     );
 }
 
+/// A meter reporting spend already past a plan's per-namespace budget — the
+/// same shape `HarnessPool::ensure_impl`'s
+/// `ensure_gates_shell_tools_once_the_token_budget_is_crossed` test uses to
+/// prove the live belt gets gated.
+struct ExhaustedMeter(Vec<crate::ports::usage::UsageSample>);
+
+#[async_trait]
+impl crate::ports::UsageMeter for ExhaustedMeter {
+    async fn record(
+        &self,
+        _company: &CompanyId,
+        _sample: &crate::ports::usage::UsageSample,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+    async fn query(
+        &self,
+        _company: &CompanyId,
+        _since_millis: u64,
+    ) -> crate::Result<Vec<crate::ports::usage::UsageSample>> {
+        Ok(self.0.clone())
+    }
+}
+
+/// `runtime.workflow_harness_deps.capabilities` is the boot-time identity
+/// snapshot [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) always seeds as
+/// [`AllowAll`](crate::harness::toolbelt::CapabilityFilter::AllowAll) — with a
+/// `[plan]` set, only `HarnessPool::ensure_impl` re-resolves the tenant's live
+/// spend against the meter every turn, and installs the result solely onto its
+/// own local `fresh_deps` used to build the roster, never writing it back onto
+/// `runtime.workflow_harness_deps`. Exactly the same seam `tenant_search` had
+/// before the fix two commits up, one field over: after a namespace budget is
+/// exhausted post-boot, `gather_evidence` reading the stale `AllowAll`
+/// snapshot would still mark that namespace's evidence native while the next
+/// dispatched agent has the tool actually stripped from its belt. This test
+/// wires a `[plan]` budgeting `shell` at 100 tokens and a meter already
+/// reporting 150 spent — an exhausted budget the very first `gather_evidence`
+/// call ever sees, with no prior `HarnessPool::ensure` in between — and proves
+/// the evidence agrees with what the belt would be gated to, not with the
+/// stale identity snapshot.
+#[tokio::test]
+async fn native_shell_evidence_reflects_a_budget_exhausted_after_boot() {
+    let manifest: CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Ops"
+tools = ["shell"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["shell"]
+"#,
+    )
+    .expect("fixture manifest parses");
+
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-planning-budget-exhausted-")
+        .tempdir()
+        .expect("tempdir");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme-budget-exhausted"))
+        .build()
+        .await
+        .expect("runtime");
+
+    let plan = crate::harness::capability_budget::CapabilityPlan {
+        period: crate::harness::capability_budget::BudgetPeriod::Daily,
+        budgets: std::collections::BTreeMap::from([("shell".to_string(), 100u64)]),
+        total_budget: None,
+    };
+    let meter: Arc<dyn crate::ports::UsageMeter> =
+        Arc::new(ExhaustedMeter(vec![crate::ports::usage::UsageSample {
+            at_millis: crate::ports::now_millis(),
+            agent: "maya".into(),
+            provider: "managed".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cached_input_tokens: 0,
+            cost_usd: 0.0,
+            kind: crate::ports::usage::SampleKind::Inference,
+            run_id: None,
+            model: None,
+        }]));
+
+    // `deps.capabilities` is set to the same `AllowAll` identity
+    // `RuntimeBuilder` always seeds — the stale boot-time snapshot this fix
+    // must stop trusting once a `[plan]`/meter pair is wired.
+    let deps = crate::harness::workflow_wiring_deps(
+        &runtime,
+        Some(meter),
+        crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        Some(plan),
+    );
+    runtime.set_workflow_harness_deps(deps);
+
+    let runtime = Arc::new(runtime);
+    let evidence = gather_evidence(&runtime, &card("c1", "maya"))
+        .await
+        .expect("evidence");
+
+    assert!(
+        !evidence.native_capabilities.contains("shell"),
+        "a namespace budget already exhausted when this evidence pass first \
+         runs must not be reported as native off the stale AllowAll boot \
+         snapshot: {:?}",
+        evidence.native_capabilities
+    );
+}
+
 /// `runtime.workflow_harness_deps.tenant_search` is a boot-time snapshot —
 /// only `HarnessPool::ensure` re-resolves the live BYO search connection, and
 /// only into the pool's own local `fresh_deps` used to build the roster, never
