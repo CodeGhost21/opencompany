@@ -10094,6 +10094,22 @@ members = ["eng1", "eng2"]
         }
     }
 
+    /// The re-run of a card carrying review feedback reads that feedback: the
+    /// operator's `[reviewer]` note block is part of the turn instruction the
+    /// fresh dispatch is built from, which is why `apply_review_feedback`
+    /// appends to the note *before* re-dispatch.
+    #[test]
+    fn task_instruction_carries_a_reviewer_note_block() {
+        let mut card = card_in_review("card-1");
+        card.note = Some("[reviewer] tighten the intro".to_string());
+        let instruction = task_instruction(&card);
+        assert!(
+            instruction.contains("[reviewer] tighten the intro"),
+            "the fresh run must see the reviewer's feedback: {instruction}"
+        );
+        assert!(instruction.starts_with(&format!("Task: {}", card.title)));
+    }
+
     fn granted(approval: &str, tool: &str) -> crate::runtime::grants::GrantedCall {
         crate::runtime::grants::GrantedCall {
             approval_id: ApprovalId::new(approval),
