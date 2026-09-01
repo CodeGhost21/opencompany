@@ -2550,9 +2550,37 @@ impl HarnessAgentRunner {
                     let recovered =
                         crate::workflows::judge::ask_around(&self.deps, &self.company, question)
                             .await;
-                    if let Some(evidence) = recovered.evidence {
-                        outcome.reply.push_str("\n\nRecovered company context:\n");
-                        outcome.reply.push_str(&evidence);
+                    // Codex review on #1990: found evidence is not itself proof
+                    // the gap is closed — it is raw snippets the ORIGINAL turn
+                    // never saw or acted on. A refusal like "I cannot draft the
+                    // email without the customer's name" plus an appended
+                    // "Recovered company context:" block is still that same
+                    // refusal; without a second judge pass on the augmented
+                    // text, it settled Succeeded and rode downstream as the
+                    // deliverable. Re-verify before accepting.
+                    let recovered_and_sufficient = match &recovered.evidence {
+                        Some(evidence) => {
+                            let mut augmented = outcome.reply.clone();
+                            augmented.push_str("\n\nRecovered company context:\n");
+                            augmented.push_str(evidence);
+                            let reverdict = crate::workflows::judge::judge_sufficiency(
+                                &self.deps,
+                                &self.company,
+                                crate::workflows::judge::JudgeInput {
+                                    instruction: &message,
+                                    output: &augmented,
+                                    criteria,
+                                    execution_failed: false,
+                                },
+                            )
+                            .await;
+                            (reverdict == crate::workflows::judge::SufficiencyVerdict::Continue)
+                                .then_some(augmented)
+                        }
+                        None => None,
+                    };
+                    if let Some(augmented) = recovered_and_sufficient {
+                        outcome.reply = augmented;
                     } else {
                         let message = format!(
                             "workflow node `{lineage_node}` needs missing information; recovery tried {}",
@@ -3901,6 +3929,179 @@ mod tests {
         assert!(
             sent.contains("Request for this run:"),
             "the judge's prompt must use the same composed shape the agent's own turn ran on: {sent}"
+        );
+    }
+
+    /// A turn double that always answers with a fixed refusal reply — a node
+    /// whose agent could not complete the ask, the shape a `recover` verdict is
+    /// meant to rescue.
+    struct RefusalWorkflowTurn;
+
+    #[async_trait]
+    impl RunTurn for RefusalWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "I cannot draft the email without the customer's name.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    /// A [`FactStore`] that always answers `list` with one fixed fact,
+    /// regardless of the query — standing in for a real match so `ask_around`
+    /// always has evidence to offer.
+    struct OneFactStore;
+
+    #[async_trait]
+    impl crate::ports::FactStore for OneFactStore {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            _query: Option<&str>,
+            _kind: Option<crate::ports::FactKind>,
+        ) -> crate::Result<Vec<crate::ports::FactRecord>> {
+            Ok(vec![crate::ports::FactRecord {
+                id: "f1".to_string(),
+                kind: crate::ports::FactKind::Fact,
+                title: "Company context".to_string(),
+                body: "irrelevant background, not the customer's name".to_string(),
+                source: "test".to_string(),
+                updated_at_millis: 0,
+            }])
+        }
+
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _fact: &crate::ports::FactRecord,
+        ) -> crate::Result<()> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    /// Codex review on #1990 (issue #1866, #3903874673): found evidence is not
+    /// itself proof the gap closed. Before the fix, ANY evidence — however
+    /// unrelated — was appended to a refusal's own reply and the node settled
+    /// `Succeeded` without ever re-checking whether the augmented text now
+    /// actually answers the ask. Here the "recovered" fact is deliberately
+    /// irrelevant to the missing customer name, so a correct re-verify must
+    /// still refuse to accept the node.
+    #[tokio::test]
+    async fn recovered_evidence_that_does_not_close_the_gap_is_not_accepted() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-reverify-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RefusalWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990g".to_string(),
+            "run-1990g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "irrelevant recovered evidence must not turn a refusal into a success"
+        );
+        let seen = script.seen.lock().expect("seen");
+        assert_eq!(
+            seen.len(),
+            2,
+            "the judge must be asked again about the augmented output, not just once up front"
+        );
+        let reverify_prompt = seen[1].to_string();
+        assert!(
+            reverify_prompt.contains("Recovered company context"),
+            "the second judge call must see the augmented output, not the original refusal alone: \
+             {reverify_prompt}"
         );
     }
 
