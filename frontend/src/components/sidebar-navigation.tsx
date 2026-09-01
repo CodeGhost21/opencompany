@@ -341,6 +341,20 @@ export function SidebarNavigation({
             className={cn(
               "min-h-0 flex-1 pt-5",
               !roomContents && "group-data-[collapsible=icon]:hidden",
+              // On the 3rem rail this group's own `px-2` is the difference
+              // between fitting and not. The rail is 48px; the gutter leaves a
+              // 32px content box, and `ChannelRail`'s compact rows are `size-9`
+              // (36px) with their unread dots hung off the right edge — so the
+              // rows overhung the slot by 2px a side and the dots landed in
+              // horizontal overflow (codex P2 review). Measured before this:
+              // slot `clientWidth` 32 against `scrollWidth` 34.
+              //
+              // The gutter goes rather than the rows shrinking: 36px is the
+              // compact rail's own avatar size, shared with the roster and the
+              // `#` glyphs, and re-sizing it for one container is how the two
+              // densities drift apart. Only in icon mode — the expanded column
+              // keeps the gutter every other group has.
+              roomContents && "group-data-[collapsible=icon]:px-0",
             )}
           >
             {active.children && (
