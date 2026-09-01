@@ -2268,40 +2268,49 @@ export function ChatView({
               </p>
             )}
             <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
-            <MessageComposer
-              placeholder={
-                readOnly
-                  ? "This channel is read-only"
-                  : `Message ${channelTitle(channel)}`
-              }
-              disabled={sending || readOnly}
-              prefill={composerPrefill ?? undefined}
-              // Not voided (unlike the thread composer below): the composer
-              // awaits this to know whether an attachment it carried actually
-              // journaled, so it can clean up one that did not (codex review
-              // finding on #1682) — see `deleteAttachment` and `send`'s doc.
-              onSend={(text, intent, attachments, mentions) =>
-                send(text, intent, undefined, attachments, mentions)
-              }
-              // Issue #1682: only the channel/DM composer attaches — the paperclip
-              // is present exactly because this prop is.
-              uploadAttachment={uploadAttachment}
-              // Cleans up a staged upload that never got sent (codex review
-              // finding on #1682) — see `deleteAttachment`.
-              deleteAttachment={deleteAttachment}
-              // Every keystroke asks; the hook throttles to one ping per
-              // channel per few seconds and skips entirely while the event
-              // stream is down.
-              onTyping={() => onTyping?.(active.id)}
-              // Channel *and* DM composers offer "just chatting" / "do it once" /
-              // "build me the workflow" (issues #580, #845, #1152) — see
-              // `offersDeliverableChoice`, which owns the rule and is unchanged:
-              // the new position inherits the same channel+DM gating. Only the
-              // thread and copilot composers below go without.
-              deliverableChoice={offersDeliverableChoice(active.kind)}
-              mentionables={mentionables}
-              channelMemberIds={inChannel?.map((m) => m.id)}
-            />
+            {/* No composer at all on a read-only channel, rather than a disabled
+                one. A disabled control is still a claim that the action exists:
+                the strip above says "there is nothing to reply to here", and a
+                greyed-out reply box with a Send button and an "Enter to send"
+                hint under it says the opposite in the same breath. The notice is
+                what should occupy this space.
+
+                `disabled` therefore no longer carries `readOnly` — nothing can be
+                read-only and rendered here at the same time. The server's
+                read-only guard and `ThreadPanel`'s no-op `onSend` (issue #1757)
+                are untouched: this removes the affordance, not the belt. */}
+            {!readOnly && (
+              <MessageComposer
+                placeholder={`Message ${channelTitle(channel)}`}
+                disabled={sending}
+                prefill={composerPrefill ?? undefined}
+                // Not voided (unlike the thread composer below): the composer
+                // awaits this to know whether an attachment it carried actually
+                // journaled, so it can clean up one that did not (codex review
+                // finding on #1682) — see `deleteAttachment` and `send`'s doc.
+                onSend={(text, intent, attachments, mentions) =>
+                  send(text, intent, undefined, attachments, mentions)
+                }
+                // Issue #1682: only the channel/DM composer attaches — the paperclip
+                // is present exactly because this prop is.
+                uploadAttachment={uploadAttachment}
+                // Cleans up a staged upload that never got sent (codex review
+                // finding on #1682) — see `deleteAttachment`.
+                deleteAttachment={deleteAttachment}
+                // Every keystroke asks; the hook throttles to one ping per
+                // channel per few seconds and skips entirely while the event
+                // stream is down.
+                onTyping={() => onTyping?.(active.id)}
+                // Channel *and* DM composers offer "just chatting" / "do it once" /
+                // "build me the workflow" (issues #580, #845, #1152) — see
+                // `offersDeliverableChoice`, which owns the rule and is unchanged:
+                // the new position inherits the same channel+DM gating. Only the
+                // thread and copilot composers below go without.
+                deliverableChoice={offersDeliverableChoice(active.kind)}
+                mentionables={mentionables}
+                channelMemberIds={inChannel?.map((m) => m.id)}
+              />
+            )}
           </div>
 
           {parent && (

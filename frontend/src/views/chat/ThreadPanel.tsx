@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { TriangleAlert, X } from "lucide-react";
 
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -42,11 +42,14 @@ interface Props {
   /**
    * Whether the channel this thread belongs to is read-only (issue #1757's
    * Operator channel, `Boolean(channel?.system)` in `ChatView`). The main
-   * composer already disables on this, but a thread has its own composer —
-   * so without this a durable Operator report could still be opened as a
-   * thread and replied to there, only for the server's read-only guard to
-   * reject it after the text was written. Absent means "no such channel is
-   * open", the same as the main composer's default.
+   * composer is not rendered on such a channel, but a thread has its own
+   * composer — so without this a durable Operator report could still be
+   * opened as a thread and replied to there, only for the server's read-only
+   * guard to reject it after the text was written. Absent means "no such
+   * channel is open", the same as the main composer's default.
+   *
+   * The panel answers it the way the channel does: **no composer at all**,
+   * and a notice in its place saying why. See the render site.
    */
   readOnly?: boolean;
   /**
@@ -192,26 +195,47 @@ export function ThreadPanel({
         ))}
       </div>
 
-      <TypingLine names={typingNames} />
-      <MessageComposer
-        compact
-        placeholder={readOnly ? "This channel is read-only" : "Reply…"}
-        disabled={sending || readOnly}
-        mentionables={mentionables}
-        channelMemberIds={channelMemberIds}
-        // Belt to the composer's brace: `disabled` already keeps the UI from
-        // calling this, but a read-only thread never reaches the real
-        // `onSend` — and therefore never calls `client.chat` — even if
-        // something upstream bypasses the disabled input (issue #1757).
-        onSend={readOnly ? noopSend : onSend}
-        onTyping={onTyping}
-      />
+      {/* A read-only thread gets the notice and no composer, the way its
+          channel does. The panel used to render a *disabled* composer with the
+          placeholder "This channel is read-only" — but a disabled reply box is
+          still a claim that replying is a thing you do here, and it was the
+          only thing this panel said on the subject. The explanation is what
+          should occupy the space; the affordance should not be there at all.
+
+          `noopSend` went with it: with no composer there is nothing left to
+          wire a no-op to. The belt that mattered is the server's read-only
+          guard (issue #1757), which is untouched, plus `ChatView`'s own
+          `if (readOnly) return;` before it calls `client.chat`. */}
+      {readOnly ? (
+        <p
+          role="status"
+          data-testid="thread-read-only-notice"
+          className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+        >
+          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0">
+            The <span className="font-medium text-foreground">Operator</span> channel is a
+            read-only feed of workflow reports and notifications. There is nothing to reply to
+            here.
+          </span>
+        </p>
+      ) : (
+        <>
+          <TypingLine names={typingNames} />
+          <MessageComposer
+            compact
+            placeholder="Reply…"
+            disabled={sending}
+            mentionables={mentionables}
+            channelMemberIds={channelMemberIds}
+            onSend={onSend}
+            onTyping={onTyping}
+          />
+        </>
+      )}
     </aside>
   );
 }
-
-/** The no-op `onSend` a read-only [`ThreadPanel`] wires its composer to. */
-function noopSend() {}
 
 function Line({
   channel,
