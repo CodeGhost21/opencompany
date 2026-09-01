@@ -461,22 +461,40 @@ function findDirective(messages) {
  */
 function findPlan(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    // `specWords`, not the raw text: the host appends briefings that quote
-    // other messages verbatim and truncated, so a message can carry a decoy
-    // copy of an older directive with its payload cut in half.
     const text = specWords(textOf(messages[i]));
-    const at = text.indexOf(PLAN_DIRECTIVE);
-    if (at < 0) continue;
-    const steps = readJsonValue(text, at + PLAN_DIRECTIVE.length, "[", "]");
+    // Every occurrence, newest first — not just the first one.
+    //
+    // The host prepends context to an operator message: a `## Relevant prior
+    // work` digest of earlier tasks, then the operator's own words under
+    // `## Task`. The digest quotes those earlier messages *truncated*, so when
+    // a spec opens a thread with a directive in it, later messages carry a
+    // chopped-off copy of it BEFORE the live one.
+    //
+    // `indexOf` found the decoy, and a decoy is unparsable by construction.
+    // Scanning back through occurrences puts the operator's own directive --
+    // the last one in the text -- ahead of anything quoted above it.
+    const found = [];
+    for (let at = text.indexOf(PLAN_DIRECTIVE); at >= 0; at = text.indexOf(PLAN_DIRECTIVE, at + 1)) {
+      found.push(at);
+    }
+    let at = -1;
+    let steps = null;
+    for (let k = found.length - 1; k >= 0; k -= 1) {
+      const parsed = readJsonValue(text, found[k] + PLAN_DIRECTIVE.length, "[", "]");
+      if (Array.isArray(parsed)) {
+        at = found[k];
+        steps = parsed;
+        break;
+      }
+    }
+    if (found.length === 0) continue;
     if (!Array.isArray(steps)) {
-      // Say so loudly — a spec that wrote bad JSON deserves to hear it — but
-      // keep scanning rather than giving up on the whole thread. Returning null
-      // here let one unparsable directive anywhere in the history silence every
-      // real plan behind it, which is how a truncated echo took out an entire
-      // spec rather than one turn.
+      // Loud, because a spec that wrote bad JSON deserves to hear it — but keep
+      // scanning older messages rather than abandoning the thread. Returning
+      // null here let one truncated echo silence every real plan behind it.
       process.stderr.write(
-        `[mock brain] ${PLAN_DIRECTIVE} found in message ${i} but its JSON payload did ` +
-          `not parse; ignoring it and looking further back\n`,
+        `[mock brain] ${PLAN_DIRECTIVE} appears ${found.length}x in message ${i}; none of ` +
+          `them parsed, looking further back\n`,
       );
       continue;
     }

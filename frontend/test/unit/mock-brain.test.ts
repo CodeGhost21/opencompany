@@ -124,20 +124,19 @@ describe("the mock inference backend", () => {
     // returned null for the entire thread — so the real plan behind it was
     // never served. `orchestration-simulation.spec.ts` died exactly there:
     // cards reached `in_review` and the closing `review_task` never ran.
+    // The decoy sits BEFORE the live directive in the SAME message, which is
+    // how the host actually composes a turn: a `## Relevant prior work` digest
+    // quoting earlier tasks (truncated), then the operator's words under
+    // `## Task`. `indexOf` reached the decoy first, so scanning older messages
+    // was no help -- the real plan was further down the same string.
     const real = plan("echo-1", [[{ name: "review_task", arguments: { decision: "approve" } }]]);
-    const decoy =
-      "and now the next thing" +
-      "\n\n[Other conversations in this channel, for reference only):\n" +
-      '- [12] "close this out __MOCK_PLAN__ [[{\"name\":\"spawn_ta' +
-      "\n]";
+    const composed =
+      "## Relevant prior work\n" +
+      '- Task: ship the digest. __MOCK_PLAN__ [[{"name":"spawn_task","arguments":{"title":"sim gather the sou' +
+      "\n\n## Task\n" +
+      real;
 
-    const reply = await chat(
-      [
-        { role: "user", content: real },
-        { role: "user", content: decoy },
-      ],
-      ["review_task"],
-    );
+    const reply = await chat([{ role: "user", content: composed }], ["review_task"]);
 
     const call = reply.choices[0].message.tool_calls?.[0];
     expect(call?.function?.name).toBe("review_task");
