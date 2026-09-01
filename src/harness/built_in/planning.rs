@@ -102,6 +102,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::harness::HarnessDeps;
 use crate::harness::build::{grants_cover, model_for_tier};
 use crate::harness::provider::HarnessModel;
+use crate::harness::toolbelt;
 use crate::ports::now_millis;
 use crate::ports::tasks::{
     AssigneeCandidate, COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO, PlanStep,
@@ -342,7 +343,7 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
     }
     let token = card.updated_at_millis;
 
-    let evidence = match gather_evidence(&runtime, &card).await {
+    let mut evidence = match gather_evidence(&runtime, &card).await {
         Ok(evidence) => evidence,
         Err(err) => {
             tracing::warn!(
@@ -367,6 +368,7 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
         }
     };
     record_usage(&runtime, &planner, &task_id, &usage).await;
+    refresh_native_capabilities(&runtime, &mut evidence, &card).await;
 
     let prerequisites = verify_prerequisites(&runtime, &evidence, &draft.prerequisites).await;
     let candidates = resolve_assignee_candidates(&evidence, &draft.assignee_candidates);
@@ -867,16 +869,22 @@ struct Evidence {
     /// Distinct from [`Self::composio_reachable`], which is "did the probe
     /// answer" — a liveness fact. This one is "do we hold a bearer at all".
     composio_credential: bool,
-    /// Native capability namespaces some plannable teammate holds a built-in
-    /// tool for — the company can serve these without any Composio connection.
-    ///
-    /// Union scope over the roster's grants
-    /// ([`grants_confer_native`](crate::company::grants_confer_native) over each
-    /// teammate), keyed to the shared native vocabulary
-    /// ([`native_capability_namespaces`](crate::company::native_capability_namespaces)).
-    /// A `connection`/`composio` prerequisite naming one of these is satisfied by
-    /// the built-in tool rather than parked on a connection it never needed.
+    /// Native capability namespaces the company can serve without any
+    /// Composio connection — see [`native_capabilities_of`] for the full
+    /// rule: the card's fixed assignee's own grants when it has one, the
+    /// roster union otherwise, each namespace additionally gated on this
+    /// deployment actually having wired the tool (not just granted it) for
+    /// the real-money `search`/`media` families. A `connection`/`composio`
+    /// prerequisite naming one of these is satisfied by the built-in tool
+    /// rather than parked on a connection it never needed.
     native_capabilities: HashSet<String>,
+    /// Carried alongside `native_capabilities` so
+    /// [`refresh_native_capabilities`] can recompute the latter — through the
+    /// same [`native_capabilities_of`] call [`gather_evidence`] made — without
+    /// re-deriving these two backend checks from `runtime.workflow_harness_deps`
+    /// a second time.
+    search_backend_configured: bool,
+    media_backend_configured: bool,
 }
 
 impl Evidence {
@@ -905,10 +913,25 @@ impl Evidence {
     ///
     /// [`OverlayAgent`]: crate::ports::types::OverlayAgent
     fn working_teammate(&self, key: &str) -> Option<&TeammateBrief> {
-        let resolution = assignee::resolve(&self.record, key);
-        let working = resolution.working_agent()?;
-        self.teammates.iter().find(|t| t.id == working)
+        resolve_working_teammate(&self.record, &self.teammates, key)
     }
+}
+
+/// The roster teammate a resolved assignee ultimately routes work to — the free
+/// function [`Evidence::working_teammate`] delegates to, and that
+/// [`gather_evidence`] also needs a beat before `Evidence` exists (to decide
+/// whether [`native_capabilities_of`] should read one teammate's grants or the
+/// whole roster's). Same resolution both times: a **desk** resolves to its
+/// lead, and every unworkable form (`Unassigned`, `EmptyDesk`, `Unknown`,
+/// `AmbiguousTeammate`) answers `None`.
+fn resolve_working_teammate<'a>(
+    record: &CompanyRecord,
+    teammates: &'a [TeammateBrief],
+    key: &str,
+) -> Option<&'a TeammateBrief> {
+    let resolution = assignee::resolve(record, key);
+    let working = resolution.working_agent()?;
+    teammates.iter().find(|t| t.id == working)
 }
 
 /// The assignee gate. A plan may *fill in* a blank assignee but never reassign
@@ -928,18 +951,87 @@ fn settled_assignee(card_assignee: &str, proposed: Option<String>) -> Option<Str
     }
 }
 
-/// The native capability namespaces the company can serve with a built-in tool,
-/// as a union over the roster: a namespace is included when **any** teammate's
-/// grants confer it. Union scope is deliberate — one teammate holding the tool
-/// means the company can do the work natively, so no card should park on a
-/// Composio connection for it.
-fn native_capabilities_of(teammates: &[TeammateBrief]) -> HashSet<String> {
+/// The native capability namespaces the company can serve with a built-in
+/// tool, WITHOUT any Composio connection — the evidence
+/// `verify_connection`/`verify_composio` short-circuit `Satisfied` against.
+///
+/// Two follow-up fixes on top of the original union rule (PR #1946 review):
+///
+/// **Grants alone are not proof of wiring.** [`grants_confer_native`] is a
+/// pure grant-string check; it never asks whether the namespace's tool was
+/// actually built. `shell`/`code`/`subagent` wire off the grant alone, but
+/// `build_agent` gates `search` and `media` on a SECOND condition — a managed
+/// or company-owned backend on the harness deps
+/// (`deps.search`/`deps.tenant_search`, `deps.media`; see `build.rs`'s
+/// `search`/`media` wiring blocks) — because both are real-money calls a
+/// grant alone does not provision. A company granting `search` on a
+/// deployment (or BYO setup) with neither backend configured held no
+/// `web_search` tool at all; before this fix it was still reported native and
+/// satisfied, so a card's evidence and dispatch's actual belt disagreed.
+/// `media_backend_configured` also asks
+/// [`MediaBackend::is_https`](crate::harness::toolbelt::MediaBackend::is_https),
+/// the same predicate [`media_tools`](crate::harness::toolbelt::media_tools)
+/// gates on — a `deps.media` present but pointed at a non-HTTPS host wires no
+/// tool either, so the evidence has to fail closed the same way.
+/// `search_backend_configured`/`media_backend_configured` close that gap —
+/// pass `false` for a namespace this deployment cannot back regardless of
+/// grants.
+///
+/// **Roster union assumes an unassigned card.** The union scope in the
+/// original doc comment below is correct for a card with no fixed worker yet:
+/// "the company can serve this somehow" is the right question when planning
+/// has not committed to who runs it. It stops being correct once
+/// `fixed_assignee` names a specific teammate (an operator-chosen assignee
+/// `settled_assignee` preserves rather than overrides) — that teammate, and
+/// only that teammate, is who dispatch actually invokes, so their own grants
+/// are what decide whether the built-in tool exists on the belt this card
+/// will run against. A card fixed to an assignee with no `search` grant must
+/// not read as `search: satisfied` because some *other* roster member holds
+/// it; that teammate never touches this card.
+///
+/// `fixed_assignee: None` (no assignee yet, a desk with no lead, or a name
+/// that does not resolve) falls back to the roster union: a namespace is
+/// included when **any** teammate's grants confer it, because whichever
+/// teammate ultimately works the card, the company can do it natively.
+///
+/// **A denied namespace is not proof of wiring either.** `capabilities` is the
+/// SAME [`toolbelt::CapabilityFilter`] `HarnessDeps::capabilities` carries and
+/// [`filter_by_capabilities`](crate::harness::toolbelt::filter_by_capabilities)
+/// strips the live belt with — exactly the check
+/// [`native_caps_for_composio_brief`](crate::harness::toolbelt::native_caps_for_composio_brief)
+/// already applies on the Composio-brief side. A tenant tier that denies
+/// `search` still leaves `maya`'s grant and this deployment's search backend
+/// in place; without this filter the evidence would call `search` native
+/// while `filter_by_capabilities` is about to strip the tool the belt would
+/// otherwise have carried.
+fn native_capabilities_of(
+    teammates: &[TeammateBrief],
+    fixed_assignee: Option<&TeammateBrief>,
+    search_backend_configured: bool,
+    media_backend_configured: bool,
+    capabilities: &toolbelt::CapabilityFilter,
+) -> HashSet<String> {
+    let grants_confer = |ns: &str| -> bool {
+        match fixed_assignee {
+            Some(assignee) => crate::company::grants_confer_native(&assignee.grants, ns),
+            None => teammates
+                .iter()
+                .any(|t| crate::company::grants_confer_native(&t.grants, ns)),
+        }
+    };
+    let backend_available = |ns: &str| -> bool {
+        match ns {
+            "search" => search_backend_configured,
+            "media" => media_backend_configured,
+            _ => true,
+        }
+    };
     crate::company::native_capability_namespaces()
         .into_iter()
         .filter(|ns| {
-            teammates
-                .iter()
-                .any(|t| crate::company::grants_confer_native(&t.grants, ns))
+            backend_available(ns)
+                && grants_confer(ns)
+                && !toolbelt::namespace_denied(capabilities, ns)
         })
         .map(str::to_string)
         .collect()
@@ -962,7 +1054,11 @@ async fn gather_evidence(
             crate::error::OpenCompanyError::CompanyNotFound(runtime.id().to_string())
         })?;
 
-    let allow = record.manifest.tools.allow.clone();
+    // The effective allow-list, not the raw manifest field: [`CompanyRecord::effective_tool_allow`]
+    // folds in a console tool-grant an operator added after the seed shipped, so
+    // a namespace granted through the Connections tab reaches this evidence the
+    // same way it reaches every other `effective_tool_allow` reader.
+    let allow = record.effective_tool_allow();
     // The roster the company actually runs, not the half of it the manifest
     // declares (issue #1106, CodeRabbit on #1157).
     //
@@ -1129,7 +1225,94 @@ async fn gather_evidence(
     )
     .await;
 
-    let native_capabilities = native_capabilities_of(&teammates);
+    // The two conditions `native_capabilities_of` needs beyond the roster's
+    // grants: whether THIS deployment actually wired the real-money `search`/
+    // `media` families (a grant alone does not provision either — see
+    // `native_capabilities_of`'s doc comment), and — when the card already has
+    // an operator-chosen assignee — which single teammate's grants should
+    // decide the answer instead of the roster union. Both read off the SAME
+    // `record`/`teammates` this pass already built, before either is moved
+    // into `Evidence` below.
+    // The active capability-tier filter for this deployment, resolved the same
+    // live per-call way `HarnessPool::ensure_impl` resolves it before every
+    // turn (`resolve_capability_filter` → `capability_budget::resolve_filter`
+    // when a `[plan]` is set), not read off `deps.capabilities`. That field is
+    // the boot-time snapshot `RuntimeBuilder` seeds as `AllowAll` — with a plan
+    // attached, `HarnessPool::ensure` re-resolves the tenant's spend against the
+    // meter each turn and installs the result only onto its own local
+    // `fresh_deps` used to build the roster, never writing it back onto
+    // `runtime.workflow_harness_deps`. Reading the stale field here means a
+    // namespace whose budget has since been exhausted (or a meter that started
+    // failing closed) still reports that namespace's prerequisite native, while
+    // the next dispatched agent has the tool actually stripped. Re-resolving
+    // through the same plan/meter path `HarnessPool` uses is what keeps this
+    // evidence and the belt a freshly-dispatched agent gets from disagreeing —
+    // the same fix `search_backend_configured` above already applies to the
+    // tenant-search seam. `AllowAll` (denies nothing) is the correct fallback
+    // for the no-deps case, matching the [`HarnessDeps`] default everywhere
+    // else.
+    let capabilities = match runtime.workflow_harness_deps.as_ref() {
+        Some(deps) => match &deps.plan {
+            Some(plan) => {
+                crate::harness::built_in::capability_budget::resolve_filter(
+                    plan,
+                    deps.meter.as_deref(),
+                    runtime.id(),
+                    now_millis(),
+                )
+                .await
+            }
+            None => deps.capabilities.clone(),
+        },
+        None => toolbelt::CapabilityFilter::AllowAll,
+    };
+
+    let (search_backend_configured, media_backend_configured) =
+        match runtime.workflow_harness_deps.as_ref() {
+            Some(deps) => {
+                // Media evidence additionally requires the `media` feature itself:
+                // `media_backend_from_env`/`with_media_backend` are gated only on
+                // `openhuman`, so `deps.media` can be populated in a build that never
+                // compiles `media_tools` (it is `#[cfg(feature = "media")]` in full).
+                // Crediting `media` here without the feature would report a
+                // capability the belt can never carry, feature flags aside.
+                let media_backend_configured = cfg!(feature = "media")
+                    && deps
+                        .media
+                        .as_ref()
+                        .is_some_and(|backend| backend.is_https());
+                // `deps.tenant_search` is the boot-time snapshot on
+                // `runtime.workflow_harness_deps`, which nothing re-writes once a
+                // company adds a BYO key after startup — only `HarnessPool::ensure`
+                // re-resolves it, and only into the pool's own local `fresh_deps`
+                // used to build the roster. Ask the live store the same way
+                // `HarnessPool::resolve_tenant_search` does, so this evidence and
+                // the belt a freshly-dispatched agent actually gets agree.
+                let search_backend_configured = deps.search.is_some()
+                    || (crate::company::grants_search_explicit(&allow)
+                        && match crate::harness::search_byo::TenantSearch::resolve(
+                            runtime.secrets(),
+                            runtime.id(),
+                        )
+                        .await
+                        {
+                            Ok(resolved) => resolved.is_some(),
+                            Err(_) => deps.tenant_search.is_some(),
+                        });
+                (search_backend_configured, media_backend_configured)
+            }
+            // No deps attached means no deployment to ask — fail closed rather
+            // than crediting a backend this pass cannot confirm exists.
+            None => (false, false),
+        };
+    let fixed_assignee = resolve_working_teammate(&record, &teammates, &card.assignee);
+    let native_capabilities = native_capabilities_of(
+        &teammates,
+        fixed_assignee,
+        search_backend_configured,
+        media_backend_configured,
+        &capabilities,
+    );
 
     Ok(Evidence {
         company_name: record.manifest.company.name.clone(),
@@ -1150,7 +1333,54 @@ async fn gather_evidence(
         mail_configured: runtime.mail().is_some(),
         composio_credential,
         native_capabilities,
+        search_backend_configured,
+        media_backend_configured,
     })
+}
+
+/// Re-resolves [`Evidence::native_capabilities`] against the tenant's spend as
+/// of right now.
+///
+/// [`gather_evidence`] resolves the live capability filter *before*
+/// [`call_model`] runs, so it reflects the budget as it stood before the
+/// planning call's own tokens were charged. [`record_usage`] charges those
+/// tokens — a planning sample counts toward the capability-tier ceiling the
+/// same as any other completion — and [`verify_prerequisites`] runs after
+/// that charge. Without this re-resolve, a tenant whose planning call itself
+/// crosses a namespace's budget still has that namespace's evidence stamped
+/// native off the pre-charge filter, while `HarnessPool::ensure` strips the
+/// tool from the belt the dispatched agent actually gets.
+///
+/// A no-op when there is no plan to resolve against: the no-plan
+/// `deps.capabilities` value and the no-deps `AllowAll` default do not depend
+/// on spend, so nothing this pass charged could have changed them.
+async fn refresh_native_capabilities(
+    runtime: &Arc<CompanyRuntime>,
+    evidence: &mut Evidence,
+    card: &TaskRecord,
+) {
+    let Some(deps) = runtime.workflow_harness_deps.as_ref() else {
+        return;
+    };
+    let Some(plan) = deps.plan.as_ref() else {
+        return;
+    };
+    let capabilities = crate::harness::built_in::capability_budget::resolve_filter(
+        plan,
+        deps.meter.as_deref(),
+        runtime.id(),
+        now_millis(),
+    )
+    .await;
+    let fixed_assignee =
+        resolve_working_teammate(&evidence.record, &evidence.teammates, &card.assignee);
+    evidence.native_capabilities = native_capabilities_of(
+        &evidence.teammates,
+        fixed_assignee,
+        evidence.search_backend_configured,
+        evidence.media_backend_configured,
+        &capabilities,
+    );
 }
 
 /// Whether **any** Composio credential resolves for this company — presence
