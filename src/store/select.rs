@@ -282,6 +282,7 @@ impl MemoryOverlay {
                 driver_id: "test".into(),
                 capabilities: Vec::new(),
                 healthy: None,
+                unreachable_families: None,
             },
             #[cfg(feature = "tinymemory")]
             probe: None,
@@ -317,12 +318,80 @@ impl MemoryOverlay {
             );
         }
         self.descriptor.healthy = Some(healthy);
+
+        let unreachable = probe_mandatory_families(probe.as_ref(), timeout).await;
+        if !unreachable.is_empty() {
+            tracing::warn!(
+                driver_id = %self.descriptor.driver_id,
+                families = ?unreachable,
+                "memory engine advertises families its live surface did not answer; the \
+                 bind-time audit cannot catch this because `provides()` reports Core, Recall \
+                 and Portability unconditionally. Reads against these will fail inside a \
+                 tenant when the memory is needed"
+            );
+        }
+        self.descriptor.unreachable_families = Some(unreachable);
     }
 
     /// Without the provider seam there is nothing to probe; `healthy` stays
     /// `None` ("not probed"), which is the truth.
     #[cfg(not(feature = "tinymemory"))]
     pub async fn refresh_health(&mut self, _timeout: std::time::Duration) {}
+}
+
+/// Reads once against each **mandatory** family to see whether the live engine
+/// answers it, independently of what the adapter claims.
+///
+/// Only the three mandatory families are probed, and deliberately so: they are
+/// the ones `MemoryProvider::provides` reports `true` for unconditionally, so
+/// the bind-time audit can never fail them — and they are precisely the three
+/// this host binds `MemoryStore`, `ContextStore` and `FactStore` to. The
+/// seventeen optional families are already covered by the audit, because
+/// `provides()` derives those from a real accessor.
+///
+/// Every call here is **read-only** and uses a namespace no company can
+/// produce, so probing writes nothing and cannot collide with tenant data.
+///
+/// An empty answer is success. A freshly provisioned engine holds nothing, and
+/// treating "no rows" as "broken" would refuse every family on day one — the
+/// empty-instance case that makes this problem hard (issue #1968). Only an
+/// error, or a timeout, counts as unreachable.
+///
+/// This does not catch an engine that answers `Ok(empty)` forever while never
+/// storing anything; distinguishing that from a new instance needs an
+/// engine-specific signal, which belongs in the adapter and its conformance
+/// suite rather than here.
+#[cfg(feature = "tinymemory")]
+async fn probe_mandatory_families(
+    probe: &dyn tinymemory_api::provider::MemoryProvider,
+    timeout: std::time::Duration,
+) -> Vec<String> {
+    use tinymemory_api::types::OwnedRecallOpts;
+
+    // Not a valid `Namespace`: those are sanitize-plus-hash derived from a
+    // company id, so nothing a tenant owns can collide with this.
+    const PROBE_NS: &str = "__host_probe__";
+    const PROBE_KEY: &str = "__host_probe__";
+
+    let mut unreachable = Vec::new();
+
+    let core = tokio::time::timeout(timeout, probe.get(PROBE_NS, PROBE_KEY)).await;
+    if !matches!(core, Ok(Ok(_))) {
+        unreachable.push("core".to_string());
+    }
+
+    let opts = OwnedRecallOpts::default();
+    let recall = tokio::time::timeout(timeout, probe.recall("", 1, &opts, None)).await;
+    if !matches!(recall, Ok(Ok(_))) {
+        unreachable.push("recall".to_string());
+    }
+
+    let portability = tokio::time::timeout(timeout, probe.export_page(None, 1)).await;
+    if !matches!(portability, Ok(Ok(_))) {
+        unreachable.push("portability".to_string());
+    }
+
+    unreachable
 }
 
 /// Maps a probe outcome (`None` = timed out) onto the `healthy` bit.
@@ -371,6 +440,22 @@ pub struct MemoryDescriptor {
     /// [`MemoryOverlay::refresh_health`]. `Some(false)` is a bound engine
     /// whose probe failed: still bound and loudly warned.
     pub healthy: Option<bool>,
+    /// Advertised families that did not answer a live read at probe time.
+    ///
+    /// Empty is the healthy case; `None` means "not probed". This exists
+    /// because `capabilities()` and `provides()` are both properties of the
+    /// *adapter* — `provides()` is `self.as_x().is_some()`, a Rust-object
+    /// check — so neither asks whether the engine behind it answers. The three
+    /// mandatory families are worse still: `provides()` returns `true` for
+    /// Core, Recall and Portability unconditionally, so the bind-time audit
+    /// cannot fail them by construction, and they are exactly the three this
+    /// host binds its knowledge ports to.
+    ///
+    /// **An empty result is success.** A freshly provisioned engine holds
+    /// nothing, so "returned no rows" must not be read as "does not work";
+    /// only an error is a failure. That distinction is the whole point — see
+    /// the acceptance discussion in issue #1968.
+    pub unreachable_families: Option<Vec<String>>,
 }
 
 /// Durable company → tenant ownership, for shared-database platform mode.
@@ -905,6 +990,7 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
             // Not probed yet: binding is offline by design, and the probe is
             // the caller's boot-time step (`refresh_health`).
             healthy: None,
+            unreachable_families: None,
         },
         probe: Some(probe),
     }))
@@ -1024,6 +1110,26 @@ mod test {
     use super::*;
 
     use crate::app::config::MapEnv;
+
+    /// A working engine that holds nothing must not be reported as broken.
+    ///
+    /// This is the case that makes issue #1968 hard. On a freshly provisioned
+    /// per-tenant instance every family is legitimately empty, so a probe that
+    /// read "returned no rows" as "not implemented" would refuse every family
+    /// on day one. `NullMemoryProvider` is exactly that shape — every read
+    /// succeeds and returns nothing — so it must probe clean.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn an_empty_engine_probes_clean() {
+        let provider = tinymemory_api::null::NullMemoryProvider::new();
+        let unreachable =
+            probe_mandatory_families(&provider, std::time::Duration::from_secs(5)).await;
+        assert!(
+            unreachable.is_empty(),
+            "an engine that answers every read but holds nothing must not be reported \
+             unreachable; got {unreachable:?}"
+        );
+    }
 
     #[test]
     fn parses_storage_kinds() {

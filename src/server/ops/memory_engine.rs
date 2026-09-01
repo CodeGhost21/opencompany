@@ -121,6 +121,14 @@ struct EngineDto {
     /// The last probe's verdict; absent when the engine was never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
     healthy: Option<bool>,
+    /// Advertised families the live engine did not answer when probed. Empty
+    /// is healthy; absent means the engine was never probed.
+    ///
+    /// Separate from [`Self::capabilities`] on purpose: that list is what the
+    /// driver *claims*, and the bind-time audit cannot contradict it for the
+    /// mandatory families. This is what the engine actually answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unreachable_families: Option<Vec<String>>,
     /// The engine id the saved selection names (the file, or the environment
     /// when it owns the choice).
     selected: String,
@@ -340,7 +348,7 @@ fn snapshot(
     let (selection, layer) = saved_selection(state)?;
     // The live overlay is the honest answer to "what is bound"; its absence
     // means the base store serves memory, which is exactly `store`.
-    let (active, capabilities, healthy) = match &live {
+    let (active, capabilities, healthy, unreachable_families) = match &live {
         Some(overlay) => (
             engine_id(&MemorySelection {
                 backend: overlay.descriptor.backend,
@@ -350,13 +358,15 @@ fn snapshot(
             }),
             overlay.descriptor.capabilities.clone(),
             overlay.descriptor.healthy,
+            overlay.descriptor.unreachable_families.clone(),
         ),
-        None => ("store".to_string(), Vec::new(), None),
+        None => ("store".to_string(), Vec::new(), None, None),
     };
     Ok(EngineDto {
         active,
         capabilities,
         healthy,
+        unreachable_families,
         selected: engine_id(&selection),
         url: selection.url.clone(),
         api_key_set: selection.api_key.is_some(),
