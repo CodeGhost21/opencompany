@@ -82,6 +82,7 @@ import {
   buildTimeline,
   buildTimelineItems,
   budgetPauseRedeemId,
+  canSubmitReview,
   channelIdFromSegment,
   channelMembers,
   channelTitle,
@@ -470,7 +471,13 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
-  const [reviewingCardId, setReviewingCardId] = useState<string | null>(null);
+  /** Every card whose review verdict is currently in flight — one entry per
+   * task, not a single global slot, so a click on one card's Approve/Revise
+   * control never gets silently dropped by a DIFFERENT card's in-flight
+   * verdict (Codex #3906779123). See {@link canSubmitReview}. */
+  const [reviewingCardIds, setReviewingCardIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
    * so only that notice's button shows a busy state. */
   const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
@@ -1865,8 +1872,9 @@ export function ChatView({
    * pick for the thread.
    */
   async function reviewCard(taskId: string, decision: "approve" | "revise") {
-    if (reviewingCardId || activeThreadId === undefined) return;
-    setReviewingCardId(taskId);
+    if (activeThreadId === undefined || !canSubmitReview(reviewingCardIds, activeThreadId, taskId))
+      return;
+    setReviewingCardIds((prev) => new Set(prev).add(taskId));
     try {
       await client.reviewCard(activeThreadId, taskId, decision, undefined, company);
       toast.success(decision === "approve" ? "Card approved." : "Sent for another pass.");
@@ -1877,7 +1885,11 @@ export function ChatView({
           : "Couldn't record that review.",
       );
     } finally {
-      setReviewingCardId(null);
+      setReviewingCardIds((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
     }
   }
 
@@ -2200,7 +2212,7 @@ export function ChatView({
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
               onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
-              reviewingCardId={reviewingCardId}
+              reviewingCardIds={reviewingCardIds}
               resolveAttachmentUrl={resolveAttachmentUrl}
               taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
@@ -2452,9 +2464,12 @@ export function ChatView({
               reviewing={threadReviewing}
               reviewTaskId={threadReviewAnchor?.taskId}
               onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
-              reviewInFlight={reviewingCardId === threadReviewAnchor?.taskId}
+              reviewInFlight={
+                threadReviewAnchor !== undefined &&
+                reviewingCardIds.has(threadReviewAnchor.taskId)
+              }
               additionalReviewAnchors={additionalThreadReviewAnchors}
-              reviewingTaskId={reviewingCardId}
+              reviewingTaskId={reviewingCardIds}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) => {
