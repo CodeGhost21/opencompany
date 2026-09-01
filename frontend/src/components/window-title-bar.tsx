@@ -22,8 +22,23 @@
 //
 // **Everything on it is centred by one rule.** A single `items-center` on this
 // flex row, and no per-item margins: see {@link WINDOW_TITLE_BAR_HEIGHT} for
-// why 44px is the height at which that rule also lands on the traffic lights'
+// why it is the height at which that rule also lands on the traffic lights'
 // centre line, which is the one item here whose position macOS owns.
+//
+// **It narrows by dropping whole facts, never by scrolling.** The window's
+// `minWidth` is 880 (`src-tauri/tauri.conf.json`), and the row's contents do
+// not fit there at their widest. What goes, in order:
+//
+//   1. the autonomy pill's **sentence** (below `lg`, 1024px), leaving the
+//      shield and the tier's name;
+//   2. the company switcher's width, which is capped at `max-w-72` and
+//      truncates its label — it has always done this.
+//
+// The tier's *name* never goes: it is the fact the pill exists to carry, and a
+// row that has silently dropped it looks identical to a company with no policy
+// at all. Nothing here wraps and nothing scrolls — every item is `flex-none`
+// except the deliberately elastic middle, so the row cannot grow a second line
+// or a horizontal scrollbar however narrow the window gets.
 
 import {
   WINDOW_TITLE_BAR_HEIGHT,
@@ -32,10 +47,19 @@ import {
 
 export function WindowTitleBar({
   switcher,
+  autonomy,
   profile,
 }: {
   /** The company/host switcher. Leads the row, right of the traffic lights. */
   switcher: React.ReactNode;
+  /**
+   * The standing autonomy policy, right-aligned before the profile control.
+   *
+   * Optional, and absent is a real state rather than a gap: the pill renders
+   * nothing when the host has not said what the tier is, and the row closes up
+   * around it. See `AutonomyPill`.
+   */
+  autonomy?: React.ReactNode;
   /** The profile / account control, at the far right. */
   profile: React.ReactNode;
 }) {
@@ -62,6 +86,18 @@ export function WindowTitleBar({
       {/* The draggable middle. `self-stretch` so the grabbable area is the full
           height of the row rather than a hairline through its centre. */}
       <div data-tauri-drag-region aria-hidden="true" className="min-w-0 flex-1 self-stretch" />
+      {/* The standing policy, immediately before the profile control. It is a
+          control rather than static chrome — the tier can be changed from here
+          — so it deliberately does NOT carry `data-tauri-drag-region`: the
+          attribute is opt-in per element, and marking a button would hand its
+          presses to the window drag instead of to the menu it opens. The
+          `flex-1 self-stretch` spacer above is the row's only elastic member,
+          so that spacer — not the pill — is what keeps the band between the
+          switcher and here grabbable. See `AutonomyPill`.
+          Rendered without a wrapper on purpose: the pill returns `null` when
+          the tier is unknown, and a wrapper would survive it as an empty box
+          holding one `gap-2` of dead space open in the middle of the row. */}
+      {autonomy}
       {/* Last in the DOM as well as last on screen, so tab order reads
           left-to-right across the row. */}
       <div className="flex-none">{profile}</div>

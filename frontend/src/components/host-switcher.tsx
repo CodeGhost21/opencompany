@@ -315,6 +315,36 @@ export function HostSwitcher({
       ? STATUS_COPY[worst].label
       : "Not connected";
 
+  // The title row's nameplate is **one line: the company's name**.
+  //
+  // The two-line version belongs in a sidebar column, where vertical space is
+  // free and a caption reads as a label under a heading. In 52px of window
+  // chrome it stood 44px tall, towering over the traffic lights beside it and
+  // making the bar read as unbalanced however the padding was tuned — the
+  // control's height was the problem, not the padding.
+  //
+  // "Current company" is also the right line to lose: the row *is* the current
+  // company, so the caption only repeats what its position already says. A
+  // lifecycle that is **not** running is different — that is news rather than a
+  // label — so it survives beside the name, and only when there is something to
+  // report.
+  const titlebarNameplate = (
+    <>
+      {glyph}
+      <span className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left">
+        <span className="truncate text-sm font-semibold">{primary}</span>
+        {lifecycleTone ? (
+          <span
+            data-testid="host-switcher-secondary"
+            className={cn("truncate text-xs", LIFECYCLE_TEXT[lifecycleTone])}
+          >
+            {secondary}
+          </span>
+        ) : null}
+      </span>
+    </>
+  );
+
   const nameplate = (
     <>
       {glyph}
@@ -371,7 +401,7 @@ export function HostSwitcher({
           title={switcherTooltip}
           {...triggerData}
         >
-          {nameplate}
+          {titlebarNameplate}
         </div>
       );
     }
@@ -551,7 +581,7 @@ export function HostSwitcher({
           }
           {...triggerData}
         >
-          {nameplate}
+          {titlebarNameplate}
           {/* Drops rather than flies out to the right: there is no column
               beside this trigger to open into, and the row it sits in is the
               top edge of the window. */}

@@ -93,6 +93,57 @@ export function widensAutonomy(
   return fromIndex !== -1 && toIndex > fromIndex;
 }
 
+/**
+ * The words the widening confirmation is made of, exported because there are
+ * now **two** ways to reach the same decision.
+ *
+ * The tier is also changeable from the window's title row (`AutonomyPill`), and
+ * a second confirmation written there would be a second set of words free to
+ * drift from these — one dialog saying "Give teammates more autonomy?" and
+ * another saying something else about the identical act. The comparison itself
+ * is already shared ([`widensAutonomy`]); this shares the sentence that explains
+ * it, so the two entry points cannot disagree about what is being agreed to.
+ *
+ * Literals and a function rather than a shared component: this page reaches the
+ * same dialog from three different decisions (a tier, a spend-cap raise, a
+ * reset) and only the tier one is shared, so a component would have to carry
+ * all three.
+ */
+export const AUTONOMY_CONFIRM_TITLE = "Give teammates more autonomy?";
+
+/** The cancel label. It names the outcome, not the gesture: nothing changes. */
+export const AUTONOMY_CONFIRM_CANCEL = "Keep current setting";
+
+/** The confirm label for a tier widening. */
+export const AUTONOMY_CONFIRM_ACTION = "Give more autonomy";
+
+/**
+ * The standing note under a tier widening.
+ *
+ * True in this build and load-bearing: the gate runs with policy HITL disabled
+ * (`src/runtime/builder.rs`), so what still stops an agent is an explicit
+ * `request_approval` rather than the tier. An operator agreeing to a wider tier
+ * is entitled to read that wherever they can agree to it.
+ */
+export const AUTONOMY_PROMPTS_NOTE =
+  "Approval prompts remain explicit through request_approval.";
+
+/**
+ * What changes, in the host's own words on both sides of the move.
+ *
+ * Both descriptions are the host's (`TIER_TEXT`, `src/server/ops/policy.rs`),
+ * never a paraphrase — that prose is server-side precisely so it tracks the gate
+ * it describes. `current` is optional because a console running against a newer
+ * host can be sitting on a mode it has no text for; the sentence then names only
+ * what the operator is moving *to*, which is the half that still matters.
+ */
+export function tierWideningExplanation(
+  current: string | undefined,
+  next: PolicyStatus["tiers"][number],
+): string {
+  return `Instead of: ${current ?? ""} With ${next.label}: ${next.description} They will use the ${next.label} setting on their next turn.`;
+}
+
 /** Whether replacing the current spend cap with the manifest cap loosens it. */
 export function widensSpendCap(
   current: number | null,
@@ -1102,9 +1153,7 @@ export function PolicySettings({ client, company }: Props) {
                 }}
               >
                 <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    Give teammates more autonomy?
-                  </AlertDialogTitle>
+                  <AlertDialogTitle>{AUTONOMY_CONFIRM_TITLE}</AlertDialogTitle>
                   <AlertDialogDescription>
                     {pendingCapRaise !== null ? (
                       <>
@@ -1154,32 +1203,25 @@ export function PolicySettings({ client, company }: Props) {
                           </>
                         )}
                       </>
-                    ) : (
-                      <>
-                        Instead of:{" "}
-                        {
-                          status.tiers.find(
-                            (tier) => tier.value === status.mode,
-                          )?.description
-                        }{" "}
-                        With {tierAwaitingConfirmation?.label}:{" "}
-                        {tierAwaitingConfirmation?.description} They will use
-                        the {tierAwaitingConfirmation?.label} setting on their
-                        next turn.
-                      </>
-                    )}
+                    ) : tierAwaitingConfirmation ? (
+                      tierWideningExplanation(
+                        status.tiers.find((tier) => tier.value === status.mode)
+                          ?.description,
+                        tierAwaitingConfirmation,
+                      )
+                    ) : null}
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingCapRaise !== null
                       ? "This threshold remains inactive while policy HITL is disabled."
                       : resetAwaitingConfirmation
                         ? "Reset restores the stored policy fields; approval prompts remain explicit."
-                        : "Approval prompts remain explicit through request_approval."}
+                        : AUTONOMY_PROMPTS_NOTE}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel disabled={saving}>
-                    Keep current setting
+                    {AUTONOMY_CONFIRM_CANCEL}
                   </AlertDialogCancel>
                   <AlertDialogAction
                     data-testid="policy-tier-confirm"
@@ -1211,7 +1253,7 @@ export function PolicySettings({ client, company }: Props) {
                       ? `Raise cap to $${pendingCapRaise}`
                       : resetAwaitingConfirmation
                         ? "Revert and give more autonomy"
-                        : "Give more autonomy"}
+                        : AUTONOMY_CONFIRM_ACTION}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>

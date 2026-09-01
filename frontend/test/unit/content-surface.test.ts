@@ -55,10 +55,20 @@ describe("ContentSurface", () => {
     // that happen to agree is what drifts. A three-sided inset flush to one
     // edge is what the closed first attempt shipped, and it produced a sliver
     // rather than a frame.
-    expect(classes).toContain("m-(--frame-inset)");
-    // And nothing overrides one side of it: an even frame is the contract, so
-    // a stray `mt-*`/`pt-*` reintroducing a special case fails here.
-    expect(classes.filter((c) => /^m[trbl]-/.test(c))).toEqual([]);
+    expect(classes).toContain(// Three sides at the frame inset, a thinner top: the window title row
+    // sits directly above this card now, and a full inset there stacked the
+    // row's own padding on the card's margin and read as a double gap.
+    "mx-(--frame-inset)");
+    // The top is deliberately thinner, and nothing else overrides a side.
+    //
+    // An even frame WAS the contract, when nothing sat above this card. The
+    // window title row does now, so a full inset there stacked the row's own
+    // bottom padding onto the card's margin and read as a gap twice the size of
+    // the other three. `mt` is the one exception; a stray `mr`/`ml` is still a
+    // special case creeping back and still fails here.
+    expect(classes.filter((c) => /^m[rl]-/.test(c))).toEqual([]);
+    expect(classes).toContain("mb-(--frame-inset)");
+    expect(classes.some((c) => c.startsWith("mt-"))).toBe(true);
     expect(classes).toContain("rounded-2xl");
     // The edge carries the chrome hairline, and the sheet is opaque: it is the
     // only opaque surface in the shell, so anything a page draws stacks on it.

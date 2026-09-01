@@ -89,7 +89,10 @@ export function ProfileRow({
       name={name}
       tone={toneFor(me.id || me.email)}
       avatar={personAvatar(me)}
-      className="size-5 rounded-[4px] text-3xs"
+      // Round, not the sidebar's `rounded-[4px]`: in the title row this sits
+      // inside a circular button, and a squircle inside a circle reads as a
+      // mistake at 20px — the corners clip against the border on every side.
+      className="size-7 rounded-full text-2xs"
     />
   );
 
@@ -118,10 +121,21 @@ export function ProfileRow({
           // Capped so a long display name cannot push the switcher off the
           // other end of a narrow window; it truncates instead, exactly as it
           // did in the column.
-          className="flex max-w-48 items-center gap-2 rounded-lg px-2 py-1 text-sm transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          aria-label={name}
+            // The avatar alone. A title row is chrome, and the operator's own
+            // name is the one label they never need read back to them — it cost
+            // horizontal space at every window width to say something they
+            // already know. `title` and `aria-label` keep it reachable by
+            // pointer and by screen reader, so only the pixels are lost.
+            // A ring at rest, not only on hover. Stripped to the avatar alone
+            // the control had no edge of its own, so it read as a decorative
+            // mark sitting on the chrome rather than something clickable — the
+            // page's own rule is that what is interactive should look
+            // interactive. The border is the quietest thing that says so, and
+            // it firms up on hover rather than appearing from nothing.
+            className="flex items-center rounded-full border border-sidebar-border bg-sidebar/60 p-0.5 transition hover:border-sidebar-accent-foreground/30 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
         >
           {face}
-          <span className="truncate">{name}</span>
         </button>
         {dialog}
       </>

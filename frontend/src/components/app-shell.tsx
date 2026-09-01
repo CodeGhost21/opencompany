@@ -28,7 +28,7 @@ import {
   Sidebar,
   SidebarContent,
   SidebarGroup,
-  SidebarHeader,
+  SidebarFooter,
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
@@ -48,6 +48,7 @@ import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
 import {
+  SidebarCollapseButton,
   RESTING_ROW,
   SidebarUtilityBar,
 } from "@/components/sidebar-controls";
@@ -107,6 +108,8 @@ import {
   type PendingAcknowledgement,
 } from "@/lib/operational-notifications";
 import { usePresence } from "@/hooks/use-presence";
+import { useAutonomy } from "@/hooks/use-autonomy";
+import { AutonomyPill } from "@/components/autonomy-pill";
 import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
@@ -2712,6 +2715,11 @@ export function AppShell({
   // the state they feed has to live where that stream is read.
   const presence = usePresence(client, company);
   const typing = useTyping(client, company);
+  // The standing autonomy tier, for the title row. Shell-owned because the row
+  // is: it outlives every view, so the read has to sit above all of them. It is
+  // the same `GET {scope}/policy` the settings page makes, so the pill and the
+  // page that changes it cannot disagree about which tier is in force.
+  const autonomy = useAutonomy(client, company);
   /**
    * The coarse "near your credit limit" warning (issue #1846), off the live
    * `budget_proximity` frame. Shell-owned for the same reason presence/typing
@@ -3412,6 +3420,12 @@ export function AppShell({
             canCreateCompany={client.carriesPlatformBearer}
           />
         }
+        autonomy={
+          // What the agents in this company are allowed to do without asking.
+          // Renders nothing until the host has said, rather than guessing a
+          // tier — see `useAutonomy`.
+          <AutonomyPill status={autonomy} />
+        }
         profile={
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
@@ -3438,17 +3452,19 @@ export function AppShell({
           height: `calc(100svh - ${WINDOW_TITLE_BAR_HEIGHT}px)`,
         }}
       >
-        <SidebarHeader>
-          {/* What is left of the header once the switcher moved up into the
-              title row: Settings, Feedback, Discord and Collapse, as one bar of
-              icons rather than four full-width rows spread across the nav and
-              the footer. See `SidebarUtilityBar`. */}
-          <SidebarUtilityBar view={view} onNavigate={setView} />
-        </SidebarHeader>
+
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
           <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
         </SidebarContent>
+        {/* The console's own utilities sit at the FOOT of the column, under the
+            destinations rather than over them. They act on the console, not on
+            the company, so they belong after the list of places you can go —
+            and the header they used to occupy is gone entirely now that the
+            switcher lives in the window's title row. */}
+        <SidebarFooter>
+          <SidebarUtilityBar view={view} onNavigate={setView} />
+        </SidebarFooter>
         </nav>
         <SidebarRail />
       </Sidebar>
@@ -3462,6 +3478,27 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
+          {/* Show/hide the sidebar, on the corner it acts on.
+
+              It used to sit in the sidebar's own header, which put the control
+              that *hides* a panel inside the panel it hides — collapsing the
+              column took the button with it. On the inset's leading corner it
+              stays put through both states and points at the edge that moves.
+
+              Here rather than inside `ContentSurface`: this control needs
+              `useSidebar`, and that card is deliberately free of sidebar
+              context — every page renders it, including ones with no sidebar at
+              all. Centred ON the card's leading border, not inside it:
+              `left-(--frame-inset)` puts it at the edge and `-translate-x-1/2`
+              straddles it. Inside the card it sat over the page's own heading
+              and read as part of the content; on the seam it reads as chrome
+              belonging to the boundary it moves. Absolutely positioned, so it
+              costs the page no layout and no view makes room for it. */}
+          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 -translate-x-1/2">
+            <div className="pointer-events-auto">
+              <SidebarCollapseButton />
+            </div>
+          </div>
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the

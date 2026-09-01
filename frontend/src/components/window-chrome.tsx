@@ -53,7 +53,7 @@ export const WINDOW_CHROME_HEIGHT = 28;
  * also comfortably taller than the 36px switcher trigger it carries, which
  * 28px — the height of the sidebar strip this row replaced — was not.
  */
-export const WINDOW_TITLE_BAR_HEIGHT = 44;
+export const WINDOW_TITLE_BAR_HEIGHT = 52;
 
 /**
  * How far into the window the traffic lights reach, in px.

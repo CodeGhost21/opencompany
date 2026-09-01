@@ -2,7 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { act, createElement } from "react";
+import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -59,12 +59,24 @@ function render(node: Parameters<Root["render"]>[0]) {
   act(() => root!.render(node));
 }
 
-/** The row, with two identifiable stand-ins for the controls it carries. */
-function bar() {
+/** The row, with identifiable stand-ins for the controls it carries. */
+function bar(autonomy?: ReactNode) {
   return createElement(WindowTitleBar, {
     switcher: createElement("button", { type: "button", "data-testid": "stub-switcher" }, "Co"),
+    autonomy,
     profile: createElement("button", { type: "button", "data-testid": "stub-profile" }, "Me"),
   });
+}
+
+/**
+ * A stand-in for the autonomy pill. Inert on purpose, and NOT a claim that the
+ * real pill is: it is a control that opens a menu and carries no
+ * `data-tauri-drag-region` of its own. This row is a pure layout component that
+ * takes the pill as an opaque `ReactNode`, so what is under test here is where
+ * the slot sits in the row — never what the control in it does.
+ */
+function stubAutonomy() {
+  return createElement("span", { "data-testid": "stub-autonomy" }, "Auto");
 }
 
 beforeEach(() => {
@@ -150,6 +162,43 @@ describe("the window title row", () => {
     const spacer = row.querySelector(":scope > [data-tauri-drag-region][aria-hidden=true]");
     expect(spacer).not.toBeNull();
     expect((spacer as HTMLElement).className).toContain("flex-1");
+  });
+
+  it("puts the autonomy slot after the draggable middle and before the profile", () => {
+    render(bar(stubAutonomy()));
+
+    const row = host.querySelector("[data-testid=window-title-bar]") as HTMLElement;
+    const spacer = row.querySelector(
+      ":scope > [data-tauri-drag-region][aria-hidden=true]",
+    ) as HTMLElement;
+    const autonomy = row.querySelector("[data-testid=stub-autonomy]") as HTMLElement;
+    const profile = row.querySelector("[data-testid=stub-profile]") as HTMLElement;
+
+    expect(autonomy).not.toBeNull();
+    // Right-aligned: it must fall on the far side of the elastic spacer, or it
+    // sits beside the switcher at the left end of the row instead.
+    expect(
+      spacer.compareDocumentPosition(autonomy) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // And still before the avatar, which stays last.
+    expect(
+      autonomy.compareDocumentPosition(profile) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("closes up completely when there is no autonomy to show", () => {
+    // The pill returns null when the tier is unknown. Nothing may survive it:
+    // an empty wrapper would still hold one `gap-2` of dead space open, which
+    // reads as a missing control rather than as an absent fact.
+    render(bar(null));
+
+    const row = host.querySelector("[data-testid=window-title-bar]") as HTMLElement;
+    const spacer = row.querySelector(
+      ":scope > [data-tauri-drag-region][aria-hidden=true]",
+    ) as HTMLElement;
+    // The spacer's next sibling is the profile control's own wrapper — there is
+    // no element between them.
+    expect(spacer.nextElementSibling?.querySelector("[data-testid=stub-profile]")).not.toBeNull();
   });
 
   it("puts the switcher before the profile control in the DOM", () => {
