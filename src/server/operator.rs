@@ -2849,26 +2849,27 @@ async fn chat_and_emit(
     // own relay on settle. Only a threaded message can be review feedback, so a
     // top-level line never reaches here.
     #[cfg(feature = "openhuman")]
-    if let Some(parent) = parent
-        && let Some(card) = runtime.review_feedback_target(&desk, parent).await
-    {
-        let accepted =
-            accept_chat_turn(&runtime, id, &message, by.as_ref(), Some(parent), &desk).await?;
-        let message_id = accepted.message_seq.value().to_string();
-        let turn_id = accepted.turn_id.clone();
-        let review = runtime
-            .apply_review_feedback(&card, &message.text, by.as_ref())
-            .await
-            .map_err(ApiError);
-        settle_chat_turn(&runtime, id, turn_id.as_deref(), review.as_ref().err()).await;
-        review?;
-        return Ok(ChatOk::Settled(Box::new(ChatResponse {
-            responses: Vec::new(),
-            message_id: Some(message_id),
-            still_awaiting: None,
-            turn_id,
-            outcome: None,
-        })));
+    if let Some(parent) = parent {
+        let _serialized = runtime.task_writes.lock().await;
+        if let Some(card) = runtime.review_feedback_target(&desk, parent).await {
+            let accepted =
+                accept_chat_turn(&runtime, id, &message, by.as_ref(), Some(parent), &desk).await?;
+            let message_id = accepted.message_seq.value().to_string();
+            let turn_id = accepted.turn_id.clone();
+            let review = runtime
+                .apply_review_feedback(&card, &message.text, by.as_ref())
+                .await
+                .map_err(ApiError);
+            settle_chat_turn(&runtime, id, turn_id.as_deref(), review.as_ref().err()).await;
+            review?;
+            return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                responses: Vec::new(),
+                message_id: Some(message_id),
+                still_awaiting: None,
+                turn_id,
+                outcome: None,
+            })));
+        }
     }
     // The turn runs on its own task, and the replies are journaled there too
     // (issue #882). Both used to sit in this handler's future, which hyper drops
@@ -3881,6 +3882,7 @@ async fn review_card(
                 body.decision
             )))
         })?;
+    let _serialized = scope.runtime.task_writes.lock().await;
     let card = scope
         .runtime
         .review_card_in_review(&body.task_id, &body.chat_id)
@@ -13591,5 +13593,168 @@ mode = "full"
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::TaskRecord {
+        crate::ports::tasks::TaskRecord {
+            id: id.to_string(),
+            title: "Ship it".to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: Some(chat_id.to_string()),
+            origin_parent: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        }
+    }
+
+    /// Two review verdicts racing the same `in_review` card (PR #1981 review
+    /// finding, Codex P1) must not both resolve it before either applies —
+    /// same `task_writes`-serialized load-modify-save shape
+    /// `add_desk_member_serializes_against_the_company_write_lock` proves
+    /// above, applied to `review_card`.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_serializes_against_the_task_writes_lock() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
+            .await
+            .unwrap();
+
+        let guard = runtime.task_writes.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            let scope = ScopedCompany {
+                runtime: runtime_for_task,
+                actor: None,
+                may_read_contents: true,
+                is_admin: true,
+            };
+            review_card(
+                scope,
+                Json(ChatReviewRequest {
+                    chat_id: "strategy".to_string(),
+                    task_id: "t-1".to_string(),
+                    decision: "approve".to_string(),
+                    note: None,
+                }),
+            )
+            .await
+        });
+
+        let raced_ahead = tokio::time::timeout(Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "review_card resolved and applied a verdict while task_writes was \
+             held elsewhere — it is not serializing against concurrent board \
+             writers"
+        );
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("review_card never resumed after task_writes was released")
+            .expect("review_card task panicked");
+        assert!(result.is_ok());
+    }
+
+    /// The revalidation half of the same finding: a review reply parked on
+    /// `task_writes` while a second verdict already settled the card must see
+    /// the now-current column once it resumes, not the stale `in_review`
+    /// snapshot it would have clone from before it blocked — so it 404s
+    /// instead of silently re-applying on top of the settled card.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_404s_when_the_card_left_review_while_the_reply_was_in_flight() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
+            .await
+            .unwrap();
+
+        let guard = runtime.task_writes.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            let scope = ScopedCompany {
+                runtime: runtime_for_task,
+                actor: None,
+                may_read_contents: true,
+                is_admin: true,
+            };
+            review_card(
+                scope,
+                Json(ChatReviewRequest {
+                    chat_id: "strategy".to_string(),
+                    task_id: "t-1".to_string(),
+                    decision: "approve".to_string(),
+                    note: None,
+                }),
+            )
+            .await
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(200), &mut task).await;
+
+        let card = runtime
+            .review_card_in_review("t-1", "strategy")
+            .await
+            .expect("card is still in_review before the lock is released");
+        runtime
+            .apply_review_decision(
+                &card,
+                crate::harness::built_in::lifecycle::ReviewDecision::Revise,
+                Some("send it back"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("review_card never resumed after task_writes was released")
+            .expect("review_card task panicked");
+        assert!(
+            result.is_err(),
+            "a review reply that had already resolved the card must not \
+             silently re-apply its verdict once the card is no longer \
+             in_review"
+        );
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        assert_eq!(after.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
+        let note = after.note.expect("note");
+        assert!(note.contains("send it back"), "{note}");
     }
 }
