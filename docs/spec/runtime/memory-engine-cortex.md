@@ -134,8 +134,9 @@ adapter**. `provides()` is a defaulted trait method with a fixed body:
 calls it "the implementation-side truth". Neither side asks whether the engine
 answers.
 
-So the three **mandatory** families can never fail the audit, and they are
-exactly the ones this host's knowledge ports are built on. The lever is a live
+So the three **mandatory** families can never fail the audit. Two of them,
+`Core` and `Recall`, are what this host's knowledge ports are built on;
+`Portability` is mandatory to the *contract* without being exercised by them. The lever is a live
 probe or a conformance case, **not** `provides()` — asking `provides()` to
 consult the engine would make the audit compare two runtime opinions instead of a
 claim against a structure. Tracked as
@@ -321,7 +322,8 @@ Selling OpenCompany with Cortex behind the memory seam is building a product on
 top of CortexDB, not reselling CortexDB. Condition (a) is satisfied **by
 construction**: tenants reach memory only through the `MemoryProvider` seam, and
 the credential and endpoint "never appear in logs, `/healthz`, `/spec`, status
-output, or an export" (`memory-engine.md`). A tenant cannot address the engine
+output, or an export" (`storage.md`; `memory-engine.md` states the same rule in
+its own words). A tenant cannot address the engine
 directly.
 
 Two obligations follow, and both of them are gates:
@@ -346,12 +348,20 @@ and cloud-hosted offerings at sales@cortexdb.ai — neither is required here.
 explicitly and write down why. Licensing is settled (clause 2 permits it); what
 remains is the topology decision, which gates everything below.
 
-**Phase 1 — a driver scoped to what returns data. Currently blocked upstream.**
-A `cortex` driver over `tinymemory-api` advertising only the families Cortex
-actually serves — the mandatory `Core` and `Recall`. That is the whole of what
-`MemoryStore`, `ContextStore` and `FactStore` need, since all three are host
-ports over the same `Bound` helper and no driver advertises or withholds them
-individually. What Phase 1 leaves out is Cortex's derived fact and belief tier,
+**Phase 1 — the driver. Currently blocked upstream.**
+A `cortex` driver over `tinymemory-api` implementing the mandatory three —
+`Core`, `Recall` and `Portability`. All three are non-negotiable:
+`MemoryProvider` declares them as supertraits
+(`MemoryCore + MemoryRecall + MemoryPortability`), so a driver missing
+`export_page`/`import_records` does not compile, and
+`advertised_capabilities()` returns the set unconditionally.
+
+Only `Core` and `Recall` are exercised by the knowledge ports — that is the
+whole of what `MemoryStore`, `ContextStore` and `FactStore` need, since all
+three are host ports over the same `Bound` helper and no driver advertises or
+withholds them individually. `Portability` is not optional scope to defer,
+though: it is what Phase 3 runs migration over, and implementing it against an
+append-only event log is its own problem rather than a line of glue. What Phase 1 leaves out is Cortex's derived fact and belief tier,
 which no host port reads and which Phase 4 revisits. This cannot start until
 CortexDB offers a way to replace a value at a key
 ([cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3));

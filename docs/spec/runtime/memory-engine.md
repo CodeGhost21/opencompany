@@ -85,7 +85,7 @@ be embedded and skip the egress and trust checks that class gates.
 
 `capabilities()` is a claim the driver writes by hand; `provides()` is derived
 from the accessors it actually returns. The host compares the two once, at bind
-(`audit_capabilities` in `src/store/memory/driver.rs`), because it registers RPC
+(`audit_provider`, called from `src/store/memory/driver.rs`), because it registers RPC
 methods and assembles agent tools from the *claim* and never re-checks. A driver
 advertising a family it does not implement would otherwise produce a surface
 that exists, is offered to an agent, and fails on its first call — inside a
