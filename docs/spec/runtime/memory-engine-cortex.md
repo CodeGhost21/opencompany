@@ -26,9 +26,12 @@ question, and the recommendation follows from them.
    bundled `PRODUCTION_DEPLOYMENT.md` describes `CORTEX_API_KEY` as the
    bootstrap key for the *default* tenant, with real per-tenant keys coming from
    Cortex's own hosted key store.
-3. **Three of the five memory layers advertise and return nothing.** Facts,
-   Beliefs and Understanding stay empty with the extraction and enrichment
-   routers enabled and reporting healthy. Only Events and Episodes hold data.
+3. **The derived fact and belief tier does not work.** Facts, Beliefs and
+   Understanding stay empty with the extraction and enrichment routers enabled
+   and reporting healthy; only Events and Episodes hold data. These are Cortex
+   *layers*, not contract capability families — the audit cannot fire on them —
+   so this is a reason Cortex offers nothing over the incumbent drivers, not a
+   bind-time failure.
 4. **Retrieval quality is real, and comes from embeddings alone.** Ranked recall
    over the Events layer is good and needs no LLM lanes at all.
 5. **A conformant driver cannot be written against v0.9.8 at all.** The contract's
@@ -92,16 +95,15 @@ Cortex, each owning a disjoint set of ports.
 That also bounds the blast radius of everything in this document: a Cortex
 outage costs a tenant its knowledge ports, not its company records.
 
-## Capability audit: the strongest reason for caution
+## Layers are not capability families
 
-`memory-engine.md` refuses a bind when a driver advertises a family it does not
-implement, because the host "registers RPC methods and assembles agent tools
-from the *claim* and never re-checks". Cortex triggers precisely that failure,
-in three families at once.
+The empty layers are real, but they are **not** a capability-audit finding, and
+it is worth separating the two because conflating them points a driver plan at
+the wrong thing.
 
 Measured on the deployment, with the LLM lanes configured and healthy:
 
-| Layer | Endpoint | Contents |
+| Cortex layer | Endpoint | Contents |
 |---|---|---|
 | Events | `/v1/events` | populated |
 | Episodes | `/v1/episodes` | populated |
@@ -109,51 +111,37 @@ Measured on the deployment, with the LLM lanes configured and healthy:
 | Beliefs | `/v1/beliefs` | **empty** |
 | Understanding | `/v1/understanding` | **empty**; errors every scheduler tick |
 
-Every signal a driver could reasonably key on reports success. The routes exist.
-Boot logs say `LLM router enabled for entity extraction` and
-`Enrichment LLM router enabled for fact augmentation`. `/v1/derivation/status`
-returns `built: {episodes: 3, beliefs: 3, concepts: 0}` for a scope whose belief
-store is empty — those counters count *scopes processed*, not records produced.
+The contract's `Capability` enum is a closed set — deliberately not
+`#[non_exhaustive]`, so adding a variant is a compile error rather than a config
+change — and it contains **no** Facts, Beliefs or Understanding variant. Cortex's
+five layers are an engine-internal model, not families a driver advertises, so
+`audit_provider` cannot fire on them however empty they are. If a hosted Cortex
+driver carries an over-claim risk it lives in `Ingest`, `Entities`, `Tree` or
+`Retrieval`, and a driver plan should name which of those it intends to
+advertise and on what evidence.
 
-A `cortex` driver deriving `provides()` from routes, from configuration, or from
-the engine's own build counters would advertise Facts, Beliefs and Understanding,
-pass `audit_capabilities` cleanly, and then return empty on every read — inside a
-tenant, at the moment the memory is needed, which is the exact harm the audit
-exists to prevent.
+What the empty layers *do* mean is commercial rather than structural: the
+derived fact/belief tier is the reason to prefer Cortex over
+`supermemory`/`mem0`/`cognee` at all, and it does not work. That is the finding.
 
-**Requirement for the driver plan:** `provides()` must be established against
-the *live engine*, not from configuration, route availability, or engine
-self-report.
+### The audit gap that is real, and is not about Cortex
 
-Observed contents alone are not sufficient, and it is worth being precise about
-why: on a freshly provisioned per-tenant instance **every** layer is legitimately
-empty, so a rule of "advertise only what currently holds records" would refuse
-every family on day one. Emptiness is ambiguous — it means "new" and "inert"
-equally.
+Separately — and this one holds regardless of engine — `audit_provider` compares
+`capabilities()` against `provides()`, and **both are properties of the
+adapter**. `provides()` is a defaulted trait method with a fixed body:
+`Core | Recall | Portability` hardcoded `true`, everything else
+`self.as_x().is_some()`. It is a structural Rust-type question, and its own doc
+calls it "the implementation-side truth". Neither side asks whether the engine
+answers.
 
-What distinguishes them has to be a positive signal that the family *functions*,
-not that it currently holds data. For Cortex the available signal is that a
-build endpoint reports work done against a store that stays empty
-(`/v1/beliefs/build` returning `built: 0` with `no_facts_in_scope`, while
-`derivation/status` claims success). That is engine-specific, which means the
-discriminator belongs in each adapter rather than in the host — and therefore in
-the conformance suite (tinymemory#18 §E1), which runs against a live engine and
-would cover every driver by construction.
-
-The acceptance gate must include **a freshly provisioned, entirely empty
-instance**: the driver must advertise its working families and withhold its
-broken ones with no records anywhere to inspect. That case is the whole
-difficulty, and a suite that only tests a populated instance would pass a driver
-that fails it. Tracked generally as
-[#1968](https://github.com/tinyhumansai/opencompany/issues/1968).
-
-Two upstream defects sit behind this: concept reflection cannot resolve the
-router two other lanes use, and facts never extract, so beliefs can never build.
-Reproductions are recorded at
-[cortexdb-releases#1](https://github.com/cortexdbai/cortexdb-releases/issues/1)
-and [#2](https://github.com/cortexdbai/cortexdb-releases/issues/2); both are
-closed there because that tracker is scoped to packaging, and they are being
-raised with CortexDB directly.
+So the three **mandatory** families can never fail the audit, and they are
+exactly the ones this host's knowledge ports are built on. The lever is a live
+probe or a conformance case, **not** `provides()` — asking `provides()` to
+consult the engine would make the audit compare two runtime opinions instead of a
+claim against a structure. Tracked as
+[#1968](https://github.com/tinyhumansai/opencompany/issues/1968); a boot-time
+probe of the mandatory families is proposed in
+[#1973](https://github.com/tinyhumansai/opencompany/pull/1973).
 
 ## A conformant driver cannot be written against v0.9.8
 
@@ -194,17 +182,23 @@ engine already implements and is already conformance-tested against, rather than
 add a capability. It also suggests the gap is an API-surface oversight rather
 than a deliberate design position.
 
-The only technically viable adapter keeps an **external index** of
-`(namespace, key) → event_id`, writes with fresh idempotency keys, and forgets
-the prior event on overwrite. That makes the driver stateful — it carries a
-database of its own — across two non-atomic calls, resting on a `forget` that
-reported `deleted.events: 2` for a selector naming one event id. That is a lot
-of correctness risk to absorb for something an upstream `on_conflict: replace`
-would remove entirely.
+Two emulations exist, and neither is comfortable. A driver can keep an
+**external index** of `(namespace, key) → event_id`, writing with fresh
+idempotency keys and forgetting the prior event on overwrite — which makes the
+driver stateful, carrying a database of its own. Or it can put the key in an
+**in-content envelope** and resolve it with a client-side scan; the host already
+wraps records in a JSON envelope inside `content` (`Bound::put` calls
+`encode(record)`), so that is the shape it uses anyway — but a scan-per-read is
+slow and still non-atomic.
+
+Both rest on a `forget` that reported `deleted.events: 2` for a selector naming
+one event id. That is a lot of correctness risk to absorb for something an
+upstream `on_conflict: replace` would remove entirely.
 
 The reproduction is recorded at
 [cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3)
-and is being raised with CortexDB directly.
+— closed there, like #1 and #2, because that tracker is scoped to packaging, and
+being raised with CortexDB directly instead.
 **Phase 1 is blocked on their answer, not on our effort.**
 
 ## Belief revision is not reachable
@@ -237,14 +231,37 @@ any derived layer had built:
 - *"how long do contract reviews take?"* → `Contract reviews take about five
   business days`
 
-Tenant separation also holds. Scopes are slash-delimited `type:id` paths
-(`^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}(/[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}){0,31}$`),
-which maps cleanly onto
-`BoundMemory`'s injective sanitize-plus-hash derivation from `&CompanyId`. Writes
-to one scope never surfaced in another across every test run.
+Tenant separation also holds *within Cortex*: writes to one scope never
+surfaced in another across every test run.
 
-So Cortex can back `MemoryStore` and `ContextStore` today. It cannot back
-`FactStore` with anything the layer model promises.
+**But the namespace formats are incompatible, and a driver must translate.**
+Cortex scopes are slash-delimited `type:id` segments
+(`^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}(/[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}){0,31}$`).
+Host namespaces are nothing of the sort: `Namespace::company_root` emits
+`oc/<slug>-<32 hex>`, children append a plain segment (`…/context`, `…/facts`,
+`…/agent/<member>`), and `sanitize_segment` maps every character outside
+`[A-Za-z0-9-_]` to `_` — so a colon can never appear and no segment is ever
+`type:id`. Passed through unchanged, every store and recall would be rejected.
+
+A `cortex` driver therefore needs an explicit and **reversible** translation.
+Reversible is not a nicety: `Bound::recall` re-checks every returned entry with
+`Namespace::contains` and drops mismatches, so a return the driver failed to map
+back yields zero hits *silently* rather than an error.
+
+So Cortex can back all three knowledge ports today — including `FactStore`.
+That needs saying precisely, because the obvious reading is wrong.
+`MemoryStore`, `ContextStore` and `FactStore` are **host ports**, not driver
+families; a driver can neither advertise nor withhold them. All three are
+facades over the same `Bound` helper using only `store`/`get`/`list`/`forget`/
+`recall` — `Core` plus `Recall`, both mandatory supertraits.
+`FactStore::upsert` is `self.bound.put(company, &fact.id, fact, "fact")`, which
+writes operator-curated records into `oc/<company>/facts` through
+`MemoryCore::store`. It never reads a derived facts layer, so Cortex's empty
+`/v1/facts` does not touch it.
+
+The true statement is narrower, and still supports the conclusion: Cortex cannot
+deliver the *derived* fact and belief tier. That is a reason it offers nothing
+over `supermemory`/`mem0`/`cognee`, not a reason a port fails.
 
 ## Fitting the seam's invariants
 
@@ -341,9 +358,20 @@ adapter work can satisfy. Acceptance, once unblocked:
 - failure-path tests for error mapping and malformed responses, as the existing
   remote adapters carry;
 - **a bind refusal when the engine reports the mock embedding provider**;
-- **`provides()` established against the live engine**, with two tests: an
-  engine reporting a family it cannot serve fails the bind, and a freshly
-  provisioned empty instance still advertises its working families.
+- **a live reachability probe** for the mandatory families, with a freshly
+  provisioned empty instance probing clean. Note this cannot be expressed
+  through `provides()`, which is a fixed-body structural check — the lever is a
+  probe or a conformance case (#1968, #1973);
+- **key-exact deletion**, verified. `Bound::forget`, `evict`'s
+  archive-then-delete loop and `delete_label` all require it, and an
+  over-deleting `forget` destroys tenant memory even with upsert working — the
+  observed `deleted.events: 2` for a one-id selector is disqualifying on its own
+  until explained.
+
+One operational note for whoever starts Phase 1: `cortex` is clean as a *driver
+id* in the registry, but `OPENCOMPANY_MEMORY=cortex` remains a hard boot refusal
+as a **mode** value, left over from #1568. The driver is selected with
+`OPENCOMPANY_MEMORY=remote` plus `OPENCOMPANY_MEMORY_DRIVER=cortex`.
 
 **Phase 2 — provisioning.** Per-tenant instance lifecycle through
 opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existing
