@@ -3929,7 +3929,8 @@ struct ChatReviewRequest {
 struct ChatReviewReceipt {
     /// The reviewed card's id.
     task_id: String,
-    /// The column it landed in: `done` on approve, `in_progress` on revise.
+    /// The column it landed in: `done` on approve, `in_progress` on revise —
+    /// or `in_review`, unchanged, on a revise with a blank note.
     column: String,
 }
 
