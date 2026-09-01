@@ -83,6 +83,8 @@ pub struct StashedBlock {
     /// into the continuation so approving the block does not silently reset it
     /// to `Operator` — see `spawn_blocked_node_continuation`.
     pub started_by: StartedBy,
+    /// The tinyflows checkpoint lineage this block resumes, when available.
+    pub thread_id: Option<String>,
     /// Whether any of this node's parked calls has been approved, banked the
     /// moment that decision lands rather than read off the release batch
     /// (issue #1816).
@@ -118,6 +120,17 @@ impl BlockedNodeQueue {
     /// key and one trigger input, so a second arm for the same key would carry
     /// identical facts; keeping the first is simplest and cannot disagree.
     pub fn arm(&self, turn: &str, workflow_id: &str, input: &Value, started_by: &StartedBy) {
+        self.arm_checkpointed(turn, workflow_id, input, started_by, None);
+    }
+
+    pub fn arm_checkpointed(
+        &self,
+        turn: &str,
+        workflow_id: &str,
+        input: &Value,
+        started_by: &StartedBy,
+        thread_id: Option<&str>,
+    ) {
         self.inner
             .lock()
             .expect("blocked node queue poisoned")
@@ -126,6 +139,7 @@ impl BlockedNodeQueue {
                 workflow_id: workflow_id.to_string(),
                 input: input.clone(),
                 started_by: started_by.clone(),
+                thread_id: thread_id.map(str::to_string),
                 approved: false,
             });
     }
@@ -204,12 +218,22 @@ impl BlockedNodeQueue {
     /// `Operator` (its `#[serde(default)]`), so this call site just passes the
     /// fact through rather than re-deciding the fallback.
     pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value, StartedBy)>) {
+        self.rearm_checkpointed(stashes.into_iter().map(
+            |(turn, workflow_id, input, started_by)| (turn, workflow_id, input, started_by, None),
+        ));
+    }
+
+    pub fn rearm_checkpointed(
+        &self,
+        stashes: impl IntoIterator<Item = (String, String, Value, StartedBy, Option<String>)>,
+    ) {
         let mut inner = self.inner.lock().expect("blocked node queue poisoned");
-        for (turn, workflow_id, input, started_by) in stashes {
+        for (turn, workflow_id, input, started_by, thread_id) in stashes {
             inner.entry(turn).or_insert(StashedBlock {
                 workflow_id,
                 input,
                 started_by,
+                thread_id,
                 approved: false,
             });
         }

@@ -415,6 +415,9 @@ enum JournalRecord {
         /// pre-#1862 code path always used.
         #[serde(default = "default_started_by_operator")]
         started_by: StartedBy,
+        /// The tinyflows checkpoint lineage this block resumes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
         /// Epoch-millis the block was stashed.
         at_millis: u64,
     },
@@ -1128,6 +1131,7 @@ struct BlockedStash {
     /// [`BlockedNodeQueue::rearm`](crate::runtime::blocked_nodes::BlockedNodeQueue::rearm)
     /// the real trigger instead of a hardcoded `Operator` default.
     started_by: StartedBy,
+    thread_id: Option<String>,
     /// Whether this stash's `BlockedNodeStashed` append has actually landed
     /// (issue #1825, P1 — found by chatgpt-codex-connector).
     ///
@@ -1462,6 +1466,7 @@ impl RuntimeJournal {
                 workflow_id,
                 input,
                 started_by,
+                thread_id,
                 ..
             } => {
                 state.blocked_stashes.insert(
@@ -1470,6 +1475,7 @@ impl RuntimeJournal {
                         workflow_id,
                         input,
                         started_by,
+                        thread_id,
                         // A record `replay` folds is durable by construction —
                         // it was read back from the journal it describes.
                         durable: true,
@@ -1823,7 +1829,7 @@ impl RuntimeJournal {
     /// [`pending`](Self::pending) feeds the gate queue's re-arm. Only stashes
     /// whose paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased)
     /// has not replayed are returned — a re-dispatched run does not come back.
-    pub fn blocked_stashes(&self) -> Vec<(String, String, Value, StartedBy)> {
+    pub fn blocked_stashes(&self) -> Vec<(String, String, Value, StartedBy, Option<String>)> {
         self.state
             .lock()
             .expect("journal state poisoned")
@@ -1835,6 +1841,7 @@ impl RuntimeJournal {
                     stash.workflow_id.clone(),
                     stash.input.clone(),
                     stash.started_by.clone(),
+                    stash.thread_id.clone(),
                 )
             })
             .collect()
@@ -1881,6 +1888,18 @@ impl RuntimeJournal {
         input: &Value,
         started_by: &StartedBy,
     ) -> Result<()> {
+        self.record_blocked_node_stashed_checkpointed(turn, workflow_id, input, started_by, None)
+            .await
+    }
+
+    pub async fn record_blocked_node_stashed_checkpointed(
+        &self,
+        turn: &str,
+        workflow_id: &str,
+        input: &Value,
+        started_by: &StartedBy,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
             match state.blocked_stashes.get(turn) {
@@ -1906,6 +1925,7 @@ impl RuntimeJournal {
                             workflow_id: workflow_id.to_string(),
                             input: input.clone(),
                             started_by: started_by.clone(),
+                            thread_id: thread_id.map(str::to_string),
                             durable: false,
                         },
                     );
@@ -1917,6 +1937,7 @@ impl RuntimeJournal {
             workflow_id: workflow_id.to_string(),
             input: input.clone(),
             started_by: started_by.clone(),
+            thread_id: thread_id.map(str::to_string),
             at_millis: crate::ports::now_millis(),
         })
         .await?;
@@ -4552,6 +4573,7 @@ mod test {
                 workflow_id: "w".into(),
                 input: serde_json::json!({}),
                 started_by: StartedBy::Operator,
+                thread_id: Some("lineage".into()),
                 at_millis: 10,
             },
             JournalRecord::BlockedNodeReleased { turn: "t".into() },
@@ -5068,7 +5090,8 @@ mod test {
                 "turn-1".to_string(),
                 "wf-1".to_string(),
                 input.clone(),
-                StartedBy::Operator
+                StartedBy::Operator,
+                None,
             )],
             "the in-memory stash must still be there after a failed append — a resolve \
              landing before the next retry has to find it"
@@ -5097,7 +5120,8 @@ mod test {
                 "turn-1".to_string(),
                 "wf-1".to_string(),
                 input,
-                StartedBy::Operator
+                StartedBy::Operator,
+                None,
             )],
             "a restart must rehydrate this stash — the retried append is the only durable \
              record of it, and pre-fix it was never written at all"
@@ -5133,7 +5157,7 @@ mod test {
 
         let stashes = journal.blocked_stashes();
         assert_eq!(stashes.len(), 1);
-        let (turn, workflow_id, input, started_by) = &stashes[0];
+        let (turn, workflow_id, input, started_by, thread_id) = &stashes[0];
         assert_eq!(turn, "turn-legacy");
         assert_eq!(workflow_id, "wf-legacy");
         assert_eq!(input, &serde_json::json!({ "request": "before #1862" }));
@@ -5143,5 +5167,26 @@ mod test {
             "a legacy line with no started_by field degrades to Operator, the coarse \
              pre-#1862 fallback — not a load failure"
         );
+        assert!(thread_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_blocked_stash_rehydrates_its_checkpoint_lineage() {
+        let dir = tmp_dir();
+        let journal = RuntimeJournal::new(dir.path().join("journal.jsonl"));
+        journal
+            .record_blocked_node_stashed_checkpointed(
+                "turn-1",
+                "wf-1",
+                &serde_json::json!({ "request": "resume" }),
+                &StartedBy::Operator,
+                Some("thread-1"),
+            )
+            .await
+            .expect("stash persists");
+
+        let reloaded = RuntimeJournal::new(dir.path().join("journal.jsonl"));
+        reloaded.load().await.expect("journal reloads");
+        assert_eq!(reloaded.blocked_stashes()[0].4.as_deref(), Some("thread-1"));
     }
 }

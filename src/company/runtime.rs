@@ -299,6 +299,10 @@ pub struct CompanyRuntime {
     /// so the default build simply leaves it `None` and the run route reports
     /// "not wired".
     pub(crate) workflow_runner: Option<Arc<dyn crate::ports::WorkflowRunner>>,
+    /// Durable engine checkpoints for this company's workflow lineages.
+    #[cfg(feature = "openhuman")]
+    pub(crate) workflow_checkpoints:
+        Option<Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>>,
     /// Issue #111: the registry of in-flight, steerable runs. The operator steer
     /// routes (`GET …/tasks/inflight`, `POST …/tasks/{key}/steer`) read and write
     /// it; the harness brain registers a dispatched task / desk delegation here
@@ -540,6 +544,8 @@ impl CompanyRuntime {
             source_dir: None,
             auth_mode: AuthMode::default(),
             workflow_runner: None,
+            #[cfg(feature = "openhuman")]
+            workflow_checkpoints: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
             grants,
@@ -1748,6 +1754,21 @@ impl CompanyRuntime {
     /// releases it see one set.
     pub fn adopt_blocked_nodes(&mut self, blocked_nodes: BlockedNodeQueue) {
         self.blocked_nodes = blocked_nodes;
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub fn set_workflow_checkpoints(
+        &mut self,
+        checkpoints: Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>,
+    ) {
+        self.workflow_checkpoints = Some(checkpoints);
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn workflow_checkpoints(
+        &self,
+    ) -> Option<&Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>> {
+        self.workflow_checkpoints.as_ref()
     }
 
     /// The blocked-agent-node stash, for the workflow-node continuation fork in
@@ -6462,6 +6483,7 @@ mod tests {
             assignee: origin.to_string(),
             updated_at_millis: 0,
             origin_chat_id: Some(origin.to_string()),
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,

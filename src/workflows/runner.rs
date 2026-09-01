@@ -116,6 +116,18 @@ pub async fn run_workflow_lane_aware(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
+    run_workflow_lane_aware_checkpointed(turn, deps, record, workflow, input, ctx, None).await
+}
+
+async fn run_workflow_lane_aware_checkpointed(
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    deps: HarnessDeps,
+    record: &CompanyRecord,
+    workflow: &WorkflowFile,
+    input: Value,
+    ctx: &WorkflowRunContext,
+    checkpoint_store: Option<Arc<super::checkpoint_store::WorkflowCheckpointStore>>,
+) -> Result<WorkflowRun> {
     // Issue #151 part a: refuse an unbounded re-entry before it takes the host
     // down. `run_workflow` is an orchestrator tool, and a workflow `agent` node
     // may address the orchestrator — so a graph whose agent node runs a
@@ -144,7 +156,7 @@ pub async fn run_workflow_lane_aware(
     WORKFLOW_DEPTH
         .scope(
             depth + 1,
-            run_workflow_inner(turn, deps, record, workflow, input, ctx),
+            run_workflow_inner(turn, deps, record, workflow, input, ctx, checkpoint_store),
         )
         .await
 }
@@ -281,6 +293,7 @@ async fn run_workflow_inner(
     workflow: &WorkflowFile,
     input: Value,
     ctx: &WorkflowRunContext,
+    checkpoint_store: Option<Arc<super::checkpoint_store::WorkflowCheckpointStore>>,
 ) -> Result<WorkflowRun> {
     let mut graph = super::translate::translate(workflow);
     // Policy-generated workflow HITL is disabled. Preserve an author's own
@@ -319,6 +332,10 @@ async fn run_workflow_inner(
     // A side win: the run's `_workflow/` workspace directory, which is named
     // from this id, becomes correlatable with the journal for the first time.
     let run_id = ctx.run_id.clone();
+    let checkpoint_thread_id = ctx
+        .checkpoint_resume
+        .as_ref()
+        .map_or_else(|| run_id.clone(), |resume| resume.thread_id.clone());
     // Issue #154: the operator's run request rides the trigger payload. Pull it
     // out before the input is handed to the engine so every agent node's turn
     // message carries the topic — a node's authored `prompt` is the same on
@@ -423,6 +440,7 @@ async fn run_workflow_inner(
         super::caps::RunContext {
             workflow_id: &workflow.id,
             run_id: &run_id,
+            checkpoint_thread_id: &checkpoint_thread_id,
             run_request,
             trigger_input: &trigger_input,
             started_by: ctx.started_by.clone(),
@@ -460,6 +478,7 @@ async fn run_workflow_inner(
             // Issue #1862 prerequisite: who triggered this run, stamped as a
             // fact at start rather than guessed later at failure time.
             started_by: Some(ctx.started_by.clone()),
+            resume_semantic: ctx.resume_semantic,
         };
         if let Err(err) = events.append(&record.id, started).await {
             tracing::warn!(
@@ -671,16 +690,72 @@ async fn run_workflow_inner(
     // `Box::pin` because the losing branch must be droppable, which a
     // `tokio::pin!`ed local is not.
     let token = tinyflows::engine::CancellationToken::new();
-    let mut engine = Box::pin(tinyflows::engine::run_cancellable_with_observer(
-        &compiled,
-        input,
-        &capabilities,
-        token.clone(),
-        &observer,
-    ));
+    let checkpointed = checkpoint_store.is_some() && !dry_run;
+    let mut engine: std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = tinyflows::error::Result<tinyflows::engine::RunOutcome>,
+                > + Send
+                + '_,
+        >,
+    > = if let Some(store) = checkpoint_store.as_ref().filter(|_| !dry_run) {
+        let checkpointer: Arc<dyn tinyflows::graph::Checkpointer<Value>> = store.clone();
+        let graph_journal = Arc::new(tinyflows::engine::InMemoryGraphEventJournal::new());
+        if let Some(resume) = &ctx.checkpoint_resume {
+            let compiled = &compiled;
+            let capabilities = &capabilities;
+            let observer = &observer;
+            let checkpoint_thread_id = checkpoint_thread_id.clone();
+            let approved = resume.approved.clone();
+            let rejected = resume.rejected.clone();
+            Box::pin(async move {
+                tinyflows::engine::resume_with_checkpointer_journaled_observed(
+                    compiled,
+                    capabilities,
+                    checkpointer,
+                    &checkpoint_thread_id,
+                    approved,
+                    rejected,
+                    graph_journal,
+                    observer,
+                )
+                .await
+                .map(|journaled| journaled.outcome)
+            })
+        } else {
+            let compiled = &compiled;
+            let capabilities = &capabilities;
+            let observer = &observer;
+            let checkpoint_thread_id = checkpoint_thread_id.clone();
+            Box::pin(async move {
+                tinyflows::engine::run_with_checkpointer_journaled_observed(
+                    compiled,
+                    input,
+                    capabilities,
+                    checkpointer,
+                    &checkpoint_thread_id,
+                    graph_journal,
+                    observer,
+                )
+                .await
+                .map(|journaled| journaled.outcome)
+            })
+        }
+    } else {
+        Box::pin(tinyflows::engine::run_cancellable_with_observer(
+            &compiled,
+            input,
+            &capabilities,
+            token.clone(),
+            &observer,
+        ))
+    };
     let outcome_opt = tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => {
+            if checkpointed {
+                None
+            } else {
             // Node-boundary stop: flip the engine's token so it winds down
             // cleanly, then bound the wait. A run that crosses a boundary within
             // the grace returns its real `cancelled` outcome; a wedged one times
@@ -690,6 +765,7 @@ async fn run_workflow_inner(
             tokio::time::timeout(CANCEL_HARD_ABORT_GRACE, &mut engine)
                 .await
                 .ok()
+            }
         }
         outcome = &mut engine => Some(outcome),
     };
@@ -906,13 +982,14 @@ async fn run_workflow_inner(
             // continuation facts so approving its parked calls re-dispatches the
             // run. (The `on_error = "continue"/"route"` case settles on the main
             // arm below, which arms the same stash there.)
-            stash_blocked_agent_nodes(
+            stash_blocked_agent_nodes_checkpointed(
                 delivery.as_ref(),
                 &workflow.id,
                 &run_id,
                 &trigger_input,
                 &blocked,
                 &ctx.started_by,
+                Some(&checkpoint_thread_id),
             )
             .await;
             // Reclassify capped nodes before they move into the blocked run, the
@@ -935,6 +1012,7 @@ async fn run_workflow_inner(
             }));
         }
         None => {
+            prune_checkpoint_lineage(checkpoint_store.as_deref(), &checkpoint_thread_id).await;
             return Ok(cancelled_run(
                 notices.take(),
                 board.take(),
@@ -994,6 +1072,7 @@ async fn run_workflow_inner(
         // disagreement, a third exit.
         let mut nodes = nodes;
         reclassify_capped_nodes(&mut nodes, &capped.take());
+        prune_checkpoint_lineage(checkpoint_store.as_deref(), &checkpoint_thread_id).await;
         return Ok(WorkflowRun {
             output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
             pending_approvals: Vec::new(),
@@ -1179,6 +1258,7 @@ async fn run_workflow_inner(
             // child gate's card can name the child's tool and reason.
             child_gates: &child_gates,
             started_by: &ctx.started_by,
+            checkpoint_thread_id: &checkpoint_thread_id,
         },
     )
     .await;
@@ -1226,13 +1306,14 @@ async fn run_workflow_inner(
     // agent node's continuation needs, keyed by the same per-(run, node) turn key
     // its parked calls armed `ContinuationQueue` under. The resolve path releases
     // both together and re-dispatches the run once the last call is decided.
-    stash_blocked_agent_nodes(
+    stash_blocked_agent_nodes_checkpointed(
         delivery.as_ref(),
         &workflow.id,
         &run_id,
         &trigger_input,
         &blocked_nodes,
         &ctx.started_by,
+        Some(&checkpoint_thread_id),
     )
     .await;
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
@@ -1259,6 +1340,10 @@ async fn run_workflow_inner(
         notices.push(errored_node_notice(&row.node_id));
     }
 
+    if pending_approvals.is_empty() && blocked_nodes.is_empty() {
+        prune_checkpoint_lineage(checkpoint_store.as_deref(), &checkpoint_thread_id).await;
+    }
+
     Ok(WorkflowRun {
         output: merge_run_artifacts_envelope(outcome.output, &captured_artifacts),
         pending_approvals,
@@ -1278,6 +1363,17 @@ async fn run_workflow_inner(
         // author's `on_error` decides — and the receipt is owed in both cases.
         approvals: approvals.take(),
     })
+}
+
+async fn prune_checkpoint_lineage(
+    store: Option<&super::checkpoint_store::WorkflowCheckpointStore>,
+    thread_id: &str,
+) {
+    if let Some(store) = store
+        && let Err(error) = store.prune_settled(thread_id).await
+    {
+        tracing::warn!(%thread_id, %error, "workflow: failed to prune settled checkpoints");
+    }
 }
 
 /// Whether every node that reported an error is one the host blocked.
@@ -1729,6 +1825,7 @@ struct PausedGates<'a> {
     /// every card this pass parks so `spawn_continuation` can carry it into the
     /// continuation instead of resetting to `Operator`.
     started_by: &'a crate::ports::types::StartedBy,
+    checkpoint_thread_id: &'a str,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -1787,6 +1884,7 @@ struct PausedGates<'a> {
 /// A build with no approvals queue wired stashes nothing and is silent — the
 /// same node already logged its own "could not be parked" line, and there is no
 /// resolve path to release a stash to.
+#[cfg(test)]
 async fn stash_blocked_agent_nodes(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     workflow_id: &str,
@@ -1794,6 +1892,27 @@ async fn stash_blocked_agent_nodes(
     trigger_input: &serde_json::Value,
     blocked: &[crate::ports::WorkflowBlockedNode],
     started_by: &crate::ports::types::StartedBy,
+) {
+    stash_blocked_agent_nodes_checkpointed(
+        delivery,
+        workflow_id,
+        run_id,
+        trigger_input,
+        blocked,
+        started_by,
+        None,
+    )
+    .await;
+}
+
+async fn stash_blocked_agent_nodes_checkpointed(
+    delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
+    workflow_id: &str,
+    run_id: &str,
+    trigger_input: &serde_json::Value,
+    blocked: &[crate::ports::WorkflowBlockedNode],
+    started_by: &crate::ports::types::StartedBy,
+    checkpoint_thread_id: Option<&str>,
 ) {
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         return;
@@ -1864,9 +1983,13 @@ async fn stash_blocked_agent_nodes(
                 );
                 return None;
             }
-            parking
-                .blocked_nodes
-                .arm(&turn, workflow_id, trigger_input, started_by);
+            parking.blocked_nodes.arm_checkpointed(
+                &turn,
+                workflow_id,
+                trigger_input,
+                started_by,
+                checkpoint_thread_id,
+            );
             Some((turn, &node.node_id))
         })
         .collect();
@@ -1909,7 +2032,13 @@ async fn stash_blocked_agent_nodes(
         // happened in the synchronous pass above that built `turns`.
         if let Err(error) = parking
             .journal
-            .record_blocked_node_stashed(&turn, workflow_id, trigger_input, started_by)
+            .record_blocked_node_stashed_checkpointed(
+                &turn,
+                workflow_id,
+                trigger_input,
+                started_by,
+                checkpoint_thread_id,
+            )
             .await
         {
             tracing::warn!(
@@ -1946,6 +2075,7 @@ async fn park_pending_gates(
         // child gate's card.
         child_gates,
         started_by,
+        checkpoint_thread_id,
     } = paused;
     if pending.is_empty() {
         return;
@@ -2096,6 +2226,10 @@ async fn park_pending_gates(
             payload.insert(
                 crate::runtime::workflow_resume::PAYLOAD_STARTED_BY.to_string(),
                 serde_json::json!(started_by),
+            );
+            payload.insert(
+                "thread_id".to_string(),
+                serde_json::json!(checkpoint_thread_id),
             );
         }
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
@@ -2260,6 +2394,7 @@ fn map_engine_error(err: tinyflows::error::EngineError) -> OpenCompanyError {
 pub struct HarnessWorkflowRunner {
     turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
+    checkpoint_store: Option<Arc<super::checkpoint_store::WorkflowCheckpointStore>>,
     /// The company record as of this runner's construction (runtime build /
     /// rebuild). The run re-reads the live record from the store so a console
     /// policy PUT since then reaches the run's gate; this snapshot is the
@@ -2275,7 +2410,20 @@ impl HarnessWorkflowRunner {
         deps: HarnessDeps,
         record: CompanyRecord,
     ) -> Self {
-        Self { turn, deps, record }
+        Self {
+            turn,
+            deps,
+            checkpoint_store: None,
+            record,
+        }
+    }
+
+    pub fn with_checkpoint_store(
+        mut self,
+        checkpoint_store: Arc<super::checkpoint_store::WorkflowCheckpointStore>,
+    ) -> Self {
+        self.checkpoint_store = Some(checkpoint_store);
+        self
     }
 
     /// The effective record for a run: the store's current one when it can be
@@ -2318,13 +2466,14 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         // own company; `_company` is the routed scope, which the runtime
         // resolves to this same record.
         self.turn.ensure(&record).await?;
-        run_workflow_lane_aware(
+        run_workflow_lane_aware_checkpointed(
             self.turn.clone(),
             self.deps.clone(),
             &record,
             workflow,
             input,
             ctx,
+            self.checkpoint_store.clone(),
         )
         .await
     }
@@ -6620,6 +6769,7 @@ to = "gate"
                     workflow_id,
                     scheduled,
                     started_by,
+                    ..
                 } => {
                     assert_eq!(run_id, &ctx.run_id);
                     assert_eq!(workflow_id, "greet");
@@ -6818,6 +6968,36 @@ to = "done"
         assert!(run.pending_approvals.is_empty());
     }
 
+    #[tokio::test]
+    async fn a_trigger_rerun_records_its_resume_semantic() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let (deps, events) = deps_with_events(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let ctx = WorkflowRunContext::new(false)
+            .with_resume_semantic(crate::ports::ResumeSemantic::ReRunFromTrigger);
+
+        run_workflow(
+            pool,
+            deps,
+            &rec,
+            &parse_workflow(GREET).expect("workflow parses"),
+            Value::Null,
+            &ctx,
+        )
+        .await
+        .expect("fallback run completes");
+
+        assert!(matches!(
+            journaled(&events, &rec.id).await.first(),
+            Some(CompanyEvent::WorkflowRunStarted {
+                resume_semantic: Some(crate::ports::ResumeSemantic::ReRunFromTrigger),
+                ..
+            })
+        ));
+    }
+
     // --- #383: stopping a run in flight ------------------------------------
 
     /// A model that parks forever on its first call, after announcing that it
@@ -7003,6 +7183,113 @@ to = "done"
             panic!("expected the start first, got {:?}", journal[0]);
         };
         assert_eq!(run_id, &ctx.run_id);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_resume_can_be_hard_aborted_keeping_completed_nodes() {
+        const GATED_STALL: &str = r#"
+id = "gated-stall"
+name = "Gated stall"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate"
+kind = "transform"
+name = "Gate"
+requires_approval = true
+[[node]]
+id = "shape"
+kind = "transform"
+name = "Shape"
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+prompt = "Think about it."
+[[edge]]
+from = "start"
+to = "gate"
+[[edge]]
+from = "gate"
+to = "shape"
+[[edge]]
+from = "shape"
+to = "ceo"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (mut deps, events) = deps_with_events(dir.path());
+        deps.provider = Arc::new(StallingProvider {
+            entered: entered.clone(),
+        });
+        deps.provider_slug = "stalling".to_string();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
+        );
+        let file = parse_workflow(GATED_STALL).expect("workflow parses");
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                dir.path().join("checkpoints"),
+            ),
+        );
+        let first_ctx = WorkflowRunContext::new(false);
+        let paused = run_workflow_lane_aware_checkpointed(
+            turn.clone(),
+            deps.clone(),
+            &rec,
+            &file,
+            Value::Null,
+            &first_ctx,
+            Some(checkpoints.clone()),
+        )
+        .await
+        .expect("initial run pauses");
+        assert_eq!(paused.pending_approvals, vec!["gate"]);
+
+        let resume_ctx = WorkflowRunContext::new(false).with_checkpoint_resume(
+            first_ctx.run_id,
+            vec!["gate".to_string()],
+            Vec::new(),
+        );
+        let cancel = resume_ctx.cancel.clone();
+        let reached_agent = entered.notified();
+        let mut resumed = Box::pin(run_workflow_lane_aware_checkpointed(
+            turn,
+            deps,
+            &rec,
+            &file,
+            Value::Null,
+            &resume_ctx,
+            Some(checkpoints),
+        ));
+        tokio::select! {
+            _ = &mut resumed => panic!("the resumed agent did not stall"),
+            () = reached_agent => {}
+        }
+        cancel.cancel();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(5), resumed)
+            .await
+            .expect("checkpoint resume did not hard abort")
+            .expect("cancelled checkpoint resume is not a failure");
+        assert!(run.cancelled);
+
+        let completed: Vec<_> = journaled(&events, &rec.id)
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                CompanyEvent::WorkflowNodeFinished {
+                    run_id, node_id, ..
+                } if run_id == resume_ctx.run_id => Some(node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed, vec!["gate", "shape"]);
     }
 
     /// The same stop works with **no journal wired** — the default-build shape,
