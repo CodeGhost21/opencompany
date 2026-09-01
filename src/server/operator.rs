@@ -53,7 +53,7 @@ use crate::server::provision::{emit_cycle_webhooks, emit_feedback_webhook};
 
 /// Builds the operator route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/companies", get(list_companies))
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
@@ -126,7 +126,22 @@ pub fn router() -> Router<AppState> {
         // Standing permissions (issue #374): what the operator has opened up,
         // and how to take it back. Registered under both scope forms.
         .merge(scoped("/grants", get(list_grants)))
-        .merge(scoped("/grants/{gid}", delete(revoke_grant)))
+        .merge(scoped("/grants/{gid}", delete(revoke_grant)));
+    with_review_routes(router)
+}
+
+/// Registers the thread-scoped review verdict route — Approve finishes a
+/// settled `in_review` dispatch card, Revise re-runs it. Gated with the harness
+/// that dispatches cards in the first place; the default build has no such card
+/// to review, so the route is not mounted.
+#[cfg(feature = "openhuman")]
+fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
+    router.merge(scoped("/chat/review", post(review_card)))
+}
+
+#[cfg(not(feature = "openhuman"))]
+fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
+    router
 }
 
 /// One desk (group chat) as the console renders it. Mirrors `DeskDto` in
@@ -2828,6 +2843,33 @@ async fn chat_and_emit(
         Some(raw) => Some(parse_message_id(raw)?),
         None => None,
     };
+    // A reply to a settled `in_review` dispatch card's settle pill or relay
+    // bubble is review feedback, not a fresh turn. It is appended to the card
+    // and re-runs it through the dispatch choke point; the re-run journals its
+    // own relay on settle. Only a threaded message can be review feedback, so a
+    // top-level line never reaches here.
+    #[cfg(feature = "openhuman")]
+    if let Some(parent) = parent
+        && let Some(card) = runtime.review_feedback_target(&desk, parent).await
+    {
+        let accepted =
+            accept_chat_turn(&runtime, id, &message, by.as_ref(), Some(parent), &desk).await?;
+        let message_id = accepted.message_seq.value().to_string();
+        let turn_id = accepted.turn_id.clone();
+        let review = runtime
+            .apply_review_feedback(&card, &message.text, by.as_ref())
+            .await
+            .map_err(ApiError);
+        settle_chat_turn(&runtime, id, turn_id.as_deref(), review.as_ref().err()).await;
+        review?;
+        return Ok(ChatOk::Settled(Box::new(ChatResponse {
+            responses: Vec::new(),
+            message_id: Some(message_id),
+            still_awaiting: None,
+            turn_id,
+            outcome: None,
+        })));
+    }
     // The turn runs on its own task, and the replies are journaled there too
     // (issue #882). Both used to sit in this handler's future, which hyper drops
     // the moment the peer goes away — and a reverse proxy in front of a hosted
@@ -3785,6 +3827,74 @@ async fn react_to_message_single(
     let runtime = sole(&state)?;
     let id = runtime.id().clone();
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
+}
+
+/// The operator's thread-scoped review verdict on a settled `in_review`
+/// dispatch card. Mirrors `ChatReviewRequest` in `frontend/src/api/types.ts`.
+///
+/// This is **not** the native-tool approval gate (`resolveApproval`): that
+/// settles a parked tool call, while this settles the board card the origin
+/// thread is reviewing.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReviewRequest {
+    /// The origin conversation — the desk/channel id — whose in-review
+    /// dispatch card this verdict settles.
+    chat_id: String,
+    /// `approve` finishes the card; `revise` re-runs it with `note`, on the
+    /// same path a chat reply of feedback takes.
+    decision: String,
+    /// The reviewer's note: recorded on the card, and the instruction the
+    /// re-run reads back on a `revise`.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// The card a review verdict left behind, so the console can reconcile its
+/// optimistic move. Mirrors `ChatReviewReceipt` in `frontend/src/api/types.ts`.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReviewReceipt {
+    /// The reviewed card's id.
+    task_id: String,
+    /// The column it landed in: `done` on approve, `in_progress` on revise.
+    column: String,
+}
+
+/// `POST {scope}/chat/review` — settle the thread's in-review dispatch card
+/// per the operator's verdict.
+#[cfg(feature = "openhuman")]
+async fn review_card(
+    scope: ScopedCompany,
+    Json(body): Json<ChatReviewRequest>,
+) -> Result<Json<ChatReviewReceipt>, crate::server::Rejection> {
+    let decision = crate::harness::built_in::lifecycle::ReviewDecision::parse(&body.decision)
+        .ok_or_else(|| {
+            ApiError(crate::error::OpenCompanyError::InvalidRequest(format!(
+                "unknown review decision '{}'",
+                body.decision
+            )))
+        })?;
+    let card = scope
+        .runtime
+        .review_card_for_desk(&body.chat_id)
+        .await
+        .ok_or_else(|| {
+            ApiError(crate::error::OpenCompanyError::NotFound(
+                "no card is awaiting review in this conversation".to_string(),
+            ))
+        })?;
+    let updated = scope
+        .runtime
+        .apply_review_decision(&card, decision, body.note.as_deref(), scope.actor.as_ref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(ChatReviewReceipt {
+        task_id: updated.id,
+        column: updated.column,
+    }))
 }
 
 /// `GET /api/v1/companies/{id}/approvals`.
