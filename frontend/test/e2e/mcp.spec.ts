@@ -44,7 +44,7 @@ async function openMcpSettings(page: Page) {
     });
 }
 
-test("Settings MCP lists the company's servers instead of crashing on open", async ({ page }) => {
+test("the MCP page lists the company's servers instead of crashing on open", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
