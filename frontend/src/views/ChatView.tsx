@@ -2442,6 +2442,9 @@ export function ChatView({
               channelMemberIds={inChannel?.map((m) => m.id)}
               readOnly={readOnly}
               reviewing={threadReviewing}
+              reviewTaskId={threadReviewAnchor?.taskId}
+              onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+              reviewInFlight={reviewingCardId === threadReviewAnchor?.taskId}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) => {

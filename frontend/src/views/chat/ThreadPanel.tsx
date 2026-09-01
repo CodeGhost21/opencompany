@@ -60,6 +60,19 @@ interface Props {
    */
   reviewing?: boolean;
   /**
+   * The `reviewing` card's id, so the panel can offer Approve beside its own
+   * notice (CodeRabbit #3905116857) — a card settled inside an already-open
+   * thread folds its settle pill into a plain reply line with no room for
+   * `MessageRow`'s Approve button, so without this the ONLY way to approve
+   * such a card was to close the thread and find the pill in the channel.
+   * Absent exactly when `reviewing` is, since the anchor is what makes it so.
+   */
+  reviewTaskId?: string;
+  /** Approves or revises {@link reviewTaskId}. Mirrors `MessageRow`'s prop of the same name. */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Whether {@link reviewTaskId}'s verdict is already in flight. */
+  reviewInFlight?: boolean;
+  /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
    *
@@ -149,6 +162,9 @@ export function ThreadPanel({
   resolveAttachmentUrl,
   onSend,
   reviewing,
+  reviewTaskId,
+  onReviewCard,
+  reviewInFlight,
   onClose,
   typingNames = [],
   onTyping,
@@ -231,10 +247,23 @@ export function ThreadPanel({
         <>
           <TypingLine names={typingNames} />
           {reviewing && (
-            <p className="border-t bg-muted/40 px-4 py-1.5 text-xs text-muted-foreground">
-              This card is ready for review. A reply sends it back for another pass
-              with your notes.
-            </p>
+            <div className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5">
+              <p className="text-xs text-muted-foreground">
+                This card is ready for review. A reply sends it back for another pass
+                with your notes.
+              </p>
+              {reviewTaskId !== undefined && onReviewCard !== undefined && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={reviewInFlight}
+                  onClick={() => onReviewCard(reviewTaskId, "approve")}
+                >
+                  {reviewInFlight ? "Approving…" : "Approve"}
+                </Button>
+              )}
+            </div>
           )}
           <MessageComposer
             compact
