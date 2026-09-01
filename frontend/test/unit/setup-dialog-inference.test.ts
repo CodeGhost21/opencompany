@@ -252,7 +252,11 @@ describe("readiness is the addressed company's, not the host's", () => {
     expect(notice?.textContent).not.toContain("can't reach a model");
     const restartLink = linkNamed("Restart the company");
     expect(restartLink).toBeTruthy();
-    expect(restartLink).toHaveProperty("hash", "#/settings/connections");
+    // Inference. The restart this notice means is the one `restartRequired`
+    // names, and the control that performs it renders on the Inference card.
+    // This asserted `#/settings/connections` — an address that named no
+    // settings page and was repaired onto General, where the control is not.
+    expect(restartLink).toHaveProperty("hash", "#/settings/inference");
 
     // Following it is starting setup, not declining it — same as "Set up a
     // model", so the return reopens the dialog.
@@ -394,7 +398,9 @@ describe('"Set up a model" is starting setup, not declining it', () => {
     await show(clientWith());
     const link = linkNamed("Set up a model");
     expect(link, "no model link on the notice").toBeTruthy();
-    expect(link).toHaveProperty("hash", "#/settings/connections");
+    // Where a model is actually set up. See the restart assertion above for
+    // why this used to name a page that did not exist.
+    expect(link).toHaveProperty("hash", "#/settings/inference");
 
     await click(link!);
 

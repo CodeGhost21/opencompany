@@ -34,7 +34,7 @@ type Page = import("@playwright/test").Page;
 
 /** The MCP settings page, with the product tour dismissed if it appears. */
 async function openMcpSettings(page: Page) {
-  await page.goto("/#/settings/mcp");
+  await page.goto("/#/connections/mcp");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
