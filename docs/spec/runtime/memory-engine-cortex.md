@@ -255,9 +255,9 @@ families; a driver can neither advertise nor withhold them. All three are
 facades over the same `Bound` helper using only `store`/`get`/`list`/`forget`/
 `recall` — `Core` plus `Recall`, both mandatory supertraits.
 `FactStore::upsert` is `self.bound.put(company, &fact.id, fact, "fact")`, which
-writes operator-curated records into `oc/<company>/facts` through
-`MemoryCore::store`. It never reads a derived facts layer, so Cortex's empty
-`/v1/facts` does not touch it.
+writes operator-curated records into `oc/<slug>-<32 hex>/facts` — the full host
+namespace derived from the `CompanyId` — through `MemoryCore::store`. It never
+reads a derived facts layer, so Cortex's empty `/v1/facts` does not touch it.
 
 The true statement is narrower, and still supports the conclusion: Cortex cannot
 deliver the *derived* fact and belief tier. That is a reason it offers nothing
@@ -324,7 +324,7 @@ the credential and endpoint "never appear in logs, `/healthz`, `/spec`, status
 output, or an export" (`memory-engine.md`). A tenant cannot address the engine
 directly.
 
-Two obligations follow, neither of them a gate:
+Two obligations follow, and both of them are gates:
 
 - **Never hand a tenant its own Cortex endpoint or credential.** Under
   instance-per-tenant that would be easy to do casually — a BYO-engine feature,
@@ -348,8 +348,12 @@ remains is the topology decision, which gates everything below.
 
 **Phase 1 — a driver scoped to what returns data. Currently blocked upstream.**
 A `cortex` driver over `tinymemory-api` advertising only the families Cortex
-actually serves — `MemoryStore` and `ContextStore` shaped. This cannot start
-until CortexDB offers a way to replace a value at a key
+actually serves — the mandatory `Core` and `Recall`. That is the whole of what
+`MemoryStore`, `ContextStore` and `FactStore` need, since all three are host
+ports over the same `Bound` helper and no driver advertises or withholds them
+individually. What Phase 1 leaves out is Cortex's derived fact and belief tier,
+which no host port reads and which Phase 4 revisits. This cannot start until
+CortexDB offers a way to replace a value at a key
 ([cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3));
 without it the driver fails a mandatory conformance assertion no amount of
 adapter work can satisfy. Acceptance, once unblocked:
