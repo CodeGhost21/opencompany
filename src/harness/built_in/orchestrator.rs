@@ -2111,22 +2111,16 @@ impl Tool for ReadTaskTool {
                         md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
                     } else {
                         let pinned = card.output.as_ref().map(|o| o.artifacts.as_slice());
+                        let has_stamp = pinned.is_some_and(|entries| !entries.is_empty());
                         for artifact in &published {
-                            // The task's own output stamp pins each artifact
-                            // it produced to the exact version that attempt
-                            // wrote (`TaskOutput::artifacts`), so a later
-                            // operator edit — a new version by a different
-                            // author — never renders here as the agent's own
-                            // work. Falls back to the latest revision only
-                            // when no pin is on record (an artifact from
-                            // outside this stamp, or one written before
-                            // pinning existed).
-                            let pinned_version = pinned
-                                .and_then(|entries| {
-                                    entries.iter().find(|a| a.artifact_id == artifact.id)
-                                })
-                                .and_then(|entry| artifact.version(entry.version));
-                            let preview = pinned_version
+                            let pinned_entry = pinned.and_then(|entries| {
+                                entries.iter().find(|a| a.artifact_id == artifact.id)
+                            });
+                            if has_stamp && pinned_entry.is_none() {
+                                continue;
+                            }
+                            let preview = pinned_entry
+                                .and_then(|entry| artifact.version(entry.version))
                                 .or_else(|| artifact.latest())
                                 .map(|v| truncate_chars(v.body.trim(), 400))
                                 .unwrap_or_default();
@@ -12690,6 +12684,75 @@ name = "Morning"
         assert!(
             !out.contains("an operator edited this"),
             "a later operator edit must not render as what the task produced: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_only_renders_artifacts_pinned_by_the_current_output_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Draft the memo",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-2".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 10,
+            artifacts: vec![crate::ports::tasks::TaskOutputArtifact {
+                artifact_id: "art-b".to_string(),
+                version: 1,
+                title: "Follow-up".to_string(),
+                kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            }],
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let record_a = crate::ports::artifacts::ArtifactRecord::new(
+            "art-a",
+            "t-1",
+            "First draft",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "attempt 1's body — superseded, no longer part of the latest output",
+            "engineer",
+            5,
+        );
+        artifacts.upsert(&company, &record_a).await.unwrap();
+        let record_b = crate::ports::artifacts::ArtifactRecord::new(
+            "art-b",
+            "t-1",
+            "Follow-up",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "attempt 2's body",
+            "engineer",
+            10,
+        );
+        artifacts.upsert(&company, &record_b).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("attempt 2's body"),
+            "the artifact pinned by the current output stamp must render: {out}"
+        );
+        assert!(
+            !out.contains("First draft") && !out.contains("superseded"),
+            "an artifact from an earlier attempt that the current output stamp does not pin \
+             must not render as part of the latest output: {out}"
         );
     }
 
