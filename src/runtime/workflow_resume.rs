@@ -2898,6 +2898,7 @@ mode = "full"
     /// #1991's review (`3903797619`), must also stop leaving that lineage's
     /// checkpoint on disk forever: no other path ever comes back for a wholly
     /// denied run's thread id.
+    #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn an_all_denied_batch_prunes_its_checkpoint_lineage() {
         use tinyflows::graph::Checkpointer;
