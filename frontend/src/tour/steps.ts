@@ -15,7 +15,7 @@ import type { View } from "@/components/app-shell";
  */
 export interface TourStop {
   view: View;
-  /** A section's sub-page, when the stop lives inside one (`#/settings/…`). */
+  /** A section's sub-page, when the stop lives inside one (`#/connections/…`). */
   sub?: string;
   target: string;
   title: string;
@@ -67,11 +67,19 @@ export const TOUR: TourStop[] = [
     body: "Anything that needs your sign-off before it happens waits here. Nothing risky runs without you.",
   },
   {
-    // The accounts page is `#/settings/oauth` since the Connections split, so
-    // the stop navigates there and spotlights the nav row that leads to it.
-    view: "settings",
-    sub: "oauth",
-    target: '[data-tour="nav-settings"]',
+    // The accounts page is `#/connections/apps` since it left the settings rail
+    // for its own section, so the stop navigates there and spotlights the
+    // Connections nav row that leads to it.
+    //
+    // That row is the point of the change. This stop is titled "Connect your
+    // tools" and used to spotlight **Settings**, because the accounts page was
+    // a settings sub-page and the utility bar's `nav-settings` anchor was the
+    // nearest always-mounted thing to point at. An operator following the tour
+    // was shown a gear and told it was where tools get connected. The stop now
+    // names the same surface the sidebar does.
+    view: "connections",
+    sub: "apps",
+    target: '[data-tour="nav-connections"]',
     placement: "right",
     title: "Connect your tools",
     body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your teammates can act for real.",
