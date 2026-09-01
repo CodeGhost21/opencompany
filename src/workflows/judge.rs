@@ -146,6 +146,15 @@ pub async fn judge_sufficiency(
     company: &CompanyId,
     input: JudgeInput<'_>,
 ) -> SufficiencyVerdict {
+    if crate::harness::HarnessPool::total_ceiling_spent(company, deps).await {
+        tracing::info!(
+            company = %company,
+            "[capability-budget] total token ceiling reached; skipping the sufficiency judge \
+             (no model call)"
+        );
+        return SufficiencyVerdict::Retry;
+    }
+
     let model = deps
         .model_override
         .clone()
@@ -347,6 +356,8 @@ fn usage_from(response: &ModelResponse) -> TokenUsage {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+
     use super::*;
 
     #[test]
@@ -527,6 +538,117 @@ mod tests {
         assert!(
             evidence.contains("Renewal date"),
             "expected the matched fact in the evidence: {evidence}"
+        );
+    }
+
+    /// A meter that always reports enough spend to exhaust any total ceiling,
+    /// regardless of `since_millis` — standing in for a company already past
+    /// its plan-level token cap.
+    struct ExhaustedMeter;
+
+    #[async_trait]
+    impl crate::ports::UsageMeter for ExhaustedMeter {
+        async fn record(
+            &self,
+            _company: &CompanyId,
+            _sample: &crate::ports::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            _company: &CompanyId,
+            _since_millis: u64,
+        ) -> crate::Result<Vec<crate::ports::UsageSample>> {
+            Ok(vec![crate::ports::UsageSample {
+                at_millis: 0,
+                agent: "ceo".to_string(),
+                provider: "managed".to_string(),
+                input_tokens: 10_000,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+                kind: crate::ports::SampleKind::Inference,
+                run_id: None,
+                model: None,
+            }])
+        }
+    }
+
+    /// A provider that counts every `invoke` rather than ever answering one —
+    /// the judge must never reach it once the total ceiling is spent.
+    #[derive(Default)]
+    struct PanicIfInvokedProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for PanicIfInvokedProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: ModelRequest,
+        ) -> tinyagents::Result<ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ModelResponse::assistant(
+                "{\"verdict\":\"continue\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for PanicIfInvokedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "panic-if-invoked".to_string()
+        }
+    }
+
+    /// Codex review on #1990 (#3904894255): `HarnessPool::run_inner` refuses
+    /// dispatch at the plan-level total token ceiling before ever invoking the
+    /// agent model, but `judge_sufficiency` called `deps.provider.invoke`
+    /// unconditionally — a `verify`-declared node whose company had already
+    /// exhausted its ceiling still paid for a judge turn, and because that
+    /// refusal is not `execution_failed`, retries could repeat the spend.
+    /// Exhausting the ceiling and asking the judge to verdict must now cost
+    /// zero inference calls.
+    #[tokio::test]
+    async fn a_spent_total_ceiling_skips_the_judge_call_entirely() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-judge-ceiling-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = std::sync::Arc::new(PanicIfInvokedProvider::default());
+        deps.provider = provider.clone();
+        deps.plan = Some(crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: Default::default(),
+            total_budget: Some(1_000),
+        });
+        deps.meter = Some(std::sync::Arc::new(ExhaustedMeter));
+
+        let verdict = judge_sufficiency(
+            &deps,
+            &CompanyId::new("acme"),
+            JudgeInput {
+                instruction: "send the report",
+                output: "the report has been sent",
+                criteria: None,
+                execution_failed: false,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the judge must not spend inference once the total ceiling is spent"
+        );
+        assert_eq!(
+            verdict,
+            SufficiencyVerdict::Retry,
+            "a budget-refused verify must not be accepted as sufficient"
         );
     }
 }
