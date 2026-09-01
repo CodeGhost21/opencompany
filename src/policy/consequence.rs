@@ -449,6 +449,15 @@ const DECLARED: &[Declared] = &[
     // is a pure read of this process's own in-memory cache, no counterparty and
     // nothing an operator authored — same class as `query_company`.
     d("read_run_output", EffectGroup::Other, Reach::Nothing),
+    // Issue #1859: `list_tasks` / `read_task` / `read_run` are the read-only
+    // surface over the company's own task board — `TaskStore`, `RunStore` and
+    // `ArtifactStore`/`EventLog`, none of which carries a run's USD cost, a raw
+    // tool-call argument, or a step's full trace (see the fail-closed note on
+    // `ListTasksTool`). No counterparty is reached and nothing changes, the
+    // same class as `query_company` and `read_run_output` above.
+    d("list_tasks", EffectGroup::Other, Reach::Nothing),
+    d("read_task", EffectGroup::Other, Reach::Nothing),
+    d("read_run", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: reads ------------------------
     // All six are pure reads inside the workspace the agent is pinned to.
     // `file_read`, `glob`, `grep` and `image_info` PARKED before this table
