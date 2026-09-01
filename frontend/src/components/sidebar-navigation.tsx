@@ -8,6 +8,7 @@ import {
   type LucideIcon,
   MessagesSquare,
   Network,
+  Plug,
   ShieldCheck,
   Wallet,
   Workflow,
@@ -26,6 +27,7 @@ import {
 import { RESTING_ROW } from "@/components/sidebar-controls";
 import { useRoomRailSlot } from "@/components/room-rail";
 import { isNavigationActive, type View } from "@/lib/console-routes";
+import { CONNECTION_PAGES } from "@/views/connection-pages";
 import { cn } from "@/lib/utils";
 
 /**
@@ -125,6 +127,24 @@ export const NAV_SECTIONS: NavSection[] = [
       { view: "brain", label: "Brain", icon: Brain },
       { view: "finances", label: "Finance", icon: Wallet },
     ],
+  },
+  // What the company can act through: the apps its teammates sign in to, and
+  // the MCP tool servers they can call. Its children come straight off
+  // `CONNECTION_PAGES` rather than being restated here — that table is already
+  // what the route resolver, the rewrites and `CONNECTIONS_NAMED_BY` read, and
+  // a fourth copy of two labels is a fourth thing to forget. This section grew
+  // its own content rail when it shipped (PR #1977); the rail is gone and these
+  // rows are what replaced it.
+  {
+    view: "connections",
+    label: "Connections",
+    icon: Plug,
+    children: CONNECTION_PAGES.map((page) => ({
+      view: "connections" as const,
+      sub: page.id,
+      label: page.label,
+      icon: page.icon,
+    })),
   },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },

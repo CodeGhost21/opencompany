@@ -3836,12 +3836,7 @@ export function AppShell({
             </Suspense>
           )}
           {view === "connections" && (
-            <ConnectionsSection
-              client={client}
-              company={company}
-              sub={sub}
-              onNavigate={(page) => navigate("connections", page)}
-            />
+            <ConnectionsSection client={client} company={company} sub={sub} />
           )}
           {view === "settings" && (
             <SettingsSection

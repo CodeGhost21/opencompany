@@ -78,6 +78,7 @@ describe("the sidebar's section table", () => {
       "Room",
       "Overview",
       "Company",
+      "Connections",
       "Approvals",
       "Workflows",
       "Observatory",
@@ -115,6 +116,12 @@ describe("which section an address belongs to", () => {
     for (const view of ["company", "ledgers", "workspace", "brain", "finances"] as View[]) {
       expect(sectionOwning(view)?.label).toBe("Company");
     }
+  });
+
+  it("claims Connections for both of its sub-pages", () => {
+    // Its children share the parent's view and differ only by hash segment, so
+    // the section is claimed by the view and the child by the segment.
+    expect(sectionOwning("connections")?.label).toBe("Connections");
   });
 
   it("claims nothing for the surfaces that are deliberately not in the nav", () => {
@@ -159,6 +166,7 @@ describe("the rendered sidebar", () => {
       "Workspace",
       "Brain",
       "Finance",
+      "Connections",
       "Approvals",
       "Workflows",
       "Observatory",
@@ -169,6 +177,7 @@ describe("the rendered sidebar", () => {
       "Room",
       "Overview",
       "Company",
+      "Connections",
       "Approvals",
       "Workflows",
       "Observatory",
