@@ -169,6 +169,18 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
           <SearchView key={company ?? "self"} client={client} company={company} />
         )}
         {page === "skills" && <SkillsView client={client} company={company} />}
+        {/* Observatory has a row on this rail but renders nothing here: the row
+            is a doorway, and `#/settings/observatory` is rewritten onto
+            `#/observatory` before it ever reaches this dispatch.
+
+            Not squeamishness about a nested route — it is that the Observatory
+            owns four query keys of its own (`tab`, `agent`, `turn`, `step`) and
+            reads them straight off `window.location`, keyed on the hash's head
+            being `observatory` (`views/observatory/hash.ts`). Rendered under
+            `#/settings/…` that head is `settings`, so `writeObservatoryQuery`
+            goes silent and the analytics tab, the open agent thread and the
+            expanded turn all stop being addressable. A surface with its own
+            address grammar has to keep its own address. */}
         {page === "usage" && (
           <Suspense fallback={<RouteLoading title="Usage" label="Loading usage…" />}>
             <UsageView client={client} company={company} />

@@ -207,6 +207,11 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   hosting: "HostingView.tsx",
   search: "SearchView.tsx",
   skills: "SkillsView.tsx",
+  // The run index is a settings page now; the shell hands the pane in rather
+  // than `SettingsSection` importing it, so the lazy boundary and its loading
+  // title stay in one place. A single run keeps its own `#/observatory/<runId>`
+  // route, which is why this file is also `NAMED_BY.observatory`.
+  observatory: "observatory/ObservatoryView.tsx",
   usage: "UsageView.tsx",
 };
 

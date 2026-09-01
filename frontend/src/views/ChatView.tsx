@@ -9,6 +9,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
+import { createPortal } from "react-dom";
 import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
@@ -46,7 +47,6 @@ import {
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
 import { settingsHref } from "@/views/settings-pages";
-import { readChannelRailCollapsed, writeChannelRailCollapsed } from "@/lib/chat-rail";
 import {
   addMemberFailure,
   reportAddMember,
@@ -54,9 +54,8 @@ import {
 } from "@/lib/member-feedback";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { personAvatar, personName } from "@/lib/person";
-import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
-import { useIsDesktop } from "@/hooks/use-mobile";
+import { useRoomRailSlot } from "@/components/room-rail";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { ChannelCreateDialog } from "./chat/ChannelCreateDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
@@ -294,9 +293,10 @@ interface Props {
     loadedMessageIds?: ReadonlySet<string>,
   ) => void;
   /**
-   * Reports whether the transcript is actually on screen right now — below
-   * `lg`, `mobilePane === "rail"` hides it behind the channel list even
-   * though `onChannelViewed`'s last report still names that channel.
+   * Reports whether the transcript is actually on screen right now — on a
+   * phone the sidebar holding the channel list is a sheet over the whole
+   * screen, and it hides the transcript even though `onChannelViewed`'s last
+   * report still names that channel.
    * Distinct from `onChannelViewed`'s own channel memory (which the shell
    * also uses to address an unaddressed system line after the operator walks
    * off to Approvals, and must keep doing even while the rail is showing):
@@ -477,27 +477,22 @@ export function ChatView({
   const [addOpen, setAddOpen] = useState(false);
   // The rail's "+" (issue #1835) — chat's own door for creating a channel.
   const [channelCreateOpen, setChannelCreateOpen] = useState(false);
-  const [mobilePane, setMobilePane] = useState<"rail" | "chat">("chat");
-  // Whether the transcript is actually on screen. At `lg` (≥1024) the rail and
-  // transcript share the viewport (`hidden lg:flex`), so it is visible even
-  // while `mobilePane` says "rail"; below that the pane toggle is the whole
-  // story. Mention clearing is gated on this so a mention cannot be marked
-  // read while only the rail is showing (codex P1 review).
-  const isDesktop = useIsDesktop();
-  const chatPaneVisible = mobilePane === "chat" || isDesktop;
-  const [channelsCollapsed, setChannelsCollapsed] = useState(() => readChannelRailCollapsed(scope));
+  // The channel list is a section of the app sidebar now, so the sidebar owns
+  // where it is, how dense it is, and whether it is covering the transcript.
+  // See `components/room-rail.tsx`.
+  const roomRail = useRoomRailSlot();
+  // Whether the transcript is actually on screen. The rail sits beside it at
+  // every width the sidebar is a column; only the phone's sheet covers it.
+  // Mention clearing is gated on this so a mention cannot be marked read while
+  // the operator is looking at the channel list (codex P1 review).
+  const chatPaneVisible = !roomRail.covering;
+  const channelsCollapsed = roomRail.collapsed;
   // Section disclosure is shared by the desktop and sub-`lg` rail instances
   // (codex P2 review): each instance would otherwise keep its own fold state,
   // so dropping below `lg` reopened every section the operator had folded.
   const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
   const toggleRailSection = (id: string) =>
     setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
-  // The header's density toggle stays mounted across a collapse/expand, but the
-  // compact rail's expand button does not — expanding unmounts it while a
-  // keyboard user is still focused on it, dropping them at the document. The
-  // ref lets the expand action hand focus to the header toggle instead (the
-  // fix for the rail's issue #1340 focus review).
-  const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
@@ -507,12 +502,6 @@ export function ChatView({
   const [people, setPeople] = useState<Person[]>([]);
   // The member whose budget dialog is open, if any.
   const [budgetFor, setBudgetFor] = useState<TeamMember | null>(null);
-
-  // A host switch keeps this mounted briefly, so replace rather than carry the
-  // previous connection's layout preference into the next company.
-  useEffect(() => {
-    setChannelsCollapsed(readChannelRailCollapsed(scope));
-  }, [scope]);
 
   /**
    * Ask the host whether this company can think (issues #1734, #1735).
@@ -603,17 +592,20 @@ export function ChatView({
   const echoing = echoCause(cognition) !== null;
 
   function toggleChannels() {
-    setChannelsCollapsed((collapsed) => {
-      const next = !collapsed;
-      writeChannelRailCollapsed(scope, next);
-      // Expanding from the compact rail unmounts the button that carried focus;
-      // hand it to the header toggle, which is mounted on both density states.
-      // `next` is the rail's new collapsed state, so expanding is `!next` —
-      // collapsing from the header's own toggle leaves that button mounted,
-      // and the focus it already holds is the right place to stay.
-      if (!next) channelsToggleRef.current?.focus();
-      return next;
-    });
+    const expanding = channelsCollapsed;
+    roomRail.expand();
+    // Expanding unmounts the compact rail's own expand button while a keyboard
+    // user is still on it, dropping them at the document (issue #1340). Hand
+    // focus to the sidebar's collapse control, which is the one control mounted
+    // on BOTH density states now that the chat header no longer carries a
+    // duplicate of it. Queried by its test id rather than threaded as a ref:
+    // it is rendered by the shell, two components above this one, and that id
+    // is already the contract `sidebar-toggle-reachable.spec.ts` pins it by.
+    if (expanding) {
+      window.requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>('[data-testid="sidebar-collapse"]')?.focus(),
+      );
+    }
   }
 
   const boot = useCallback(async () => {
@@ -1286,11 +1278,11 @@ export function ChatView({
   // replies' mentions — which the channel-open alone must not clear — clear
   // the moment the thread makes them visible.
   //
-  // Gated on the transcript actually being on screen: below `lg`, `mobilePane
-  // === "rail"` hides the pane, and a mention that lands while the operator is
-  // only looking at the channel rail must not be marked read behind their back.
-  // The gate itself is a dependency, so re-opening the pane from the rail
-  // re-runs the report and clears whatever is newly visible.
+  // Gated on the transcript actually being on screen: on a phone the sidebar
+  // holding the channel list is a sheet over the whole screen, and a mention
+  // that lands while the operator is only looking at that list must not be
+  // marked read behind their back. The gate itself is a dependency, so closing
+  // the sheet re-runs the report and clears whatever is newly visible.
   useEffect(() => {
     if (channel && chatPaneVisible)
       onChannelViewed?.(
@@ -2065,7 +2057,15 @@ export function ChatView({
 
   function selectChannel(id: string) {
     onNavigate(id);
-    setMobilePane("chat");
+    // On a phone the rail is painted inside the sidebar's sheet, which covers
+    // the whole screen. Navigating without closing it leaves the operator
+    // looking at the channel list they just chose from rather than the
+    // transcript they chose — and every other row in this sidebar closes the
+    // sheet as it navigates (`SidebarNavigation`), the channel list being one
+    // of its sections now (codex P2 review). `dismiss` is `undefined` at every
+    // width where the rail is a column beside the transcript, so this is a
+    // no-op on desktop rather than a second opinion about layout.
+    roomRail.dismiss?.();
   }
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
@@ -2073,57 +2073,48 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1">
-      {/* The channel rail and the chat pane share the viewport with the app
-          sidebar. That sidebar is on from `md` (≥768), so a rail that also came
-          in at `md` gave two rails plus content a ~290px pane from 768–1023px —
-          Send fell off the right edge with no scroll to reach it (issue #1383).
-          The rail now waits for `lg` (≥1024); from 768–1023 the pane runs
-          single-column and the "Show channels" toggle in the header (also
-          `lg:hidden`) swaps to the rail, mirroring the sub-`md` mobile flow. */}
-      <ChannelRail
-        sections={sections}
-        activeId={channel.id}
-        unread={unread ?? {}}
-        mentions={mentions}
-        onSelect={selectChannel}
-        openSections={railOpenSections}
-        onToggleSection={toggleRailSection}
-        directMessages={directMessageChannels(members)}
-        onStartDirectMessage={selectChannel}
-        onAddChannel={onAddChannel}
-        className={cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")}
-      />
-      <ChannelRail
-        sections={sections}
-        activeId={channel.id}
-        unread={unread ?? {}}
-        mentions={mentions}
-        onSelect={selectChannel}
-        openSections={railOpenSections}
-        onToggleSection={toggleRailSection}
-        directMessages={directMessageChannels(members)}
-        onStartDirectMessage={selectChannel}
-        onAddChannel={onAddChannel}
-        collapsed={channelsCollapsed}
-        onExpand={toggleChannels}
-        className="hidden lg:flex"
-      />
+      {/* ONE rail, painted in the app sidebar under the Room row.
+          `createPortal` moves the node, not the component: every prop below is
+          still this view's state, and the dialogs the rail opens still mount
+          inside this tree.
 
-      <div
-        className={cn(
-          "min-w-0 flex-1 flex-col",
-          mobilePane === "chat" ? "flex" : "hidden lg:flex",
+          There used to be two of these — an `lg:hidden` one that took over the
+          pane below 1024px and a `hidden lg:flex` one beside the transcript —
+          because the rail was a second column competing with the app sidebar
+          for the viewport (issue #1383). It is not a second column any more, so
+          the breakpoint dance goes with it: the sidebar already decides whether
+          it is a column, a 3rem rail or a sheet, at exactly one set of
+          breakpoints, and the channel list follows it. */}
+      {roomRail.element !== null &&
+        createPortal(
+          <ChannelRail
+            sections={sections}
+            activeId={channel.id}
+            unread={unread ?? {}}
+            mentions={mentions}
+            onSelect={selectChannel}
+            openSections={railOpenSections}
+            onToggleSection={toggleRailSection}
+            directMessages={directMessageChannels(members)}
+            onStartDirectMessage={selectChannel}
+            onAddChannel={onAddChannel}
+            collapsed={channelsCollapsed}
+            onExpand={toggleChannels}
+            // In the sidebar the rail IS the column: it drops its own width,
+            // its own border and its own fill, and lets the sidebar's scroll
+            // container handle a long list.
+            className="flex w-full overflow-visible border-r-0 bg-transparent"
+          />,
+          roomRail.element,
         )}
-      >
+
+      <div className="flex min-w-0 flex-1 flex-col">
         <ChatHeader
           channel={channel}
           memberCount={headerCount}
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
-          onOpenRail={() => setMobilePane("rail")}
-          channelsCollapsed={channelsCollapsed}
-          onToggleChannels={toggleChannels}
-          channelsToggleRef={channelsToggleRef}
+          onOpenRail={roomRail.reveal}
         />
 
         <div className="flex min-h-0 flex-1">
