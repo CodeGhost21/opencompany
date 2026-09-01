@@ -2111,7 +2111,8 @@ impl Tool for ReadTaskTool {
                         md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
                     } else {
                         let pinned = card.output.as_ref().map(|o| o.artifacts.as_slice());
-                        let has_stamp = pinned.is_some_and(|entries| !entries.is_empty());
+                        let has_stamp = pinned.is_some();
+                        let mut rendered = 0usize;
                         for artifact in &published {
                             let pinned_entry = pinned.and_then(|entries| {
                                 entries.iter().find(|a| a.artifact_id == artifact.id)
@@ -2119,6 +2120,7 @@ impl Tool for ReadTaskTool {
                             if has_stamp && pinned_entry.is_none() {
                                 continue;
                             }
+                            rendered += 1;
                             let preview = pinned_entry
                                 .and_then(|entry| artifact.version(entry.version))
                                 .or_else(|| artifact.latest())
@@ -2130,6 +2132,9 @@ impl Tool for ReadTaskTool {
                                 artifact.kind.as_str(),
                                 preview
                             ));
+                        }
+                        if has_stamp && rendered == 0 {
+                            md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
                         }
                     }
                 }
@@ -12753,6 +12758,61 @@ name = "Morning"
             !out.contains("First draft") && !out.contains("superseded"),
             "an artifact from an earlier attempt that the current output stamp does not pin \
              must not render as part of the latest output: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_treats_an_empty_output_stamp_as_the_latest_attempt_publishing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Draft the memo",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-2".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 10,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let record_a = crate::ports::artifacts::ArtifactRecord::new(
+            "art-a",
+            "t-1",
+            "First draft",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "attempt 1's body — attempt 2 published nothing",
+            "engineer",
+            5,
+        );
+        artifacts.upsert(&company, &record_a).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("First draft") && !out.contains("attempt 1's body"),
+            "an earlier attempt's artifact must not render as the latest attempt's output when \
+             the current output stamp pins an empty (non-absent) artifact list: {out}"
+        );
+        assert!(
+            out.contains("No artifacts published"),
+            "an empty-but-present output stamp must render as the latest attempt publishing \
+             nothing, not fall through to the all-artifacts legacy fallback: {out}"
         );
     }
 
