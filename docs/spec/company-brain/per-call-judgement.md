@@ -66,7 +66,14 @@ already exist rather than a new taxonomy:
    its `EffectGroup` is `Other`, so rule 1 never applies to it, and rule 3 does
    not name it — so whether it parks is decided entirely at step 4 by its
    `Reach`: free when the URL names a concrete host, `Consequence` (so it
-   parks under `supervised`) when it does not.
+   parks under `supervised`) when it does not. `http_request` reaches the same
+   step-4 `Reach` check when its method reads GET/HEAD/OPTIONS, but "free"
+   there is earned by the **whole call**, not the method in isolation: a `body`
+   or a header outside an explicit safe allowlist keeps it `Consequence` even
+   though the method alone would have read as a fetch — the method names the
+   request's intent, but `to_tool_args` forwards `body`/`headers` unconditionally
+   and the wired tool sends both regardless of method, so either is a channel a
+   method-only check would have missed.
 
 Rule 3 is a **list, and was briefly a derivation**. `Consequence` +
 `Standing::PerCall` looks like it names exactly this set, since #444 refuses a
