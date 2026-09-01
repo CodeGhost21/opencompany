@@ -124,6 +124,10 @@ function readOnlyComposerInput() {
   return container.querySelector('textarea[aria-label="This channel is read-only"]');
 }
 
+function banner() {
+  return container.querySelector('[data-testid="chat-cognition-banner"]');
+}
+
 describe("a read-only channel renders no composer", () => {
   it("draws neither the composer nor its placeholder", async () => {
     await mount("operator");
@@ -177,5 +181,53 @@ describe("a writable channel still renders the whole composer", () => {
     }
     expect(container.textContent).toContain("to send");
     expect(container.textContent).not.toContain("There is nothing to reply to here");
+  });
+});
+
+describe("the harness-unavailable notice sits next to the composer", () => {
+  it("renders the notice, unchanged, on a writable channel", async () => {
+    await mount("main", "unavailable");
+
+    const strip = banner();
+    expect(strip).not.toBeNull();
+    expect(strip?.textContent).toContain(
+      "This host cannot reach a model — no agent harness is available.",
+    );
+    expect(strip?.textContent).toContain(
+      "The replies below come from the offline echo brain rather than the teammate they " +
+        "appear under. No setting changes that: it takes a host built and started with the " +
+        "harness.",
+    );
+  });
+
+  it("places it below the transcript and above the composer", async () => {
+    await mount("main", "unavailable");
+
+    const strip = banner()!;
+    const input = composerInput()!;
+    expect(strip).not.toBeNull();
+    expect(input).not.toBeNull();
+
+    // `MessageTimeline`'s root is the scrolling viewport. The notice, the
+    // scroller and the composer are all direct children of the same flex
+    // column, so their order in that column is the order on screen — which is
+    // the entire claim being made: the notice qualifies the Send below it, not
+    // the transcript above it.
+    const column = strip.parentElement!;
+    const kids = Array.from(column.children);
+    const scroller = column.querySelector(":scope > div.overflow-y-auto")!;
+    const composerRoot = kids.find((el) => el.contains(input))!;
+
+    expect(scroller).not.toBeNull();
+    expect(composerRoot).not.toBeUndefined();
+    expect(kids.indexOf(scroller)).toBeLessThan(kids.indexOf(strip));
+    expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(composerRoot));
+  });
+
+  it("is suppressed on a read-only channel, where nothing can be sent", async () => {
+    await mount("operator", "unavailable");
+
+    expect(banner()).toBeNull();
+    expect(container.textContent).toContain("There is nothing to reply to here");
   });
 });

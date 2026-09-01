@@ -2097,93 +2097,6 @@ export function ChatView({
                 </span>
               </p>
             )}
-            {/* Issues #1734 / #1735. Above the scroller rather than inside it,
-                like the two strips it sits between: this is a standing fact
-                about the company, not a row in the transcript, and it must not
-                scroll away from the operator who is reading the replies it
-                explains. `role="status"` (not `alert`) for the reason
-                `components/ui/alert.tsx` gives — a notice present on mount
-                should not interrupt a screen reader. */}
-            {echoing && (
-              <p
-                role="status"
-                data-testid="chat-cognition-banner"
-                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
-              >
-                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0">
-                  {cognition === "unconfigured" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        Teammates can&apos;t think yet.
-                      </span>{" "}
-                      This company has no model configured, so the replies below come from the
-                      offline echo brain rather than the teammate they appear under. Choose a
-                      provider in{" "}
-                      <a
-                        className="font-medium text-foreground underline-offset-4 hover:underline"
-                        href={settingsHref("inference")}
-                      >
-                        Settings → Inference
-                      </a>
-                      .
-                    </>
-                  )}
-                  {/* A provider is configured and resolves; the runtime just
-                      predates it. Saying "no model configured" here sends an
-                      operator who did exactly the right thing back to redo it,
-                      which is why this is its own state. The link goes to the
-                      card that owns the restart — and stops there, because
-                      whether a restart can be performed in place is that card's
-                      fact to report (#1736), not a promise to make from here. */}
-                  {cognition === "restart-required" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        Teammates can&apos;t think yet — the model isn&apos;t live.
-                      </span>{" "}
-                      A provider is configured, but this company&apos;s runtime was built before
-                      it was saved, so the replies below still come from the offline echo brain
-                      rather than the teammate they appear under. Finish the switch in{" "}
-                      <a
-                        className="font-medium text-foreground underline-offset-4 hover:underline"
-                        href={settingsHref("inference")}
-                      >
-                        Settings → Inference
-                      </a>
-                      .
-                    </>
-                  )}
-                  {cognition === "unavailable" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        This host cannot reach a model — no agent harness is available.
-                      </span>{" "}
-                      The replies below come from the offline echo brain rather than the teammate
-                      they appear under. No setting changes that: it takes a host built and
-                      started with the harness.
-                    </>
-                  )}
-                  {/* The host is on the echo brain and cannot say why: it could
-                      not read this company's inference configuration. Names no
-                      remedy on purpose — an unreadable config is no evidence
-                      that saving one would help, which is the same #266
-                      doctrine that stops the workflow-run route answering
-                      `inference_required` in this state. A settings link here
-                      would be the switch that does nothing, one more time. */}
-                  {cognition === "undetermined" && (
-                    <>
-                      <span className="font-medium text-foreground">
-                        Teammates can&apos;t think, and this host can&apos;t say why.
-                      </span>{" "}
-                      Its inference configuration could not be read, so the replies below come
-                      from the offline echo brain rather than the teammate they appear under.
-                      Until the host can read that configuration, saving a provider is not known
-                      to help.
-                    </>
-                  )}
-                </span>
-              </p>
-            )}
             <MessageTimeline
               channel={channel}
               items={items}
@@ -2264,6 +2177,104 @@ export function ChatView({
                   The <span className="font-medium text-foreground">Operator</span> channel is a
                   read-only feed of workflow reports and notifications — a scannable “what
                   happened” view. There is nothing to reply to here.
+                </span>
+              </p>
+            )}
+            {/* Issues #1734 / #1735, repositioned. Directly above the composer,
+                not above the transcript: what the notice warns about — a reply
+                that comes from the echo brain rather than the teammate it appears
+                under — is the consequence of pressing Send, and a caveat at the
+                other end of the page from the control it qualifies is one the
+                operator reads before it means anything and has forgotten by the
+                time it does. It stays OUTSIDE the scroller (a sibling strip,
+                `shrink-0`) like the read-only and budget strips above it, because
+                it is a standing fact about the company rather than a row in the
+                transcript.
+
+                Suppressed on a read-only channel: nothing can be sent there, so a
+                caveat about what sending produces has nothing left to qualify —
+                and the composer it would sit above is not rendered at all.
+
+                `role="status"` (not `alert`) for the reason
+                `components/ui/alert.tsx` gives — a notice present on mount should
+                not interrupt a screen reader. */}
+            {echoing && !readOnly && (
+              <p
+                role="status"
+                data-testid="chat-cognition-banner"
+                className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0">
+                  {cognition === "unconfigured" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think yet.
+                      </span>{" "}
+                      This company has no model configured, so the replies below come from the
+                      offline echo brain rather than the teammate they appear under. Choose a
+                      provider in{" "}
+                      <a
+                        className="font-medium text-foreground underline-offset-4 hover:underline"
+                        href={settingsHref("inference")}
+                      >
+                        Settings → Inference
+                      </a>
+                      .
+                    </>
+                  )}
+                  {/* A provider is configured and resolves; the runtime just
+                      predates it. Saying "no model configured" here sends an
+                      operator who did exactly the right thing back to redo it,
+                      which is why this is its own state. The link goes to the
+                      card that owns the restart — and stops there, because
+                      whether a restart can be performed in place is that card's
+                      fact to report (#1736), not a promise to make from here. */}
+                  {cognition === "restart-required" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think yet — the model isn&apos;t live.
+                      </span>{" "}
+                      A provider is configured, but this company&apos;s runtime was built before
+                      it was saved, so the replies below still come from the offline echo brain
+                      rather than the teammate they appear under. Finish the switch in{" "}
+                      <a
+                        className="font-medium text-foreground underline-offset-4 hover:underline"
+                        href={settingsHref("inference")}
+                      >
+                        Settings → Inference
+                      </a>
+                      .
+                    </>
+                  )}
+                  {cognition === "unavailable" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        This host cannot reach a model — no agent harness is available.
+                      </span>{" "}
+                      The replies below come from the offline echo brain rather than the teammate
+                      they appear under. No setting changes that: it takes a host built and
+                      started with the harness.
+                    </>
+                  )}
+                  {/* The host is on the echo brain and cannot say why: it could
+                      not read this company's inference configuration. Names no
+                      remedy on purpose — an unreadable config is no evidence
+                      that saving one would help, which is the same #266
+                      doctrine that stops the workflow-run route answering
+                      `inference_required` in this state. A settings link here
+                      would be the switch that does nothing, one more time. */}
+                  {cognition === "undetermined" && (
+                    <>
+                      <span className="font-medium text-foreground">
+                        Teammates can&apos;t think, and this host can&apos;t say why.
+                      </span>{" "}
+                      Its inference configuration could not be read, so the replies below come
+                      from the offline echo brain rather than the teammate they appear under.
+                      Until the host can read that configuration, saving a provider is not known
+                      to help.
+                    </>
+                  )}
                 </span>
               </p>
             )}
