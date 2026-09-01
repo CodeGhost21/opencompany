@@ -124,15 +124,8 @@ fn user_prompt(input: JudgeInput<'_>) -> String {
 }
 
 fn parse_verdict(text: &str) -> Option<SufficiencyVerdict> {
-    let body = json_object(text)?;
-    let answer: JudgeAnswer = serde_json::from_str(body).ok()?;
+    let answer: JudgeAnswer = serde_json::from_str(text.trim()).ok()?;
     SufficiencyVerdict::from_parts(answer.verdict.trim(), answer.gap.as_deref().map(str::trim))
-}
-
-fn json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (end >= start).then_some(&text[start..=end])
 }
 
 fn enforce_anti_suppression(
@@ -296,6 +289,12 @@ mod tests {
         ] {
             assert!(prompt.contains(gap.as_str()), "missing gap token");
         }
+    }
+
+    #[test]
+    fn text_outside_the_json_object_is_rejected() {
+        let wrapped = "Sure, here you go: {\"verdict\":\"halt_benign\"} — hope that helps!";
+        assert_eq!(parse_verdict(wrapped), None);
     }
 
     #[test]
