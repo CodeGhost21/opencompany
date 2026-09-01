@@ -101,6 +101,18 @@ fn task_leaves_todo(prev_column: Option<&str>, next_column: &str) -> bool {
     prev_column == Some(TODO) && next_column != TODO
 }
 
+/// Whether `card` is the review surface for `desk`: an `in_review`
+/// dispatch-origin card whose origin conversation is `desk`. A board-created
+/// card (no `origin_chat_id`) is excluded — it was never dispatched from a
+/// thread and has no origin conversation to review it in.
+#[cfg(feature = "openhuman")]
+fn is_review_target(card: &TaskRecord, desk: &str) -> bool {
+    card.column == crate::ports::tasks::COLUMN_IN_REVIEW
+        && card.origin_chat_id.as_deref().is_some_and(|origin| {
+            crate::server::chat_history::same_conversation(Some(origin), Some(desk))
+        })
+}
+
 /// Whether a company should come up with the emergency stop engaged, given what
 /// replaying its event log produced (issue #86).
 ///
@@ -3496,6 +3508,166 @@ impl CompanyRuntime {
         }
     }
 
+    /// The board card a thread's review action targets: the `in_review`
+    /// dispatch-origin card whose origin conversation is `desk`, anchored by
+    /// the `parent` message the operator replied to — either that card's settle
+    /// pill ([`CompanyEvent::DeskTaskCompleted`]) or the relay bubble that
+    /// followed it.
+    ///
+    /// `None` when `parent` names neither, when no such card is on the board, or
+    /// when the card has already left `in_review` — each of which routes the
+    /// message back to an ordinary chat turn rather than a review pass.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn review_feedback_target(
+        self: &Arc<Self>,
+        desk: &str,
+        parent: EventSeq,
+    ) -> Option<TaskRecord> {
+        let task_id = self.review_anchor_card(desk, parent).await?;
+        self.review_card_in_review(&task_id, desk).await
+    }
+
+    /// The card id a review `parent` anchors to. A settle pill names it
+    /// directly; the relay bubble carries `task_id: None` by construction, so
+    /// its adjacent settle pill in the same conversation is the anchor.
+    #[cfg(feature = "openhuman")]
+    async fn review_anchor_card(&self, desk: &str, parent: EventSeq) -> Option<String> {
+        let stored = self.events.read_from(&self.id, parent, 1).await.ok()?;
+        let stored = stored.into_iter().next()?;
+        if stored.seq != parent {
+            return None;
+        }
+        match stored.event {
+            CompanyEvent::DeskTaskCompleted { task_id, .. } => Some(task_id),
+            CompanyEvent::AgentReply {
+                task_id: None,
+                chat_id,
+                ..
+            } if crate::server::chat_history::same_conversation(Some(&chat_id), Some(desk)) => {
+                self.settle_pill_before(desk, parent).await
+            }
+            _ => None,
+        }
+    }
+
+    /// The card id of the most recent settle pill before `before` whose origin
+    /// conversation is `desk` — the anchor for a relay bubble the operator
+    /// replied to.
+    #[cfg(feature = "openhuman")]
+    async fn settle_pill_before(&self, desk: &str, before: EventSeq) -> Option<String> {
+        const WINDOW: usize = 24;
+        self.events
+            .read_before(&self.id, Some(before), WINDOW)
+            .await
+            .ok()?
+            .into_iter()
+            .find_map(|stored| match stored.event {
+                CompanyEvent::DeskTaskCompleted {
+                    task_id,
+                    origin_chat_id,
+                    ..
+                } if origin_chat_id.as_deref().is_some_and(|origin| {
+                    crate::server::chat_history::same_conversation(Some(origin), Some(desk))
+                }) =>
+                {
+                    Some(task_id)
+                }
+                _ => None,
+            })
+    }
+
+    /// The card with id `task_id`, but only when it is an `in_review`
+    /// dispatch-origin card whose origin conversation is `desk`.
+    #[cfg(feature = "openhuman")]
+    async fn review_card_in_review(&self, task_id: &str, desk: &str) -> Option<TaskRecord> {
+        let card = self
+            .ops
+            .tasks
+            .list(&self.id)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|t| t.id == task_id)?;
+        is_review_target(&card, desk).then_some(card)
+    }
+
+    /// The card a thread-scoped review action settles: the most-recently-updated
+    /// `in_review` dispatch-origin card whose origin conversation is `desk`.
+    /// `list` returns newest-updated first, so the first match is that card.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn review_card_for_desk(&self, desk: &str) -> Option<TaskRecord> {
+        self.ops
+            .tasks
+            .list(&self.id)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|card| is_review_target(card, desk))
+    }
+
+    /// Appends the operator's review feedback to `card`'s note as a
+    /// `[reviewer]` block and re-dispatches it: the card moves
+    /// `in_review → in_progress` through [`upsert_task`](Self::upsert_task),
+    /// whose dispatch edge fires a fresh run that reads the appended note back
+    /// through the card's task instruction.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn apply_review_feedback(
+        self: &Arc<Self>,
+        card: &TaskRecord,
+        feedback: &str,
+        author: Option<&Actor>,
+    ) -> Result<TaskRecord> {
+        tracing::debug!(
+            company = %self.id,
+            task = %card.id,
+            reviewer = ?author.map(|a| a.id.as_str()),
+            "[review] applying feedback; re-dispatching the card"
+        );
+        let mut next = card.clone();
+        if !feedback.trim().is_empty() {
+            next.note = Some(crate::runtime::delegation::append_note(
+                next.note.as_deref(),
+                crate::harness::built_in::lifecycle::REVIEWER_ATTRIBUTION,
+                feedback,
+            ));
+        }
+        next.column = IN_PROGRESS.to_string();
+        next.updated_at_millis = now_millis();
+        self.upsert_task(&next).await
+    }
+
+    /// Settles a reviewed `in_review` card per the operator's verdict:
+    /// `Approve` finishes it to `done` with the verdict recorded in its note,
+    /// `Revise` routes through [`apply_review_feedback`](Self::apply_review_feedback)
+    /// for a fresh pass.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn apply_review_decision(
+        self: &Arc<Self>,
+        card: &TaskRecord,
+        decision: crate::harness::built_in::lifecycle::ReviewDecision,
+        note: Option<&str>,
+        author: Option<&Actor>,
+    ) -> Result<TaskRecord> {
+        use crate::harness::built_in::lifecycle;
+        match decision {
+            lifecycle::ReviewDecision::Revise => {
+                self.apply_review_feedback(card, note.unwrap_or_default(), author)
+                    .await
+            }
+            lifecycle::ReviewDecision::Approve => {
+                let mut next = card.clone();
+                next.note = Some(crate::runtime::delegation::append_note(
+                    next.note.as_deref(),
+                    lifecycle::REVIEWER_ATTRIBUTION,
+                    &lifecycle::review_note(decision, note),
+                ));
+                next.column = lifecycle::review_landing_column(decision).to_string();
+                next.updated_at_millis = now_millis();
+                self.upsert_task(&next).await
+            }
+        }
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
         let conversation = self
             .journal
@@ -6462,6 +6634,7 @@ mod tests {
             assignee: origin.to_string(),
             updated_at_millis: 0,
             origin_chat_id: Some(origin.to_string()),
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7214,5 +7387,242 @@ mod tests {
             runtime.pending_approvals().is_empty(),
             "and the projection row `record_parked` inserted before its append must go with it"
         );
+    }
+
+    /// The thread-as-review-surface: a reply to a settled `in_review` dispatch
+    /// card's settle pill or relay bubble routes as review feedback and re-runs
+    /// the card; an Approve verdict finishes it.
+    #[cfg(feature = "openhuman")]
+    mod review {
+        use crate::ports::TaskRecord;
+        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_TODO};
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        type Runtime = crate::company::runtime::CompanyRuntime;
+
+        async fn runtime() -> (Arc<Runtime>, TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-review-")
+                .tempdir()
+                .expect("tempdir");
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[group_chat]]\nid = \"strategy\"\nname = \"Strategy\"\nmembers = [\"ceo\"]\n",
+            )
+            .expect("manifest");
+            let runtime = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            (runtime, home)
+        }
+
+        fn card(id: &str, origin: &str, column: &str) -> TaskRecord {
+            TaskRecord {
+                id: id.to_string(),
+                title: "Ship it".to_string(),
+                note: None,
+                column: column.to_string(),
+                priority: "medium".to_string(),
+                assignee: "ceo".to_string(),
+                updated_at_millis: 1,
+                origin_chat_id: Some(origin.to_string()),
+                origin_parent: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
+                bounced: None,
+            }
+        }
+
+        fn settle_pill(task_id: &str, origin: &str) -> CompanyEvent {
+            CompanyEvent::DeskTaskCompleted {
+                task_id: task_id.to_string(),
+                desk: "ceo".to_string(),
+                output: "done".to_string(),
+                column: COLUMN_IN_REVIEW.to_string(),
+                artifact_ids: Vec::new(),
+                origin_chat_id: Some(origin.to_string()),
+                origin_parent: None,
+            }
+        }
+
+        fn relay_bubble(origin: &str) -> CompanyEvent {
+            CompanyEvent::AgentReply {
+                chat_id: origin.to_string(),
+                agent_id: "ceo".to_string(),
+                text: "Here is the draft.".to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            }
+        }
+
+        async fn seed(runtime: &Arc<Runtime>, c: &TaskRecord) {
+            runtime.tasks().upsert(runtime.id(), c).await.expect("seed");
+        }
+
+        async fn append(runtime: &Arc<Runtime>, event: CompanyEvent) -> EventSeq {
+            runtime
+                .events
+                .append(runtime.id(), event)
+                .await
+                .expect("append")
+        }
+
+        async fn stored(runtime: &Arc<Runtime>, id: &str) -> TaskRecord {
+            runtime
+                .tasks()
+                .list(runtime.id())
+                .await
+                .expect("list")
+                .into_iter()
+                .find(|t| t.id == id)
+                .expect("card survives")
+        }
+
+        #[tokio::test]
+        async fn a_settle_pill_resolves_its_in_review_card() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            let pill = append(&rt, settle_pill("t-1", "strategy")).await;
+
+            let target = rt.review_feedback_target("strategy", pill).await;
+            assert_eq!(target.map(|c| c.id), Some("t-1".to_string()));
+        }
+
+        #[tokio::test]
+        async fn a_relay_bubble_resolves_via_its_settle_pill() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            let bubble = append(&rt, relay_bubble("strategy")).await;
+
+            let target = rt.review_feedback_target("strategy", bubble).await;
+            assert_eq!(
+                target.map(|c| c.id),
+                Some("t-1".to_string()),
+                "the relay bubble carries no card link, so it anchors on the settle pill \
+                 immediately before it"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_resolver_declines_a_card_that_left_review() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_DONE)).await;
+            let pill = append(&rt, settle_pill("t-1", "strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("strategy", pill).await.is_none(),
+                "a card already approved is not open for review"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_resolver_declines_a_pill_from_another_conversation() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            let pill = append(&rt, settle_pill("t-1", "strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("marketing", pill).await.is_none(),
+                "a reply in another desk must not review this desk's card"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_resolver_declines_an_ordinary_message() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            let chatter = append(
+                &rt,
+                CompanyEvent::OperatorMessage {
+                    text: "unrelated".to_string(),
+                    by: None,
+                    chat: Some("strategy".to_string()),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await;
+
+            assert!(
+                rt.review_feedback_target("strategy", chatter)
+                    .await
+                    .is_none(),
+                "a top-level message names no review surface and starts a normal turn"
+            );
+        }
+
+        #[tokio::test]
+        async fn feedback_appends_a_reviewer_block_and_re_enters_in_progress() {
+            let (rt, _home) = runtime().await;
+            let mut seeded = card("t-1", "strategy", COLUMN_IN_REVIEW);
+            seeded.note = Some("[writer] first draft".to_string());
+            seed(&rt, &seeded).await;
+
+            rt.apply_review_feedback(&seeded, "tighten the intro", None)
+                .await
+                .expect("feedback applies");
+
+            let after = stored(&rt, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_PROGRESS,
+                "review feedback re-runs the card through the dispatch edge"
+            );
+            let note = after.note.expect("note");
+            assert!(note.contains("[reviewer] tighten the intro"), "{note}");
+            assert!(
+                note.contains("[writer] first draft"),
+                "the prior note is preserved: {note}"
+            );
+        }
+
+        #[tokio::test]
+        async fn approve_finishes_the_card() {
+            use crate::harness::built_in::lifecycle::ReviewDecision;
+            let (rt, _home) = runtime().await;
+            let seeded = card("t-1", "strategy", COLUMN_IN_REVIEW);
+            seed(&rt, &seeded).await;
+
+            rt.apply_review_decision(&seeded, ReviewDecision::Approve, None, None)
+                .await
+                .expect("approve applies");
+
+            let after = stored(&rt, "t-1").await;
+            assert_eq!(after.column, COLUMN_DONE);
+        }
+
+        #[tokio::test]
+        async fn review_card_for_desk_finds_the_in_review_card() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-done", "strategy", COLUMN_DONE)).await;
+            seed(&rt, &card("t-todo", "strategy", COLUMN_TODO)).await;
+            seed(&rt, &card("t-review", "strategy", COLUMN_IN_REVIEW)).await;
+
+            let found = rt.review_card_for_desk("strategy").await;
+            assert_eq!(found.map(|c| c.id), Some("t-review".to_string()));
+
+            assert!(
+                rt.review_card_for_desk("marketing").await.is_none(),
+                "a desk with no in-review card resolves nothing"
+            );
+        }
     }
 }
