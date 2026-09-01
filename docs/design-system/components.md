@@ -221,8 +221,10 @@ was before the shell was rebuilt.
 
 **Anything that cuts a hole in the chrome must ask for the chrome.** A `ring-2`
 around a status dot is a cut-out of the ground behind it, not a decoration. The
-two in the shell — `SidebarMenuDot` on the collapsed rail and the host
-switcher's status dot — take `ring-chrome`. `ring-sidebar` there paints a halo.
+one left in the shell — the host switcher's status dot — takes `ring-chrome`;
+`ring-sidebar` there paints a halo. The collapsed rail's attention dot was the
+other, and went with `SidebarMenuDot` when the approvals count moved into the
+window's title row.
 
 ### The frame
 
