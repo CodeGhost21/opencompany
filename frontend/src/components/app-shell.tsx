@@ -8,6 +8,7 @@ import {
   type LucideIcon,
   MessagesSquare,
   Network,
+  Plug,
   ShieldCheck,
   BookText,
   Wallet,
@@ -31,8 +32,6 @@ import {
   SidebarFooter,
   SidebarInset,
   SidebarMenu,
-  SidebarMenuBadge,
-  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -41,9 +40,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
+import { ApprovalsButton } from "@/components/approvals-button";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { OverviewButton } from "@/components/overview-button";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
@@ -169,6 +170,7 @@ import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { UnknownRouteView } from "@/views/UnknownRouteView";
+import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -239,13 +241,24 @@ interface NavItem {
   icon: LucideIcon;
 }
 
+// The approvals count is NOT here any more, and its absence is the point.
+//
+// This rendered two elements for one fact: a `SidebarMenuBadge` carrying the
+// number, and — because that badge hides itself on the 32px rail — a
+// `SidebarMenuDot` mirroring it so a collapsed sidebar still said something was
+// waiting (issue #1018). The dot existed only to survive a collapse.
+//
+// The count now lives in the window's title row (`ApprovalsButton`), which is
+// chrome: it is on screen on every page, in every sidebar state, at every width
+// down to the floor of the degradation ladder. There is no collapse left for a
+// dot to survive, so both elements are deleted rather than one of them kept —
+// two mechanisms for one number is exactly what #1018 had to reconcile, and the
+// cheapest way not to have that problem is not to have two.
 function SidebarNavigation({
   view,
-  pending,
   onNavigate,
 }: {
   view: View;
-  pending: number;
   onNavigate: (view: View) => void;
 }) {
   const { isMobile, setOpenMobile } = useSidebar();
@@ -272,22 +285,6 @@ function SidebarNavigation({
               <item.icon />
               <span>{item.label}</span>
             </SidebarMenuButton>
-            {item.view === "approvals" && pending > 0 && (
-              <>
-                <SidebarMenuBadge>{pending}</SidebarMenuBadge>
-                {/* Issue #1018: the badge is the sidebar's only attention
-                    signal and `SidebarMenuBadge` hides itself on the
-                    collapsed rail, so a collapsed sidebar said nothing was
-                    waiting. The dot is the same `pending` value rendered
-                    so it survives 32px — not a second source, so it cannot
-                    disagree with the badge or fork the count contract
-                    #932 pins. Exactly one of the two is visible at a
-                    time. */}
-                <SidebarMenuDot
-                  label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
-                />
-              </>
-            )}
           </SidebarMenuItem>
         ))}
       </SidebarMenu>
@@ -334,6 +331,21 @@ const NAV: NavItem[] = [
   // Chargebee and PayPal surfaces the host had no HTTP route for until
   // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
   { view: "finances", label: "Finance", icon: Wallet },
+  // Beside Finance, and above the Workflows/Observatory pair, because that is
+  // the seam it belongs on. Finance and Connections are the two rows about the
+  // world *outside* this company — the money it moves through Chargebee and
+  // PayPal, and the apps and tool servers its teammates act through — while
+  // Workflows and Observatory are the "what the agents did" pair and read as
+  // one thing when adjacent. Splitting either pair to slot this in would cost
+  // more than it bought.
+  //
+  // Not in Settings, which is where it used to live as two sub-pages. A
+  // settings rail is for configuration an operator sets once; which apps the
+  // company can act through is something they come back to and read, and it
+  // changes as the work does — the same argument that moved Billing out to
+  // Finance (docs/spec/runtime/finance-console.md) and Brain out to its own
+  // row. See docs/spec/runtime/ledgers-console-ia.md, Rule 7.
+  { view: "connections", label: "Connections", icon: Plug },
   { view: "workflows", label: "Workflows", icon: Workflow },
   // What the agents actually did, run by run — the read-only companion to
   // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
@@ -1174,8 +1186,8 @@ export function AppShell({
   // Runs once; StrictMode's double invoke is harmless because the first run
   // clears the params the second reads.
   //
-  // The accounts page is `#/settings/oauth` since the Connections split, so the
-  // bounce-back lands there rather than on a top-level view.
+  // The accounts page is `#/connections/apps` since it left the settings rail
+  // for the Connections section, so the bounce-back lands there.
   //
   // Before issue #300 the host answered a cancelled or expired handshake with a
   // JSON body, which the browser rendered as the page — a dead end with no way
@@ -1198,7 +1210,7 @@ export function AppShell({
       "",
       window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
-    setView("settings", "oauth");
+    setView("connections", "apps");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
     const providerName = providerId
@@ -3444,6 +3456,27 @@ export function AppShell({
             canCreateCompany={client.carriesPlatformBearer}
           />
         }
+        overview={
+          // The console's front page, as a glyph. It was a labelled sidebar row;
+          // in a chrome band a labelled button reads as content, so the name
+          // moves to `aria-label` and `title`. First thing the row drops as the
+          // window narrows — see `TITLE_BAR_LADDER`.
+          <OverviewButton
+            active={isNavigationActive("overview", view)}
+            onNavigate={() => setView("overview")}
+          />
+        }
+        approvals={
+          // What is waiting on you, from every page in every sidebar state.
+          // `pending` is `feed.status.pending_approvals` passed straight
+          // through — the same single value the sidebar badge and the collapsed
+          // rail dot both used before this row took the signal off them.
+          <ApprovalsButton
+            pending={pending}
+            active={isNavigationActive("approvals", view)}
+            onNavigate={() => setView("approvals")}
+          />
+        }
         autonomy={
           // What the agents in this company are allowed to do without asking.
           // Renders nothing until the host has said, rather than guessing a
@@ -3490,7 +3523,7 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+          <SidebarNavigation view={view} onNavigate={setView} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on
@@ -3968,6 +4001,14 @@ export function AppShell({
                 onNavigate={(page) => navigate("finances", page)}
               />
             </Suspense>
+          )}
+          {view === "connections" && (
+            <ConnectionsSection
+              client={client}
+              company={company}
+              sub={sub}
+              onNavigate={(page) => navigate("connections", page)}
+            />
           )}
           {view === "settings" && (
             <SettingsSection

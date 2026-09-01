@@ -64,6 +64,15 @@ export type View =
   | "observatory"
   | "pages"
   | "finances"
+  /**
+   * What this company can reach outside itself: the apps its teammates act
+   * through, and the tool servers they can call.
+   *
+   * Two settings sub-pages (`#/settings/oauth`, `#/settings/mcp`) until they
+   * got a section of their own. Both old addresses still resolve, rewritten by
+   * `console-route-rewrites.ts`.
+   */
+  | "connections"
   | "settings"
   | "feedback"
   /** The first-run setup dialog, opened from a direct address or Settings. */
@@ -153,6 +162,13 @@ const ROUTABLE: Record<View, true> = {
    * routes all three; see docs/spec/runtime/finance-console.md.
    */
   finances: true,
+  /**
+   * Apps (the third-party accounts, Composio included) and MCP Servers, under
+   * one nav row. Its sub-pages ride the second hash segment
+   * (`#/connections/mcp`), so this one entry routes both — the same shape
+   * `finances` above uses. See docs/spec/runtime/ledgers-console-ia.md, Rule 7.
+   */
+  connections: true,
   settings: true,
   /** No nav row: linked from the sidebar footer instead. */
   feedback: true,
