@@ -70,6 +70,21 @@ use serde_json::Value;
 
 use crate::ports::types::StartedBy;
 
+/// One rehydratable blocked-node stash, as `(turn, workflow_id, input,
+/// started_by, thread_id, workflow_fingerprint)` — the shape
+/// [`RuntimeJournal::blocked_stashes`](crate::runtime::journal::RuntimeJournal::blocked_stashes)
+/// hands to [`BlockedNodeQueue::rearm_checkpointed`]. Named so both sides of
+/// that handoff share one type instead of two independently-maintained
+/// six-tuples.
+pub type BlockedStashRow = (
+    String,
+    String,
+    Value,
+    StartedBy,
+    Option<String>,
+    Option<String>,
+);
+
 /// The facts a blocked agent node's continuation needs, stashed at
 /// block-settle and handed back on release.
 #[derive(Clone, Debug)]
@@ -85,6 +100,14 @@ pub struct StashedBlock {
     pub started_by: StartedBy,
     /// The tinyflows checkpoint lineage this block resumes, when available.
     pub thread_id: Option<String>,
+    /// The graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+    /// at the moment this node parked, when one was stashed — the blocked-node
+    /// counterpart to [`PAYLOAD_WORKFLOW_FINGERPRINT`](crate::runtime::workflow_resume::PAYLOAD_WORKFLOW_FINGERPRINT)
+    /// on a gate's parked effect. `spawn_blocked_node_continuation` refuses
+    /// `thread_id`'s checkpoint when this no longer matches the graph it is
+    /// about to resume against, on the same terms `graph_unchanged_since_park`
+    /// already applies to the gate path.
+    pub workflow_fingerprint: Option<String>,
     /// Whether any of this node's parked calls has been approved, banked the
     /// moment that decision lands rather than read off the release batch
     /// (issue #1816).
@@ -120,7 +143,7 @@ impl BlockedNodeQueue {
     /// key and one trigger input, so a second arm for the same key would carry
     /// identical facts; keeping the first is simplest and cannot disagree.
     pub fn arm(&self, turn: &str, workflow_id: &str, input: &Value, started_by: &StartedBy) {
-        self.arm_checkpointed(turn, workflow_id, input, started_by, None);
+        self.arm_checkpointed(turn, workflow_id, input, started_by, None, None);
     }
 
     pub fn arm_checkpointed(
@@ -130,6 +153,7 @@ impl BlockedNodeQueue {
         input: &Value,
         started_by: &StartedBy,
         thread_id: Option<&str>,
+        workflow_fingerprint: Option<&str>,
     ) {
         self.inner
             .lock()
@@ -140,6 +164,7 @@ impl BlockedNodeQueue {
                 input: input.clone(),
                 started_by: started_by.clone(),
                 thread_id: thread_id.map(str::to_string),
+                workflow_fingerprint: workflow_fingerprint.map(str::to_string),
                 approved: false,
             });
     }
@@ -219,21 +244,21 @@ impl BlockedNodeQueue {
     /// fact through rather than re-deciding the fallback.
     pub fn rearm(&self, stashes: impl IntoIterator<Item = (String, String, Value, StartedBy)>) {
         self.rearm_checkpointed(stashes.into_iter().map(
-            |(turn, workflow_id, input, started_by)| (turn, workflow_id, input, started_by, None),
+            |(turn, workflow_id, input, started_by)| {
+                (turn, workflow_id, input, started_by, None, None)
+            },
         ));
     }
 
-    pub fn rearm_checkpointed(
-        &self,
-        stashes: impl IntoIterator<Item = (String, String, Value, StartedBy, Option<String>)>,
-    ) {
+    pub fn rearm_checkpointed(&self, stashes: impl IntoIterator<Item = BlockedStashRow>) {
         let mut inner = self.inner.lock().expect("blocked node queue poisoned");
-        for (turn, workflow_id, input, started_by, thread_id) in stashes {
+        for (turn, workflow_id, input, started_by, thread_id, workflow_fingerprint) in stashes {
             inner.entry(turn).or_insert(StashedBlock {
                 workflow_id,
                 input,
                 started_by,
                 thread_id,
+                workflow_fingerprint,
                 approved: false,
             });
         }

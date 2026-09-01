@@ -2802,6 +2802,7 @@ impl CompanyRuntime {
             stashed.input,
             stashed.started_by,
             stashed.thread_id,
+            stashed.workflow_fingerprint,
         )
         .await
         {
@@ -7465,6 +7466,7 @@ mod tests {
             &serde_json::json!({}),
             &crate::ports::types::StartedBy::Operator,
             Some("blocked-thread"),
+            None,
         );
 
         runtime

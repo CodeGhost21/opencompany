@@ -1175,6 +1175,7 @@ pub async fn spawn_blocked_node_continuation(
     input: Value,
     started_by: crate::ports::types::StartedBy,
     checkpoint_thread_id: Option<String>,
+    workflow_fingerprint: Option<String>,
 ) -> Result<()> {
     let Some(runner) = runtime.workflow_runner().cloned() else {
         return Err(OpenCompanyError::InvalidRequest(format!(
@@ -1212,7 +1213,16 @@ pub async fn spawn_blocked_node_continuation(
     // already-admitted `ctx` (rather than via `spawn_as`, which owns its own
     // `begin` call) so this still gets the split-`begin`/dispatch-marker
     // ordering below.
-    let node_restart = checkpoint_resume_available(runtime, checkpoint_thread_id.as_deref()).await;
+    // Issue #1991 review (`3904397452`/`3904304754`): the blocked-node twin of
+    // `spawn_continuation`'s own `graph_unchanged_since_park` check — a
+    // checkpoint being available says nothing about whether the graph it
+    // describes is still the one this node blocked against. Without this, an
+    // agent node that blocks on approval and gets edited before that approval
+    // lands would resume the stale checkpoint into the edited graph: stale
+    // completed-node state, or an engine failure where the topology no longer
+    // matches.
+    let node_restart = checkpoint_resume_available(runtime, checkpoint_thread_id.as_deref()).await
+        && fingerprint_unchanged_since_park(workflow_fingerprint.as_deref(), &workflow);
     let ctx = ctx.with_started_by(started_by);
     let ctx = if node_restart {
         ctx.with_checkpoint_resume(
@@ -1223,6 +1233,15 @@ pub async fn spawn_blocked_node_continuation(
             Vec::new(),
         )
     } else {
+        // Same leak class `spawn_continuation`'s own fallback closes
+        // (`3904304781`): falling back to a trigger re-run — whether because
+        // no checkpoint was ever taken, or because the fingerprint check just
+        // rejected a stale one — must not leave `checkpoint_thread_id`'s
+        // lineage behind. Nothing else ever comes back for it once this block
+        // is about to re-dispatch on the trigger input instead.
+        if let Some(thread_id) = checkpoint_thread_id.as_deref() {
+            prune_checkpoint_lineage(runtime, thread_id).await;
+        }
         ctx.with_resume_semantic(crate::ports::ResumeSemantic::ReRunFromTrigger)
     };
     // Issue #1825 (P1 follow-up): abort rather than launch unmarked. Warning
@@ -1270,11 +1289,33 @@ pub async fn spawn_blocked_node_continuation(
 /// the workflow was edited while this approval sat pending, so its checkpoint
 /// no longer describes the graph the continuation would run against.
 fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::WorkflowFile) -> bool {
-    let Some(parked) = effect
-        .payload
-        .get(PAYLOAD_WORKFLOW_FINGERPRINT)
-        .and_then(Value::as_str)
-    else {
+    fingerprint_unchanged_since_park(
+        effect
+            .payload
+            .get(PAYLOAD_WORKFLOW_FINGERPRINT)
+            .and_then(Value::as_str),
+        workflow,
+    )
+}
+
+/// The shared check behind [`graph_unchanged_since_park`] (the gate path,
+/// which reads its parked fingerprint off an [`Effect`]) and
+/// [`spawn_blocked_node_continuation`] (the blocked-node path, which reads
+/// its parked fingerprint off a
+/// [`StashedBlock`](crate::runtime::blocked_nodes::StashedBlock) — a parked
+/// tool call has no effect payload of its own to carry one).
+///
+/// `true` when `parked` is `None` — a card stashed before either path tracked
+/// a fingerprint — so an upgrade replays exactly as it did before this check
+/// existed. `false` only when a fingerprint WAS stashed and no longer
+/// matches: the workflow was edited while this approval or block sat
+/// pending, so its checkpoint no longer describes the graph the continuation
+/// would run against.
+fn fingerprint_unchanged_since_park(
+    parked: Option<&str>,
+    workflow: &crate::company::WorkflowFile,
+) -> bool {
+    let Some(parked) = parked else {
         return true;
     };
     if parked == workflow.content_fingerprint() {
@@ -1288,6 +1329,27 @@ fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::Workfl
     false
 }
 
+/// Prunes `thread_id`'s stashed checkpoint lineage, when this build has a
+/// checkpoint store wired.
+///
+/// The core behind [`prune_checkpoint_lineage_for_effect`] (the gate path,
+/// keyed off an [`Effect`]'s `PAYLOAD_THREAD_ID`) and
+/// [`spawn_blocked_node_continuation`]'s own fingerprint-rejection exit,
+/// which already holds its thread id directly off `StashedBlock` with no
+/// effect to read it from.
+#[cfg(feature = "openhuman")]
+async fn prune_checkpoint_lineage(runtime: &CompanyRuntime, thread_id: &str) {
+    let Some(store) = runtime.workflow_checkpoints() else {
+        return;
+    };
+    if let Err(error) = store.prune_settled(thread_id).await {
+        tracing::warn!(%thread_id, %error, "workflow: failed to prune settled checkpoints");
+    }
+}
+
+#[cfg(not(feature = "openhuman"))]
+async fn prune_checkpoint_lineage(_runtime: &CompanyRuntime, _thread_id: &str) {}
+
 /// Prunes `effect`'s stashed checkpoint lineage, when it has one and this
 /// build has a checkpoint store wired.
 ///
@@ -1298,11 +1360,7 @@ fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::Workfl
 /// `3903797619`), without either of those default-build call sites needing to
 /// know that `workflow_checkpoints()` only exists under the `openhuman`
 /// feature.
-#[cfg(feature = "openhuman")]
 async fn prune_checkpoint_lineage_for_effect(runtime: &CompanyRuntime, effect: &Effect) {
-    let Some(store) = runtime.workflow_checkpoints() else {
-        return;
-    };
     let Some(thread_id) = effect
         .payload
         .get(PAYLOAD_THREAD_ID)
@@ -1310,13 +1368,8 @@ async fn prune_checkpoint_lineage_for_effect(runtime: &CompanyRuntime, effect: &
     else {
         return;
     };
-    if let Err(error) = store.prune_settled(thread_id).await {
-        tracing::warn!(%thread_id, %error, "workflow: failed to prune settled checkpoints");
-    }
+    prune_checkpoint_lineage(runtime, thread_id).await;
 }
-
-#[cfg(not(feature = "openhuman"))]
-async fn prune_checkpoint_lineage_for_effect(_runtime: &CompanyRuntime, _effect: &Effect) {}
 
 #[cfg(feature = "openhuman")]
 async fn checkpoint_resume_available(runtime: &CompanyRuntime, thread_id: Option<&str>) -> bool {
@@ -2417,6 +2470,14 @@ mod decide_tests {
         input: Value,
         run_id: String,
         started_by: crate::ports::types::StartedBy,
+        /// Which way the run entered the engine — `NodeRestart` (a checkpoint
+        /// resume) or `ReRunFromTrigger` — so a test can pin which one a
+        /// fingerprint check chose without inspecting the engine's own
+        /// behaviour. Read only by the `openhuman`-gated checkpoint-fingerprint
+        /// tests below — `#[cfg]`'d rather than left unconditional, or the
+        /// default lane (which never reads it) fails `-D dead_code`.
+        #[cfg(feature = "openhuman")]
+        resume_semantic: Option<crate::ports::ResumeSemantic>,
     }
 
     /// A runner that records every run it is handed and settles immediately.
@@ -2448,6 +2509,8 @@ mod decide_tests {
                     input,
                     run_id: ctx.run_id.clone(),
                     started_by: ctx.started_by.clone(),
+                    #[cfg(feature = "openhuman")]
+                    resume_semantic: ctx.resume_semantic,
                 });
             Ok(WorkflowRun {
                 output: json!({ "ok": true }),
@@ -2964,6 +3027,176 @@ mode = "full"
             remaining.is_empty(),
             "a wholly refused batch starts no continuation, so its checkpoint lineage must be \
              pruned: {remaining:?}"
+        );
+    }
+
+    /// A blocked agent node's edited-graph twin of the gate-path proof above
+    /// (`an_edited_graph_no_longer_matches_its_parked_fingerprint`) — this is
+    /// the finding both `3904397452` (coderabbit) and `3904304754` (codex)
+    /// raised on `spawn_blocked_node_continuation`'s own `node_restart` check,
+    /// which used to consult checkpoint availability alone.
+    ///
+    /// Pre-fix, `node_restart` was `checkpoint_resume_available(..)` with no
+    /// fingerprint term at all, so this test's checkpoint (seeded and
+    /// available) made it pick `NodeRestart` regardless of the edit below —
+    /// this assertion is what fails against that code.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocked_node_refuses_a_stale_checkpoint_after_the_graph_is_edited() {
+        use tinyflows::graph::Checkpointer;
+
+        let home = seed_home();
+        let parked_fingerprint = crate::company::parse_workflow(GATED_TOML)
+            .expect("parses")
+            .content_fingerprint();
+        let mut rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+            .with_seed_dir(home.path().to_path_buf())
+            .build()
+            .await
+            .expect("runtime builds");
+        let runner = Arc::new(RecordingRunner::default());
+        rt.set_workflow_runner(runner.clone());
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                home.path().join("checkpoints"),
+            ),
+        );
+        checkpoints
+            .put(tinyflows::graph::Checkpoint {
+                thread_id: "blocked-thread".to_string(),
+                checkpoint_id: "c1".to_string(),
+                run_id: Some("blocked-thread".to_string()),
+                parent_checkpoint_id: None,
+                namespace: Vec::new(),
+                state: json!({}),
+                next_nodes: vec![tinyflows::graph::ids::NodeId::new("gate")],
+                completed_tasks: Vec::new(),
+                pending_writes: Vec::new(),
+                interrupts: Vec::new(),
+                pending_activations: None,
+                barrier_arrivals: Vec::new(),
+                metadata: Value::Null,
+            })
+            .await
+            .expect("seed checkpoint");
+        rt.set_workflow_checkpoints(checkpoints.clone());
+        let rt = Arc::new(rt);
+
+        // The edit: an author renames the gate node while this block sits
+        // pending — the same shape `FINGERPRINT_V2` gives the gate-path test,
+        // applied to the graph on disk `spawn_blocked_node_continuation`
+        // re-loads.
+        std::fs::write(
+            home.path().join("workflows").join("gated.toml"),
+            GATED_TOML.replace("name = \"Gate\"", "name = \"Gate — renamed\""),
+        )
+        .expect("edit graph on disk");
+
+        spawn_blocked_node_continuation(
+            &rt,
+            "blocked-turn",
+            "gated",
+            json!({ "request": "x" }),
+            crate::ports::types::StartedBy::Operator,
+            Some("blocked-thread".to_string()),
+            Some(parked_fingerprint),
+        )
+        .await
+        .expect("a blocked-node continuation still starts, just not as a checkpoint resume");
+
+        let started = wait_for_runs(&runner, 1).await;
+        assert_eq!(started.len(), 1, "exactly one continuation run must start");
+        assert_eq!(
+            started[0].resume_semantic,
+            Some(crate::ports::ResumeSemantic::ReRunFromTrigger),
+            "the graph changed since this node parked, so the stale checkpoint must be refused \
+             in favour of a trigger re-run, not resumed into the edited graph"
+        );
+
+        let remaining = checkpoints
+            .get_thread("blocked-thread")
+            .await
+            .expect("checkpoint read");
+        assert!(
+            remaining.is_empty(),
+            "the refused lineage is unreachable from here on, so it must be pruned rather than \
+             leaked: {remaining:?}"
+        );
+    }
+
+    /// The positive control beside the test above: an unedited graph must
+    /// still resume its checkpoint — the fingerprint check must not become a
+    /// blanket refusal.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocked_node_resumes_its_checkpoint_when_the_graph_is_unchanged() {
+        use tinyflows::graph::Checkpointer;
+
+        let home = seed_home();
+        let parked_fingerprint = crate::company::parse_workflow(GATED_TOML)
+            .expect("parses")
+            .content_fingerprint();
+        let mut rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+            .with_seed_dir(home.path().to_path_buf())
+            .build()
+            .await
+            .expect("runtime builds");
+        let runner = Arc::new(RecordingRunner::default());
+        rt.set_workflow_runner(runner.clone());
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                home.path().join("checkpoints"),
+            ),
+        );
+        checkpoints
+            .put(tinyflows::graph::Checkpoint {
+                thread_id: "blocked-thread".to_string(),
+                checkpoint_id: "c1".to_string(),
+                run_id: Some("blocked-thread".to_string()),
+                parent_checkpoint_id: None,
+                namespace: Vec::new(),
+                state: json!({}),
+                next_nodes: vec![tinyflows::graph::ids::NodeId::new("gate")],
+                completed_tasks: Vec::new(),
+                pending_writes: Vec::new(),
+                interrupts: Vec::new(),
+                pending_activations: None,
+                barrier_arrivals: Vec::new(),
+                metadata: Value::Null,
+            })
+            .await
+            .expect("seed checkpoint");
+        rt.set_workflow_checkpoints(checkpoints.clone());
+        let rt = Arc::new(rt);
+
+        spawn_blocked_node_continuation(
+            &rt,
+            "blocked-turn",
+            "gated",
+            json!({ "request": "x" }),
+            crate::ports::types::StartedBy::Operator,
+            Some("blocked-thread".to_string()),
+            Some(parked_fingerprint),
+        )
+        .await
+        .expect("a blocked-node continuation starts");
+
+        let started = wait_for_runs(&runner, 1).await;
+        assert_eq!(started.len(), 1, "exactly one continuation run must start");
+        assert_eq!(
+            started[0].resume_semantic,
+            Some(crate::ports::ResumeSemantic::NodeRestart),
+            "an unedited graph must still resume its checkpoint — the fingerprint check must \
+             not refuse a lineage that is still valid"
+        );
+
+        let remaining = checkpoints
+            .get_thread("blocked-thread")
+            .await
+            .expect("checkpoint read");
+        assert!(
+            !remaining.is_empty(),
+            "a resumed lineage must not be pruned out from under the run using it"
         );
     }
 }

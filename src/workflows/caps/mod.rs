@@ -124,6 +124,15 @@ pub struct RunContext<'a> {
     pub run_id: &'a str,
     /// Stable tinyflows lineage used by checkpointed node continuations.
     pub checkpoint_thread_id: &'a str,
+    /// The graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+    /// as loaded for this run attempt (issue #1991 review, `3904397452`/
+    /// `3904304754`). Threaded to [`HarnessAgentRunner`] so
+    /// [`park_gated_calls`](HarnessAgentRunner::park_gated_calls) can stamp it
+    /// onto a blocked node's stash the same way `park_pending_gates` stamps
+    /// one onto a parked gate's effect — the fact
+    /// `spawn_blocked_node_continuation` needs to refuse a checkpoint resume
+    /// into a graph an editor changed while the block sat pending.
+    pub workflow_fingerprint: &'a str,
     /// The operator's topic for this run (issue #154), threaded to the agent
     /// capability so a node's turn carries what was actually asked.
     pub run_request: Option<String>,
@@ -222,6 +231,7 @@ pub async fn build_capabilities(
         workflow_id,
         run_id,
         checkpoint_thread_id,
+        workflow_fingerprint,
         run_request,
         trigger_input,
         started_by,
@@ -430,6 +440,7 @@ pub async fn build_capabilities(
                 publish_refusal_claim,
             )
             .with_checkpoint_thread_id(checkpoint_thread_id)
+            .with_workflow_fingerprint(workflow_fingerprint)
             .with_runs(runs, deep, attempts),
         );
         (Arc::new(tools), Arc::new(http), state, Some(agent))
@@ -592,6 +603,15 @@ pub struct HarnessAgentRunner {
     /// workflow run is waiting on the operator.
     run_id: String,
     checkpoint_thread_id: String,
+    /// The graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+    /// at the moment this run started (issue #1991 review, `3904397452`/
+    /// `3904304754`), stamped onto every blocked-node stash [`park_gated_calls`]
+    /// arms so `spawn_blocked_node_continuation` can refuse a checkpoint resume
+    /// into a graph an editor changed while the block sat pending — the same
+    /// check `graph_unchanged_since_park` already applies to the gate path.
+    /// `None` only in a build/test that never set it, which behaves exactly as
+    /// it did before this field existed.
+    workflow_fingerprint: Option<String>,
     /// What the operator asked for on this run (issue #154), when they supplied
     /// it. A node's `prompt` is authored into the graph and is the same on every
     /// run, so without this the run's topic never reaches the teammate doing the
@@ -1002,6 +1022,7 @@ impl HarnessAgentRunner {
             workflow_id,
             run_id,
             checkpoint_thread_id,
+            workflow_fingerprint: None,
             run_request,
             trigger_input,
             started_by,
@@ -1018,6 +1039,11 @@ impl HarnessAgentRunner {
 
     pub fn with_checkpoint_thread_id(mut self, thread_id: &str) -> Self {
         self.checkpoint_thread_id = thread_id.to_string();
+        self
+    }
+
+    pub fn with_workflow_fingerprint(mut self, fingerprint: &str) -> Self {
+        self.workflow_fingerprint = Some(fingerprint.to_string());
         self
     }
 
@@ -1800,6 +1826,7 @@ impl HarnessAgentRunner {
             &self.trigger_input,
             &self.started_by,
             Some(&self.checkpoint_thread_id),
+            self.workflow_fingerprint.as_deref(),
         );
 
         // Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
@@ -1827,6 +1854,7 @@ impl HarnessAgentRunner {
                 &self.trigger_input,
                 &self.started_by,
                 Some(&self.checkpoint_thread_id),
+                self.workflow_fingerprint.as_deref(),
             )
             .await
         {
@@ -5917,6 +5945,7 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -5972,6 +6001,7 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -6144,6 +6174,7 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -6206,6 +6237,7 @@ mod tests {
                 workflow_id: "wf",
                 run_id: "run:1",
                 checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,

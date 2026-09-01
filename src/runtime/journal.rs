@@ -418,6 +418,17 @@ enum JournalRecord {
         /// The tinyflows checkpoint lineage this block resumes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        /// The graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+        /// at park time, the blocked-node counterpart to a parked gate's
+        /// `PAYLOAD_WORKFLOW_FINGERPRINT` — so a restart rehydrates the same
+        /// refusal `spawn_blocked_node_continuation` applies to the in-memory
+        /// stash when the graph was edited while this block sat pending.
+        /// `#[serde(default)]` so a record written before this field existed
+        /// still replays: it degrades to `None`, which
+        /// `graph_unchanged_since_park`-style checks already treat as "nothing
+        /// to compare against".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_fingerprint: Option<String>,
         /// Epoch-millis the block was stashed.
         at_millis: u64,
     },
@@ -1132,6 +1143,9 @@ struct BlockedStash {
     /// the real trigger instead of a hardcoded `Operator` default.
     started_by: StartedBy,
     thread_id: Option<String>,
+    /// The graph's content fingerprint at park time, mirrored from
+    /// [`JournalRecord::BlockedNodeStashed`]'s own field.
+    workflow_fingerprint: Option<String>,
     /// Whether this stash's `BlockedNodeStashed` append has actually landed
     /// (issue #1825, P1 — found by chatgpt-codex-connector).
     ///
@@ -1467,6 +1481,7 @@ impl RuntimeJournal {
                 input,
                 started_by,
                 thread_id,
+                workflow_fingerprint,
                 ..
             } => {
                 state.blocked_stashes.insert(
@@ -1476,6 +1491,7 @@ impl RuntimeJournal {
                         input,
                         started_by,
                         thread_id,
+                        workflow_fingerprint,
                         // A record `replay` folds is durable by construction —
                         // it was read back from the journal it describes.
                         durable: true,
@@ -1829,7 +1845,7 @@ impl RuntimeJournal {
     /// [`pending`](Self::pending) feeds the gate queue's re-arm. Only stashes
     /// whose paired [`BlockedNodeReleased`](JournalRecord::BlockedNodeReleased)
     /// has not replayed are returned — a re-dispatched run does not come back.
-    pub fn blocked_stashes(&self) -> Vec<(String, String, Value, StartedBy, Option<String>)> {
+    pub fn blocked_stashes(&self) -> Vec<crate::runtime::blocked_nodes::BlockedStashRow> {
         self.state
             .lock()
             .expect("journal state poisoned")
@@ -1842,6 +1858,7 @@ impl RuntimeJournal {
                     stash.input.clone(),
                     stash.started_by.clone(),
                     stash.thread_id.clone(),
+                    stash.workflow_fingerprint.clone(),
                 )
             })
             .collect()
@@ -1888,8 +1905,15 @@ impl RuntimeJournal {
         input: &Value,
         started_by: &StartedBy,
     ) -> Result<()> {
-        self.record_blocked_node_stashed_checkpointed(turn, workflow_id, input, started_by, None)
-            .await
+        self.record_blocked_node_stashed_checkpointed(
+            turn,
+            workflow_id,
+            input,
+            started_by,
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn record_blocked_node_stashed_checkpointed(
@@ -1899,6 +1923,7 @@ impl RuntimeJournal {
         input: &Value,
         started_by: &StartedBy,
         thread_id: Option<&str>,
+        workflow_fingerprint: Option<&str>,
     ) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
@@ -1926,6 +1951,7 @@ impl RuntimeJournal {
                             input: input.clone(),
                             started_by: started_by.clone(),
                             thread_id: thread_id.map(str::to_string),
+                            workflow_fingerprint: workflow_fingerprint.map(str::to_string),
                             durable: false,
                         },
                     );
@@ -1938,6 +1964,7 @@ impl RuntimeJournal {
             input: input.clone(),
             started_by: started_by.clone(),
             thread_id: thread_id.map(str::to_string),
+            workflow_fingerprint: workflow_fingerprint.map(str::to_string),
             at_millis: crate::ports::now_millis(),
         })
         .await?;
@@ -4574,6 +4601,7 @@ mod test {
                 input: serde_json::json!({}),
                 started_by: StartedBy::Operator,
                 thread_id: Some("lineage".into()),
+                workflow_fingerprint: Some("fingerprint".into()),
                 at_millis: 10,
             },
             JournalRecord::BlockedNodeReleased { turn: "t".into() },
@@ -5092,6 +5120,7 @@ mod test {
                 input.clone(),
                 StartedBy::Operator,
                 None,
+                None,
             )],
             "the in-memory stash must still be there after a failed append — a resolve \
              landing before the next retry has to find it"
@@ -5121,6 +5150,7 @@ mod test {
                 "wf-1".to_string(),
                 input,
                 StartedBy::Operator,
+                None,
                 None,
             )],
             "a restart must rehydrate this stash — the retried append is the only durable \
@@ -5157,7 +5187,7 @@ mod test {
 
         let stashes = journal.blocked_stashes();
         assert_eq!(stashes.len(), 1);
-        let (turn, workflow_id, input, started_by, thread_id) = &stashes[0];
+        let (turn, workflow_id, input, started_by, thread_id, workflow_fingerprint) = &stashes[0];
         assert_eq!(turn, "turn-legacy");
         assert_eq!(workflow_id, "wf-legacy");
         assert_eq!(input, &serde_json::json!({ "request": "before #1862" }));
@@ -5168,6 +5198,7 @@ mod test {
              pre-#1862 fallback — not a load failure"
         );
         assert!(thread_id.is_none());
+        assert!(workflow_fingerprint.is_none());
     }
 
     #[tokio::test]
@@ -5181,6 +5212,7 @@ mod test {
                 &serde_json::json!({ "request": "resume" }),
                 &StartedBy::Operator,
                 Some("thread-1"),
+                Some("fingerprint-1"),
             )
             .await
             .expect("stash persists");
@@ -5188,5 +5220,46 @@ mod test {
         let reloaded = RuntimeJournal::new(dir.path().join("journal.jsonl"));
         reloaded.load().await.expect("journal reloads");
         assert_eq!(reloaded.blocked_stashes()[0].4.as_deref(), Some("thread-1"));
+        assert_eq!(
+            reloaded.blocked_stashes()[0].5.as_deref(),
+            Some("fingerprint-1")
+        );
+    }
+
+    /// The blocked-node twin of [`a_blocked_stash_rehydrates_its_checkpoint_lineage`]:
+    /// a restart must rehydrate the park-time fingerprint too, on the same
+    /// terms as the checkpoint thread id beside it — `spawn_blocked_node_continuation`
+    /// reads both off `StashedBlock` to decide whether a checkpoint resume is
+    /// safe (PR #1991 review, `3904397452`/`3904304754`).
+    #[tokio::test]
+    async fn a_pre_fingerprint_blocked_node_stashed_line_replays_with_no_fingerprint() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let legacy = serde_json::json!({
+            "record": "BlockedNodeStashed",
+            "turn": "turn-legacy",
+            "workflow_id": "wf-legacy",
+            "input": { "request": "before the fingerprint field" },
+            "thread_id": "thread-legacy",
+            "at_millis": 1_000,
+        });
+        tokio::fs::write(&path, format!("{legacy}\n"))
+            .await
+            .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("a line with no workflow_fingerprint field still replays");
+
+        let stashes = journal.blocked_stashes();
+        assert_eq!(stashes.len(), 1);
+        assert_eq!(stashes[0].4.as_deref(), Some("thread-legacy"));
+        assert!(
+            stashes[0].5.is_none(),
+            "a legacy line with no workflow_fingerprint field degrades to None, not a load \
+             failure"
+        );
     }
 }

@@ -433,6 +433,12 @@ async fn run_workflow_inner(
     // here and owned past the engine call — the engine future and the
     // capability bundle drop before parking runs.
     let child_gates = Arc::new(super::caps::resolver::ChildGateRegistry::default());
+    // Issue #1991 review (`3904397452`/`3904304754`): the graph's fingerprint
+    // as loaded for this run attempt, stamped onto a blocked node's stash the
+    // same way `park_pending_gates` stamps it onto a gate's parked effect, so
+    // `spawn_blocked_node_continuation` can refuse a checkpoint resume into a
+    // graph an editor changed while the block sat pending.
+    let workflow_fingerprint = workflow.content_fingerprint();
     let capabilities = super::caps::build_capabilities(
         turn,
         deps,
@@ -441,6 +447,7 @@ async fn run_workflow_inner(
             workflow_id: &workflow.id,
             run_id: &run_id,
             checkpoint_thread_id: &checkpoint_thread_id,
+            workflow_fingerprint: &workflow_fingerprint,
             run_request,
             trigger_input: &trigger_input,
             started_by: ctx.started_by.clone(),
@@ -1026,6 +1033,7 @@ async fn run_workflow_inner(
                 &blocked,
                 &ctx.started_by,
                 Some(&checkpoint_thread_id),
+                Some(&workflow_fingerprint),
             )
             .await;
             // Reclassify capped nodes before they move into the blocked run, the
@@ -1351,6 +1359,7 @@ async fn run_workflow_inner(
         &blocked_nodes,
         &ctx.started_by,
         Some(&checkpoint_thread_id),
+        Some(&workflow_fingerprint),
     )
     .await;
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
@@ -1943,10 +1952,12 @@ async fn stash_blocked_agent_nodes(
         blocked,
         started_by,
         None,
+        None,
     )
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stash_blocked_agent_nodes_checkpointed(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     workflow_id: &str,
@@ -1955,6 +1966,7 @@ async fn stash_blocked_agent_nodes_checkpointed(
     blocked: &[crate::ports::WorkflowBlockedNode],
     started_by: &crate::ports::types::StartedBy,
     checkpoint_thread_id: Option<&str>,
+    workflow_fingerprint: Option<&str>,
 ) {
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         return;
@@ -2031,6 +2043,7 @@ async fn stash_blocked_agent_nodes_checkpointed(
                 trigger_input,
                 started_by,
                 checkpoint_thread_id,
+                workflow_fingerprint,
             );
             Some((turn, &node.node_id))
         })
@@ -2080,6 +2093,7 @@ async fn stash_blocked_agent_nodes_checkpointed(
                 trigger_input,
                 started_by,
                 checkpoint_thread_id,
+                workflow_fingerprint,
             )
             .await
         {
