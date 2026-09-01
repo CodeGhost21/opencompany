@@ -56,7 +56,7 @@ use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{CompanyAgent, HarnessDeps};
 use crate::ports::types::CompanyId;
-use crate::runtime::delegation::with_chat_only_hint;
+use crate::runtime::delegation::{ChatTarget, with_chat_only_hint};
 use crate::store::{FsCompanyStore, FsContextStore};
 
 /// The vendored `AgentConfig::default().max_tool_iterations` this crate used to
@@ -626,7 +626,7 @@ async fn a_greeting_after_a_task_runs_no_tools_and_leaks_no_prior_context() {
             Some(stream_for("sports")),
             None,
             None,
-            None,
+            ChatTarget::channel(Some("sports")),
         )
         .await
         .expect("task A runs");
@@ -657,7 +657,14 @@ async fn a_greeting_after_a_task_runs_no_tools_and_leaks_no_prior_context() {
     // ── A bare "hi" on a DIFFERENT chat — the greeting fast path. ──
     let (outcome_b, _usage_b) = with_chat_only_hint(
         true,
-        agent.run_with_steer("hi", None, Some(stream_for("smalltalk")), None, None, None),
+        agent.run_with_steer(
+            "hi",
+            None,
+            Some(stream_for("smalltalk")),
+            None,
+            None,
+            ChatTarget::channel(Some("smalltalk")),
+        ),
     )
     .await
     .expect("the greeting runs");
@@ -761,14 +768,22 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
             Some(stream_for("sports")),
             None,
             None,
-            None,
+            ChatTarget::channel(Some("sports")),
         )
         .await
         .expect("chat turn 1 runs");
 
     // ── The background task: unthreaded — `stream: None`, same shared Agent. ──
     let (outcome_bg, _usage_bg) = agent
-        .run_with_steer("run the background task", None, None, None, None, None)
+        .run_with_steer(
+            "run the background task",
+            None,
+            None,
+            None,
+            None,
+            // A background task names no conversation — the point of the case.
+            ChatTarget::default(),
+        )
         .await
         .expect("background task runs");
     assert!(
@@ -796,7 +811,7 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
             Some(stream_for("sports")),
             None,
             None,
-            None,
+            ChatTarget::channel(Some("sports")),
         )
         .await
         .expect("chat turn 2 runs");

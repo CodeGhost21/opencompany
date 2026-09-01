@@ -930,6 +930,31 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
         events.read_before(&id, None, 0).await.unwrap().is_empty(),
         "a zero limit never reads a page"
     );
+
+    // Issue #1890 G. `usize::MAX` is the port's "no limit" sentinel, and the
+    // one input a backend is most likely to get wrong while looking correct:
+    // an implementation that reserves against the limit allocates 2^64 slots,
+    // and one that reads from the end must not treat it as a stopping count.
+    // Every caller of the unbounded form is a full-history reader, so a page
+    // silently short here is a reader silently missing history.
+    let all = events.read_before(&id, None, usize::MAX).await.unwrap();
+    assert_eq!(
+        all.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[3], seqs[2], seqs[1], seqs[0]],
+        "an unlimited page is the whole log, newest-first"
+    );
+    let unbounded_before = events
+        .read_before(&id, Some(seqs[2]), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        unbounded_before
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![seqs[1], seqs[0]],
+        "…and still stops at the cursor"
+    );
 }
 
 /// Asserts the [`EventLog`] retention contract (issue #275): the default

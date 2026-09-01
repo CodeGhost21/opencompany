@@ -1,6 +1,7 @@
 import type { Step } from "react-joyride";
 
 import type { View } from "@/components/app-shell";
+import { MAIN_THREAD_ID } from "@/lib/chat";
 
 /**
  * One stop on the guided tour: a spotlight target plus the console view it
@@ -12,6 +13,11 @@ import type { View } from "@/components/app-shell";
  * view, but the spotlight never waits on a code-split chunk. Only the two
  * richest moments (the operator overview, the chat composer) anchor to content on
  * non-lazy views.
+ *
+ * A content anchor has to be **addressed**, not just navigated to: a stop that
+ * names only its view inherits whatever sub-page was last open there, and a
+ * content anchor that the remembered sub-page does not render is skipped in
+ * silence. Both chat composer stops therefore carry an explicit `sub`.
  */
 export interface TourStop {
   view: View;
@@ -39,7 +45,25 @@ export const TOUR: TourStop[] = [
     body: "Your company at a glance: its departments, the work in flight, who's doing it, and what it remembers. Pull the graph around to explore it.",
   },
   {
+    // `sub` is not optional here, and neither composer stop below may drop it.
+    //
+    // A bare `setView("chat")` restores whichever channel the operator was last
+    // on — `app-shell`'s `lastSubByViewRef`, and `ChatView`'s own
+    // `readLastChannel` for a cold start. That can be the read-only `#Operator`
+    // feed, which renders no composer at all since PR #1984. The stop would then
+    // wait out `targetWaitTimeout` and be **skipped** — silently, because a
+    // missing anchor degrades rather than errors (see `waitForTarget`), so the
+    // tour would simply teach less and say nothing about it. The last stop below
+    // is "You're all set", so the tour would end by vanishing.
+    //
+    // `main` is the built-in company-wide channel, present in every company from
+    // first boot (issue #1743) and always writable. A blueprint that
+    // grandfathers a desk onto that line renders it under the desk's own id
+    // instead; `ChatView` folds every General spelling onto whichever channel
+    // actually holds the line (`generalChannelId`), so this address resolves
+    // either way rather than raising issue #370's unknown-channel notice.
     view: "chat",
+    sub: MAIN_THREAD_ID,
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "Talk to your company",
@@ -85,7 +109,9 @@ export const TOUR: TourStop[] = [
     body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your teammates can act for real.",
   },
   {
+    // Addressed, for the reason the first composer stop above gives at length.
     view: "chat",
+    sub: MAIN_THREAD_ID,
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "You're all set",

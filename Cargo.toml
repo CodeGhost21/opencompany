@@ -624,3 +624,11 @@ criterion = { version = "0.8", default-features = false, features = [
 [[bench]]
 name = "journal_append"
 harness = false
+
+# Issue #1890 G. Opt-in for the same reason as the bench above: it measures the
+# host's storage, and the finding is the SHAPE — head-first is linear in the
+# journal's length, from-the-end is flat in it — which no shared runner needs to
+# gate on.
+[[bench]]
+name = "journal_read_before"
+harness = false

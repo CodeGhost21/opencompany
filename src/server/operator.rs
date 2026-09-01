@@ -2293,12 +2293,25 @@ async fn run_chat(
             // changes. `None` for an unaddressed message, which is every card
             // this site opened before and therefore no change for one.
             origin_chat_id: message.chat.clone(),
-            // Issue #1890 B: the thread inside that channel. A message's own
-            // `parent` IS its root — a reply is parented to its question's
-            // parent, never to the question — so this needs no walk, and an
-            // unparented message carries `None` and stays on the channel-level
-            // conversation exactly as every card this site opened before.
-            origin_parent: accepted.thread_root(),
+            // Issue #1890 B, reconciled with D. The thread this card was raised
+            // in — **by the same rule an answer to this message threads under**.
+            //
+            // B alone read the message's own `parent`, so a card raised from a
+            // channel-level question recorded no thread. That was right while a
+            // thread was only ever something an operator opened by hand. D
+            // changed what a thread IS: an answer now parents to the message
+            // that opened the exchange, so that question is a root, and a card
+            // raised from it belongs to the thread it just started.
+            //
+            // Left as `thread_root()`, the two disagreed about one message: the
+            // answer landed in a thread and the card's settle marker landed
+            // flat in the channel — the conversation and its outcome in
+            // different places, which is the failure B exists to prevent,
+            // reintroduced by D moving the ground under it.
+            //
+            // Found by hand-testing B and D together. Neither suite could catch
+            // it: B's has no auto-threading and D's has no cards.
+            origin_parent: reply_thread(accepted.thread_root(), accepted.message_seq),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -2989,7 +3002,21 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // bubble. `err.0` is the inner error (it carries `Display`);
                 // the `ApiError` newtype does not.
                 let notice = CompanyEvent::AgentReply {
-                    parent,
+                    // Issue #1890 D: threaded on exactly the terms a successful
+                    // reply is. This notice IS the answer when there is no
+                    // other one, and `reply_thread`'s whole argument is that
+                    // `parent` must not be a function of what happened at run
+                    // time — deciding it by race timing was the case it names,
+                    // and deciding it by whether the model answered is the same
+                    // mistake. Left as the raw `parent`, one operator message
+                    // opened a thread when the turn worked and stayed flat when
+                    // it did not, so two identical sends produced two different
+                    // transcripts depending on the weather.
+                    //
+                    // Found by hand-testing the epic against a company whose
+                    // provider refused every turn — which is exactly the state
+                    // that makes this the ONLY reply an operator gets.
+                    parent: reply_thread(parent, accepted.message_seq),
                     chat_id: desk.clone(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
                     text: format!(
@@ -3015,7 +3042,8 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 return Err(err);
             }
         };
-        journal_chat_replies(&runtime, &company, &desk, parent, &mut report).await;
+        let reply_parent = reply_thread(parent, accepted.message_seq);
+        journal_chat_replies(&runtime, &company, &desk, reply_parent, &mut report).await;
         settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
@@ -3040,6 +3068,30 @@ async fn join_chat_turn(
 ///
 /// Runs inside the spawned turn (issue #882) so the record survives a client or
 /// proxy that gave up waiting.
+/// The thread an answer belongs in (issue #1890 D part 1).
+///
+/// `asked_in` is the root the operator's message hung off, and `message_seq` is
+/// that message's own position.
+///
+/// * **Already in a thread** — the answer takes the same root. A follow-up
+///   typed inside a thread must not open a thread of its own, or N messages
+///   would mean N threads instead of N *topics*.
+/// * **Not in one** — the answer takes the message itself as its root, so the
+///   exchange becomes a thread rather than two flat lines. This is the change:
+///   before it, an answer to an unthreaded question was unparented, and the
+///   only threads that existed were ones an operator opened by hand.
+///
+/// Never `None`, and that is the point: **uniform**. The tempting version
+/// decides here — "thread it only if another question arrived while I was
+/// working" — which makes `parent` a function of race timing, and `parent` is
+/// permanent. Two operators doing the identical thing would get permanently
+/// different transcripts on microseconds, and the console renders a reply as it
+/// streams, before the backend could know. Whether the pair *reads* as a thread
+/// is re-decided on every render instead, by the console's `buildTimeline`.
+fn reply_thread(asked_in: Option<EventSeq>, message_seq: EventSeq) -> Option<EventSeq> {
+    Some(asked_in.unwrap_or(message_seq))
+}
+
 pub(crate) async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -5083,10 +5135,41 @@ mode = "full"
             unaddressed.origin_chat_id, None,
             "an unaddressed message has no thread to answer in"
         );
-        assert_eq!(
-            tasks[0].origin_parent, None,
-            "and a message typed at channel level opens a channel-level card",
+        // Reversed once #1890 D landed alongside B, and the reversal is the
+        // point. B alone read the message's own `parent`, so a card raised from
+        // a channel-level question recorded no thread — right while a thread
+        // was only ever something an operator opened by hand.
+        //
+        // D changed what a thread is: an answer parents to the message that
+        // opened the exchange, so that question is a root. A card raised from
+        // it belongs to the thread it just started, and recording `None` here
+        // would put the settle marker in the channel while the answer to the
+        // same message sat in a thread — the split B exists to prevent.
+        assert!(
+            tasks[0].origin_parent.is_some(),
+            "a channel-level question is itself the thread its card was raised in",
         );
+    }
+
+    /// Issue #1890 D part 1: every answer threads under the message that
+    /// opened the exchange.
+    ///
+    /// The two arms are the whole rule, and the second is the change: before
+    /// it, an answer to an unthreaded question was journaled unparented, so the
+    /// only threads that existed were ones an operator opened by hand.
+    #[test]
+    fn an_answer_threads_under_the_message_that_opened_the_exchange() {
+        let message = EventSeq::new(41);
+        // Not in a thread: the exchange becomes one, rooted at the question.
+        assert_eq!(reply_thread(None, message), Some(message));
+        // Already in one: the same root, so a follow-up does not open a thread
+        // of its own — N messages in a thread is one topic, not N.
+        let root = EventSeq::new(7);
+        assert_eq!(reply_thread(Some(root), message), Some(root));
+        // Never `None`: uniform is what keeps `parent` out of the hands of race
+        // timing, since `parent` is permanent and presentation is not.
+        assert!(reply_thread(None, message).is_some());
+        assert!(reply_thread(Some(root), message).is_some());
     }
 
     /// Issue #1890 B: the card remembers **which thread** inside that channel.
