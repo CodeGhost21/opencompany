@@ -94,6 +94,18 @@ folds the console's `main` to `General` and `resolve_desk_id("General")` then
 selects `ops`, so `@everyone` on the built-in row would have expanded to that
 desk's members while the row beside it routed by `ops`.
 
+**A General spelling in the address bar opens the line too.** The host folds
+four spellings into one conversation (`isGeneralChannel`, mirroring
+`is_general_chat`), and every consumer of a live frame already applies that
+fold; routing was the one place that did not, so which of `#/chat/main` and
+`#/chat/general` worked depended on how the company happened to be declared.
+`ChatView` now falls back to `generalChannelId` for a General-spelled segment
+that names no channel outright — exact ids are still asked first, so a real desk
+whose id *is* a General spelling still wins its own channel and nothing that
+already resolved is rerouted. The guided tour's two composer stops depend on
+this: they address `#/chat/main` explicitly so they cannot inherit the read-only
+Operator feed, which renders no composer for their spotlight to anchor on.
+
 **A teammate whose id is a General spelling does not take the line with it.**
 `mint_agent_id` reserves `main` and `General`, but a manifest can still declare
 one, and `GET chat/history?desk=main` answers with the folded General

@@ -37,6 +37,7 @@ import { PageHeader } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fromHistory,
+  isGeneralChannel,
   makeMessage,
   reconcileIds,
   toHostMessageId,
@@ -90,6 +91,7 @@ import {
   dmThreadId,
   findChannel,
   firstChannel,
+  generalChannelId,
   historyReady,
   HISTORY_UNTRACKED,
   clearTaskCardEverywhere,
@@ -923,6 +925,34 @@ export function ChatView({
       ? resolveDmChannelId(decodedSub, members)
       : null;
   /**
+   * A General *spelling* in the hash, mapped onto the channel that actually
+   * renders the company-wide line.
+   *
+   * The host folds four addresses into one conversation — `""`, `main`,
+   * `general` and `General`, case-insensitively (`isGeneralChannel`, mirroring
+   * `is_general_chat`) — and everything downstream of a live frame already
+   * applies that fold. Routing did not, so which of the four opened the channel
+   * depended on how the company was declared: the built-in channel is `main`,
+   * while a blueprint `[[group_chat]] id = "general"` is grandfathered onto the
+   * line and the built-in steps aside for it ({@link generalChannelId}). One
+   * spelling therefore worked and the other raised issue #370's "isn't a channel
+   * here" — for the same conversation, in the same company.
+   *
+   * Only ever a *fallback*: the exact id is asked first, so a real desk whose id
+   * happens to be a General spelling still wins its own channel, and this cannot
+   * reroute anything that already resolves. It takes precedence over
+   * `resolvedSub` for the reason `channelForThread` gives — a teammate whose id
+   * is a General spelling does not inherit the company's line.
+   *
+   * The guided tour depends on it (PR #1984): its two composer stops address
+   * `#/chat/main` explicitly so they cannot land on the read-only Operator feed,
+   * which renders no composer and would silently skip both stops.
+   */
+  const generalSub =
+    desks && decodedSub && isGeneralChannel(decodedSub) && !findChannel(sections, decodedSub)
+      ? generalChannelId(desks)
+      : null;
+  /**
    * The channel the hash names, else the first one that exists.
    *
    * The rail only carries DMs with a transcript (issue #1335), so `findChannel`
@@ -933,8 +963,8 @@ export function ChatView({
    * takes over, without ever adding the inactive DM to the rail.
    */
   const channel = desks
-    ? (findChannel(sections, resolvedSub ?? decodedSub) ??
-      directMessageForId(members, resolvedSub ?? decodedSub) ??
+    ? (findChannel(sections, generalSub ?? resolvedSub ?? decodedSub) ??
+      directMessageForId(members, generalSub ?? resolvedSub ?? decodedSub) ??
       firstChannel(sections))
     : null;
   /**
@@ -951,11 +981,16 @@ export function ChatView({
    * picker just opened, but `directMessageForId` still resolves it against the
    * whole roster. Check that resolver explicitly rather than leaning on
    * `resolvedSub`, whose legacy-id shim is meant to be deletable.
+   *
+   * Nor is a General spelling the company renders under another id: `generalSub`
+   * resolved it to a real channel, so naming it unknown would put a notice over
+   * the conversation the operator actually asked for.
    */
   const unknownChannel =
     desks &&
     decodedSub &&
     !resolvedSub &&
+    !generalSub &&
     !findChannel(sections, decodedSub) &&
     !directMessageForId(members, decodedSub)
       ? decodedSub
@@ -2180,6 +2215,7 @@ export function ChatView({
                 </span>
               </p>
             )}
+            <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
             {/* Issues #1734 / #1735, repositioned. Directly above the composer,
                 not above the transcript: what the notice warns about — a reply
                 that comes from the echo brain rather than the teammate it appears
@@ -2190,6 +2226,15 @@ export function ChatView({
                 `shrink-0`) like the read-only and budget strips above it, because
                 it is a standing fact about the company rather than a row in the
                 transcript.
+
+                It sits BELOW `TypingLine`, not above it. Proximity to the
+                composer is the whole reason this strip moved, and a typing line
+                between the two put a row back in the gap in exactly the case
+                where it matters most — mid-conversation, with someone at a
+                keyboard (CodeRabbit review on #1984). `chat-cognition-banner`'s
+                sibling-order test pins this WITH a typing line present, because
+                the order read correct with nobody typing and wrong with someone
+                typing.
 
                 Suppressed on a read-only channel: nothing can be sent there, so a
                 caveat about what sending produces has nothing left to qualify —
@@ -2287,7 +2332,6 @@ export function ChatView({
                 </span>
               </p>
             )}
-            <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
             {/* No composer at all on a read-only channel, rather than a disabled
                 one. A disabled control is still a claim that the action exists:
                 the strip above says "there is nothing to reply to here", and a
@@ -2298,39 +2342,51 @@ export function ChatView({
                 `disabled` therefore no longer carries `readOnly` — nothing can be
                 read-only and rendered here at the same time. The server's
                 read-only guard and `ThreadPanel`'s no-op `onSend` (issue #1757)
-                are untouched: this removes the affordance, not the belt. */}
-            {!readOnly && (
-              <MessageComposer
-                placeholder={`Message ${channelTitle(channel)}`}
-                disabled={sending}
-                prefill={composerPrefill ?? undefined}
-                // Not voided (unlike the thread composer below): the composer
-                // awaits this to know whether an attachment it carried actually
-                // journaled, so it can clean up one that did not (codex review
-                // finding on #1682) — see `deleteAttachment` and `send`'s doc.
-                onSend={(text, intent, attachments, mentions) =>
-                  send(text, intent, undefined, attachments, mentions)
-                }
-                // Issue #1682: only the channel/DM composer attaches — the paperclip
-                // is present exactly because this prop is.
-                uploadAttachment={uploadAttachment}
-                // Cleans up a staged upload that never got sent (codex review
-                // finding on #1682) — see `deleteAttachment`.
-                deleteAttachment={deleteAttachment}
-                // Every keystroke asks; the hook throttles to one ping per
-                // channel per few seconds and skips entirely while the event
-                // stream is down.
-                onTyping={() => onTyping?.(active.id)}
-                // Channel *and* DM composers offer "just chatting" / "do it once" /
-                // "build me the workflow" (issues #580, #845, #1152) — see
-                // `offersDeliverableChoice`, which owns the rule and is unchanged:
-                // the new position inherits the same channel+DM gating. Only the
-                // thread and copilot composers below go without.
-                deliverableChoice={offersDeliverableChoice(active.kind)}
-                mentionables={mentionables}
-                channelMemberIds={inChannel?.map((m) => m.id)}
-              />
-            )}
+                are untouched: this removes the affordance, not the belt.
+
+                `suppressed`, not `{!readOnly && …}`. The element stays in the
+                tree so React keeps the instance — and with it the draft, the
+                staged attachment, the resolved mentions and the selected intent,
+                all of which are state inside `MessageComposer`. Gating the
+                element itself unmounted it, so an operator who opened `#Operator`
+                for a moment with an unsent message in `#general` came back to an
+                empty box (codex review on PR #1984): the disabled composer this
+                PR removed was accidentally holding the draft across channel
+                navigation. `suppressed` renders `null` after its hooks, so the
+                DOM gets nothing — no textarea, no Send, no `data-tour` anchor —
+                while the draft survives. See that prop's doc for why a
+                `display:none` wrapper is not the same thing. */}
+            <MessageComposer
+              suppressed={readOnly}
+              placeholder={`Message ${channelTitle(channel)}`}
+              disabled={sending}
+              prefill={composerPrefill ?? undefined}
+              // Not voided (unlike the thread composer below): the composer
+              // awaits this to know whether an attachment it carried actually
+              // journaled, so it can clean up one that did not (codex review
+              // finding on #1682) — see `deleteAttachment` and `send`'s doc.
+              onSend={(text, intent, attachments, mentions) =>
+                send(text, intent, undefined, attachments, mentions)
+              }
+              // Issue #1682: only the channel/DM composer attaches — the paperclip
+              // is present exactly because this prop is.
+              uploadAttachment={uploadAttachment}
+              // Cleans up a staged upload that never got sent (codex review
+              // finding on #1682) — see `deleteAttachment`.
+              deleteAttachment={deleteAttachment}
+              // Every keystroke asks; the hook throttles to one ping per
+              // channel per few seconds and skips entirely while the event
+              // stream is down.
+              onTyping={() => onTyping?.(active.id)}
+              // Channel *and* DM composers offer "just chatting" / "do it once" /
+              // "build me the workflow" (issues #580, #845, #1152) — see
+              // `offersDeliverableChoice`, which owns the rule and is unchanged:
+              // the new position inherits the same channel+DM gating. Only the
+              // thread and copilot composers below go without.
+              deliverableChoice={offersDeliverableChoice(active.kind)}
+              mentionables={mentionables}
+              channelMemberIds={inChannel?.map((m) => m.id)}
+            />
           </div>
 
           {parent && (

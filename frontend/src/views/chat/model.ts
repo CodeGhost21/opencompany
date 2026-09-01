@@ -622,8 +622,15 @@ export function channelIdForThread(
  *
  * One place, because two answers to "where does the main line render" is
  * precisely how a message ends up somewhere nothing is listening.
+ *
+ * Exported because `ChatView` folds a General *address* onto it too: the host
+ * accepts four spellings for this one conversation (`isGeneralChannel`), and
+ * every other consumer of that fold — `generalAwareChannel`, `channelForThread`,
+ * `mention-badge` — already applies it. Routing was the one place that did not,
+ * so `#/chat/main` raised "isn't a channel here" in exactly the grandfathered
+ * company where the built-in channel had stepped aside for a desk.
  */
-function generalChannelId(desks: Desk[]): string {
+export function generalChannelId(desks: Desk[]): string {
   return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
 }
 
