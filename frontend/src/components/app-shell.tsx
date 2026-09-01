@@ -19,9 +19,11 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
+import { ApprovalsButton } from "@/components/approvals-button";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { OverviewButton } from "@/components/overview-button";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
@@ -3308,6 +3310,28 @@ export function AppShell({
             onBackToPicker={onBackToPicker}
             onCreateCompany={onCreateCompany}
             canCreateCompany={client.carriesPlatformBearer}
+          />
+        }
+        overview={
+          // The console's front page, as a glyph. `NAV` still carries the
+          // labelled row and will until the sidebar restructure removes it; in a
+          // chrome band a labelled button reads as content, so the name moves
+          // here to `aria-label` and `title`. First thing the row drops as the
+          // window narrows — see `TITLE_BAR_LADDER`.
+          <OverviewButton
+            active={isNavigationActive("overview", view)}
+            onNavigate={() => setView("overview")}
+          />
+        }
+        approvals={
+          // What is waiting on you, from every page in every sidebar state.
+          // `pending` is `feed.status.pending_approvals` passed straight
+          // through — the same single value the sidebar badge and the collapsed
+          // rail dot both used before this row took the signal off them.
+          <ApprovalsButton
+            pending={pending}
+            active={isNavigationActive("approvals", view)}
+            onNavigate={() => setView("approvals")}
           />
         }
         autonomy={

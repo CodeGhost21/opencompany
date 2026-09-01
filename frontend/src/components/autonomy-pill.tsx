@@ -80,6 +80,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { TITLE_BAR_LADDER } from "@/components/window-title-bar";
 import { applyAutonomy } from "@/hooks/use-autonomy";
 import { useConsole } from "@/lib/console-context";
 import { cn } from "@/lib/utils";
@@ -154,8 +155,9 @@ export function tierIcon(mode: string): LucideIcon {
  *
  * Taking the leading sentence keeps every word the host's own and keeps the
  * full text one hover away. If the description has no sentence break it is used
- * whole, and the row's own `hidden lg:inline` decides whether there is space
- * for it at all.
+ * whole, and the title row's own degradation ladder — `TITLE_BAR_LADDER`,
+ * which drops this sentence below 1280px — decides whether there is space for
+ * it at all.
  *
  * The **menu** does not use this. A row in an opened dropdown has the space for
  * the whole sentence and an operator about to change what the agents may do
@@ -406,14 +408,16 @@ export function AutonomyPill({
               sentence still says which tier is in force, which is the fact this
               element exists to carry. */}
           <span className="flex-none text-foreground">{tierLabel(status)}</span>
-          {/* The host's leading sentence. First to go as the window narrows — see
-              the degradation note on `WindowTitleBar`. `hidden` rather than
+          {/* The host's leading sentence. First to go as the window narrows, and
+              the breakpoint is not chosen here: `TITLE_BAR_LADDER` on
+              `WindowTitleBar` owns the whole order in one place, so this
+              consumes a rung rather than inventing one. `hidden` rather than
               truncated, because half a sentence about what the agents may do is
               worse than none: it would still read as a complete claim. */}
           {description && (
             <span
               data-testid="autonomy-consequence"
-              className="hidden whitespace-nowrap lg:inline"
+              className={cn("whitespace-nowrap", TITLE_BAR_LADDER.autonomySentence)}
             >
               {leadSentence(description)}
             </span>
