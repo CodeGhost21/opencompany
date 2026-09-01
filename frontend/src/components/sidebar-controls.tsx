@@ -1,4 +1,10 @@
-import { MessageSquareWarning, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
+import {
+  LayoutDashboard,
+  MessageSquareWarning,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+} from "lucide-react";
 
 import type { View } from "@/components/app-shell";
 
@@ -79,6 +85,41 @@ export function SidebarUtilityBar({
     // the landmark is the places an operator works out of, and these are the
     // utilities that act on the console itself.
     <SidebarMenu role="group" aria-label="Console utilities" data-testid="sidebar-utilities">
+      {/* Overview, and ONLY where the window's title row has dropped it.
+
+          `TITLE_BAR_LADDER.overview` is `hidden md:inline-flex`: below 768px
+          the title row drops Overview first, deliberately, because it is a
+          destination you choose while a pending count is one that chooses you
+          (#1980). That reasoning was sound while the sidebar still carried an
+          Overview row — and this change is what removed it. The intersection of
+          the two left phone-sized viewports with no path to the page at all:
+          the title-row button is `display: none` and the sheet held only the
+          four sections, so an operator had to know to type `#/overview`
+          (codex P1 review on #1987). Confirmed in a browser at 390px before
+          this: zero controls named Overview anywhere on the page.
+
+          `md:hidden` is the exact complement of the ladder's `hidden
+          md:inline-flex`, so the two are one decision rather than two: Overview
+          is on screen at every width, in exactly one place, and there is no
+          width at which it is in both or in neither. `overview-reachable.test.ts`
+          pins that complementarity rather than either class on its own.
+
+          Here rather than as a fifth nav row because the four are a fixed
+          block — always four, always contiguous — and a row that appears only
+          on a phone would break the thing this restructure exists to establish. */}
+      <SidebarMenuItem className="md:hidden">
+        <SidebarMenuButton
+          isActive={view === "overview"}
+          aria-current={view === "overview" ? "page" : undefined}
+          data-testid="sidebar-overview-fallback"
+          tooltip="Overview"
+          onClick={() => navigate("overview")}
+          className={RESTING_ROW}
+        >
+          <LayoutDashboard />
+          <span>Overview</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
       <SidebarMenuItem>
         <SidebarMenuButton
           isActive={view === "settings"}

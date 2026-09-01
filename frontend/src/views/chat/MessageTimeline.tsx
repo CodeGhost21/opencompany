@@ -524,8 +524,16 @@ function ChannelIntro({
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
           offering "add a teammate here" over a channel that turns out to be full
-          of conversation reads as data loss. */}
-      {empty && !loading && channel.kind === "channel" && (
+          of conversation reads as data loss.
+
+          Not on the read-only Operator feed (`channel.system`, the same
+          predicate `ChatView` derives `readOnly` from). Neither opening exists
+          there: "Give the team a brief" prefills a composer that channel does
+          not render, and "Add people" opens a members pane `ChatView` gates
+          off on the same flag — so both were controls offering an action that
+          could not happen, under a notice saying there is nothing to reply to
+          here. */}
+      {empty && !loading && channel.kind === "channel" && !channel.system && (
         <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>

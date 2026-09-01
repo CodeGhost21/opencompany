@@ -104,7 +104,7 @@ describe("Company header (#1207)", () => {
     });
     await act(async () => {});
 
-    assertHeadingActionsShareRowDescriptionBeneath("company-header", "Company");
+    assertHeadingActionsShareRowDescriptionBeneath("company-header", "Agents");
     expect(testId("company-manage-desks")).not.toBeNull();
   });
 });
