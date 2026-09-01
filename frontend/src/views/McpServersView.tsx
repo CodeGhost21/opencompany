@@ -31,8 +31,11 @@ interface Props {
  * one source of truth per question, and a tab does not break it.
  *
  * The rows live in [`McpServersSection`](./connections/McpServersSection.tsx),
- * which the Apps page also renders inline — that is the same surface, not a
- * copy.
+ * rendered `standalone` because this page is the whole of it. Apps does **not**
+ * render it: `ConnectionsSection` sends the bare `#/connections` to `OAuthView`
+ * and `#/connections/mcp` here, and `OAuthView` renders no MCP section at all.
+ * That is still one surface rather than two — this page is its only caller
+ * (issue #414).
  */
 export function McpServersView({ client, company }: Props) {
   // Adding or removing a server changes what tools the company's agents can

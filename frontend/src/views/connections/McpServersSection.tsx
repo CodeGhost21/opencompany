@@ -140,9 +140,10 @@ type ToolsState =
 /**
  * How the page around this section frames it.
  *
- * - `inline` — a section among others (Connections). The page has plenty else
- *   to show, so a host with no MCP surface renders nothing here at all.
- * - `standalone` — the whole page is this section (Settings, MCP Servers). The
+ * - `inline` — a section among others. The page has plenty else to show, so a
+ *   host with no MCP surface renders nothing here at all. The default, and
+ *   since the Connections split no page embeds it.
+ * - `standalone` — the whole page is this section (`#/connections/mcp`). The
  *   page supplies the heading, and a host with no MCP surface says so, because
  *   the alternative is a page that is simply blank.
  */
@@ -171,9 +172,11 @@ interface Props {
  * List A's routes at all. That dispatch is
  * [`mcpRowControls`](@/lib/mcp-registry)'s.
  *
- * This is the console's **only** MCP surface, reached from two places: the
- * Connections page renders it `inline`, Settings, MCP Servers renders it
- * `standalone`. Settings used to carry a second implementation of this screen
+ * This is the console's **only** MCP surface, and it has exactly one caller:
+ * [`McpServersView`](../McpServersView.tsx), the `#/connections/mcp` page,
+ * which renders it `standalone`. Apps (`OAuthView`) does **not** render it —
+ * MCP is a page beside Apps under Connections, not a section inline on it.
+ * Settings used to carry a second implementation of this screen
  * against an API no host has ever served (`{ servers }` wrappers, `server_id`
  * keys, `/connect` and `/disconnect` routes), which crashed on open — a second
  * surface is how the two came to disagree, so there is one (issue #414).
@@ -689,15 +692,15 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   return (
     <section className="space-y-3">
       {/* `h2` in both chromes, and it lands one level under the page's `h1`
-          either way (issue #1392). Inline on Apps it is a peer of
-          the company key, Composio and providers, which all head their
-          sections at the same level —
-          `test/unit/connections-section-heading-level.test.ts` holds them
-          together, because promoting this one alone would read to a screen
-          reader as though every section after it were a subsection of MCP
-          Servers. Standalone on `#/connections/mcp` the page's own `h1` is "MCP
+          either way (issue #1392). Standalone on `#/connections/mcp` — the only
+          way this section is rendered — the page's own `h1` is already "MCP
           Servers", so this names what it actually heads there instead of
-          repeating it. */}
+          repeating it. `test/unit/page-section-heading-level.test.ts` pins that
+          pairing: heading at `h3` under that `h1` would read to a screen reader
+          as a subsection of a section that does not exist. `inline` stays at
+          `h2` for the mirror-image reason — on a page of peer sections,
+          promoting this one alone would read as though every section after it
+          were a subsection of MCP Servers. */}
       <div className="flex items-center gap-2">
         {chrome === "inline" && <Server className="size-4 text-muted-foreground" />}
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
