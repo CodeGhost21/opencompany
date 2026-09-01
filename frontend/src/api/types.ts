@@ -704,6 +704,17 @@ export interface ApprovalSummary {
    * that can be decided.
    */
   batch?: string | null;
+  /**
+   * The shared root cause a blocker has with its siblings (#1862) — a
+   * connection id, an integration name — so every card stalled on one broken
+   * integration folds into a single question and one verdict fans back to them
+   * all.
+   *
+   * Distinct from {@link batch}: a batch is "asked in the same turn", a group
+   * is "blocked by the same cause". Absent for an ordinary approval and for a
+   * blocker particular to its own step; those group alone.
+   */
+  group_key?: string | null;
 }
 
 /**

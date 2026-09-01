@@ -24,6 +24,7 @@ import {
   FileSignature,
   FileText,
   Globe,
+  HelpCircle,
   KeyRound,
   Mail,
   MessageSquare,
@@ -32,6 +33,7 @@ import {
   Rocket,
   ShieldCheck,
   SquareKanban,
+  Unplug,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -168,8 +170,41 @@ export function batchConsequences(approvals: ApprovalSummary[]): ApprovalConsequ
 const PREVIEW_LINES = 3;
 const PREVIEW_VALUE_CHARS = 160;
 
-/** The glyph for an effect kind; a shield for one this console doesn't know. */
+/** The dotted prefix every blocker effect kind carries (host `BLOCKER_EFFECT_PREFIX`). */
+const BLOCKER_KIND_PREFIX = "blocker.";
+
+/** Whether an effect kind is a parked blocker — a stop a person can answer (#1862). */
+export function isBlockerKind(kind: string): boolean {
+  return kind.startsWith(BLOCKER_KIND_PREFIX);
+}
+
+/**
+ * The operator-readable fields a blocker card renders (#1862): what stopped,
+ * what would unblock it, and the connection it is about when one groups it.
+ *
+ * Read defensively off the redactable payload — a Member's card withholds it
+ * (#618), and an older host may not carry every field — so a missing half
+ * simply renders less rather than throwing.
+ */
+export function blockerFields(a: ApprovalSummary): {
+  reason?: string;
+  needed?: string;
+  connection?: string;
+} | null {
+  if (!isBlockerKind(a.kind)) return null;
+  const payload = (a.payload ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim().length > 0 ? v : undefined;
+  const groupKey = str(a.group_key) ?? str(payload.group_key);
+  const connection = groupKey?.startsWith("connection:")
+    ? groupKey.slice("connection:".length)
+    : undefined;
+  return { reason: str(payload.reason), needed: str(payload.needed), connection };
+}
+
+/** The glyph for an effect kind; a question for a blocker, a shield for the unknown. */
 export function approvalIcon(kind: string): LucideIcon {
+  if (isBlockerKind(kind)) return HelpCircle;
   return KIND_ICONS[kind] ?? ShieldCheck;
 }
 
@@ -186,6 +221,40 @@ export function ApprovalHeadline({
 }) {
   const Icon = approvalIcon(a.kind);
   const consequence = approvalConsequence(a.group);
+  const blocker = blockerFields(a);
+  if (blocker) {
+    return (
+      <div className="flex flex-wrap items-start gap-4">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+          <Icon className="size-5" />
+        </div>
+        <div className="min-w-[min(12rem,100%)] flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <p className="font-medium">{blocker.reason ?? approvalAction(a)}</p>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-foreground">
+              Blocked
+            </span>
+          </div>
+          {blocker.needed && (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Needs: {blocker.needed}
+            </p>
+          )}
+          {blocker.connection && (
+            <p className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+              <Unplug className="size-3.5" />
+              Reconnect {blocker.connection} in Apps to unblock
+            </p>
+          )}
+        </div>
+        {actions && (
+          <div data-approval-actions className="flex shrink-0 gap-2">
+            {actions}
+          </div>
+        )}
+      </div>
+    );
+  }
   return (
     <div className="flex flex-wrap items-start gap-4">
       <div
