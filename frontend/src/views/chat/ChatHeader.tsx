@@ -13,9 +13,16 @@ interface Props {
   memberCount: number;
   membersOpen: boolean;
   onToggleMembers: () => void;
-  /** Only rendered below `lg`, where the full rail shares the pane. */
+  /**
+   * Opens the channel list on a phone, where the sidebar holding it is a sheet
+   * over the whole screen. Absent from `md` up, where the sidebar is a column
+   * and the list is already beside the transcript — the rule this codebase
+   * follows for a control that would do nothing.
+   */
   onOpenRail?: () => void;
+  /** The app sidebar is a 3rem icon rail, so the channel list is compact. */
   channelsCollapsed: boolean;
+  /** Collapses or expands the app sidebar the channel list lives in. */
   onToggleChannels: () => void;
   /**
    * Where the shell restores focus after this header's own toggle unmounts the
@@ -69,7 +76,7 @@ export function ChatHeader({
         <Button
           variant="ghost"
           size="icon"
-          className="size-8 lg:hidden"
+          className="size-8 md:hidden"
           onClick={onOpenRail}
           aria-label="Show channels"
         >
@@ -81,7 +88,7 @@ export function ChatHeader({
         ref={channelsToggleRef}
         variant="ghost"
         size="icon"
-        className="hidden size-8 lg:inline-flex"
+        className="hidden size-8 md:inline-flex"
         onClick={onToggleChannels}
         aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}
         title={channelsCollapsed ? "Expand channels" : "Collapse channels"}

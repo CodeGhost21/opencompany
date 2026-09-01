@@ -95,6 +95,14 @@ export interface NavSection {
  * contents belong under its row, where the sidebar already is.
  */
 export const NAV_SECTIONS: NavSection[] = [
+  // The chat column, whole, and the console's default landing view
+  // (`app-shell.tsx`'s `useHashView` fallback). The room is where an operator
+  // says what they want and where their company answers — the thing they came
+  // to do — so it is what opens, and it is first.
+  //
+  // Its contents are not a table here: they are the channel list `ChatView`
+  // already renders, portalled into the slot below. See `room-rail.tsx`.
+  { view: "chat", label: "Room", icon: MessagesSquare, slot: "room" },
   { view: "overview", label: "Overview", icon: LayoutDashboard },
   // The company itself: who is in it, what they are working on, what it keeps,
   // what it remembers, and what it spends. Five surfaces that were five
@@ -118,7 +126,6 @@ export const NAV_SECTIONS: NavSection[] = [
       { view: "finances", label: "Finance", icon: Wallet },
     ],
   },
-  { view: "chat", label: "Chat", icon: MessagesSquare },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
   // What the agents actually did, run by run — the read-only companion to

@@ -135,8 +135,12 @@ export function ChannelRail({
         className,
       )}
     >
-      <div className="flex items-center justify-between px-3 py-3">
-        <h2 className="truncate text-sm font-semibold tracking-tight">Chat</h2>
+      {/* No caption, and no heading. The Room row directly above this list
+          already names it, and a heading here would sit inside the sidebar's
+          `Main navigation` landmark, ahead of the page's own `h1` — the ordering
+          defect issue #1392 was filed for. The "New message" door is the only
+          thing this row still carries, so it sits alone on the right. */}
+      <div className="flex items-center justify-end px-1 pt-1 pb-0.5">
         {onStartDirectMessage && (
           <NewMessageDialog
             directMessages={directMessages}

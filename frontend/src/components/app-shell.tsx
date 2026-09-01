@@ -27,6 +27,7 @@ import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
 import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
 import { SidebarNavigation } from "@/components/sidebar-navigation";
+import { RoomRailSlotProvider } from "@/components/room-rail";
 import { SetupController } from "@/setup/SetupController";
 import {
   arrivedViaSetupHandoff,
@@ -91,7 +92,7 @@ import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { VIEWS, type View } from "@/lib/console-routes";
+import { DEFAULT_VIEW, VIEWS, type View } from "@/lib/console-routes";
 import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
@@ -445,11 +446,10 @@ export function AppShell({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
-  const [view, sub, navigate] = useHashView<View>(
-    VIEWS,
-    "overview",
-    REWRITE_RETIRED,
-  );
+  // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
+  // whose view was retired — all of them land in the room the operator talks
+  // to their company in, rather than on a dashboard about it.
+  const [view, sub, navigate] = useHashView<View>(VIEWS, DEFAULT_VIEW, REWRITE_RETIRED);
   const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
@@ -566,7 +566,7 @@ export function AppShell({
    * the tour drives `view` around, and re-reading it would let a tour step
    * suppress the very dialog that is meant to precede the tour.
    */
-  const deepLinked = useRef(view !== "overview" || Boolean(sub)).current;
+  const deepLinked = useRef(view !== DEFAULT_VIEW || Boolean(sub)).current;
   /**
    * Bumped when setup finishes, so the Team page re-reads a roster that now has
    * people on it. A counter rather than a boolean: a second run must re-trigger
@@ -3130,7 +3130,7 @@ export function AppShell({
         setSetupCompleted(true);
         setView("company");
       }}
-      onRouteDismiss={() => setView("overview")}
+      onRouteDismiss={() => setView(DEFAULT_VIEW)}
     />
   );
 
@@ -3263,6 +3263,14 @@ export function AppShell({
           control, which is inside this context — so the direction is flipped
           here rather than by wrapping the provider in another element. */}
       <SidebarProvider className="h-svh flex-col overflow-hidden">
+      {/* Room's channel list is rendered by `ChatView`, in the content column,
+          and painted in the sidebar column. This provider is the slot the two
+          agree on; `room-rail.tsx` explains why it is a portal rather than the
+          whole chat model lifted up here. Inside `SidebarProvider` because it
+          also carries the sidebar's density down to the rail — the sidebar's
+          collapse IS the channel list's collapse now — and above both the
+          sidebar and the inset, which are the two ends of the portal. */}
+      <RoomRailSlotProvider>
         <a
           href={`#${MAIN_CONTENT_ID}`}
           className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
@@ -3873,6 +3881,7 @@ export function AppShell({
         hold={setupOpen}
         suppressWelcome={setupCompleted}
       />
+      </RoomRailSlotProvider>
       </SidebarProvider>
     </ConsoleProvider>
   );

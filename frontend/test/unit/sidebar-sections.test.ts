@@ -75,9 +75,9 @@ afterEach(() => {
 describe("the sidebar's section table", () => {
   it("is exactly these top-level rows, in this order", () => {
     expect(NAV_SECTIONS.map((section) => section.label)).toEqual([
+      "Room",
       "Overview",
       "Company",
-      "Chat",
       "Approvals",
       "Workflows",
       "Observatory",
@@ -108,7 +108,7 @@ describe("which section an address belongs to", () => {
     // section open rather than emptying the sidebar.
     expect(sectionOwning("tasks")?.label).toBe("Company");
     expect(sectionOwning("team")?.label).toBe("Company");
-    expect(sectionOwning("conversation")?.label).toBe("Chat");
+    expect(sectionOwning("conversation")?.label).toBe("Room");
   });
 
   it("claims a section's children for that section", () => {
@@ -151,6 +151,7 @@ describe("the rendered sidebar", () => {
   it("shows a section's contents only while that section is the one you are in", () => {
     render("company");
     expect(renderedRows()).toEqual([
+      "Room",
       "Overview",
       "Company",
       "Agents",
@@ -158,7 +159,6 @@ describe("the rendered sidebar", () => {
       "Workspace",
       "Brain",
       "Finance",
-      "Chat",
       "Approvals",
       "Workflows",
       "Observatory",
@@ -166,9 +166,9 @@ describe("the rendered sidebar", () => {
 
     render("chat");
     expect(renderedRows()).toEqual([
+      "Room",
       "Overview",
       "Company",
-      "Chat",
       "Approvals",
       "Workflows",
       "Observatory",
@@ -194,9 +194,20 @@ describe("the rendered sidebar", () => {
   it("lights a section's own row when nothing under it is open", () => {
     render("chat");
     const row = [...container.querySelectorAll("[data-sidebar='menu-button']")].find(
-      (el) => el.textContent?.trim() === "Chat",
+      (el) => el.textContent?.trim() === "Room",
     )!;
     expect(row.hasAttribute("data-active")).toBe(true);
+  });
+
+  it("gives Room a slot for the channel list, and gives it to no one else", () => {
+    render("chat");
+    expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(1);
+
+    // The slot is the portal target `ChatView` renders into. Absent while
+    // another section is open, which is what makes the list Room's contents
+    // rather than standing furniture.
+    render("company");
+    expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(0);
   });
 
   it("puts no heading in the sidebar, at runtime and not only in source", () => {

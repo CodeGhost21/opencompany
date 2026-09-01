@@ -172,6 +172,20 @@ const ROUTABLE: Record<View, true> = {
 export const VIEWS: View[] = Object.keys(ROUTABLE) as View[];
 
 /**
+ * Where the console opens: an empty hash, a bare `#/`, or an address whose view
+ * no longer exists.
+ *
+ * A constant rather than a literal at the `useHashView` call site, because two
+ * things have to agree on it and they are 120 lines apart. The other is the
+ * shell's `deepLinked`, which asks "did the operator arrive at a *specific*
+ * address, or just open the console?" and answers it by comparing the resolved
+ * view against this one. First-run setup only offers itself when the answer is
+ * "just opened" — so a default view changed in one place and not the other is
+ * not a cosmetic drift, it is a company that can never be set up.
+ */
+export const DEFAULT_VIEW: View = "chat";
+
+/**
  * Whether a sidebar destination owns the current view.
  *
  * The three views with no row of their own but an obvious owner. Each is a

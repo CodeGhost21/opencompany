@@ -219,7 +219,11 @@ beforeEach(() => {
     removeListener: () => {},
     dispatchEvent: () => false,
   })) as unknown as typeof window.matchMedia;
-  window.location.hash = "#/overview";
+  // The console's default landing view (`DEFAULT_VIEW`). It has to be the
+  // default and not merely a real one: the shell reads "did the operator arrive
+  // at a specific address, or just open the console?" off exactly this
+  // comparison, and only the second answer lets first-run setup offer itself.
+  window.location.hash = "#/chat";
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);

@@ -14,6 +14,11 @@ import { describe, expect, it } from "vitest";
  * position (the header owns the toggle that is mounted on *both* density
  * states), so the expand action hands focus to that header toggle instead.
  *
+ * Still true after the rail moved into the app sidebar: the density it responds
+ * to is the sidebar's collapse, but the collapsed rail still unmounts its own
+ * expand button, and the chat header's toggle is still the control mounted on
+ * both sides of the switch.
+ *
  * A jsdom render of `ChatView` cannot prove this — it needs the whole client
  * and every hook. So this guards the *wiring contract* the fix rests on, the
  * same source-contract idiom as `responsive-two-rail-band.test.ts`: the rail
@@ -43,8 +48,10 @@ describe("expanding the compact rail preserves focus (issue #1340)", () => {
     expect(chatView).toContain("const channelsToggleRef = useRef<HTMLButtonElement>(null);");
     // And the expand half of the toggle focuses it — the compact rail button is
     // about to unmount, so focus moves to the toggle that survives the switch.
-    // `next` is the rail's new collapsed state, so expanding is `!next`.
-    expect(chatView).toContain("if (!next) channelsToggleRef.current?.focus();");
+    // The collapse state is the app sidebar's now, so `expanding` is read
+    // BEFORE the toggle rather than derived from a `setState` callback's `next`.
+    expect(chatView).toContain("const expanding = channelsCollapsed;");
+    expect(chatView).toContain("if (expanding) channelsToggleRef.current?.focus();");
   });
 
   it("passes that ref to the header", () => {
