@@ -112,6 +112,36 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ mock inference backend reply.");
   });
 
+  it("ignores a truncated directive the host echoed back, and serves the real plan", async () => {
+    // Issue #2002. The host appends briefings that quote other messages
+    // *verbatim and truncated* — `[Other conversations in this channel…` lists
+    // each thread's opening words. Once a spec opens a thread with a directive
+    // in it, every LATER message in that channel carries a chopped-off copy.
+    //
+    // That ordering is the whole bug, so the fixture has to reproduce it: the
+    // real plan is an older message, and the newest message carries only the
+    // decoy. `findPlan` scans newest-first, met the unparsable copy, and
+    // returned null for the entire thread — so the real plan behind it was
+    // never served. `orchestration-simulation.spec.ts` died exactly there:
+    // cards reached `in_review` and the closing `review_task` never ran.
+    // The decoy sits BEFORE the live directive in the SAME message, which is
+    // how the host actually composes a turn: a `## Relevant prior work` digest
+    // quoting earlier tasks (truncated), then the operator's words under
+    // `## Task`. `indexOf` reached the decoy first, so scanning older messages
+    // was no help -- the real plan was further down the same string.
+    const real = plan("echo-1", [[{ name: "review_task", arguments: { decision: "approve" } }]]);
+    const composed =
+      "## Relevant prior work\n" +
+      '- Task: ship the digest. __MOCK_PLAN__ [[{"name":"spawn_task","arguments":{"title":"sim gather the sou' +
+      "\n\n## Task\n" +
+      real;
+
+    const reply = await chat([{ role: "user", content: composed }], ["review_task"]);
+
+    const call = reply.choices[0].message.tool_calls?.[0];
+    expect(call?.function?.name).toBe("review_task");
+  });
+
   it("calls spawn_task once for a SPAWNONE prompt, with a title off the message", async () => {
     const reply = await chat([{ role: "user", content: "please track this SPAWNONE 456" }]);
 
