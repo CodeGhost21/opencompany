@@ -200,6 +200,14 @@ struct ProbeDto {
     /// The families it negotiated, so an operator sees what it does NOT do
     /// before committing to it.
     capabilities: Vec<String>,
+    /// Mandatory families the candidate advertised but did not answer when
+    /// probed. Empty is healthy; absent means it was never probed.
+    ///
+    /// `capabilities` above is what the driver *claims*; this is what the
+    /// engine answered. A candidate can pass `health_check` and still fail
+    /// here, because health hits a different endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unreachable_families: Option<Vec<String>>,
     /// Why it failed, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
@@ -528,19 +536,37 @@ async fn test_engine(
         Ok(None) => Ok(Json(ProbeDto {
             healthy: true,
             capabilities: Vec::new(),
+            unreachable_families: None,
             detail: None,
         })),
-        Ok(Some(overlay)) => Ok(Json(ProbeDto {
-            // `None` means there was no provider seam to ask (the in-pod
-            // engine overlay). It opened, so it is usable.
-            healthy: overlay.descriptor.healthy.unwrap_or(true),
-            capabilities: overlay.descriptor.capabilities.clone(),
-            detail: (overlay.descriptor.healthy == Some(false))
-                .then(|| "the engine did not answer a health check".to_string()),
-        })),
+        Ok(Some(overlay)) => {
+            let unreachable = overlay.descriptor.unreachable_families.clone();
+            // Two distinct verdicts, reported distinctly: a candidate that did
+            // not answer at all, and one that answered but does not serve the
+            // families this host's ports are built on.
+            let detail = if overlay.descriptor.healthy == Some(false) {
+                Some("the engine did not answer a health check".to_string())
+            } else {
+                unreachable.as_ref().filter(|f| !f.is_empty()).map(|f| {
+                    format!(
+                        "the engine answered a health check but did not serve {}",
+                        f.join(", ")
+                    )
+                })
+            };
+            Ok(Json(ProbeDto {
+                // `None` means there was no provider seam to ask (the in-pod
+                // engine overlay). It opened, so it is usable.
+                healthy: overlay.descriptor.healthy.unwrap_or(true),
+                capabilities: overlay.descriptor.capabilities.clone(),
+                unreachable_families: unreachable,
+                detail,
+            }))
+        }
         Err(error) => Ok(Json(ProbeDto {
             healthy: false,
             capabilities: Vec::new(),
+            unreachable_families: None,
             detail: Some(error.to_string()),
         })),
     }
@@ -578,6 +604,26 @@ async fn apply(
             "`{}` did not answer a health check, so it was not bound and your current engine is \
              untouched. Check the endpoint and the API key.",
             request.engine.trim()
+        ))));
+    }
+    // A candidate can pass `health_check` and still not serve the ports this
+    // host binds: health hits its own endpoint, and the mandatory families are
+    // the three `provides()` reports true for unconditionally, so nothing
+    // upstream of here can refuse them. This route refuses rather than warns —
+    // unlike boot, which binds-and-warns so a transient outage cannot
+    // crash-loop a tenant. An operator applying a change is present, and the
+    // previous engine is still in force.
+    if !query.force
+        && let Some(overlay) = &overlay
+        && let Some(unreachable) = &overlay.descriptor.unreachable_families
+        && !unreachable.is_empty()
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(format!(
+            "`{}` answered a health check but did not serve {}, so it was not bound and your \
+             current engine is untouched. Reads against those families would fail once a \
+             company needed them.",
+            request.engine.trim(),
+            unreachable.join(", ")
         ))));
     }
 

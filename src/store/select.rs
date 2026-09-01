@@ -319,7 +319,7 @@ impl MemoryOverlay {
         }
         self.descriptor.healthy = Some(healthy);
 
-        let unreachable = probe_mandatory_families(probe.as_ref(), timeout).await;
+        let unreachable = probe_families(probe.as_ref(), timeout).await;
         if !unreachable.is_empty() {
             tracing::warn!(
                 driver_id = %self.descriptor.driver_id,
@@ -339,58 +339,69 @@ impl MemoryOverlay {
     pub async fn refresh_health(&mut self, _timeout: std::time::Duration) {}
 }
 
-/// Reads once against each **mandatory** family to see whether the live engine
-/// answers it, independently of what the adapter claims.
+/// Reads once against the mandatory families that can be probed in a single
+/// round trip, to see whether the live engine answers them.
 ///
-/// Only the three mandatory families are probed, and deliberately so: they are
-/// the ones `MemoryProvider::provides` reports `true` for unconditionally, so
-/// the bind-time audit can never fail them — and they are precisely the three
-/// this host binds `MemoryStore`, `ContextStore` and `FactStore` to. The
-/// seventeen optional families are already covered by the audit, because
-/// `provides()` derives those from a real accessor.
+/// Only mandatory families are probed. `MemoryProvider::provides` reports Core,
+/// Recall and Portability `true` unconditionally, so the bind-time audit can
+/// never fail them, and they are the three this host binds `MemoryStore`,
+/// `ContextStore` and `FactStore` to. The optional families are *not* covered
+/// by the audit either — `provides()` is `self.as_x().is_some()` for those, the
+/// same structural check — but each needs its own call shape, so probing them
+/// is separate work rather than a line here.
 ///
-/// Every call here is **read-only** and uses a namespace no company can
-/// produce, so probing writes nothing and cannot collide with tenant data.
+/// **Portability is deliberately not probed.** Its only read is `export_page`,
+/// which calls `namespace_summaries()` and then an unbounded `list()`; `limit`
+/// slices the returned records, not the walk. On a hosted engine that is one
+/// container-tag listing plus a paged walk per tag — tens of sequential round
+/// trips on a real account, growing with everything the company remembers. It
+/// would time out and report a working engine broken, and a false alarm that
+/// worsens with use is worse than no signal.
+///
+/// Every call is **read-only** and uses a namespace no company can produce, so
+/// probing writes nothing and cannot collide with tenant data.
 ///
 /// An empty answer is success. A freshly provisioned engine holds nothing, and
-/// treating "no rows" as "broken" would refuse every family on day one — the
-/// empty-instance case that makes this problem hard (issue #1968). Only an
-/// error, or a timeout, counts as unreachable.
+/// treating "no rows" as "broken" would refuse every family on day one. Only an
+/// error or a timeout counts.
 ///
-/// This does not catch an engine that answers `Ok(empty)` forever while never
-/// storing anything; distinguishing that from a new instance needs an
-/// engine-specific signal, which belongs in the adapter and its conformance
-/// suite rather than here.
+/// This does not catch an engine that answers `Ok(empty)` forever while storing
+/// nothing; separating that from a new instance needs an engine-specific signal,
+/// which belongs in the adapter and its conformance suite.
 #[cfg(feature = "tinymemory")]
-async fn probe_mandatory_families(
+async fn probe_families(
     probe: &dyn tinymemory_api::provider::MemoryProvider,
     timeout: std::time::Duration,
 ) -> Vec<String> {
+    use tinymemory_api::capabilities::Capability;
     use tinymemory_api::types::OwnedRecallOpts;
 
     // Not a valid `Namespace`: those are sanitize-plus-hash derived from a
-    // company id, so nothing a tenant owns can collide with this.
+    // company id, so nothing a tenant owns can collide with these.
     const PROBE_NS: &str = "__host_probe__";
     const PROBE_KEY: &str = "__host_probe__";
-
-    let mut unreachable = Vec::new();
-
-    let core = tokio::time::timeout(timeout, probe.get(PROBE_NS, PROBE_KEY)).await;
-    if !matches!(core, Ok(Ok(_))) {
-        unreachable.push("core".to_string());
-    }
+    // Non-empty on purpose. `RemoteMemory::recall` returns `Ok(vec![])` without
+    // reaching the network when the query trims to empty, so an empty probe
+    // query would report a revoked credential as healthy — the failure this
+    // whole probe exists to catch.
+    const PROBE_QUERY: &str = "__host_probe__";
 
     let opts = OwnedRecallOpts::default();
-    let recall = tokio::time::timeout(timeout, probe.recall("", 1, &opts, None)).await;
+    // Concurrently, so the pre-listener budget grows by one timeout rather than
+    // by one per family. `/healthz` has to answer before the wake proxy gives
+    // up, and this runs before the listener binds.
+    let (core, recall) = tokio::join!(
+        tokio::time::timeout(timeout, probe.get(PROBE_NS, PROBE_KEY)),
+        tokio::time::timeout(timeout, probe.recall(PROBE_QUERY, 1, &opts, None)),
+    );
+
+    let mut unreachable = Vec::new();
+    if !matches!(core, Ok(Ok(_))) {
+        unreachable.push(Capability::Core.as_str().to_string());
+    }
     if !matches!(recall, Ok(Ok(_))) {
-        unreachable.push("recall".to_string());
+        unreachable.push(Capability::Recall.as_str().to_string());
     }
-
-    let portability = tokio::time::timeout(timeout, probe.export_page(None, 1)).await;
-    if !matches!(portability, Ok(Ok(_))) {
-        unreachable.push("portability".to_string());
-    }
-
     unreachable
 }
 
@@ -453,8 +464,7 @@ pub struct MemoryDescriptor {
     ///
     /// **An empty result is success.** A freshly provisioned engine holds
     /// nothing, so "returned no rows" must not be read as "does not work";
-    /// only an error is a failure. That distinction is the whole point — see
-    /// the acceptance discussion in issue #1968.
+    /// only an error is a failure.
     pub unreachable_families: Option<Vec<String>>,
 }
 
@@ -1111,23 +1121,255 @@ mod test {
 
     use crate::app::config::MapEnv;
 
+    /// A stub whose every mandatory read fails, so the probe has something to
+    /// find. `NullMemoryProvider` answers everything, which is the right
+    /// subject for the empty-instance case and useless for the failure one.
+    #[cfg(feature = "tinymemory")]
+    #[derive(Debug)]
+    struct FailingProvider {
+        fail_core: bool,
+        fail_recall: bool,
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[async_trait]
+    impl tinymemory_api::traits::Memory for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        async fn store(
+            &self,
+            _namespace: &str,
+            _key: &str,
+            _content: &str,
+            _category: tinymemory_api::types::MemoryCategory,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn get(
+            &self,
+            _namespace: &str,
+            _key: &str,
+        ) -> anyhow::Result<Option<tinymemory_api::types::MemoryEntry>> {
+            if self.fail_core {
+                anyhow::bail!("core is unreachable");
+            }
+            Ok(None)
+        }
+        async fn forget(&self, _namespace: &str, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        async fn list(
+            &self,
+            _namespace: Option<&str>,
+            _category: Option<&tinymemory_api::types::MemoryCategory>,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<Vec<tinymemory_api::types::MemoryEntry>> {
+            Ok(Vec::new())
+        }
+        async fn namespace_summaries(
+            &self,
+        ) -> anyhow::Result<Vec<tinymemory_api::types::NamespaceSummary>> {
+            Ok(Vec::new())
+        }
+        async fn count(&self) -> anyhow::Result<usize> {
+            Ok(0)
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+        async fn recall(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _opts: tinymemory_api::types::RecallOpts<'_>,
+        ) -> anyhow::Result<Vec<tinymemory_api::types::MemoryEntry>> {
+            if self.fail_recall {
+                anyhow::bail!("recall is unreachable");
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    #[cfg(feature = "tinymemory")]
+    fn failing(
+        fail_core: bool,
+        fail_recall: bool,
+    ) -> tinymemory_api::mandatory::MemoryTraitProvider {
+        tinymemory_api::mandatory::MemoryTraitProvider::new(
+            Arc::new(FailingProvider {
+                fail_core,
+                fail_recall,
+            }),
+            "failing",
+        )
+    }
+
     /// A working engine that holds nothing must not be reported as broken.
     ///
-    /// This is the case that makes issue #1968 hard. On a freshly provisioned
-    /// per-tenant instance every family is legitimately empty, so a probe that
-    /// read "returned no rows" as "not implemented" would refuse every family
-    /// on day one. `NullMemoryProvider` is exactly that shape — every read
-    /// succeeds and returns nothing — so it must probe clean.
+    /// On a freshly provisioned per-tenant instance every family is legitimately
+    /// empty, so a probe reading "returned no rows" as "not implemented" would
+    /// refuse every family on day one. `NullMemoryProvider` is exactly that
+    /// shape — every read succeeds and returns nothing — so it must probe clean.
     #[cfg(feature = "tinymemory")]
     #[tokio::test]
     async fn an_empty_engine_probes_clean() {
         let provider = tinymemory_api::null::NullMemoryProvider::new();
-        let unreachable =
-            probe_mandatory_families(&provider, std::time::Duration::from_secs(5)).await;
+        let unreachable = probe_families(&provider, std::time::Duration::from_secs(5)).await;
         assert!(
             unreachable.is_empty(),
             "an engine that answers every read but holds nothing must not be reported \
              unreachable; got {unreachable:?}"
+        );
+    }
+
+    /// The direction the clean-probe test cannot pin: an engine that fails must
+    /// actually be reported. Without this, replacing the probe body with
+    /// `Vec::new()` still passes the suite.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn a_dead_engine_reports_every_family() {
+        let provider = failing(true, true);
+        let unreachable = probe_families(&provider, std::time::Duration::from_secs(5)).await;
+        assert_eq!(unreachable, vec!["core".to_string(), "recall".to_string()]);
+    }
+
+    /// Attribution: one broken family must not condemn the others, and — the
+    /// case that caught a real bug — a recall that fails must be *seen* to
+    /// fail. An empty probe query short-circuits inside `RemoteMemory::recall`
+    /// before the network, which made this leg unfalsifiable.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn one_broken_family_is_named_alone() {
+        let unreachable =
+            probe_families(&failing(false, true), std::time::Duration::from_secs(5)).await;
+        assert_eq!(unreachable, vec!["recall".to_string()]);
+
+        let unreachable =
+            probe_families(&failing(true, false), std::time::Duration::from_secs(5)).await;
+        assert_eq!(unreachable, vec!["core".to_string()]);
+    }
+
+    /// The probe must send a **non-empty** recall query.
+    ///
+    /// `RemoteMemory::recall` returns `Ok(vec![])` without reaching the network
+    /// when the query trims to empty, so an empty probe query makes the recall
+    /// leg unfalsifiable on every hosted engine: a revoked credential reports
+    /// healthy. A stub cannot reproduce that short-circuit — it lives in the
+    /// remote adapter, not the contract — so this asserts the precondition
+    /// directly instead.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn the_recall_probe_query_is_never_empty() {
+        use std::sync::Mutex;
+
+        #[derive(Debug, Default)]
+        struct Recorder(Mutex<Option<String>>);
+
+        #[async_trait]
+        impl tinymemory_api::traits::Memory for Recorder {
+            fn name(&self) -> &str {
+                "recorder"
+            }
+            async fn store(
+                &self,
+                _n: &str,
+                _k: &str,
+                _c: &str,
+                _cat: tinymemory_api::types::MemoryCategory,
+                _s: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn get(
+                &self,
+                _n: &str,
+                _k: &str,
+            ) -> anyhow::Result<Option<tinymemory_api::types::MemoryEntry>> {
+                Ok(None)
+            }
+            async fn forget(&self, _n: &str, _k: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            async fn list(
+                &self,
+                _n: Option<&str>,
+                _c: Option<&tinymemory_api::types::MemoryCategory>,
+                _s: Option<&str>,
+            ) -> anyhow::Result<Vec<tinymemory_api::types::MemoryEntry>> {
+                Ok(Vec::new())
+            }
+            async fn namespace_summaries(
+                &self,
+            ) -> anyhow::Result<Vec<tinymemory_api::types::NamespaceSummary>> {
+                Ok(Vec::new())
+            }
+            async fn count(&self) -> anyhow::Result<usize> {
+                Ok(0)
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            async fn recall(
+                &self,
+                query: &str,
+                _limit: usize,
+                _opts: tinymemory_api::types::RecallOpts<'_>,
+            ) -> anyhow::Result<Vec<tinymemory_api::types::MemoryEntry>> {
+                *self.0.lock().expect("probe query lock") = Some(query.to_string());
+                Ok(Vec::new())
+            }
+        }
+
+        let recorder = Arc::new(Recorder::default());
+        let provider = tinymemory_api::mandatory::MemoryTraitProvider::new(
+            Arc::clone(&recorder) as Arc<dyn tinymemory_api::traits::Memory>,
+            "recorder",
+        );
+        let _ = probe_families(&provider, std::time::Duration::from_secs(5)).await;
+
+        let seen = recorder.0.lock().expect("probe query lock").clone();
+        let seen = seen.expect("the probe never called recall at all");
+        assert!(
+            !seen.trim().is_empty(),
+            "the recall probe sent `{seen}`, which RemoteMemory short-circuits before the \
+             network — the leg would pass against a dead engine"
+        );
+    }
+
+    /// `refresh_health` must record what it probed, not just log it — the
+    /// engine route reads the descriptor.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn refresh_health_records_unreachable_families() {
+        let bound = crate::store::memory::BoundMemory::bind(
+            Arc::new(failing(true, true)),
+            tinymemory::registry::DriverClass::External,
+        )
+        .expect("bind");
+        let mut overlay = MemoryOverlay {
+            memory: bound.memory(),
+            context: bound.context(),
+            facts: Some(bound.facts()),
+            inbound_context: Some(bound.inbound_context()),
+            scratch: Some(bound.scratch()),
+            scopes: Some(Arc::new(bound.clone())),
+            descriptor: MemoryDescriptor {
+                backend: MemoryBackend::Remote,
+                driver_id: "failing".into(),
+                capabilities: Vec::new(),
+                healthy: None,
+                unreachable_families: None,
+            },
+            probe: Some(Arc::new(failing(true, true))),
+        };
+        overlay
+            .refresh_health(std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            overlay.descriptor.unreachable_families,
+            Some(vec!["core".to_string(), "recall".to_string()])
         );
     }
 

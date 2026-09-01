@@ -216,6 +216,15 @@ export interface MemoryEngineState {
   active: string;
   capabilities: string[];
   healthy?: boolean;
+  /**
+   * Mandatory families the engine advertised but did not answer at boot.
+   * Empty is healthy; absent means it was never probed.
+   *
+   * `capabilities` is what the driver claims. This is what the engine
+   * answered — the two can disagree, and the bind-time audit cannot catch it
+   * for the mandatory families.
+   */
+  unreachableFamilies?: string[];
   /** The engine the saved selection names. */
   selected: string;
   url?: string;

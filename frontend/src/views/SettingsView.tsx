@@ -538,6 +538,21 @@ function MemoryEngineCard({
                 : "not probed"}
           </span>
         </InfoRow>
+        {/*
+          Distinct from "Not served" above, which is derived client-side from
+          what the driver *claims*. This is what the engine actually answered
+          when read at boot: a family can be advertised, pass the bind-time
+          audit, and still return nothing.
+        */}
+        <InfoRow label="Did not answer">
+          <span className="text-sm">
+            {engine.unreachableFamilies === undefined
+              ? "not probed"
+              : engine.unreachableFamilies.length === 0
+                ? "none — every probed family answered"
+                : `${engine.unreachableFamilies.join(", ")} — reads against these will fail`}
+          </span>
+        </InfoRow>
       </CardContent>
     </Card>
   );

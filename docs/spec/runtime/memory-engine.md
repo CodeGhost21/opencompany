@@ -116,11 +116,23 @@ for Core, Recall and Portability unconditionally, so the audit cannot fail them
 by construction — and they are exactly the three this host binds `MemoryStore`,
 `ContextStore` and `FactStore` to.
 
-`MemoryOverlay::refresh_health` therefore reads once against each mandatory
-family at boot and records the ones that did not answer on the descriptor,
-surfaced as `unreachableFamilies` on the authenticated engine route. Advisory,
-like the health probe beside it: it warns loudly and does not refuse, because a
-transient vendor outage must not crash-loop a tenant.
+`MemoryOverlay::refresh_health` therefore reads once against the mandatory
+families that answer in a single round trip — Core and Recall — and records the
+ones that did not answer on the descriptor, surfaced as `unreachableFamilies` on
+the authenticated engine route. At boot it is advisory, like the health probe
+beside it: it warns loudly and does not refuse, because a transient vendor
+outage must not crash-loop a tenant. The console apply route *does* refuse,
+matching what it already does for a failed health probe — an operator applying a
+change is present, and the previous engine stays in force.
+
+Portability is deliberately not probed: its only read is `export_page`, which
+enumerates every namespace and then lists one in full, so on a hosted engine it
+is tens of sequential round trips that grow with the corpus. It would time out
+and report a working engine broken.
+
+The optional families are **not** covered by the audit either — `provides()` is
+the same `self.as_x().is_some()` check for those — but each needs its own call
+shape, so probing them is separate work rather than a line beside these two.
 
 **An empty answer is success.** A freshly provisioned engine holds nothing, so
 reading "no rows" as "not implemented" would refuse every family on day one;
