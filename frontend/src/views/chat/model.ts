@@ -36,10 +36,12 @@ import type { TaskStatus } from "@/api/tasks";
  * `parent` is not a review surface.
  *
  * A parent is a review surface when it is the card's settle pill — a system
- * marker carrying its `taskId` — or the relay bubble that followed it, a
- * company line with no `taskId` anchored to the nearest settle pill before it
- * in the same transcript. Either way the card must still be in `in_review`;
- * one already approved or re-running is no longer open for review.
+ * marker carrying its `taskId` — or the relay bubble that followed it: the
+ * pill's *first* company line with no `taskId`, mirroring the backend's
+ * `is_relay_bubble_for`. A later, ordinary company reply is not a review
+ * surface even though it has the same shape. Either way the card must still
+ * be in `in_review`; one already approved or re-running is no longer open
+ * for review.
  */
 export function reviewCardIdForThread(
   parent: ChatMessage,
@@ -56,6 +58,7 @@ export function reviewCardIdForThread(
   if (index < 0) return undefined;
   for (let i = index - 1; i >= 0; i--) {
     const prior = messages[i];
+    if (prior.from === "company" && !prior.taskId) return undefined;
     if (prior.from !== "system" || !prior.taskId) continue;
     return inReview(prior.taskId) ? prior.taskId : undefined;
   }
