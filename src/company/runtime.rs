@@ -122,7 +122,7 @@ const RELAY_SCAN_MAX_PAGES: usize = 8;
 #[cfg(feature = "openhuman")]
 fn is_review_target(card: &TaskRecord, desk: &str) -> bool {
     card.column == crate::ports::tasks::COLUMN_IN_REVIEW
-        && card.origin_chat_id.as_deref().is_some_and(|origin| {
+        && card.origin_chat_id().is_some_and(|origin| {
             crate::server::chat_history::same_conversation(Some(origin), Some(desk))
         })
 }
@@ -3835,7 +3835,12 @@ impl CompanyRuntime {
                     .await
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|card| (card.id, card.origin_parent))
+                    .map(|card| {
+                        // The origin borrows the card, so read it before `id`
+                        // moves out of it.
+                        let origin_parent = card.origin_parent();
+                        (card.id, origin_parent)
+                    })
                     .collect()
             } else {
                 std::collections::HashMap::new()
@@ -6640,8 +6645,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6719,8 +6723,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7228,8 +7231,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7323,8 +7325,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7482,8 +7483,7 @@ mod tests {
             updated_at_millis: 0,
             // The field the whole bug turns on: without an origin thread,
             // `relay_reply` is never called at all (a board-created card).
-            origin_chat_id: Some("strategy".to_string()),
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7638,10 +7638,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: origin.to_string(),
             updated_at_millis: 0,
-            origin_chat_id: Some(origin.to_string()),
-            // Channel-level, like every card this test raises: it is about
-            // which surface a relay lands on, not which thread (#1890).
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some(origin.to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7658,7 +7655,7 @@ mod tests {
         // Built the way `run_task` builds them: the speaker is the origin DM's
         // own agent, or the orchestrator for a shared surface.
         let relay = |c: &TaskRecord| {
-            let origin = c.origin_chat_id.clone().expect("origin");
+            let origin = c.origin_chat_id().map(str::to_string).expect("origin");
             let speaker = relay_speaker(&record, &origin, orchestrator);
             relay_reply(c, orchestrator, &speaker, origin, &[])
         };
@@ -7853,8 +7850,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "writer".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: Some("general".to_string()),
-            origin_parent: Some(root),
+            origin: crate::ports::TaskOrigin::new(Some("general".to_string()), Some(root)),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7904,7 +7900,8 @@ mod tests {
         // And a card raised at channel level still relays flat — `None` is the
         // channel-level conversation, not a gap.
         card.id = "t-flat".to_string();
-        card.origin_parent = None;
+        card.origin =
+            crate::ports::TaskOrigin::new(card.origin_chat_id().map(str::to_string), None);
         rt.tasks().upsert(&id, &card).await.unwrap();
         let report = crate::runtime::types::CycleReport {
             responses: vec![relay(Some("t-flat"))],
@@ -8647,8 +8644,7 @@ mod tests {
                 priority: "medium".to_string(),
                 assignee: "ceo".to_string(),
                 updated_at_millis: 1,
-                origin_chat_id: Some(origin.to_string()),
-                origin_parent: None,
+                origin: crate::ports::TaskOrigin::new(Some(origin.to_string()), None),
                 parent_task_id: None,
                 output: None,
                 plan: None,

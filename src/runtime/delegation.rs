@@ -37,7 +37,7 @@ use crate::ports::tasks::{
     TaskOutputWorkflow,
 };
 use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
-use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
+use crate::ports::{TaskOrigin, TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::runtime::cycle::{
     BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, SETTLED_WORK_ANNOTATION, THREAD_INDEX_ANNOTATION,
@@ -2612,13 +2612,13 @@ impl<'a> DelegationRunner<'a> {
             priority: "medium".to_string(),
             assignee: assignee.to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: chat_id.map(str::to_string),
-            // Issue #1890 B: and *which thread* inside it. The runner was bound
-            // to the raising turn's root by `in_thread`, so this is the same
-            // conversation the turn itself answers in — not a second reading of
-            // it. `None` is the channel-level conversation, which is what an
-            // unthreaded hand-off has always been.
-            origin_parent: self.thread_root,
+            // Issue #1890 B: the conversation this card was raised in — the
+            // desk, and *which thread* inside it. The runner was bound to the
+            // raising turn's root by `in_thread`, so this is the same
+            // conversation the turn itself answers in, not a second reading of
+            // it. `None` for the thread is the channel-level conversation,
+            // which is what an unthreaded hand-off has always been.
+            origin: TaskOrigin::new(chat_id.map(str::to_string), self.thread_root),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -2838,7 +2838,7 @@ impl<'a> DelegationRunner<'a> {
                 card.title == title
                     && (card.column == COLUMN_TODO || card.column == COLUMN_PLANNING)
                     && (card.assignee.is_empty() || self.addressed_to(chat_id, &card.assignee))
-                    && (card.origin_chat_id.is_none() || card.origin_chat_id.as_deref() == chat_id)
+                    && (card.origin_chat_id().is_none() || card.origin_chat_id() == chat_id)
             })
             .map(|card| card.id))
     }
@@ -2990,14 +2990,13 @@ impl<'a> DelegationRunner<'a> {
                     // *scheduled* the workflow hours earlier would make the card
                     // answer into a conversation the operator has left. The run
                     // reference below is the provenance instead.
-                    origin_chat_id: chat_id.map(str::to_string),
-                    // Issue #1890 B: and which thread inside it — the root the
+                    // Issue #1890 B: which thread inside it, too — the root the
                     // runner was bound to by `in_thread`, so a card a threaded
                     // turn spawns settles back into that thread rather than flat
-                    // in the channel. `None` on the workflow path for the same
-                    // reason the channel above is: no conversation is behind a
+                    // in the channel. On the workflow path the whole origin is
+                    // `None` for the reason above: no conversation is behind a
                     // run, so there is no thread inside one either.
-                    origin_parent: self.thread_root,
+                    origin: TaskOrigin::new(chat_id.map(str::to_string), self.thread_root),
                     // Lineage (#185): the dispatched card whose turn queued this
                     // one, when the drain is running inside a task
                     // (`for_task`) — since #204 a dispatched turn drains the
@@ -4893,8 +4892,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             priority: "medium".to_string(),
             assignee: "engineer".to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -4999,7 +4997,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the card belongs to the delegate"
         );
         assert_eq!(card.column, COLUMN_IN_REVIEW, "it settles for a person");
-        assert_eq!(card.origin_chat_id.as_deref(), Some("general"));
+        assert_eq!(card.origin_chat_id(), Some("general"));
         assert!(
             card.note
                 .as_deref()
@@ -5144,9 +5142,10 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(cards[0].assignee, "engineer");
         assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
-        assert_eq!(cards[0].origin_chat_id.as_deref(), Some("eng_desk"));
+        assert_eq!(cards[0].origin_chat_id(), Some("eng_desk"));
         assert_eq!(
-            cards[0].origin_parent, None,
+            cards[0].origin_parent(),
+            None,
             "an unthreaded turn raises a card on the channel-level conversation",
         );
         assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
@@ -5176,12 +5175,12 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let cards = fx.cards().await;
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(
-            cards[0].origin_chat_id.as_deref(),
+            cards[0].origin_chat_id(),
             Some("eng_desk"),
             "the channel half is unchanged",
         );
         assert_eq!(
-            cards[0].origin_parent,
+            cards[0].origin_parent(),
             Some(EventSeq::new(41)),
             "and the thread half is the root the turn was bound to",
         );
@@ -5212,8 +5211,8 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
 
         let cards = fx.cards().await;
         assert_eq!(cards.len(), 1, "{cards:?}");
-        assert_eq!(cards[0].origin_chat_id.as_deref(), Some("general"));
-        assert_eq!(cards[0].origin_parent, Some(EventSeq::new(41)));
+        assert_eq!(cards[0].origin_chat_id(), Some("general"));
+        assert_eq!(cards[0].origin_parent(), Some(EventSeq::new(41)));
     }
 
     /// **Issue #984, the reported probe.** The message that opened a card on
@@ -5820,8 +5819,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6170,8 +6168,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6237,8 +6234,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6295,8 +6291,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6346,8 +6341,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6393,8 +6387,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: Some("dm:engineer".to_string()),
-                    origin_parent: None,
+                    origin: TaskOrigin::new(Some("dm:engineer".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6438,8 +6431,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: "".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: Some("eng_desk".to_string()),
-                    origin_parent: None,
+                    origin: TaskOrigin::new(Some("eng_desk".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6487,8 +6479,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6536,8 +6527,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -8693,8 +8683,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             priority: "medium".to_string(),
             assignee: "chief".to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,

@@ -2311,23 +2311,22 @@ async fn run_chat(
             priority: "medium".to_string(),
             assignee,
             updated_at_millis: crate::ports::now_millis(),
-            // Issue #982: the thread this card was opened from, so the settle
-            // marker lands back in the conversation that asked for the work
-            // rather than only on the board. This is the field #151 added for
-            // exactly that (`relay_reply` answers in the origin thread), and the
-            // console already renders a marker in a DM channel — nothing there
-            // changes. `None` for an unaddressed message, which is every card
-            // this site opened before and therefore no change for one.
-            origin_chat_id: message.chat.clone(),
-            // Issue #1890 B, reconciled with D. The thread this card was raised
-            // in — **by the same rule an answer to this message threads under**.
+            // Issue #982 + #1890 B, reconciled with D: the conversation this
+            // card was opened from, so the settle marker lands back where the
+            // work was asked for rather than only on the board. `relay_reply`
+            // answers in it, and the console already renders a marker in a DM
+            // channel — nothing there changes. `None` for an unaddressed
+            // message, which is every card this site opened before.
             //
-            // B alone read the message's own `parent`, so a card raised from a
-            // channel-level question recorded no thread. That was right while a
-            // thread was only ever something an operator opened by hand. D
-            // changed what a thread IS: an answer now parents to the message
-            // that opened the exchange, so that question is a root, and a card
-            // raised from it belongs to the thread it just started.
+            // The thread half is **the same rule by which an answer to this
+            // message threads**, which is why it is `reply_thread` and not
+            // `thread_root()`. B alone read the message's own `parent`, so a
+            // card raised from a channel-level question recorded no thread.
+            // That was right while a thread was only ever something an operator
+            // opened by hand. D changed what a thread IS: an answer now parents
+            // to the message that opened the exchange, so that question is a
+            // root, and a card raised from it belongs to the thread it just
+            // started.
             //
             // Left as `thread_root()`, the two disagreed about one message: the
             // answer landed in a thread and the card's settle marker landed
@@ -2336,8 +2335,13 @@ async fn run_chat(
             // reintroduced by D moving the ground under it.
             //
             // Found by hand-testing B and D together. Neither suite could catch
-            // it: B's has no auto-threading and D's has no cards.
-            origin_parent: reply_thread(accepted.thread_root(), accepted.message_seq),
+            // it: B's has no auto-threading and D's has no cards. Step 5 is why
+            // it cannot come back: the desk and the thread are one value now,
+            // built by one constructor, so there is no second field to forget.
+            origin: crate::ports::TaskOrigin::new(
+                message.chat.clone(),
+                reply_thread(accepted.thread_root(), accepted.message_seq),
+            ),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -5306,7 +5310,7 @@ mode = "full"
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(
-            tasks[0].origin_chat_id.as_deref(),
+            tasks[0].origin_chat_id(),
             Some("dm:designer"),
             "the thread as the console addressed it"
         );
@@ -5321,10 +5325,33 @@ mode = "full"
             .iter()
             .find(|c| c.title == "Draft the investor update")
             .expect("the second card");
+        // No desk, therefore no conversation and no thread inside one. Before
+        // #1890 step 5 this card carried a thread root beside no desk — the
+        // drifted pair — and the root was inert: `relay_reply` posts back
+        // through the desk, so a root with nothing to post into named nothing.
+        // `TaskOrigin` cannot hold that state, so it is simply absent now.
+        //
+        // Restoring a real origin here means stamping the General desk the
+        // route already folds this message into, which is a behaviour change
+        // and not this one.
         assert_eq!(
-            unaddressed.origin_chat_id, None,
-            "an unaddressed message has no thread to answer in"
+            unaddressed.origin_chat_id(),
+            None,
+            "an unaddressed message has no conversation to answer in"
         );
+        assert_eq!(
+            unaddressed.origin_parent(),
+            None,
+            "and therefore no thread inside one either"
+        );
+
+        // The addressed card, found by title rather than by index: the two are
+        // listed together from here on, and this assertion is about the one
+        // that has a desk.
+        let addressed = tasks
+            .iter()
+            .find(|c| c.origin_chat_id() == Some("dm:designer"))
+            .expect("the addressed card");
         // Reversed once #1890 D landed alongside B, and the reversal is the
         // point. B alone read the message's own `parent`, so a card raised from
         // a channel-level question recorded no thread — right while a thread
@@ -5336,7 +5363,7 @@ mode = "full"
         // would put the settle marker in the channel while the answer to the
         // same message sat in a thread — the split B exists to prevent.
         assert!(
-            tasks[0].origin_parent.is_some(),
+            addressed.origin_parent().is_some(),
             "a channel-level question is itself the thread its card was raised in",
         );
     }
@@ -5384,9 +5411,9 @@ mode = "full"
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
-        assert_eq!(tasks[0].origin_chat_id.as_deref(), Some("dm:designer"));
+        assert_eq!(tasks[0].origin_chat_id(), Some("dm:designer"));
         assert_eq!(
-            tasks[0].origin_parent,
+            tasks[0].origin_parent(),
             Some(crate::ports::types::EventSeq::new(41)),
             "the root the operator was answering in",
         );
@@ -8045,8 +8072,7 @@ mode = "full"
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -13405,8 +13431,7 @@ mode = "full"
                         priority: "medium".to_string(),
                         assignee: "ceo".to_string(),
                         updated_at_millis,
-                        origin_chat_id: Some("strategy".to_string()),
-                        origin_parent: None,
+                        origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
                         parent_task_id: None,
                         output: None,
                         plan: None,
@@ -13482,8 +13507,7 @@ mode = "full"
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: Some("strategy".to_string()),
-                    origin_parent: None,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -13544,8 +13568,7 @@ mode = "full"
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: Some("strategy".to_string()),
-                    origin_parent: None,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -13620,8 +13643,7 @@ mode = "full"
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: Some("strategy".to_string()),
-                    origin_parent: None,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -13731,8 +13753,7 @@ mode = "full"
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: Some("strategy".to_string()),
-                    origin_parent: None,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -13795,8 +13816,7 @@ mode = "full"
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: Some("strategy".to_string()),
-                    origin_parent: None,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -13881,8 +13901,7 @@ mode = "full"
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: Some(chat_id.to_string()),
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some(chat_id.to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,

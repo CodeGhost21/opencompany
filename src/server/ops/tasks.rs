@@ -192,6 +192,10 @@ pub(crate) struct TaskCard {
 
 impl From<TaskRecord> for TaskCard {
     fn from(t: TaskRecord) -> Self {
+        // Taken out first: the DTO keeps the desk flat, and the literal below
+        // moves the record apart field by field, so the origin cannot be read
+        // through a borrow partway down it.
+        let origin_chat_id = t.origin.map(|origin| origin.origin_chat_id);
         Self {
             id: t.id,
             title: t.title,
@@ -203,7 +207,7 @@ impl From<TaskRecord> for TaskCard {
             updated_at: t.updated_at_millis,
             cost: None,
             parent_task_id: t.parent_task_id,
-            origin_chat_id: t.origin_chat_id,
+            origin_chat_id,
             output: t.output,
             plan: t.plan,
             deliverable: t.deliverable,
@@ -479,20 +483,22 @@ async fn create_task(
         // for anything the REST surface created. A blank string is normalised
         // away so an empty form field cannot persist as a thread id that
         // matches nothing.
-        origin_chat_id: body
-            .origin_chat_id
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty()),
-        // Issue #1890 B: `None`, and a **known gap** rather than a claim. The
-        // create body carries a channel and no thread, so "Add to board" on a
-        // message inside a thread files a card that names the channel around
-        // it. That is exactly what this route did before B, so nothing
-        // regresses — but a reader must not take the `None` here for the
-        // positive "raised at channel level" it means on every path that does
-        // stamp. Closing it needs a body field and a console change (the
-        // transcript holds a rendered message id, not an `EventSeq`), which
-        // belongs with the renderer work in the epic's D.
-        origin_parent: None,
+        origin: crate::ports::TaskOrigin::new(
+            body.origin_chat_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
+            // Issue #1890 B: no thread, and a **known gap** rather than a
+            // claim. The create body carries a channel and no thread, so "Add
+            // to board" on a message inside a thread files a card that names
+            // the channel around it. That is exactly what this route did
+            // before B, so nothing regresses — but a reader must not take this
+            // for the positive "raised at channel level" a stamped `None`
+            // means on every path that does stamp. Closing it needs a body
+            // field and a console change (the transcript holds a rendered
+            // message id, not an `EventSeq`), which belongs with the renderer
+            // work in the epic's D.
+            None,
+        ),
         parent_task_id: body.parent_task_id,
         // Nothing has run yet, so there is no deliverable to point at
         // (issue #339). The first successful settle stamps it.
@@ -2817,8 +2823,7 @@ mod steer_redirect_test {
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -3078,8 +3083,7 @@ mod patch_clears_bounced_test {
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,

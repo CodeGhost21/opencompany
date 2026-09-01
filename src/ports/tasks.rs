@@ -939,6 +939,53 @@ pub struct TaskWorkflowProposal {
     pub run_id: String,
 }
 
+/// The conversation a card was raised in: a desk, and the thread within it.
+///
+/// One value because the two halves must agree. See
+/// [`TaskRecord::origin`] for the drift that made this a type rather than a
+/// pair of fields, and `docs/specs/thread-scoped-conversations.md` for where
+/// the same shape lives in `tinyhivemind`.
+///
+/// Field names are the wire names the two fields already used, and this is
+/// `#[serde(flatten)]`ed into its holder, so adopting it costs no migration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOrigin {
+    /// The desk or chat the raising turn was addressed to.
+    ///
+    /// Required: a thread root without a desk names no conversation, which is
+    /// precisely the state the two loose fields could reach.
+    pub origin_chat_id: String,
+    /// The thread within that desk, or `None` for the channel-level
+    /// conversation.
+    ///
+    /// **`None` is the channel, not a gap.** The channel is where every
+    /// unparented line hangs — which is every line in a company that has never
+    /// opened a thread — so a card raised straight into a channel carries
+    /// `None` and settles exactly where it settled before threads existed.
+    ///
+    /// **One level deep**, like every thread here: an operator message's own
+    /// `parent` *is* its root (a reply is parented to its question's parent,
+    /// never to the question), so the raising turn's root is what gets stamped
+    /// and there is no chain to walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_parent: Option<EventSeq>,
+}
+
+impl TaskOrigin {
+    /// Build an origin from a desk and a thread root, if there is a desk.
+    ///
+    /// The single constructor every stamping site goes through, so "which
+    /// conversation did this card come from" has exactly one answer.
+    #[must_use]
+    pub fn new(chat_id: Option<String>, thread_root: Option<EventSeq>) -> Option<Self> {
+        chat_id.map(|origin_chat_id| Self {
+            origin_chat_id,
+            origin_parent: thread_root,
+        })
+    }
+}
+
 /// One card on the company's task board.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -963,50 +1010,33 @@ pub struct TaskRecord {
     pub assignee: String,
     /// Epoch-millis timestamp of the last update.
     pub updated_at_millis: u64,
-    /// The chat/desk thread the task was created from, when it came from a
-    /// delegation (issue #151 §3.2).
+    /// The conversation this card was raised in, or `None` for a card created
+    /// straight on the board (issue #151 §3.2, issue #1890 B and step 5).
     ///
     /// A dispatched card runs asynchronously, long after the turn that spawned
-    /// it has answered, so the completion reply has no ambient thread to post
-    /// onto — without this it can only be written into `note`, where the
+    /// it has answered, so the completion reply has no ambient conversation to
+    /// post onto — without this it can only be written into `note`, where the
     /// operator has to go looking for it. Stamped by `spawn_task` from the
-    /// delegating turn's chat id.
+    /// delegating turn.
     ///
-    /// `None` for a card created straight on the board (no originating
-    /// conversation) and for every card written before this field existed —
-    /// both simply get no post-back, exactly as today.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_chat_id: Option<String>,
-    /// The thread within [`origin_chat_id`](Self::origin_chat_id) the card was
-    /// raised in (issue #1890 B) — the root message the raising turn hung off,
-    /// or `None` for the channel-level conversation.
+    /// **One value, not two fields.** This was `origin_chat_id: Option<String>`
+    /// beside `origin_parent: Option<EventSeq>` — a hand-rolled conversation,
+    /// two fields that had to agree with nothing making them. They drifted:
+    /// #1890 B stamped the parent from the raising message's own `parent`,
+    /// recording only threads an operator opened by hand, and #1890 D then made
+    /// every question a root. For one channel-level message the answer went
+    /// into a thread while the card recorded none, so the settle marker landed
+    /// in the channel and the thread that asked never saw the work finish —
+    /// exactly the split B exists to prevent, reintroduced by D moving the
+    /// ground under it. A [`TaskOrigin`] cannot be half-built.
     ///
-    /// `origin_chat_id` names the *channel*, which is all a card recorded until
-    /// now, so a card raised inside a thread settled its `DeskTaskCompleted`
-    /// marker flat in the channel and the thread that asked for the work never
-    /// showed it finishing. This is the missing half of that origin: the two
-    /// fields are read as one pair, here and on the terminal.
-    ///
-    /// **`None` is the channel, not a gap.** The channel-level conversation is
-    /// where every unparented line hangs — which is every line in a company
-    /// that has never opened a thread — so a card raised straight into a
-    /// channel carries `None` and settles exactly where it settled before this
-    /// field existed. It is also `None` for a board-created card, but there
-    /// `origin_chat_id` is `None` too and the pair belongs to no conversation
-    /// at all; a reader asking "which conversation?" must check that field, not
-    /// this one.
-    ///
-    /// **One level deep**, like every thread here: an operator message's own
-    /// `parent` *is* its root (a reply is parented to its question's parent,
-    /// never to the question), so the raising turn's root is what gets stamped
-    /// and there is no chain to walk.
-    ///
-    /// Additive on the wire on exactly the terms
-    /// [`origin_chat_id`](Self::origin_chat_id) and
-    /// [`parent_task_id`](Self::parent_task_id) took, so no stored board needs
-    /// migrating on any backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_parent: Option<EventSeq>,
+    /// Flattened, so this is **byte-identical on the wire** to the two fields
+    /// it replaces and no stored board needs migrating on any backend. A card
+    /// persisted with the drifted pair — a parent and no chat — has no
+    /// conversation to name, and loads as `None`: the orphan is dropped on
+    /// read rather than carried forward.
+    #[serde(flatten)]
+    pub origin: Option<TaskOrigin>,
     /// The task whose dispatch turn spawned this card (issue #185) — the
     /// parent half of the Task Detail screen's lineage.
     ///
@@ -1147,6 +1177,31 @@ pub struct TaskRecord {
     /// [`Self::output`], so no stored board needs migrating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounced: Option<String>,
+}
+
+impl TaskRecord {
+    /// The desk this card was raised in, if it came from a conversation.
+    ///
+    /// Reads through [`origin`](Self::origin), so a card with a thread root and
+    /// no desk — the state the two loose fields could reach and this type
+    /// cannot — has no conversation to name and answers `None`.
+    #[must_use]
+    pub fn origin_chat_id(&self) -> Option<&str> {
+        self.origin
+            .as_ref()
+            .map(|origin| origin.origin_chat_id.as_str())
+    }
+
+    /// The thread within that desk, or `None` for the channel-level
+    /// conversation *and* for a card that belongs to no conversation at all.
+    ///
+    /// A reader that needs to tell those two apart must ask
+    /// [`origin_chat_id`](Self::origin_chat_id), exactly as it did when these
+    /// were two fields.
+    #[must_use]
+    pub fn origin_parent(&self) -> Option<EventSeq> {
+        self.origin.as_ref().and_then(|origin| origin.origin_parent)
+    }
 }
 
 /// Durable per-company task board. Company A's tasks MUST be invisible to
@@ -1566,8 +1621,7 @@ mod test {
             priority: "medium".to_string(),
             assignee: "maya".to_string(),
             updated_at_millis: 7,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             // #339's baseline fixture stays baseline: it exists to prove the
@@ -1580,6 +1634,76 @@ mod test {
             origin_workflow_id: None,
             bounced: None,
         }
+    }
+
+    /// Issue #1890 step 5: the origin is one value and **the same two keys**.
+    ///
+    /// The whole claim of the type change is that no stored board migrates, so
+    /// this pins the bytes rather than the shape: a card raised in a thread
+    /// serializes to `originChatId` + `originParent` exactly as it did when
+    /// those were two loose fields, and a board card writes neither key.
+    #[test]
+    fn an_origin_serializes_to_the_two_keys_it_always_did() {
+        let mut card = plain_card();
+        card.origin = TaskOrigin::new(Some("engineering".to_string()), Some(EventSeq::new(41)));
+        let json = serde_json::to_string(&card).expect("serializes");
+        assert!(json.contains(r#""originChatId":"engineering""#), "{json}");
+        assert!(json.contains(r#""originParent":41"#), "{json}");
+        assert!(
+            !json.contains(r#""origin":"#),
+            "the value is flattened away"
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskRecord>(&json).expect("round trip"),
+            card
+        );
+
+        // A channel-level card writes the desk and skips the thread, and a
+        // board card writes neither — so an existing card's stored bytes are
+        // unchanged rather than merely equivalent.
+        card.origin = TaskOrigin::new(Some("engineering".to_string()), None);
+        let channel = serde_json::to_string(&card).expect("serializes");
+        assert!(
+            channel.contains(r#""originChatId":"engineering""#),
+            "{channel}"
+        );
+        assert!(!channel.contains("originParent"), "{channel}");
+
+        card.origin = None;
+        let board = serde_json::to_string(&card).expect("serializes");
+        assert!(!board.contains("originChatId"), "{board}");
+        assert!(!board.contains("originParent"), "{board}");
+    }
+
+    /// A stored card carrying the **drifted pair** loads with no origin at all.
+    ///
+    /// A thread root beside no desk names no conversation. It was reachable
+    /// while these were two independent fields — #1890 B stamped the parent
+    /// from the raising message's own `parent` and D then changed what an
+    /// unparented message means — and a card in that state settled its marker
+    /// somewhere its thread could not see. `TaskOrigin` cannot represent it, so
+    /// the orphan is dropped on read instead of being carried forward.
+    #[test]
+    fn a_thread_root_without_a_desk_is_not_a_conversation() {
+        let drifted = r#"{
+            "id": "t-1",
+            "title": "Draft the spec",
+            "column": "in_review",
+            "priority": "medium",
+            "assignee": "maya",
+            "updatedAtMillis": 7,
+            "originParent": 41
+        }"#;
+        let card: TaskRecord = serde_json::from_str(drifted).expect("drifted card parses");
+        assert!(card.origin.is_none(), "a parent alone is not an origin");
+        assert_eq!(card.origin_chat_id(), None);
+        assert_eq!(card.origin_parent(), None);
+        assert!(
+            !serde_json::to_string(&card)
+                .expect("serializes")
+                .contains("originParent"),
+            "the orphan is dropped on read, not carried forward"
+        );
     }
 
     /// Issue #661 (M5): the run reference round-trips as camelCase, and — the
