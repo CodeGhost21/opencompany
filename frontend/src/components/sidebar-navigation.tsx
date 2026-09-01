@@ -240,15 +240,30 @@ export function SidebarNavigation({
   const active = sectionOwning(view);
 
   return (
-    <SidebarGroup>
-      <SidebarMenu>
+    // `min-h-0 flex-1` down the chain, so the ONE section whose contents are
+    // unbounded can shrink instead of pushing its siblings off the bottom.
+    // Twenty channels plus DMs is an ordinary company, and without this the
+    // Room list grew until Company, Connections and Flows were below the fold
+    // — recreating, inside one row, exactly the wall the four-row sidebar
+    // exists to remove (`ledgers-console-ia.md` Rule 2's rejected Draft 1).
+    // A flex item's default `min-height: auto` floors it at its content, which
+    // is why the zero has to be said at every level rather than once.
+    <SidebarGroup className="min-h-0 flex-1">
+      <SidebarMenu className="min-h-0">
         {NAV_SECTIONS.map((section) => {
           const expanded = section === active;
           const openChild = expanded
             ? section.children?.find((child) => childActive(section, child, view, sub))
             : undefined;
           return (
-            <SidebarMenuItem key={section.view} data-tour={`nav-${section.view}`}>
+            <SidebarMenuItem
+              key={section.view}
+              data-tour={`nav-${section.view}`}
+              // Only the slot-bearing section shrinks: a fixed list of children
+              // is short by construction, and letting those rows scroll would
+              // hide a destination behind a scrollbar for no reason.
+              className={cn(section.slot && "flex min-h-0 flex-col")}
+            >
               <SidebarMenuButton
                 // The parent row carries the accent only when nothing beneath
                 // it does. With a child lit, a lit parent is two highlights for
@@ -296,7 +311,18 @@ export function SidebarNavigation({
                   dropping the channel list at 3rem is exactly the regression
                   issue #1018 filed about the approvals badge. */}
               {expanded && section.slot === "room" && (
-                <div ref={setElement} data-testid="room-rail-slot" className="min-w-0" />
+                <div
+                  ref={setElement}
+                  data-testid="room-rail-slot"
+                  // Scrolls within the section rather than truncating behind a
+                  // "show all". A channel list is scanned, not read once: an
+                  // operator looks for a name they already know, and a list
+                  // that hides its tail behind a control makes the one thing
+                  // they came for the one thing they cannot see. Scrolling
+                  // costs a gesture only at the sizes where a truncation would
+                  // cost a click plus a gesture anyway.
+                  className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
+                />
               )}
             </SidebarMenuItem>
           );
