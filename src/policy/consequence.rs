@@ -888,8 +888,11 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 /// Ordered for reading:
 ///
 /// * `composio_execute` — #441, keyed on the action slug.
-/// * `web_fetch` / `curl` — keyed on the URL's host.
-/// * `http_request` — keyed on its method and URL host.
+/// * `web_fetch` — keyed on the URL's host.
+/// * `http_request` — keyed on its method and URL host. `curl` is deliberately
+///   NOT here: unlike `web_fetch`/`http_request`, it always writes the
+///   response to the workspace `downloads/` dir, so it stays on the
+///   [`DECLARED`] row's `Reach::Consequence`.
 /// * `shell` — #875, keyed on the command line.
 /// * `git_operations` — #877, keyed on the `operation`.
 /// * `mcp_call_tool` / `mcp_registry_tool_call` — #1124, keyed on the
@@ -910,7 +913,6 @@ const ARGUMENT_GRADED: &[(&str, Grader)] = &[
     (COMPOSIO_EXECUTE, composio_execute_consequence),
     (WEB_FETCH, web_fetch_consequence),
     ("http_request", http_request_consequence),
-    ("curl", curl_consequence),
     (SHELL, shell_consequence),
     (GIT_OPERATIONS, git_operations_consequence),
     (MCP_CALL_TOOL, mcp_call_tool_consequence),
@@ -1489,10 +1491,6 @@ fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
             None => Standing::PerCall,
         },
     }
-}
-
-fn curl_consequence(args: &serde_json::Value) -> Consequence {
-    web_fetch_consequence(args)
 }
 
 fn http_request_consequence(args: &serde_json::Value) -> Consequence {
@@ -2077,7 +2075,7 @@ fn shell_command_is_read(_command: &str, _declared: Option<&str>) -> bool {
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
     // The mint side and the live call must read the host with identical code, or
     // a grant could be minted that never matches its own tool.
-    if [WEB_FETCH, "http_request", "curl"]
+    if [WEB_FETCH, "http_request"]
         .iter()
         .any(|candidate| tool.eq_ignore_ascii_case(candidate))
     {
@@ -2702,17 +2700,33 @@ mod tests {
     }
 
     #[test]
-    fn curl_and_web_fetch_are_external_reads() {
+    fn web_fetch_is_an_external_read() {
         let args = fetching("https://docs.rs/serde");
-        for tool in ["curl", WEB_FETCH] {
-            let verdict = consequence_of(tool, &args);
-            assert_eq!(verdict.reach, Reach::ExternalRead, "{tool}");
-            assert_eq!(verdict.standing, Standing::ScopedGrantable, "{tool}");
-            assert!(!verdict.reach.parks_under_supervision(), "{tool}");
-            assert!(!verdict.parks_under_auto(), "{tool}");
-            assert!(verdict.reach.denied_under_readonly(), "{tool}");
-            assert!(!verdict.reach.costs_money(), "{tool}");
-        }
+        let verdict = consequence_of(WEB_FETCH, &args);
+        assert_eq!(verdict.reach, Reach::ExternalRead);
+        assert_eq!(verdict.standing, Standing::ScopedGrantable);
+        assert!(!verdict.reach.parks_under_supervision());
+        assert!(!verdict.parks_under_auto());
+        assert!(verdict.reach.denied_under_readonly());
+        assert!(!verdict.reach.costs_money());
+    }
+
+    /// `curl` shares `web_fetch`'s URL-reading shape but, unlike it, always
+    /// streams its response to a file under the workspace `downloads/` dir
+    /// (`CurlTool::execute`) — a write on every successful call. A readable
+    /// URL must not downgrade it to `web_fetch`'s `Reach::ExternalRead`: that
+    /// would let a workspace write skip the `supervised` park.
+    #[test]
+    fn curl_stays_consequence_gated_even_with_a_readable_url() {
+        let args = fetching("https://docs.rs/serde");
+        let verdict = consequence_of("curl", &args);
+        assert_eq!(verdict.reach, Reach::Consequence);
+        assert_eq!(verdict.standing, Standing::PerCall);
+        assert!(verdict.reach.parks_under_supervision());
+        assert!(verdict.parks_under_auto());
+        assert!(verdict.reach.denied_under_readonly());
+        assert!(!verdict.reach.costs_money());
+        assert_eq!(standing_scope_of("curl", &args), None);
     }
 
     /// **The userinfo trap.** `https://docs.rs@evil.example/` fetches
@@ -3764,7 +3778,7 @@ mod tests {
         assert!(all.contains(&COMPOSIO_EXECUTE));
         assert!(all.contains(&"shell"));
         // `composio_execute` is the one roster entry with no `DECLARED` row;
-        // the other five shadow theirs and are counted once.
+        // the other four shadow theirs and are counted once.
         assert_eq!(all.len(), DECLARED.len() + 1);
     }
 
@@ -3854,7 +3868,7 @@ mod tests {
     #[test]
     fn a_roster_entry_that_shadows_a_table_row_is_enumerated_once() {
         let names: Vec<&str> = declared_tools().collect();
-        for tool in ["shell", WEB_FETCH, "http_request", "curl", GIT_OPERATIONS] {
+        for tool in ["shell", WEB_FETCH, "http_request", GIT_OPERATIONS] {
             assert_eq!(
                 names.iter().filter(|name| **name == tool).count(),
                 1,

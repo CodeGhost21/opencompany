@@ -2392,10 +2392,6 @@ mod tests {
                 serde_json::json!({ "method": "GET", "url": "https://api.example.com/items" }),
             ),
             (
-                "curl",
-                serde_json::json!({ "url": "https://example.com/data.json" }),
-            ),
-            (
                 "web_fetch",
                 serde_json::json!({ "url": "https://example.com/docs" }),
             ),
@@ -2444,6 +2440,14 @@ mod tests {
             (
                 "http_request",
                 serde_json::json!({ "method": "POST", "url": "https://api.example.com/items" }),
+            ),
+            // `curl` always streams its response to a file under the
+            // workspace `downloads/` dir (`CurlTool::execute`), unlike
+            // `web_fetch`/read-shaped `http_request` — so a readable host
+            // must not exempt it from parking.
+            (
+                "curl",
+                serde_json::json!({ "url": "https://example.com/data.json" }),
             ),
             ("git_operations", serde_json::json!({})),
             ("workspace_write", serde_json::json!({})),
