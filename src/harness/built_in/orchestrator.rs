@@ -186,6 +186,15 @@ pub const READ_RUN_TOOL: &str = "read_run";
 /// card N.
 const LIST_TASKS_LIMIT: usize = 40;
 
+/// `read_task`'s cap on rendered attempt rows (issue #1859's follow-up
+/// review). A card retried many times — especially with failed attempts
+/// carrying a 200-char error preview — can otherwise fill the whole
+/// `TOOL_RESULT_BUDGET_BYTES` before the `## Output` section that answers
+/// what the task actually produced ever renders. Bounded to the newest rows,
+/// which are the ones a "why isn't this done" question is about, with an
+/// honest count of what was cut.
+const READ_TASK_ATTEMPTS_LIMIT: usize = 10;
+
 /// The id of the orchestrator agent for a roster: the first agent tagged
 /// `tier = "orchestrator"`, else the first roster agent, else `None` (empty
 /// roster). The fallback is what keeps a company with no tagged orchestrator
@@ -2056,13 +2065,25 @@ impl Tool for ReadTaskTool {
                     if attempts.is_empty() {
                         md.push_str("_No attempts yet._\n");
                     } else {
-                        // `list_runs` is newest-first; render the timeline oldest-first.
+                        // `list_runs` is newest-first — keep the newest rows
+                        // (the ones a "why isn't this done" question is
+                        // about) before reversing the kept window to render
+                        // the timeline oldest-first.
+                        let omitted = attempts.len().saturating_sub(READ_TASK_ATTEMPTS_LIMIT);
+                        attempts.truncate(READ_TASK_ATTEMPTS_LIMIT);
                         attempts.reverse();
+                        if omitted > 0 {
+                            md.push_str(&format!(
+                                "_{omitted} earlier attempt(s) omitted — showing the \
+                                 {READ_TASK_ATTEMPTS_LIMIT} most recent._\n"
+                            ));
+                        }
                         for run in &attempts {
                             md.push_str(&format!(
-                                "- attempt {} — {}",
+                                "- attempt {} — {} (run `{}`)",
                                 run.attempt,
-                                run.status.as_str()
+                                run.status.as_str(),
+                                run.id
                             ));
                             if let Some(err) = &run.error {
                                 md.push_str(&format!(" — {}", truncate_chars(err, 200)));
@@ -12476,6 +12497,101 @@ name = "Morning"
         assert!(
             !out.contains("Nothing published yet"),
             "an artifact-store read failure must not look like a genuinely empty store: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_includes_each_attempts_run_id_so_read_run_is_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Investigate the outage",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+        let mut run = runs
+            .create_run(
+                &company,
+                crate::ports::runs::NewRun::for_task("r-1", "t-1", "engineer"),
+            )
+            .await
+            .unwrap();
+        run.status = RunStatus::Failed;
+        run.error = Some("timed out".to_string());
+        runs.put_run(&company, &run).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("r-1"),
+            "an attempt's run id must be discoverable from read_task, since read_run requires \
+             it: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_bounds_rendered_attempts_so_output_cannot_be_pushed_out_of_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let runs: Arc<dyn RunStore> = fs;
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Flaky deploy",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+        for n in 1..=(READ_TASK_ATTEMPTS_LIMIT + 3) {
+            let mut run = runs
+                .create_run(
+                    &company,
+                    crate::ports::runs::NewRun::for_task(format!("r-{n}"), "t-1", "engineer"),
+                )
+                .await
+                .unwrap();
+            run.status = RunStatus::Failed;
+            run.error = Some("boom".to_string());
+            runs.put_run(&company, &run).await.unwrap();
+        }
+
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("3 earlier attempt(s) omitted"),
+            "must report how many older attempts were cut: {out}"
+        );
+        let output_at = out.find("## Output").expect("Output section present");
+        let attempts_at = out.find("## Attempts").expect("Attempts section present");
+        assert!(
+            output_at > attempts_at,
+            "the Output section must still be reachable after a long attempt history: {out}"
         );
     }
 }
