@@ -387,6 +387,15 @@ export function MessageTimeline({
                 onRedeemBudgetPause={onRedeemBudgetPause}
                 redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
                 latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+                // Issue #1986: read off `channel.system` here rather than
+                // threaded down from `ChatView`, because this component already
+                // holds the channel and that flag *is* the predicate `ChatView`
+                // derives its own `readOnly` from — a second prop carrying the
+                // same fact through the same tree is one more thing that can
+                // disagree with it. See `MessageRow`'s `readOnly` doc for what
+                // it takes away (adding a reaction) and what it deliberately
+                // leaves (reactions already there, and the way into a thread).
+                readOnly={Boolean(channel.system)}
               />
             </div>
           ) : (

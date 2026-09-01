@@ -1,20 +1,4 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Activity,
-  // AppWindow,  // re-add with the Pages nav entry below
-  Brain,
-  FolderClosed,
-  LayoutDashboard,
-  type LucideIcon,
-  MessagesSquare,
-  Network,
-  Plug,
-  ShieldCheck,
-  BookText,
-  Wallet,
-  Workflow,
-} from "lucide-react";
-
 import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
@@ -28,16 +12,11 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarGroup,
   SidebarFooter,
   SidebarInset,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ApprovalsButton } from "@/components/approvals-button";
@@ -48,11 +27,9 @@ import { OverviewButton } from "@/components/overview-button";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
-import {
-  SidebarCollapseButton,
-  RESTING_ROW,
-  SidebarUtilityBar,
-} from "@/components/sidebar-controls";
+import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
+import { SidebarNavigation } from "@/components/sidebar-navigation";
+import { RoomRailSlotProvider } from "@/components/room-rail";
 import { SetupController } from "@/setup/SetupController";
 import {
   arrivedViaSetupHandoff,
@@ -117,7 +94,7 @@ import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { DEFAULT_VIEW, isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
 import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
@@ -235,139 +212,11 @@ const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default:
 // shell that renders those views.
 export type { View };
 
-interface NavItem {
-  view: View;
-  label: string;
-  icon: LucideIcon;
-}
-
-// The approvals count is NOT here any more, and its absence is the point.
-//
-// This rendered two elements for one fact: a `SidebarMenuBadge` carrying the
-// number, and — because that badge hides itself on the 32px rail — a
-// `SidebarMenuDot` mirroring it so a collapsed sidebar still said something was
-// waiting (issue #1018). The dot existed only to survive a collapse.
-//
-// The count now lives in the window's title row (`ApprovalsButton`), which is
-// chrome: it is on screen on every page, in every sidebar state, at every width
-// down to the floor of the degradation ladder. There is no collapse left for a
-// dot to survive, so both elements are deleted rather than one of them kept —
-// two mechanisms for one number is exactly what #1018 had to reconcile, and the
-// cheapest way not to have that problem is not to have two.
-function SidebarNavigation({
-  view,
-  onNavigate,
-}: {
-  view: View;
-  onNavigate: (view: View) => void;
-}) {
-  const { isMobile, setOpenMobile } = useSidebar();
-
-  const navigate = useCallback(
-    (next: View) => {
-      onNavigate(next);
-      if (isMobile) setOpenMobile(false);
-    },
-    [isMobile, onNavigate, setOpenMobile],
-  );
-
-  return (
-    <SidebarGroup>
-      <SidebarMenu>
-        {NAV.map((item) => (
-          <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
-            <SidebarMenuButton
-              isActive={isNavigationActive(item.view, view)}
-              tooltip={item.label}
-              onClick={() => navigate(item.view)}
-              className={RESTING_ROW}
-            >
-              <item.icon />
-              <span>{item.label}</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        ))}
-      </SidebarMenu>
-    </SidebarGroup>
-  );
-}
-
-// One flat list. The nav was grouped under "Operate" and "Configure" when the
-// second group held five entries; now that configuration is a section of its
-// own, a heading over two rows labelled more than it sorted.
-//
-// "Work" (issue #1284, Rule 2 of docs/spec/runtime/ledgers-console-ia.md) is
-// one static row landing on Tasks by default; every other list the company
-// holds (Goals, Decisions, whatever it declared) is reachable from a
-// switcher on `LedgersView`'s own page title, not a second nav element.
-// Three other shapes were tried and rejected first: a row per list (unusable
-// at the 12-declared-list cap — 15 list rows plus 8 other NAV entries), a
-// collapsible sidebar section (still wrong premise: a declared list is read
-// occasionally, mostly written by agents, not a surface an operator works
-// out of the way Tasks is), and a tab strip (solved scaling but taxed the
-// most-visited screen with a permanent band for lists rarely opened) — see
-// the doc for the full reasoning on each. Do not re-add any of them without
-// reading that doc first.
-const NAV: NavItem[] = [
-  { view: "overview", label: "Overview", icon: LayoutDashboard },
-  // Issue #311: the company's structure, and the only way in to desk
-  // creation and membership since #302 unmounted the flat Desks page.
-  { view: "company", label: "Company", icon: Network },
-  { view: "chat", label: "Chat", icon: MessagesSquare },
-  // Tasks by default; every other list the company holds is one click away
-  // through the switcher on `LedgersView`'s own title. See the comment above
-  // `NAV` for why this is one row rather than one per list or a tab strip.
-  { view: "ledgers", label: "Work", icon: BookText },
-  { view: "workspace", label: "Workspace", icon: FolderClosed },
-  // What the company remembers, beside what it keeps. It was a settings
-  // sub-page, which put a surface an operator *reads* behind the rail where
-  // they *change* things — and three clicks in front of "does it already know
-  // this". `#/settings/brain` and `#/memory` both rewrite onto this row.
-  { view: "brain", label: "Brain", icon: Brain },
-  { view: "approvals", label: "Approvals", icon: ShieldCheck },
-  // Re-listed. Issue #302 parked the flat Finances page — a single ledger
-  // projection with nowhere to go. What comes back is a section: that same
-  // projection as Overview, plus Invoicing and Wallet, which are the live
-  // Chargebee and PayPal surfaces the host had no HTTP route for until
-  // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
-  { view: "finances", label: "Finance", icon: Wallet },
-  // Beside Finance, and above the Workflows/Observatory pair, because that is
-  // the seam it belongs on. Finance and Connections are the two rows about the
-  // world *outside* this company — the money it moves through Chargebee and
-  // PayPal, and the apps and tool servers its teammates act through — while
-  // Workflows and Observatory are the "what the agents did" pair and read as
-  // one thing when adjacent. Splitting either pair to slot this in would cost
-  // more than it bought.
-  //
-  // Not in Settings, which is where it used to live as two sub-pages. A
-  // settings rail is for configuration an operator sets once; which apps the
-  // company can act through is something they come back to and read, and it
-  // changes as the work does — the same argument that moved Billing out to
-  // Finance (docs/spec/runtime/finance-console.md) and Brain out to its own
-  // row. See docs/spec/runtime/ledgers-console-ia.md, Rule 7.
-  { view: "connections", label: "Connections", icon: Plug },
-  { view: "workflows", label: "Workflows", icon: Workflow },
-  // What the agents actually did, run by run — the read-only companion to
-  // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
-  { view: "observatory", label: "Observatory", icon: Activity },
-  // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
-  // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
-  // "something an agent built" surfaces, as opposed to the fixed views above.
-  // Pages is deliberately not offered in the nav (issues #1171, #1172). Do not
-  // "fix" the omission by adding it back. What keeps `#/pages` answering is its
-  // entry in `@/lib/console-routes`, NOT this commented row — a commented row
-  // routes nothing, which is exactly how the address died for four months
-  // (issue #1311). Remove a nav row here and the surface is hidden; remove it
-  // from `console-routes.ts` and the surface is gone.
-  // { view: "pages", label: "Pages", icon: AppWindow },
-  // Settings is NOT here, and its absence is deliberate in the same way the
-  // Pages line above is. It is a utility, not a place an operator works, so it
-  // sits on the sidebar's utility bar with Feedback, Discord and Collapse
-  // (`SidebarUtilityBar`) — which still carries the `data-tour="nav-settings"`
-  // anchor the guided tour spotlights. `#/settings` keeps answering because of
-  // its entry in `@/lib/console-routes`; removing THAT is what would take the
-  // surface away.
-];
+// The nav model and the rows that render it live in
+// `@/components/sidebar-navigation` — the four sections, what is filed under
+// each, and the sub-navigation the sidebar draws beneath the active one. It is
+// a module of its own for the same reason `console-routes.ts` is: the unit lane
+// runs with no React plugin, so a table it can import is a table it can pin.
 
 // The console is hash-routed, so a normal `href="#main-content"` would also
 // be treated as a route change. Keep the conventional fragment for link
@@ -600,11 +449,10 @@ export function AppShell({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
-  const [view, sub, navigate] = useHashView<View>(
-    VIEWS,
-    "overview",
-    REWRITE_RETIRED,
-  );
+  // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
+  // whose view was retired — all of them land in the room the operator talks
+  // to their company in, rather than on a dashboard about it.
+  const [view, sub, navigate] = useHashView<View>(VIEWS, DEFAULT_VIEW, REWRITE_RETIRED);
   const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
@@ -721,7 +569,7 @@ export function AppShell({
    * the tour drives `view` around, and re-reading it would let a tour step
    * suppress the very dialog that is meant to precede the tour.
    */
-  const deepLinked = useRef(view !== "overview" || Boolean(sub)).current;
+  const deepLinked = useRef(view !== DEFAULT_VIEW || Boolean(sub)).current;
   /**
    * Bumped when setup finishes, so the Team page re-reads a roster that now has
    * people on it. A counter rather than a boolean: a second run must re-trigger
@@ -3285,7 +3133,7 @@ export function AppShell({
         setSetupCompleted(true);
         setView("company");
       }}
-      onRouteDismiss={() => setView("overview")}
+      onRouteDismiss={() => setView(DEFAULT_VIEW)}
     />
   );
 
@@ -3418,6 +3266,14 @@ export function AppShell({
           control, which is inside this context — so the direction is flipped
           here rather than by wrapping the provider in another element. */}
       <SidebarProvider className="h-svh flex-col overflow-hidden">
+      {/* Room's channel list is rendered by `ChatView`, in the content column,
+          and painted in the sidebar column. This provider is the slot the two
+          agree on; `room-rail.tsx` explains why it is a portal rather than the
+          whole chat model lifted up here. Inside `SidebarProvider` because it
+          also carries the sidebar's density down to the rail — the sidebar's
+          collapse IS the channel list's collapse now — and above both the
+          sidebar and the inset, which are the two ends of the portal. */}
+      <RoomRailSlotProvider>
         <a
           href={`#${MAIN_CONTENT_ID}`}
           className="sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:not-sr-only focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:ring-2 focus:ring-ring focus:outline-none"
@@ -3524,7 +3380,7 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} onNavigate={setView} />
+          <SidebarNavigation view={view} sub={sub} onNavigate={setView} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on
@@ -4004,12 +3860,7 @@ export function AppShell({
             </Suspense>
           )}
           {view === "connections" && (
-            <ConnectionsSection
-              client={client}
-              company={company}
-              sub={sub}
-              onNavigate={(page) => navigate("connections", page)}
-            />
+            <ConnectionsSection client={client} company={company} sub={sub} />
           )}
           {view === "settings" && (
             <SettingsSection
@@ -4058,6 +3909,7 @@ export function AppShell({
         hold={setupOpen}
         suppressWelcome={setupCompleted}
       />
+      </RoomRailSlotProvider>
       </SidebarProvider>
     </ConsoleProvider>
   );

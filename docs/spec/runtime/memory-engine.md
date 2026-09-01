@@ -104,7 +104,8 @@ would quietly stop holding.
 
 ## Which contract this binds
 
-`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/api` — the same path
+`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/crates/tinymemory-api`
+— the same path
 `vendor/openhuman` itself path-depends on, which is what keeps the
 `MemoryProvider` trait identity single across the process. The historical
 `tinycortex-api` re-export and the in-pod `tinycortex` engine that used to back
