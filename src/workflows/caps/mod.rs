@@ -2557,7 +2557,9 @@ impl HarnessAgentRunner {
             }
         }
 
-        if let Some(verify) = request.get("verify") {
+        if outcome.budget_paused.is_none()
+            && let Some(verify) = request.get("verify")
+        {
             let criteria = verify
                 .get("criteria")
                 .and_then(Value::as_str)
@@ -4150,6 +4152,79 @@ mod tests {
             "the second judge call must see the augmented output, not the original refusal alone: \
              {reverify_prompt}"
         );
+    }
+
+    /// Codex review on #1990 (#3905537805): a turn refused by its per-agent
+    /// spend cap is rejected by the `LimitStop` path regardless, so paying for
+    /// a judge on the pause notice buys nothing — and an `escalate` verdict
+    /// returns early with a generic blocker, replacing the budget-pause
+    /// diagnosis the operator needs with "needs information intervention".
+    #[tokio::test]
+    async fn a_budget_paused_turn_skips_the_sufficiency_judge() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-budget-paused-judge-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = Arc::new(EscalatingJudgeProvider::default());
+        deps.provider = provider.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "paused — out of budget".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: "researcher".to_string(),
+                summary: "acme is out of inference credits".to_string(),
+            }),
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990".to_string(),
+            "run-1990".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "spend_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "the report must be sent" },
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a budget-paused turn must not pay for a sufficiency judge"
+        );
+        let (_, outcome) = result.expect(
+            "the budget-pause diagnosis must survive: the judge must not turn this into a \
+             generic information blocker",
+        );
+        assert!(outcome.budget_paused.is_some());
     }
 
     /// PR #1883 review (Codex #3874941288): the sibling of
