@@ -13358,4 +13358,238 @@ mode = "full"
             StatusCode::NOT_FOUND
         );
     }
+
+    /// `apply_review_decision`'s `Revise` arm through the HTTP handler: the
+    /// card re-enters `in_progress` with the operator's note appended, rather
+    /// than settling to `done` the way `Approve` does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_revise_re_enters_in_progress_with_the_note() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: "Ship it".to_string(),
+                    note: Some("[writer] first draft".to_string()),
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let receipt = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-1".to_string(),
+                decision: "revise".to_string(),
+                note: Some("tighten the intro".to_string()),
+            }),
+        )
+        .await
+        .expect("revise applies")
+        .0;
+        assert_eq!(receipt.task_id, "t-1");
+        assert_eq!(receipt.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        let note = after.note.expect("note");
+        assert!(note.contains("tighten the intro"), "{note}");
+    }
+
+    /// An unrecognized `decision` string rejects with `InvalidRequest` (400)
+    /// rather than falling through to either verdict.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_rejects_an_unknown_decision() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: "Ship it".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let err = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-1".to_string(),
+                decision: "yeet".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("an unknown decision string must not settle the card");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// `POST {scope}/chat/review` end to end through the real router: proves
+    /// the route is actually mounted by [`with_review_routes`] (not just that
+    /// the handler function works when called directly) and that the wire
+    /// body deserializes and settles the card via HTTP.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn chat_review_route_is_mounted_and_settles_via_http() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: "Ship it".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat/review")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chatId": "strategy",
+                            "taskId": "t-1",
+                            "decision": "approve",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["taskId"], "t-1");
+        assert_eq!(value["column"], "done");
+    }
+
+    /// No card is `in_review` on the desk at all — as opposed to a `taskId`
+    /// naming the wrong card, covered above — must also 404, through the same
+    /// HTTP path the console calls.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn chat_review_route_404s_when_no_card_is_in_review() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat/review")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chatId": "strategy",
+                            "taskId": "t-1",
+                            "decision": "approve",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
