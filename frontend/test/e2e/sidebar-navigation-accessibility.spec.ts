@@ -47,8 +47,14 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   for (const name of ["Room", "Company", "Connections", "Flows"]) {
     await expect(navigation.getByRole("button", { name, exact: true })).toBeVisible();
   }
+  // Scoped to the FIRST group — the fixed four. The group after it holds the
+  // active section's contents, which is a different question and a different
+  // count. Asserted by count as well as by name: a tenth row creeping back in
+  // is the thing this restructure exists to stop, and four `toBeVisible` calls
+  // would not notice it.
   await expect(
-    page.locator("[data-slot=sidebar-content] [data-sidebar=menu-button]"),
+    page.locator("[data-slot=sidebar-content] [data-sidebar=group]").first()
+      .locator("[data-sidebar=menu-button]"),
   ).toHaveCount(4);
   // Overview and Approvals are not among them: they are chrome in the window's
   // title row now, not destinations in a list of destinations.

@@ -323,11 +323,18 @@ export function SidebarNavigation({
                 {active.children.map((child) => {
                   const open = childActive(active, child, view, sub);
                   return (
-                    <SidebarMenuItem key={`${child.view}/${child.sub ?? ""}`}>
+                    // The `data-tour` anchor sits on the ITEM, not the button —
+                    // the same shape a section row has, so every selector
+                    // written as `[data-tour="nav-x"] >> role=button` works for
+                    // both. Putting it on the button made a child row the one
+                    // exception, and `list-switcher.spec.ts` found it.
+                    <SidebarMenuItem
+                      key={`${child.view}/${child.sub ?? ""}`}
+                      data-tour={`nav-${child.sub ?? child.view}`}
+                    >
                       <SidebarMenuButton
                         isActive={open}
                         aria-current={open ? "page" : undefined}
-                        data-tour={`nav-${child.sub ?? child.view}`}
                         tooltip={child.label}
                         onClick={() => navigate(child.view, child.sub)}
                         className={RESTING_ROW}
