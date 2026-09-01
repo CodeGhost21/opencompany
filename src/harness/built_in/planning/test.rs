@@ -647,12 +647,24 @@ fn the_native_branch_wins_even_when_composio_is_unreachable() {
 #[test]
 fn native_capabilities_are_a_union_over_the_roster_grants() {
     let maya = teammate_with_grants("maya", &["search"]);
-    let set = native_capabilities_of(std::slice::from_ref(&maya), None, true, true);
+    let set = native_capabilities_of(
+        std::slice::from_ref(&maya),
+        None,
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(set.contains("search"));
 
     let ann = teammate_with_grants("ann", &["*"]);
     let bob = teammate_with_grants("bob", &["composio"]);
-    let set = native_capabilities_of(&[ann, bob], None, true, true);
+    let set = native_capabilities_of(
+        &[ann, bob],
+        None,
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(!set.contains("search"));
     assert!(!set.contains("composio"));
 }
@@ -670,18 +682,36 @@ fn native_capabilities_require_the_backend_not_just_the_grant() {
 
     // Neither backend configured: search/media are withheld even though the
     // grant is there; shell (no backend gate) still comes through.
-    let set = native_capabilities_of(&teammates, None, false, false);
+    let set = native_capabilities_of(
+        &teammates,
+        None,
+        false,
+        false,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(!set.contains("search"), "{set:?}");
     assert!(!set.contains("media"), "{set:?}");
     assert!(set.contains("shell"), "{set:?}");
 
     // Only search wired: search native, media still withheld.
-    let set = native_capabilities_of(&teammates, None, true, false);
+    let set = native_capabilities_of(
+        &teammates,
+        None,
+        true,
+        false,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(set.contains("search"), "{set:?}");
     assert!(!set.contains("media"), "{set:?}");
 
     // Both wired: both native.
-    let set = native_capabilities_of(&teammates, None, true, true);
+    let set = native_capabilities_of(
+        &teammates,
+        None,
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(set.contains("search"), "{set:?}");
     assert!(set.contains("media"), "{set:?}");
 }
@@ -701,19 +731,69 @@ fn native_capabilities_narrow_to_the_fixed_assignee() {
 
     // No fixed assignee: roster union — `bob` doesn't hold `search`, but
     // `maya` does, so the company can serve it.
-    let set = native_capabilities_of(&teammates, None, true, true);
+    let set = native_capabilities_of(
+        &teammates,
+        None,
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(set.contains("search"), "{set:?}");
 
     // Fixed to `bob`, who holds no search grant: the union answer would say
     // `search` is native, but `bob` is who this card actually dispatches to,
     // so it must not be.
     let bob = teammate_with_grants("bob", &["shell"]);
-    let set = native_capabilities_of(&teammates, Some(&bob), true, true);
+    let set = native_capabilities_of(
+        &teammates,
+        Some(&bob),
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(!set.contains("search"), "{set:?}");
 
     // Fixed to `maya`, who does hold it: still native.
     let maya = teammate_with_grants("maya", &["search"]);
-    let set = native_capabilities_of(&teammates, Some(&maya), true, true);
+    let set = native_capabilities_of(
+        &teammates,
+        Some(&maya),
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
+    assert!(set.contains("search"), "{set:?}");
+}
+
+/// The active [`CapabilityFilter`](crate::harness::toolbelt::CapabilityFilter)
+/// gates native evidence the same way [`toolbelt::namespace_denied`] gates the
+/// live belt (mirrored on the Composio-brief side by
+/// `native_caps_for_composio_brief`). A tenant tier that denies `search` still
+/// leaves the grant and the backend wired — `search_backend_configured` and
+/// `grants_confer` alone would both say yes — so only the filter itself can
+/// catch it; a namespace the filter does not mention stays unaffected.
+#[test]
+fn native_capabilities_respect_the_active_capability_filter() {
+    let maya = teammate_with_grants("maya", &["search", "shell"]);
+    let teammates = [maya];
+
+    let deny_search = crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
+        std::collections::HashSet::from(["search"]),
+    );
+    let set = native_capabilities_of(&teammates, None, true, true, &deny_search);
+    assert!(
+        !set.contains("search"),
+        "a tenant-tier denial must not be reported as native evidence: {set:?}"
+    );
+    assert!(set.contains("shell"), "{set:?}");
+
+    let set = native_capabilities_of(
+        &teammates,
+        None,
+        true,
+        true,
+        &crate::harness::toolbelt::CapabilityFilter::AllowAll,
+    );
     assert!(set.contains("search"), "{set:?}");
 }
 
@@ -776,6 +856,129 @@ allow = ["media"]
     assert!(
         !evidence.native_capabilities.contains("media"),
         "a non-HTTPS media backend must not be reported as natively wired: {:?}",
+        evidence.native_capabilities
+    );
+}
+
+/// `media_backend_from_env`/`with_media_backend` are gated only on the broader
+/// `openhuman` feature, not `media` — so `deps.media` can carry a resolved,
+/// HTTPS-valid backend in a build that never compiles `media_tools`, which is
+/// `#[cfg(feature = "media")]` in full. Without also checking the feature here,
+/// this evidence would report `media` native in exactly the build where the
+/// belt can never carry a media tool at all. This test only runs in that build
+/// (the crate's `--features openhuman` gate, `media` off) — an HTTPS backend
+/// present, and still no native `media` credited.
+#[cfg(not(feature = "media"))]
+#[tokio::test]
+async fn native_media_evidence_requires_the_media_feature() {
+    let manifest: CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Writer"
+tools = ["media"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["media"]
+"#,
+    )
+    .expect("fixture manifest parses");
+
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-planning-media-feature-")
+        .tempdir()
+        .expect("tempdir");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme-media-feature"))
+        .build()
+        .await
+        .expect("runtime");
+
+    let mut deps = crate::harness::workflow_wiring_deps(
+        &runtime,
+        None,
+        crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        None,
+    );
+    deps.media = Some(crate::harness::toolbelt::MediaBackend {
+        backend_url: "https://media.example".to_string(),
+        auth_token: "tok".to_string(),
+    });
+    runtime.set_workflow_harness_deps(deps);
+
+    let runtime = Arc::new(runtime);
+    let evidence = gather_evidence(&runtime, &card("c1", "maya"))
+        .await
+        .expect("evidence");
+
+    assert!(
+        !evidence.native_capabilities.contains("media"),
+        "a build without the `media` feature must never credit native media, \
+         even with a valid HTTPS backend: {:?}",
+        evidence.native_capabilities
+    );
+}
+
+/// `gather_evidence` end-to-end: a fully-granted, fully-backed `shell` is
+/// still withheld from `Evidence::native_capabilities` when the deployment's
+/// active [`CapabilityFilter`](crate::harness::toolbelt::CapabilityFilter)
+/// denies it. Before this fix `gather_evidence` never read
+/// `deps.capabilities` at all, so a tenant-tier denial applied to the live
+/// belt (`filter_by_capabilities`) went unseen here — planning could mark a
+/// namespace-denied prerequisite `Satisfied` off evidence the dispatched
+/// agent's actual belt disagreed with.
+#[tokio::test]
+async fn gather_evidence_respects_the_active_capability_filter() {
+    let manifest: CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Ops"
+tools = ["shell"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["shell"]
+"#,
+    )
+    .expect("fixture manifest parses");
+
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-planning-capfilter-")
+        .tempdir()
+        .expect("tempdir");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme-capfilter"))
+        .build()
+        .await
+        .expect("runtime");
+
+    let deny_shell = crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
+        std::collections::HashSet::from(["shell"]),
+    );
+    let deps = crate::harness::workflow_wiring_deps(&runtime, None, deny_shell, None);
+    runtime.set_workflow_harness_deps(deps);
+
+    let runtime = Arc::new(runtime);
+    let evidence = gather_evidence(&runtime, &card("c1", "maya"))
+        .await
+        .expect("evidence");
+
+    assert!(
+        !evidence.native_capabilities.contains("shell"),
+        "a tenant-tier denial on the active CapabilityFilter must not be \
+         reported as native evidence: {:?}",
         evidence.native_capabilities
     );
 }

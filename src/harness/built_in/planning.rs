@@ -102,6 +102,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::harness::HarnessDeps;
 use crate::harness::build::{grants_cover, model_for_tier};
 use crate::harness::provider::HarnessModel;
+use crate::harness::toolbelt;
 use crate::ports::now_millis;
 use crate::ports::tasks::{
     AssigneeCandidate, COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO, PlanStep,
@@ -984,11 +985,23 @@ fn settled_assignee(card_assignee: &str, proposed: Option<String>) -> Option<Str
 /// that does not resolve) falls back to the roster union: a namespace is
 /// included when **any** teammate's grants confer it, because whichever
 /// teammate ultimately works the card, the company can do it natively.
+///
+/// **A denied namespace is not proof of wiring either.** `capabilities` is the
+/// SAME [`toolbelt::CapabilityFilter`] `HarnessDeps::capabilities` carries and
+/// [`filter_by_capabilities`](crate::harness::toolbelt::filter_by_capabilities)
+/// strips the live belt with — exactly the check
+/// [`native_caps_for_composio_brief`](crate::harness::toolbelt::native_caps_for_composio_brief)
+/// already applies on the Composio-brief side. A tenant tier that denies
+/// `search` still leaves `maya`'s grant and this deployment's search backend
+/// in place; without this filter the evidence would call `search` native
+/// while `filter_by_capabilities` is about to strip the tool the belt would
+/// otherwise have carried.
 fn native_capabilities_of(
     teammates: &[TeammateBrief],
     fixed_assignee: Option<&TeammateBrief>,
     search_backend_configured: bool,
     media_backend_configured: bool,
+    capabilities: &toolbelt::CapabilityFilter,
 ) -> HashSet<String> {
     let grants_confer = |ns: &str| -> bool {
         match fixed_assignee {
@@ -1007,7 +1020,11 @@ fn native_capabilities_of(
     };
     crate::company::native_capability_namespaces()
         .into_iter()
-        .filter(|ns| backend_available(ns) && grants_confer(ns))
+        .filter(|ns| {
+            backend_available(ns)
+                && grants_confer(ns)
+                && !toolbelt::namespace_denied(capabilities, ns)
+        })
         .map(str::to_string)
         .collect()
 }
@@ -1029,7 +1046,11 @@ async fn gather_evidence(
             crate::error::OpenCompanyError::CompanyNotFound(runtime.id().to_string())
         })?;
 
-    let allow = record.manifest.tools.allow.clone();
+    // The effective allow-list, not the raw manifest field: [`CompanyRecord::effective_tool_allow`]
+    // folds in a console tool-grant an operator added after the seed shipped, so
+    // a namespace granted through the Connections tab reaches this evidence the
+    // same way it reaches every other `effective_tool_allow` reader.
+    let allow = record.effective_tool_allow();
     // The roster the company actually runs, not the half of it the manifest
     // declares (issue #1106, CodeRabbit on #1157).
     //
@@ -1204,13 +1225,30 @@ async fn gather_evidence(
     // decide the answer instead of the roster union. Both read off the SAME
     // `record`/`teammates` this pass already built, before either is moved
     // into `Evidence` below.
+    // The active capability-tier filter for this deployment. [`HarnessDeps::capabilities`]
+    // is what [`toolbelt::filter_by_capabilities`] strips the live belt with each
+    // turn; `AllowAll` (denies nothing) is the correct fallback for the no-deps
+    // case below, matching the [`HarnessDeps`] default everywhere else.
+    let capabilities = runtime
+        .workflow_harness_deps
+        .as_ref()
+        .map(|deps| &deps.capabilities)
+        .unwrap_or(&toolbelt::CapabilityFilter::AllowAll);
+
     let (search_backend_configured, media_backend_configured) =
         match runtime.workflow_harness_deps.as_ref() {
             Some(deps) => {
-                let media_backend_configured = deps
-                    .media
-                    .as_ref()
-                    .is_some_and(|backend| backend.is_https());
+                // Media evidence additionally requires the `media` feature itself:
+                // `media_backend_from_env`/`with_media_backend` are gated only on
+                // `openhuman`, so `deps.media` can be populated in a build that never
+                // compiles `media_tools` (it is `#[cfg(feature = "media")]` in full).
+                // Crediting `media` here without the feature would report a
+                // capability the belt can never carry, feature flags aside.
+                let media_backend_configured = cfg!(feature = "media")
+                    && deps
+                        .media
+                        .as_ref()
+                        .is_some_and(|backend| backend.is_https());
                 // `deps.tenant_search` is the boot-time snapshot on
                 // `runtime.workflow_harness_deps`, which nothing re-writes once a
                 // company adds a BYO key after startup — only `HarnessPool::ensure`
@@ -1241,6 +1279,7 @@ async fn gather_evidence(
         fixed_assignee,
         search_backend_configured,
         media_backend_configured,
+        capabilities,
     );
 
     Ok(Evidence {
