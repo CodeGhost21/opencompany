@@ -936,6 +936,12 @@ pub async fn resume_run(runtime: &CompanyRuntime, turn: &str) -> Result<()> {
             denied = released.denied.len(),
             "workflow: every gate on this run was refused, so no continuation runs"
         );
+        // Issue #1991 review (`3903797619`): a wholly refused batch is a
+        // terminal outcome — `resume_run` starts nothing, and no other path
+        // ever comes back for this lineage's checkpoint thread — so its
+        // `workflow-checkpoints` state is prunable exactly like the runner's
+        // own cancel/settle/genuine-failure arms already do.
+        prune_checkpoint_lineage_for_effect(runtime, &released.effect).await;
         return Ok(());
     }
     tracing::info!(
@@ -1246,6 +1252,36 @@ pub async fn spawn_blocked_node_continuation(
     );
     Ok(())
 }
+
+/// Prunes `effect`'s stashed checkpoint lineage, when it has one and this
+/// build has a checkpoint store wired.
+///
+/// A thin wrapper so the two terminal-refusal call sites — this module's
+/// [`resume_run`] and `CompanyRuntime::resume_blocked_agent_node`'s own
+/// all-refused arm — can prune the same way the workflow runner's cancel,
+/// clean-settle and genuine-failure arms already do (issue #1991 review,
+/// `3903797619`), without either of those default-build call sites needing to
+/// know that `workflow_checkpoints()` only exists under the `openhuman`
+/// feature.
+#[cfg(feature = "openhuman")]
+async fn prune_checkpoint_lineage_for_effect(runtime: &CompanyRuntime, effect: &Effect) {
+    let Some(store) = runtime.workflow_checkpoints() else {
+        return;
+    };
+    let Some(thread_id) = effect
+        .payload
+        .get(PAYLOAD_THREAD_ID)
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if let Err(error) = store.prune_settled(thread_id).await {
+        tracing::warn!(%thread_id, %error, "workflow: failed to prune settled checkpoints");
+    }
+}
+
+#[cfg(not(feature = "openhuman"))]
+async fn prune_checkpoint_lineage_for_effect(_runtime: &CompanyRuntime, _effect: &Effect) {}
 
 #[cfg(feature = "openhuman")]
 async fn checkpoint_resume_available(runtime: &CompanyRuntime, thread_id: Option<&str>) -> bool {
@@ -2736,5 +2772,78 @@ mode = "full"
             .expect_err("must surface the missing graph");
         assert!(err.to_string().contains("gated"), "{err}");
         assert!(runner.started().is_empty());
+    }
+
+    /// A workflow run whose whole approval batch is refused starts no
+    /// continuation — `resume_run`'s documented terminal case — and, since PR
+    /// #1991's review (`3903797619`), must also stop leaving that lineage's
+    /// checkpoint on disk forever: no other path ever comes back for a wholly
+    /// denied run's thread id.
+    #[tokio::test]
+    async fn an_all_denied_batch_prunes_its_checkpoint_lineage() {
+        use tinyflows::graph::Checkpointer;
+
+        let home = seed_home();
+        let mut rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+            .with_seed_dir(home.path().to_path_buf())
+            .build()
+            .await
+            .expect("runtime builds");
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                home.path().join("checkpoints"),
+            ),
+        );
+        checkpoints
+            .put(tinyflows::graph::Checkpoint {
+                thread_id: "run-that-paused".to_string(),
+                checkpoint_id: "c1".to_string(),
+                run_id: Some("run-that-paused".to_string()),
+                parent_checkpoint_id: None,
+                namespace: Vec::new(),
+                state: json!({}),
+                next_nodes: vec![tinyflows::graph::ids::NodeId::new("gate")],
+                completed_tasks: Vec::new(),
+                pending_writes: Vec::new(),
+                interrupts: Vec::new(),
+                pending_activations: None,
+                barrier_arrivals: Vec::new(),
+                metadata: Value::Null,
+            })
+            .await
+            .expect("seed checkpoint");
+        rt.set_workflow_checkpoints(checkpoints.clone());
+        let rt = Arc::new(rt);
+
+        let turn = workflow_turn_key("run-that-paused");
+        let mut effect = gate_effect(
+            "gated",
+            "gate",
+            &json!({ "request": "x" }),
+            "run-that-paused",
+            &[],
+            &[],
+            None,
+        );
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(PAYLOAD_THREAD_ID.to_string(), json!("run-that-paused"));
+        }
+        let id = ApprovalId::new("gate-1");
+        rt.workflow_gates().arm(&turn, &id, &effect);
+        rt.workflow_gates().decide(&turn, &id, Verdict::Deny);
+
+        resume_run(&rt, &turn)
+            .await
+            .expect("an all-denied batch does not error");
+
+        let remaining = checkpoints
+            .get_thread("run-that-paused")
+            .await
+            .expect("checkpoint read");
+        assert!(
+            remaining.is_empty(),
+            "a wholly refused batch starts no continuation, so its checkpoint lineage must be \
+             pruned: {remaining:?}"
+        );
     }
 }
