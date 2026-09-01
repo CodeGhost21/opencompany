@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TaskStatus } from "@/api/tasks";
 import { makeMessage, type ChatMessage } from "@/lib/chat";
 import { isTaskInReview, MessageRow } from "@/views/chat/MessageRow";
-import { reviewAnchorForThread, reviewCardIdForThread } from "@/views/chat/model";
+import { repliesInThread, reviewAnchorForThread, reviewCardIdForThread } from "@/views/chat/model";
 import type { Sender, TimelineEntry } from "@/views/chat/model";
 
 const IN_REVIEW: Readonly<Record<string, TaskStatus>> = {
@@ -95,6 +95,52 @@ describe("the anchor a thread's review composer submits", () => {
     const root = makeMessage("you", "just chatting", {});
     const reply = makeMessage("company", "sure thing", { parentId: root.id });
     expect(reviewAnchorForThread(root, [reply], [root, reply], IN_REVIEW)).toBeUndefined();
+  });
+});
+
+describe("the messages an open thread panel renders", () => {
+  it("keeps an ordinary direct reply visible (unchanged from a same-level filter)", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const reply = makeMessage("company", "on it", { parentId: root.id });
+    expect(repliesInThread(root, [root, reply])).toEqual([reply]);
+  });
+
+  // Codex #3906409961: a card dispatched from inside an already-open thread
+  // lands its settle pill/relay as replies to that thread's ROOT (a same-desk
+  // fact the backend's own review-anchor lookup relies on — see
+  // `reviewAnchorForThread`'s doc). Review feedback the operator sends from
+  // that thread is anchored on the relay, not the root, because that is the
+  // id the host needs to find the card. That makes the operator's own message
+  // a reply-to-the-relay, i.e. a grandchild of the thread root. Before this
+  // fix the panel filtered on `m.parentId === parent.id` — a same-level
+  // check — so the operator's message vanished from the thread the instant
+  // it sent, in both the optimistic bubble and the persisted echo.
+  it("still shows the operator's own message after it sends review feedback anchored on a nested relay", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const trigger = makeMessage("company", "starting on it", { parentId: root.id });
+    const pill = makeMessage("system", "finished → In review", {
+      taskId: "t-1",
+      parentId: root.id,
+    });
+    const relay = makeMessage("company", "Here is the draft.", { parentId: root.id });
+    const feedback = makeMessage("you", "make it punchier", { parentId: relay.id });
+    const messages = [root, trigger, pill, relay, feedback];
+
+    // Pre-fix behaviour, kept here as the regression proof: a same-level
+    // filter drops `feedback` because its parentId is the relay, not the root.
+    const sameLevelFilter = messages.filter((m) => m.parentId === root.id);
+    expect(sameLevelFilter).not.toContain(feedback);
+
+    expect(repliesInThread(root, messages)).toEqual([trigger, pill, relay, feedback]);
+  });
+
+  it("does not pull in a sibling thread's messages", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const reply = makeMessage("company", "on it", { parentId: root.id });
+    const otherRoot = makeMessage("you", "unrelated question", {});
+    const otherReply = makeMessage("company", "sure", { parentId: otherRoot.id });
+    const messages = [root, reply, otherRoot, otherReply];
+    expect(repliesInThread(root, messages)).toEqual([reply]);
   });
 });
 

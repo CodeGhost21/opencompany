@@ -102,6 +102,7 @@ import {
   mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
   operatorSection,
+  repliesInThread,
   resolveDmChannelId,
   reviewAnchorForThread,
   toggleReaction,
@@ -2102,7 +2103,7 @@ export function ChatView({
   }
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
-  const threadReplies = parent ? messages.filter((m) => m.parentId === parent.id) : [];
+  const threadReplies = parent ? repliesInThread(parent, messages) : [];
   // The review surface this thread hangs off, if any — the thread root itself
   // when opened directly on the pill/relay, or one of its replies when the
   // card that produced them was sent inside an already-open thread.

@@ -119,6 +119,40 @@ export function reviewAnchorForThread(
   return undefined;
 }
 
+/**
+ * Every message the open thread panel should show under `parent` — not just
+ * its direct children.
+ *
+ * Review feedback sent from inside a thread is anchored on whichever reply
+ * {@link reviewAnchorForThread} found (the card's settle pill or relay, when
+ * that card was dispatched from inside this very thread) rather than on
+ * `parent` itself, because that is what the backend needs to find the card
+ * (`review_anchor_card` on the host walks a message's *direct* parent, not
+ * its thread). That reply becomes the operator's own message's parent, so a
+ * same-level filter (`m.parentId === parent.id`) never finds it — the
+ * message the operator just typed disappears from the panel the moment it
+ * sends, in both the optimistic bubble and the persisted echo. Walk each
+ * message's parent chain back to `parent` instead, so a reply-to-a-reply
+ * still renders.
+ */
+export function repliesInThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  const descendsFromParent = (message: ChatMessage): boolean => {
+    const seen = new Set<string>();
+    let ancestorId = message.parentId;
+    while (ancestorId !== undefined && !seen.has(ancestorId)) {
+      if (ancestorId === parent.id) return true;
+      seen.add(ancestorId);
+      ancestorId = byId.get(ancestorId)?.parentId;
+    }
+    return false;
+  };
+  return messages.filter(descendsFromParent);
+}
+
 export function deskFromDto(d: DeskDto): Desk {
   const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return {
