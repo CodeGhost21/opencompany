@@ -34,13 +34,19 @@ import { TITLE_BAR_ICON_BUTTON } from "@/components/window-title-bar";
 import { cn } from "@/lib/utils";
 
 /**
- * Above this the chip prints `99+` instead of the number.
+ * Above this the count prints `99+` instead of the number.
  *
- * Three digits do not fit a mark sitting on the corner of a 32px control
- * without either overflowing the button or shrinking the type below the design
- * system's floor. The true number stays in {@link approvalsLabel}, so nothing
- * is lost — the digits an operator cannot read are traded for an exact count a
+ * The control grows with its count rather than carrying a mark on the glyph's
+ * corner, so this is a ceiling on how far the row is allowed to stretch, not on
+ * what fits — three digits are legible, four start pushing the switcher. The
+ * true number stays in {@link approvalsLabel} and in `data-pending`, so nothing
+ * is lost: the digits an operator cannot read are traded for an exact count a
  * screen reader still gets.
+ *
+ * The corner-mark arrangement was tried first and rejected at its real cap: at
+ * 128 pending, `99+` sitting on a 32px glyph covered most of the shield and the
+ * control stopped reading as approvals at all. A count that obscures the thing
+ * it is counting is worse than one that takes eighteen more pixels.
  */
 export const APPROVALS_COUNT_CAP = 99;
 
@@ -93,9 +99,17 @@ export function ApprovalsButton({
       aria-current={active ? "page" : undefined}
       aria-label={label}
       title={label}
-      className={cn(TITLE_BAR_ICON_BUTTON, className)}
+      className={cn(
+        TITLE_BAR_ICON_BUTTON,
+        // With something waiting the control stops being a 32px square and
+        // grows to hold its count beside the glyph. `w-auto` and the padding
+        // override the square; the height does not change, so the row's one
+        // `items-center` rule still lands it on the same centre line.
+        pending > 0 && "w-auto gap-1 px-1.5",
+        className,
+      )}
     >
-      <ShieldCheck aria-hidden="true" className="size-4" />
+      <ShieldCheck aria-hidden="true" className="size-4 flex-none" />
       {pending > 0 && (
         <span
           data-testid="title-bar-approvals-count"
@@ -104,18 +118,18 @@ export function ApprovalsButton({
           // it is the same fact twice.
           aria-hidden="true"
           className={cn(
-            "pointer-events-none absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center",
-            "rounded-full px-1 text-3xs leading-none font-medium tabular-nums select-none",
+            "flex h-4 min-w-4 flex-none items-center justify-center rounded-full px-1",
+            "text-3xs leading-none font-medium tabular-nums select-none",
             // `--status-blocked` is the token for "waiting on someone", which is
             // exactly what a pending approval is; the dot this replaces used the
             // same one. Soft fill plus the matching text tone rather than a solid
             // block, because a solid fill has no foreground token that themes
             // with it — and this pair is what `workflow-node` already uses for a
             // blocked state in both light and dark.
+            //
+            // This is the row's only piece of colour, and deliberately so: it is
+            // the one thing here that ever asks for attention.
             "bg-status-blocked-soft text-status-blocked-text",
-            // A cut-out of the ground, so the chip reads as sitting ON the glyph
-            // rather than merged into it. The title row is the `--chrome` layer.
-            "ring-2 ring-chrome",
           )}
         >
           {approvalsCount(pending)}
