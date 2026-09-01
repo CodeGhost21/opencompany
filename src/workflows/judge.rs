@@ -16,6 +16,9 @@ const MAX_OUTPUT_TOKENS: u32 = 256;
 const MAX_QUERY_CHARS: usize = 800;
 const MAX_RECOVERY_ITEMS: usize = 3;
 const MAX_RECOVERY_CHARS: usize = 4_000;
+const INSTRUCTION_CAP: usize = 8_000;
+const INSTRUCTION_TAIL_RESERVE: usize = 2_000;
+const OUTPUT_CAP: usize = 20_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SufficiencyVerdict {
@@ -116,10 +119,10 @@ fn system_prompt() -> String {
 fn user_prompt(input: JudgeInput<'_>) -> String {
     format!(
         "INSTRUCTION:\n{}\n\nSUCCESS CRITERIA:\n{}\n\nEXECUTION FAILED: {}\n\nOUTPUT:\n{}",
-        cap(input.instruction, 8_000),
+        cap_keeping_tail(input.instruction, INSTRUCTION_CAP, INSTRUCTION_TAIL_RESERVE),
         input.criteria.unwrap_or("No additional criteria supplied."),
         input.execution_failed,
-        cap(input.output, 20_000),
+        cap(input.output, OUTPUT_CAP),
     )
 }
 
@@ -329,6 +332,25 @@ pub async fn ask_around(deps: &HarnessDeps, company: &CompanyId, question: &str)
     }
 }
 
+/// Caps `text` to `max` characters while keeping its last `tail` characters,
+/// which is where [`compose_turn_message`](crate::workflows::caps) leaves the
+/// run's own request.
+fn cap_keeping_tail(text: &str, max: usize, tail: usize) -> String {
+    let trimmed = text.trim();
+    let total = trimmed.chars().count();
+    if total <= max {
+        return trimmed.to_string();
+    }
+    let tail = tail.min(max);
+    let head = max - tail;
+    let head_text: String = trimmed.chars().take(head).collect();
+    let tail_text: String = trimmed.chars().skip(total - tail).collect();
+    format!(
+        "{head_text}\n[… {} characters elided …]\n{tail_text}",
+        total - max
+    )
+}
+
 fn cap(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max {
@@ -424,6 +446,23 @@ mod tests {
                 SufficiencyVerdict::Retry
             );
         }
+    }
+
+    #[test]
+    fn the_run_request_survives_an_oversized_instruction() {
+        let standing = "S".repeat(INSTRUCTION_CAP * 2);
+        let instruction = format!("{standing}\n\nRequest for this run:\nship dark mode for iOS");
+        let prompt = user_prompt(JudgeInput {
+            instruction: &instruction,
+            output: "done",
+            criteria: None,
+            execution_failed: false,
+        });
+        assert!(
+            prompt.contains("ship dark mode for iOS"),
+            "the run request must survive the instruction cap"
+        );
+        assert!(prompt.contains("Request for this run:"));
     }
 
     #[test]
