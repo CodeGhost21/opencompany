@@ -26,6 +26,12 @@ mode were removed in #1568; a deployment that still sets
 naming the removed value. Only the `store` default, the hosted `remote` modes
 and `null` remain.
 
+Whether Cortex could return as a *hosted* engine under `remote` — the opposite
+question from #1568 — is investigated in
+[`memory-engine-cortex.md`](memory-engine-cortex.md), which records what a
+deployed CortexDB instance actually provides. Nothing there is implemented; it
+is a design record with open decisions.
+
 ## Choosing a hosted engine (`remote`)
 
 | Env var | Required | Notes |
@@ -79,7 +85,7 @@ be embedded and skip the egress and trust checks that class gates.
 
 `capabilities()` is a claim the driver writes by hand; `provides()` is derived
 from the accessors it actually returns. The host compares the two once, at bind
-(`audit_capabilities` in `src/store/memory/driver.rs`), because it registers RPC
+(`audit_provider`, called from `src/store/memory/driver.rs`), because it registers RPC
 methods and assembles agent tools from the *claim* and never re-checks. A driver
 advertising a family it does not implement would otherwise produce a surface
 that exists, is offered to an agent, and fails on its first call — inside a
@@ -143,7 +149,8 @@ conformance suite rather than here. Tracked in issue #1968.
 
 ## Which contract this binds
 
-`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/api` — the same path
+`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/crates/tinymemory-api`
+— the same path
 `vendor/openhuman` itself path-depends on, which is what keeps the
 `MemoryProvider` trait identity single across the process. The historical
 `tinycortex-api` re-export and the in-pod `tinycortex` engine that used to back
