@@ -320,6 +320,42 @@ fn system_notice(text: String) -> OutboundMessage {
     }
 }
 
+/// Who a dispatch relay should be authored by when it answers in the `origin`
+/// thread.
+///
+/// A card whose origin is a teammate's **private DM** must be answered by that
+/// teammate, never by the orchestrator — an orchestrator bubble in a private DM
+/// intrudes a second voice into a one-to-one thread. The origin key is resolved
+/// against the roster the same way an assignee is (the `dm:` prefix unwrapped as
+/// a fallback), and only a resolved [`AssigneeResolution::Agent`] that is not the
+/// orchestrator claims the voice. A desk, the General line, an empty/unknown key
+/// — every shared surface — keeps the orchestrator as the single point of
+/// contact.
+///
+/// The unwrapped `dm:` fallback checks the roster **by id first**, mirroring
+/// [`chat_responder`](crate::runtime::delegation_tools::chat_responder)'s own
+/// `dm:` arm (issue #1743): a desk whose id collides with a teammate's must
+/// not swallow the prefixed address, because the prefix exists precisely to
+/// reach that teammate. Falling straight into the bare, desk-first
+/// [`assignee::resolve`] here would reopen #1743 in this resolver — a card
+/// dispatched from that teammate's private DM would misattribute to the
+/// orchestrator, exactly the "second voice" this function exists to prevent.
+pub(crate) fn relay_speaker(record: &CompanyRecord, origin: &str, orchestrator: &str) -> String {
+    let mut resolution = assignee::resolve(record, origin);
+    if matches!(resolution, assignee::AssigneeResolution::Unknown(_))
+        && let Some(key) = assignee::dm_key(origin)
+    {
+        resolution = match record.resolve_roster_agent_id(key) {
+            Some(agent) => assignee::AssigneeResolution::Agent(agent),
+            None => assignee::resolve(record, key),
+        };
+    }
+    match resolution {
+        assignee::AssigneeResolution::Agent(agent) if agent != orchestrator => agent,
+        _ => orchestrator.to_string(),
+    }
+}
+
 /// The single bubble a workflow-copilot turn returns (issues #416, #966).
 ///
 /// Named rather than inlined because its **author** is the load-bearing field
@@ -971,6 +1007,12 @@ impl HarnessBrain {
             .working_agent()
             .unwrap_or(&self.responder)
             .to_string();
+        // Every id `responder` held before a reassignment overwrote it — a
+        // hand-off's `[<old responder>] delegated to …` block stays on the
+        // note under that old name, so `relay_text`'s `known_labels` needs it
+        // too or the strip leaves that block's chrome in the relayed bubble
+        // (issue #1949 review, CodeRabbit 3895599021).
+        let mut prior_responders: Vec<String> = Vec::new();
 
         // Link the working agent to the card, and persist it BEFORE the turn
         // runs (#205). A card the CEO picked up used to keep `assignee = ""`
@@ -1227,7 +1269,8 @@ impl HarnessBrain {
                                 // The delegate answered: they own the card, and
                                 // every downstream write credits them.
                                 Some(handoff) => {
-                                    responder = handoff.delegate;
+                                    prior_responders
+                                        .push(std::mem::replace(&mut responder, handoff.delegate));
                                     let budget_paused = handoff.budget_paused;
                                     match handoff.reply {
                                         Some(reply) => {
@@ -1336,7 +1379,7 @@ impl HarnessBrain {
                     redirects += 1;
                     card.note = Some(append_result(
                         card.note.as_deref(),
-                        "operator redirect",
+                        lifecycle::OPERATOR_REDIRECT_ATTRIBUTION,
                         &fresh,
                     ));
                     if redirects > MAX_REDIRECTS_PER_DISPATCH {
@@ -1714,7 +1757,10 @@ impl HarnessBrain {
         let Some(origin) = card.origin_chat_id.clone() else {
             return Ok(None);
         };
-        let relay = lifecycle::relay_reply(&card, &responder, &self.orchestrator(), origin);
+        let orchestrator = self.orchestrator();
+        let speaker = relay_speaker(&self.record(), &origin, &orchestrator);
+        let prior: Vec<&str> = prior_responders.iter().map(String::as_str).collect();
+        let relay = lifecycle::relay_reply(&card, &responder, &speaker, origin, &prior);
         Ok(Some(relay))
     }
 
@@ -1774,7 +1820,16 @@ impl HarnessBrain {
                 .await;
             return Ok(None);
         };
-        let relay = lifecycle::relay_reply(&card, &orchestrator, &orchestrator, origin);
+        let speaker = relay_speaker(&self.record(), &origin, &orchestrator);
+        // `speaker` goes in both slots: a refusal never claims anyone ran the
+        // card, so `relay_text`'s `responder == orchestrator` check must
+        // always hold here, regardless of who the relay speaks as (issue
+        // #1949 review, CodeRabbit thread 3895107568). Passing `orchestrator`
+        // in the responder slot instead used to fire the "ran it" credit
+        // whenever `speaker` diverged from it — i.e. every private DM.
+        // A refusal never ran a turn, so there is no reassignment history to
+        // carry into the strip.
+        let relay = lifecycle::relay_reply(&card, &speaker, &speaker, origin, &[]);
         self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
             .await;
         Ok(Some(relay))
@@ -6678,7 +6733,7 @@ members = ["engineer"]
         finished.column = "done".to_string();
         finished.note = None;
         assert_eq!(
-            lifecycle::relay_text(&finished, "maya", "ceo"),
+            lifecycle::relay_text(&finished, "maya", "ceo", &[]),
             "\"Ship the thing\" is done (maya ran it)."
         );
     }
@@ -7177,6 +7232,42 @@ members = ["engineer"]
         assert_eq!(posted.task_id.as_deref(), Some("t-origin"));
     }
 
+    /// A refusal into a private DM must not claim anyone ran the card.
+    ///
+    /// `refuse_dispatch` used to pass the orchestrator's own id into
+    /// `relay_reply`'s `responder` slot while the DM's speaker went into the
+    /// `orchestrator` slot — the opposite of every other call site. For a
+    /// desk/shared origin the two values collide (`relay_speaker` returns the
+    /// orchestrator) and the swap is invisible, but a private DM's speaker is
+    /// the teammate, not the orchestrator, so the mismatch fires the "ran it"
+    /// credit onto a card that never ran at all (CodeRabbit review, PR #1949
+    /// thread 3895107568).
+    #[tokio::test]
+    async fn a_refused_dispatch_into_a_dm_credits_no_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        let mut c = card("t-dm-origin", "Shane");
+        // "engineer" is a real roster agent (not the orchestrator "ceo"), so
+        // `relay_speaker` claims this as a private DM and returns "engineer"
+        // instead of falling back to the orchestrator.
+        c.origin_chat_id = Some("engineer".to_string());
+        tasks
+            .upsert(&CompanyId::new("acme"), &c)
+            .await
+            .expect("seed");
+
+        let posted = brain
+            .run_task("t-dm-origin", None)
+            .await
+            .expect("run")
+            .expect("a refused card with an origin must still post back");
+        assert!(
+            !posted.text.contains("ran it"),
+            "a refusal must never credit anyone with running the card: {}",
+            posted.text
+        );
+    }
+
     /// A dispatch for a card that no longer exists is a silent no-op, not an
     /// error.
     #[tokio::test]
@@ -7260,6 +7351,105 @@ members = ["engineer"]
             activation_completed_at: None,
             created_at_millis: None,
         }
+    }
+
+    /// A dispatch relay into a teammate's private DM is authored by that
+    /// teammate; every shared surface keeps the orchestrator's voice.
+    #[test]
+    fn relay_speaker_claims_a_private_dm_for_its_own_agent() {
+        let record = record_with_desk();
+        // A teammate DM: the origin is that teammate, so they speak.
+        assert_eq!(relay_speaker(&record, "engineer", "chief"), "engineer");
+        // The console's `dm:<id>` channel key resolves the same teammate.
+        assert_eq!(relay_speaker(&record, "dm:engineer", "chief"), "engineer");
+        // A desk is a shared surface — the orchestrator stays the one voice.
+        assert_eq!(relay_speaker(&record, "eng_desk", "chief"), "chief");
+        // The orchestrator's own DM is answered by the orchestrator, not doubled.
+        assert_eq!(relay_speaker(&record, "chief", "chief"), "chief");
+        // General / empty / unknown origins all keep the orchestrator.
+        assert_eq!(relay_speaker(&record, "General", "chief"), "chief");
+        assert_eq!(relay_speaker(&record, "", "chief"), "chief");
+        assert_eq!(relay_speaker(&record, "nobody-here", "chief"), "chief");
+    }
+
+    /// A roster with a desk whose id collides with a teammate id — the exact
+    /// shape `runtime::delegation_tools::a_prefixed_dm_reaches_the_teammate_
+    /// even_when_a_desk_shares_the_id` (issue #1743) exercises for
+    /// `chat_responder`. Manifest validation does not forbid the collision.
+    fn record_with_colliding_desk_and_teammate_id() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+description = "Coordinates the company."
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds it."
+
+[[group_chat]]
+id = "engineer"
+name = "Engineering desk"
+members = ["chief"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        }
+    }
+
+    /// PR #1949 review (Codex thread 3895066480): a `dm:` key names a
+    /// teammate even when a desk shares that id — the same invariant issue
+    /// #1743 established for `chat_responder`
+    /// (`runtime::delegation_tools::a_prefixed_dm_reaches_the_teammate_even_
+    /// when_a_desk_shares_the_id`). `relay_speaker` used to re-run the bare,
+    /// desk-first `assignee::resolve` on the key once the prefix was
+    /// stripped, so a card dispatched from that teammate's private DM
+    /// resolved to `Desk` and fell through to the orchestrator — reopening
+    /// #1743's bug in the relay's own resolver, and misattributing a private
+    /// DM's card as though it were answered on the shared desk.
+    #[test]
+    fn relay_speaker_reaches_the_dm_teammate_even_when_a_desk_shares_the_id() {
+        let record = record_with_colliding_desk_and_teammate_id();
+        assert_eq!(
+            relay_speaker(&record, "dm:engineer", "chief"),
+            "engineer",
+            "the prefix names the teammate, not the desk that shares its id"
+        );
+        // The bare key still belongs to the desk, exactly as it does for
+        // `chat_responder` — only the prefixed address reaches the teammate.
+        assert_eq!(
+            relay_speaker(&record, "engineer", "chief"),
+            "chief",
+            "the desk still answers its own bare id"
+        );
     }
 
     /// A brain over `record`, wired to a real task store.

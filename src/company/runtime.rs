@@ -6400,6 +6400,176 @@ mod tests {
         );
     }
 
+    /// A dispatched card whose origin is a teammate's **private DM** relays as
+    /// that teammate, so the orchestrator never authors a second voice in a
+    /// one-to-one thread — while a shared desk keeps the orchestrator's voice.
+    ///
+    /// The relay is produced the way `HarnessBrain::run_task` produces it:
+    /// through [`relay_speaker`](crate::harness::built_in::brain::relay_speaker)
+    /// + `relay_reply`, so a regression that let the orchestrator reclaim the DM
+    /// voice would flip the journaled author and fail this test.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_private_dm_relay_is_authored_by_the_dm_agent_not_the_orchestrator() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use crate::harness::built_in::brain::relay_speaker;
+        use crate::harness::built_in::lifecycle::relay_reply;
+        use crate::ports::Brain;
+        use crate::ports::TaskRecord;
+        use crate::ports::brain::CycleHost;
+        use crate::ports::tasks::COLUMN_IN_REVIEW;
+        use crate::ports::types::{
+            CycleRequest, CycleResult, EventSeq, OutboundMessage, TokenUsage,
+        };
+
+        /// Replays a pre-built relay for each `TaskDispatched` it recognises.
+        struct RelayBrain {
+            replies: HashMap<String, OutboundMessage>,
+        }
+
+        #[async_trait::async_trait]
+        impl Brain for RelayBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                let mut channel_responses = Vec::new();
+                for event in &req.events {
+                    if let CompanyEvent::TaskDispatched { task_id, .. } = event
+                        && let Some(reply) = self.replies.get(task_id)
+                    {
+                        channel_responses.push(reply.clone());
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses,
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let manifest_toml = "[company]\nname = \"Acme\"\n\
+             [policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\
+             [[group_chat]]\nid = \"strategy\"\nname = \"Strategy\"\nmembers = [\"ceo\"]\n";
+        let manifest: crate::company::CompanyManifest =
+            toml::from_str(manifest_toml).expect("manifest");
+
+        // A record standing for the same roster, to compute the relay authorship
+        // exactly as `HarnessBrain` would. Journaling never reads it; it only
+        // drives `relay_speaker`.
+        let record = crate::ports::types::CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: crate::ports::types::CompanyId::new("acme"),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        };
+
+        let orchestrator = "ceo";
+        let card = |id: &str, origin: &str| TaskRecord {
+            id: id.to_string(),
+            title: "Ship it".to_string(),
+            note: None,
+            column: COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: origin.to_string(),
+            updated_at_millis: 0,
+            origin_chat_id: Some(origin.to_string()),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        let dm_card = card("t-dm", "writer");
+        let desk_card = card("t-desk", "strategy");
+
+        // Built the way `run_task` builds them: the speaker is the origin DM's
+        // own agent, or the orchestrator for a shared surface.
+        let relay = |c: &TaskRecord| {
+            let origin = c.origin_chat_id.clone().expect("origin");
+            let speaker = relay_speaker(&record, &origin, orchestrator);
+            relay_reply(c, orchestrator, &speaker, origin, &[])
+        };
+        let replies = HashMap::from([
+            ("t-dm".to_string(), relay(&dm_card)),
+            ("t-desk".to_string(), relay(&desk_card)),
+        ]);
+
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-private-dm-relay-")
+            .tempdir()
+            .expect("tempdir");
+        let id = crate::ports::types::CompanyId::new("acme");
+        let runtime = Arc::new(
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+                .with_id(id.clone())
+                .with_brain(Arc::new(RelayBrain { replies }))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        for c in [&dm_card, &desk_card] {
+            let run_id = runtime.open_run(c).await;
+            Arc::clone(&runtime)
+                .run_dispatch_cycle(c.id.clone(), run_id)
+                .await;
+        }
+
+        let events = runtime
+            .events
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read journal");
+        let author_in = |thread: &str| {
+            events.iter().find_map(|stored| match &stored.event {
+                CompanyEvent::AgentReply {
+                    chat_id, agent_id, ..
+                } if chat_id == thread => Some(agent_id.clone()),
+                _ => None,
+            })
+        };
+
+        assert_eq!(
+            author_in("writer").as_deref(),
+            Some("writer"),
+            "a relay into the writer's private DM must be authored by the writer"
+        );
+        assert_eq!(
+            author_in("strategy").as_deref(),
+            Some("ceo"),
+            "a relay into a shared desk keeps the orchestrator's voice"
+        );
+    }
+
     /// Issue #1852: the gate that stops a dispatch relay from being posted
     /// twice.
     ///

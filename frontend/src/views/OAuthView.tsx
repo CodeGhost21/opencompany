@@ -56,14 +56,31 @@ const COMPOSIO_PROBE_TIMEOUT_MS = 5_000;
 const PROBE_TIMED_OUT = Symbol("composio-probe-timed-out");
 
 /**
- * OAuth: the third-party accounts this company signs in to and acts through.
+ * Apps: the third-party accounts this company signs in to and acts through.
  *
  * One question per page. This page used to be "Connections" and carried five
  * unrelated ones — the accounts below, the MCP tool servers, which model the
  * company thinks with, its Telegram channel and its bound repositories — so
  * every one of them was something an operator scrolled past on the way to
- * another. MCP (`#/settings/mcp`) and inference (`#/settings/inference`) are
+ * another. MCP (`#/connections/mcp`) and inference (`#/settings/inference`) are
  * their own pages now; channels and repositories left the product entirely.
+ *
+ * # Why the title is "Apps" and not "OAuth"
+ *
+ * It is called **Apps** since it moved to `#/connections/apps`. "OAuth" names
+ * the protocol a connection happens to run on, which is not the thing an
+ * operator came to this page to find — they are looking for Gmail, Slack,
+ * Notion. It also read as a stutter under a section already called Connections.
+ * The file, the component and every internal name stay `OAuth*`: the protocol
+ * is exactly what the code is about, and renaming it would be a mechanical
+ * diff across the module for no surface benefit. The same split Rule 1 of
+ * `docs/spec/runtime/ledgers-console-ia.md` makes for "ledger".
+ *
+ * Composio stays on this page. `ComposioSection` looks self-contained, but
+ * `ProvidersSection` reads its `credentialSource`, `granted`, `openMode` and
+ * catalog warning to decide what every provider tile renders — the credential
+ * is the engine the provider list runs on, and splitting them would separate a
+ * credential from what it unlocks.
  */
 export function OAuthView({ client, company }: Props) {
   const [load, setLoad] = useState<Load>("loading");
@@ -533,7 +550,7 @@ export function OAuthView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
-        title="OAuth"
+        title="Apps"
         width="5xl"
         description={
           <>
