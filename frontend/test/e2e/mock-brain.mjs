@@ -215,6 +215,48 @@ const SPAWN_DIRECTIVE = "SPAWNONE";
 const PLAN_DIRECTIVE = "__MOCK_PLAN__";
 
 /**
+ * The host's own briefing blocks, appended to an operator message before it
+ * reaches a model.
+ *
+ * These matter here because two of them quote **other messages verbatim**.
+ * `THREAD_INDEX_ANNOTATION` lists the opening words of the channel's other
+ * threads, truncated — so once a spec has opened a thread with a directive in
+ * it, every later message in that channel carries a chopped-off copy of that
+ * directive. A directive cut mid-payload is not a directive; it is a decoy that
+ * parses as nothing.
+ *
+ * Cutting at the earliest of these is what the host itself does to recover the
+ * operator's own words (`operator_words` in `src/runtime/delegation.rs`), and
+ * for the same reason: everything past the first marker was written by the
+ * host, not by the spec.
+ *
+ * Keep in step with the constants in `src/runtime/cycle.rs` and
+ * `src/brain/medulla/effects.rs`.
+ */
+const HOST_ANNOTATIONS = [
+  "\n\n[Open work already handed to you",
+  "\n\n[Other conversations in this channel",
+  "\n\n[Work raised in this conversation",
+  "\n\n[This request is already being built",
+  "\n\n[Attached file:",
+];
+
+/**
+ * The spec's own half of a message, with the host's briefings removed.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function specWords(text) {
+  let cut = text.length;
+  for (const marker of HOST_ANNOTATIONS) {
+    const at = text.indexOf(marker);
+    if (at >= 0 && at < cut) cut = at;
+  }
+  return text.slice(0, cut);
+}
+
+/**
  * How many steps of each plan have been served, keyed by the plan's own text.
  *
  * @type {Map<string, number>}
@@ -419,17 +461,24 @@ function findDirective(messages) {
  */
 function findPlan(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const text = textOf(messages[i]);
+    // `specWords`, not the raw text: the host appends briefings that quote
+    // other messages verbatim and truncated, so a message can carry a decoy
+    // copy of an older directive with its payload cut in half.
+    const text = specWords(textOf(messages[i]));
     const at = text.indexOf(PLAN_DIRECTIVE);
     if (at < 0) continue;
     const steps = readJsonValue(text, at + PLAN_DIRECTIVE.length, "[", "]");
     if (!Array.isArray(steps)) {
-      // A broken spec, not a plain turn. Say so loudly rather than answering
-      // with text the spec will then fail on obscurely.
+      // Say so loudly — a spec that wrote bad JSON deserves to hear it — but
+      // keep scanning rather than giving up on the whole thread. Returning null
+      // here let one unparsable directive anywhere in the history silence every
+      // real plan behind it, which is how a truncated echo took out an entire
+      // spec rather than one turn.
       process.stderr.write(
-        `[mock brain] ${PLAN_DIRECTIVE} found but its JSON payload did not parse\n`,
+        `[mock brain] ${PLAN_DIRECTIVE} found in message ${i} but its JSON payload did ` +
+          `not parse; ignoring it and looking further back\n`,
       );
-      return null;
+      continue;
     }
     // Identity is the directive and the rest of its LINE — the same key shape
     // `SPAWNONE` uses, and for both of its reasons. It is stable across the
