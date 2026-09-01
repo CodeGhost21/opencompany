@@ -4154,6 +4154,137 @@ mod tests {
         );
     }
 
+    /// A provider that always returns the `recover` verdict, driving the
+    /// judge's recovery-then-park branch.
+    #[derive(Default)]
+    struct RecoverJudgeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for RecoverJudgeProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(tinyagents::harness::model::ModelResponse::assistant(
+                "{\"verdict\":\"recover\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for RecoverJudgeProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "recover-judge".to_string()
+        }
+    }
+
+    /// tinysweeper on #1990 (#3905096415) read the recover branch as settling
+    /// `Blocked` and then having an outer handler overwrite it with `Failed`.
+    /// `run_turn` has no such handler — every settle is followed by an
+    /// immediate `return Err`, and the trailing settle is the fall-through
+    /// success path — so the parked row stays `Blocked`. Pinned here so a
+    /// future outer error handler cannot silently introduce the overwrite.
+    #[tokio::test]
+    async fn a_recovery_park_leaves_the_attempt_row_blocked() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-park-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        deps.provider = Arc::new(RecoverJudgeProvider::default());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "I cannot draft this without the customer's renewal date".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-recover"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-recover"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-recover".to_string(),
+            "run-recover".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft_step",
+                    "prompt": "draft the renewal email",
+                    "verify": { "criteria": "the email must name the renewal date" },
+                }),
+            )
+            .await;
+        assert!(result.is_err(), "a parked node halts its branch");
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-recover".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        let statuses: Vec<_> = attempts.iter().map(|a| a.status).collect();
+        assert_eq!(
+            statuses,
+            vec![crate::ports::RunStatus::Blocked],
+            "the parked node must be recorded Blocked, not overwritten with Failed"
+        );
+    }
+
+    /// A provider that counts every `invoke` and always escalates, so a judge
+    /// call is both detectable and destructive to the caller's diagnosis.
+    #[derive(Default)]
+    struct EscalatingJudgeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for EscalatingJudgeProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(tinyagents::harness::model::ModelResponse::assistant(
+                "{\"verdict\":\"escalate\",\"gap\":\"information\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for EscalatingJudgeProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "escalating-judge".to_string()
+        }
+    }
+
     /// Codex review on #1990 (#3905537805): a turn refused by its per-agent
     /// spend cap is rejected by the `LimitStop` path regardless, so paying for
     /// a judge on the pause notice buys nothing — and an `escalate` verdict
