@@ -138,7 +138,7 @@ would remove entirely.
 
 The reproduction is recorded at
 [cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3)
-and is being raised with CortexDB directly, alongside the licensing question.
+and is being raised with CortexDB directly.
 **Phase 1 is blocked on their answer, not on our effort.**
 
 ## Belief revision is not reachable
@@ -300,7 +300,7 @@ not.
   driver carrying its own key index — is that acceptable, or disqualifying?
 - Self-hosted deployments have no support channel we can reach: the public
   tracker is packaging-only and Cortex Cloud support presumes a customer
-  relationship. That is worth settling in the same conversation as licensing.
+  relationship. Worth settling when we contact them about the upsert gap.
 - If Facts and Beliefs stay unreachable, does Cortex still beat `supermemory` /
   `mem0` / `cognee` on retrieval alone — and is that enough to justify running
   one instance per tenant?
