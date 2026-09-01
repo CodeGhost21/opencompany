@@ -103,7 +103,7 @@ import {
   offersDeliverableChoice,
   operatorSection,
   resolveDmChannelId,
-  reviewCardIdForThread,
+  reviewAnchorForThread,
   toggleReaction,
   type DecidedApproval,
   type HistoryHydration,
@@ -2103,12 +2103,14 @@ export function ChatView({
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
   const threadReplies = parent ? messages.filter((m) => m.parentId === parent.id) : [];
-  // Whether this thread hangs off a settled `in_review` card's review surface,
-  // so the composer frames a reply as another pass.
-  const threadReviewing =
+  // The review surface this thread hangs off, if any — the thread root itself
+  // when opened directly on the pill/relay, or one of its replies when the
+  // card that produced them was sent inside an already-open thread.
+  const threadReviewAnchor =
     parent !== undefined && taskStatusByTaskId !== undefined
-      ? reviewCardIdForThread(parent, messages, taskStatusByTaskId) !== undefined
-      : false;
+      ? reviewAnchorForThread(parent, threadReplies, messages, taskStatusByTaskId)
+      : undefined;
+  const threadReviewing = threadReviewAnchor !== undefined;
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -2447,7 +2449,7 @@ export function ChatView({
                 // state or call `client.chat` for a channel the server's
                 // read-only guard will refuse anyway (issue #1757).
                 if (readOnly) return;
-                void send(text, undefined, parent.id, undefined, mentions);
+                void send(text, undefined, threadReviewAnchor?.anchorId ?? parent.id, undefined, mentions);
               }}
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}

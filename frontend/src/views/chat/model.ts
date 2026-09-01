@@ -65,6 +65,33 @@ export function reviewCardIdForThread(
   return undefined;
 }
 
+/**
+ * Where a thread's review feedback should be anchored, or `undefined` when
+ * the thread is not reviewing anything.
+ *
+ * `parent` itself is the review surface for a thread opened directly on a
+ * settle pill or its relay. But when the card that produced the pill was
+ * itself sent inside an existing thread, the pill and its relay land as
+ * replies under that thread's own root — `parent` is neither of them, so
+ * {@link reviewCardIdForThread} on `parent` alone finds nothing. Falls back
+ * to scanning `replies` (newest first) for the review surface among them,
+ * and anchors there instead.
+ */
+export function reviewAnchorForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string } | undefined {
+  const parentTaskId = reviewCardIdForThread(parent, messages, statusByTaskId);
+  if (parentTaskId !== undefined) return { taskId: parentTaskId, anchorId: parent.id };
+  for (let i = replies.length - 1; i >= 0; i--) {
+    const taskId = reviewCardIdForThread(replies[i], messages, statusByTaskId);
+    if (taskId !== undefined) return { taskId, anchorId: replies[i].id };
+  }
+  return undefined;
+}
+
 export function deskFromDto(d: DeskDto): Desk {
   const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return {

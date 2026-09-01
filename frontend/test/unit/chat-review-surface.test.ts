@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TaskStatus } from "@/api/tasks";
 import { makeMessage, type ChatMessage } from "@/lib/chat";
 import { isTaskInReview, MessageRow } from "@/views/chat/MessageRow";
-import { reviewCardIdForThread } from "@/views/chat/model";
+import { reviewAnchorForThread, reviewCardIdForThread } from "@/views/chat/model";
 import type { Sender, TimelineEntry } from "@/views/chat/model";
 
 const IN_REVIEW: Readonly<Record<string, TaskStatus>> = {
@@ -41,6 +41,40 @@ describe("the in-review card a chat thread reviews", () => {
     expect(isTaskInReview({ column: "in_review" })).toBe(true);
     expect(isTaskInReview({ column: "done" })).toBe(false);
     expect(isTaskInReview(undefined)).toBe(false);
+  });
+});
+
+describe("the anchor a thread's review composer submits", () => {
+  it("anchors on the root itself when it is the review surface", () => {
+    const pill = makeMessage("system", "finished → In review", { taskId: "t-1" });
+    const reply = makeMessage("you", "looks good", { parentId: pill.id });
+    expect(reviewAnchorForThread(pill, [reply], [pill, reply], IN_REVIEW)).toEqual({
+      taskId: "t-1",
+      anchorId: pill.id,
+    });
+  });
+
+  it("anchors on the relay among the thread's own replies when the card was dispatched from inside an existing thread", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const trigger = makeMessage("company", "starting on it", { parentId: root.id });
+    const pill = makeMessage("system", "finished → In review", {
+      taskId: "t-1",
+      parentId: root.id,
+    });
+    const relay = makeMessage("company", "Here is the draft.", { parentId: root.id });
+    const messages = [root, trigger, pill, relay];
+    const replies = [trigger, pill, relay];
+
+    expect(reviewAnchorForThread(root, replies, messages, IN_REVIEW)).toEqual({
+      taskId: "t-1",
+      anchorId: relay.id,
+    });
+  });
+
+  it("resolves nothing when neither the root nor any reply is a review surface", () => {
+    const root = makeMessage("you", "just chatting", {});
+    const reply = makeMessage("company", "sure thing", { parentId: root.id });
+    expect(reviewAnchorForThread(root, [reply], [root, reply], IN_REVIEW)).toBeUndefined();
   });
 });
 
