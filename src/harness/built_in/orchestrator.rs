@@ -2110,9 +2110,24 @@ impl Tool for ReadTaskTool {
                     if published.is_empty() {
                         md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
                     } else {
+                        let pinned = card.output.as_ref().map(|o| o.artifacts.as_slice());
                         for artifact in &published {
-                            let preview = artifact
-                                .latest()
+                            // The task's own output stamp pins each artifact
+                            // it produced to the exact version that attempt
+                            // wrote (`TaskOutput::artifacts`), so a later
+                            // operator edit — a new version by a different
+                            // author — never renders here as the agent's own
+                            // work. Falls back to the latest revision only
+                            // when no pin is on record (an artifact from
+                            // outside this stamp, or one written before
+                            // pinning existed).
+                            let pinned_version = pinned
+                                .and_then(|entries| {
+                                    entries.iter().find(|a| a.artifact_id == artifact.id)
+                                })
+                                .and_then(|entry| artifact.version(entry.version));
+                            let preview = pinned_version
+                                .or_else(|| artifact.latest())
                                 .map(|v| truncate_chars(v.body.trim(), 400))
                                 .unwrap_or_default();
                             md.push_str(&format!(
@@ -2133,6 +2148,24 @@ impl Tool for ReadTaskTool {
                 }
             },
             None => md.push_str(&output_stamp_markdown(card.output.as_ref(), false)),
+        }
+
+        if let Some(output) = &card.output
+            && !output.workflows.is_empty()
+        {
+            md.push_str("\n### Workflows\n");
+            for wf in &output.workflows {
+                let run_note = wf
+                    .run_id
+                    .as_deref()
+                    .map(|id| format!(" — run `{id}`"))
+                    .unwrap_or_default();
+                md.push_str(&format!(
+                    "- {} `{}`{run_note}\n",
+                    wf.action.as_str(),
+                    wf.workflow_id
+                ));
+            }
         }
 
         Ok(ToolResult::success_with_markdown(
@@ -12592,6 +12625,113 @@ name = "Morning"
         assert!(
             output_at > attempts_at,
             "the Output section must still be reachable after a long attempt history: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_resolves_the_pinned_artifact_version_not_a_later_operator_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Draft the memo",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-1".to_string(),
+                attempt: Some(1),
+            },
+            at_millis: 5,
+            artifacts: vec![crate::ports::tasks::TaskOutputArtifact {
+                artifact_id: "art-1".to_string(),
+                version: 1,
+                title: "Memo".to_string(),
+                kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            }],
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let mut record = crate::ports::artifacts::ArtifactRecord::new(
+            "art-1",
+            "t-1",
+            "Memo",
+            crate::ports::artifacts::ArtifactKind::Markdown,
+            "the agent's draft body",
+            "engineer",
+            5,
+        );
+        record.push_version(
+            "an operator edited this after the attempt settled",
+            crate::ports::artifacts::ArtifactAuthor::Operator,
+            "operator",
+            10,
+            None,
+        );
+        artifacts.upsert(&company, &record).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("the agent's draft body"),
+            "must render the version the task's output pinned, not the latest: {out}"
+        );
+        assert!(
+            !out.contains("an operator edited this"),
+            "a later operator edit must not render as what the task produced: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_renders_workflows_recorded_in_the_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Automate the weekly report",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "orchestrator",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-1".to_string(),
+                attempt: Some(1),
+            },
+            at_millis: 5,
+            artifacts: Vec::new(),
+            workflows: vec![TaskOutputWorkflow {
+                workflow_id: "wf-weekly-report".to_string(),
+                run_id: Some("wf-run-1".to_string()),
+                action: TaskOutputAction::Ran,
+            }],
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(out.contains("### Workflows"), "{out}");
+        assert!(out.contains("wf-weekly-report"), "{out}");
+        assert!(
+            out.contains("wf-run-1"),
+            "the workflow's run id must be surfaced for read_run: {out}"
         );
     }
 }
