@@ -287,10 +287,9 @@ const UNBOUNDED: &[&str] = &[
     // Also the way a run *deletes*: destruction has no `EffectGroup` of its
     // own, so this is what makes #338's "or delete" acceptance real.
     "shell",
-    // An arbitrary address, with the tenant's own credentials.
-    "curl",
+    // An arbitrary address, with the tenant's own credentials and a mutating
+    // method.
     "http_request",
-    "web_fetch",
     // Can push to a configured remote — an address this layer does not see.
     // The declaration table already singles it out for that, refusing it the
     // standing grant its filesystem siblings get.
@@ -636,18 +635,8 @@ mod tests {
     /// Arbitrary code and arbitrary addresses, which the table already refuses
     /// a standing grant for the same reason.
     ///
-    /// The outward-HTTP family — `http_request`, `curl`, `web_fetch` — is
-    /// asserted here rather than carved out. Before #674 it sat in `DEFERRED`
-    /// and this loop skipped it; the ruling put it back under the rule **on this
-    /// path**, and under #614's position on the authored-node path.
     #[test]
     fn unbounded_tools_stop() {
-        for tool in ["http_request", "curl", "web_fetch"] {
-            assert!(
-                !DEFERRED.contains(&tool),
-                "#674 ruled `{tool}` scoped by path, not deferred"
-            );
-        }
         // The filter is retained rather than dropped: nothing in `UNBOUNDED` is
         // deferred today, but `DEFERRED` is what is withheld from the rule and
         // this test is about the rule. The carve-outs have their own tests.
@@ -951,12 +940,10 @@ mod tests {
         // so this is the rule and not a sample of it.
         let cases: &[(&str, Value)] = &[
             ("shell", json!({ "command": "echo hello > out.txt" })),
-            ("curl", json!({ "url": "https://api.example.com/x" })),
             (
                 "http_request",
-                json!({ "url": "https://api.example.com/x" }),
+                json!({ "method": "POST", "url": "https://api.example.com/x" }),
             ),
-            ("web_fetch", json!({ "url": "https://example.com" })),
             ("git_operations", json!({ "op": "push" })),
             ("run_workflow", json!({ "workflow_id": "nightly" })),
             ("media_generate_image", json!({ "prompt": "a cat" })),
