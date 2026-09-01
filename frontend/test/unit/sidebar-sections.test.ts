@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -40,9 +44,17 @@ function render(view: View, sub: string | null = null) {
   );
 }
 
-/** Every row label the sidebar actually paints, parents and children alike. */
+/** Every row label the sidebar actually paints, in document order. */
 function renderedRows(): string[] {
-  return [...container.querySelectorAll("[data-sidebar='menu-button'], [data-sidebar='menu-sub-button']")].map(
+  return [...container.querySelectorAll("[data-sidebar='menu-button']")].map(
+    (el) => el.textContent?.trim() ?? "",
+  );
+}
+
+/** The four fixed rows, read from the group that never changes. */
+function fixedRows(): string[] {
+  const group = container.querySelectorAll("[data-sidebar='group']")[0];
+  return [...group.querySelectorAll("[data-sidebar='menu-button']")].map(
     (el) => el.textContent?.trim() ?? "",
   );
 }
@@ -118,6 +130,20 @@ describe("the sidebar's section table", () => {
     expect(room.view).toBe("chat");
   });
 
+  it("keeps the Agents row and the page it reaches called the same thing", () => {
+    // A row named one thing leading to a page headed another is the reader's
+    // problem, not the code's. "Company > Company" said the word twice and
+    // named nothing; both halves are Agents now.
+    const company = NAV_SECTIONS.find((section) => section.label === "Company")!;
+    expect(company.children?.[0].label).toBe("Agents");
+    const source = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../../src/views/TeamView.tsx"),
+      "utf8",
+    );
+    expect(source).toContain('title="Agents"');
+    expect(source).not.toContain('title="Company"');
+  });
+
   it("gives every section a distinct view, so two rows can never light at once", () => {
     const views = NAV_SECTIONS.map((section) => section.view);
     expect(new Set(views).size).toBe(views.length);
@@ -186,38 +212,73 @@ describe("which child row is open", () => {
 });
 
 describe("the rendered sidebar", () => {
-  it("shows a section's contents only while that section is the one you are in", () => {
+  it("keeps the four rows fixed and swaps only the block beneath them", () => {
+    // Not an accordion. The four never move, never reorder and are never
+    // displaced by a sibling's contents — so the contents always come AFTER
+    // all four, whichever section is open.
     render("company");
+    expect(fixedRows()).toEqual(["Room", "Company", "Connections", "Flows"]);
     expect(renderedRows()).toEqual([
       "Room",
       "Company",
+      "Connections",
+      "Flows",
       "Agents",
       "Work",
       "Workspace",
       "Brain",
       "Finance",
-      "Connections",
-      "Flows",
     ]);
 
-    render("chat");
+    render("connections", "mcp");
+    expect(fixedRows()).toEqual(["Room", "Company", "Connections", "Flows"]);
+    expect(renderedRows()).toEqual([
+      "Room",
+      "Company",
+      "Connections",
+      "Flows",
+      "Apps",
+      "MCP Servers",
+    ]);
+
+    // Exactly one section's contents at a time: Flows has none, so the block
+    // is not there at all.
+    render("workflows");
     expect(renderedRows()).toEqual(["Room", "Company", "Connections", "Flows"]);
   });
 
-  it("marks the open child as the current page and leaves the parent unlit", () => {
+  it("separates the four from what is filed under them with space, not a rule", () => {
+    // A horizontal line here reads as hardware bolted across a column that is
+    // already quiet, and it would have been the only rule in it — the console
+    // draws none above its footer either. The break is a deliberate gap.
+    render("company");
+    expect(container.querySelectorAll("[data-sidebar='separator']")).toHaveLength(0);
+
+    const groups = [...container.querySelectorAll("[data-sidebar='group']")];
+    expect(groups).toHaveLength(2);
+    // Deliberate, not the row rhythm: `py-1` on the group either side of it is
+    // 4px, and the break has to be legible at a glance.
+    expect(groups[1].className).toContain("pt-5");
+
+    // And no contents block at all for a section that has none, so the gap
+    // never appears with nothing under it.
+    render("workflows");
+    expect(container.querySelectorAll("[data-sidebar='group']")).toHaveLength(1);
+  });
+
+  it("marks the section in the fixed block and the page in the block below", () => {
     render("workspace");
+    // The two say different things and are read in different registers: which
+    // of the four you are in, and which of its pages is open.
+    expect(fixedRows().filter((_, i) =>
+      [...container.querySelectorAll("[data-sidebar='group']")[0]
+        .querySelectorAll("[data-sidebar='menu-button']")][i].hasAttribute("data-active"),
+    )).toEqual(["Company"]);
+
     const current = [...container.querySelectorAll('[aria-current="page"]')].map(
       (el) => el.textContent?.trim(),
     );
     expect(current).toEqual(["Workspace"]);
-
-    const parent = [...container.querySelectorAll("[data-sidebar='menu-button']")].find(
-      (el) => el.textContent?.trim() === "Company",
-    )!;
-    expect(parent.hasAttribute("data-active")).toBe(false);
-    // Still visibly the section you are in, through the resting dim rather than
-    // through a second accent fill.
-    expect(parent.hasAttribute("data-section-active")).toBe(true);
   });
 
   it("lights a section's own row when nothing under it is open", () => {

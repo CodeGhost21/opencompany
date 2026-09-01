@@ -16,9 +16,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { RESTING_ROW } from "@/components/sidebar-controls";
@@ -207,14 +204,41 @@ export function childActive(
 }
 
 /**
- * The sidebar's four rows, each expanding to show what is filed under it.
+ * The sidebar: four fixed rows, then whatever is filed under the one you are in.
  *
- * Only the active section expands. A sidebar that showed every section's
- * contents at once would be the twenty-row wall this restructure exists to
- * remove; a sidebar that expanded on hover or on a disclosure chevron would make
- * getting to a page a two-gesture affair on the console's most-used surface.
- * Expanding what you are in costs nothing and answers "where am I" at the same
- * time as "where else can I go".
+ * ## Not an accordion
+ *
+ * The four rows are always visible, always contiguous, and always in the same
+ * place. Selecting a section does not displace its siblings and does not expand
+ * a row in place — it swaps the block BELOW the four, under a divider. Exactly
+ * one section's contents are on screen at a time.
+ *
+ * The two blocks are separated by space rather than by a rule: the column is
+ * already quiet, and the console draws no rule above its footer either, so one
+ * here would have been the only seam in it.
+ *
+ * The alternative — each row expanding under itself, pushing the rows after it
+ * down — was the first thing this looked like and is worse in two specific
+ * ways. The rows move, so the muscle memory of "Flows is the fourth thing" only
+ * holds while nothing above it is open. And the one section whose contents are
+ * unbounded, Room, pushes every row after it off the bottom at an ordinary
+ * twenty channels — which recreates, inside one row, exactly the wall this
+ * restructure exists to remove (`ledgers-console-ia.md` Rule 2, Draft 1).
+ *
+ * With a fixed block the four rows never scroll away and the contents block is
+ * the only thing that scrolls. There is also no per-row open/closed state to
+ * keep: which section is showing is which section you are in, and the route
+ * already carries that.
+ *
+ * ## On the collapsed rail
+ *
+ * The four icons stay; the contents block is hidden for a section with a fixed
+ * list of children — those rows are 3rem of nothing without their labels, and
+ * their parent icon still leads to them. Room is the exception, and
+ * deliberately so: `ChannelRail` has a compact variant built for exactly this
+ * width (avatars and `#` glyphs with unread dots), and dropping it would make
+ * collapsing the sidebar silently lose the channel list — the same regression
+ * issue #1018 filed about the approvals badge.
  */
 export function SidebarNavigation({
   view,
@@ -240,94 +264,99 @@ export function SidebarNavigation({
   const active = sectionOwning(view);
 
   return (
-    // `min-h-0 flex-1` down the chain, so the ONE section whose contents are
-    // unbounded can shrink instead of pushing its siblings off the bottom.
-    // Twenty channels plus DMs is an ordinary company, and without this the
-    // Room list grew until Company, Connections and Flows were below the fold
-    // — recreating, inside one row, exactly the wall the four-row sidebar
-    // exists to remove (`ledgers-console-ia.md` Rule 2's rejected Draft 1).
-    // A flex item's default `min-height: auto` floors it at its content, which
-    // is why the zero has to be said at every level rather than once.
-    <SidebarGroup className="min-h-0 flex-1">
-      <SidebarMenu className="min-h-0">
-        {NAV_SECTIONS.map((section) => {
-          const expanded = section === active;
-          const openChild = expanded
-            ? section.children?.find((child) => childActive(section, child, view, sub))
-            : undefined;
-          return (
-            <SidebarMenuItem
-              key={section.view}
-              data-tour={`nav-${section.view}`}
-              // Only the slot-bearing section shrinks: a fixed list of children
-              // is short by construction, and letting those rows scroll would
-              // hide a destination behind a scrollbar for no reason.
-              className={cn(section.slot && "flex min-h-0 flex-col")}
-            >
+    <>
+      {/* The four. Fixed: this group never grows, never shrinks and never
+          scrolls, so the rows stay where an operator left them. */}
+      <SidebarGroup className="shrink-0">
+        <SidebarMenu>
+          {NAV_SECTIONS.map((section) => (
+            <SidebarMenuItem key={section.view} data-tour={`nav-${section.view}`}>
               <SidebarMenuButton
-                // The parent row carries the accent only when nothing beneath
-                // it does. With a child lit, a lit parent is two highlights for
-                // one location; the section still reads as the one you are in
-                // because it is the only one showing its contents, and because
-                // `data-section-active` lifts it out of the resting dim.
-                isActive={expanded && !openChild}
-                data-section-active={expanded ? "" : undefined}
+                isActive={section === active}
                 tooltip={section.label}
                 onClick={() => navigate(section.view, section.sub)}
-                className={cn(RESTING_ROW, "data-section-active:opacity-100")}
+                className={RESTING_ROW}
               >
                 <section.icon />
                 <span>{section.label}</span>
               </SidebarMenuButton>
+            </SidebarMenuItem>
+          ))}
+        </SidebarMenu>
+      </SidebarGroup>
 
-              {expanded && section.children && (
-                // Named, not headed. `nav-rail-headings.test.ts` (issue #1392)
-                // forbids an `h1`–`h6` inside a `<nav>`: the sidebar renders
-                // before the page, so a heading here would meet a screen
-                // reader's heading navigation ahead of the page's own `h1`.
-                // `aria-label` gives the list its name without entering the
-                // document outline.
-                <SidebarMenuSub aria-label={`${section.label} pages`}>
-                  {section.children.map((child) => (
-                    <SidebarMenuSubItem key={`${child.view}/${child.sub ?? ""}`}>
-                      <SidebarMenuSubButton
-                        isActive={child === openChild}
-                        aria-current={child === openChild ? "page" : undefined}
+      {active && (active.children || active.slot) && (
+        <>
+          {/* Space, not a rule.
+              
+              A horizontal line here was the reflex and it is the wrong mark:
+              this column is already quiet, and one more seam across 13.5rem
+              reads as hardware bolted on. The gap does the same work — above
+              it, the four places you can go; below it, what is inside the one
+              you are in — and it does it without adding anything to look at.
+              The console draws no rule above its footer either, so a rule here
+              would also have been the only one in the column.
+
+              `pt-5` rather than the group's own `py-1`: deliberate, and large
+              enough that the break is legible at a glance rather than a row gap
+              that reads as an accident. Together with the fixed block's `pb-1`
+              that is 24px of air against an 8px rhythm.
+
+              `min-h-0 flex-1`, so a long contents block scrolls INSIDE itself
+              rather than pushing the four rows or the footer off the column. A
+              flex item's default `min-height: auto` floors it at its content,
+              which is why the zero has to be said here as well as on the child
+              that actually scrolls. */}
+          <SidebarGroup
+            className={cn(
+              "min-h-0 flex-1 pt-5",
+              !active.slot && "group-data-[collapsible=icon]:hidden",
+            )}
+          >
+            {active.children && (
+              // Named, not headed. `nav-rail-headings.test.ts` (issue #1392)
+              // forbids an `h1`–`h6` inside a `<nav>`: the sidebar renders
+              // before the page, so a heading here would meet a screen reader's
+              // heading navigation ahead of the page's own `h1`. `aria-label`
+              // names the list without entering the document outline.
+              <SidebarMenu aria-label={`${active.label} pages`}>
+                {active.children.map((child) => {
+                  const open = childActive(active, child, view, sub);
+                  return (
+                    <SidebarMenuItem key={`${child.view}/${child.sub ?? ""}`}>
+                      <SidebarMenuButton
+                        isActive={open}
+                        aria-current={open ? "page" : undefined}
                         data-tour={`nav-${child.sub ?? child.view}`}
+                        tooltip={child.label}
                         onClick={() => navigate(child.view, child.sub)}
-                        render={<button type="button" />}
+                        className={RESTING_ROW}
                       >
                         <child.icon />
                         <span>{child.label}</span>
-                      </SidebarMenuSubButton>
-                    </SidebarMenuSubItem>
-                  ))}
-                </SidebarMenuSub>
-              )}
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            )}
 
-              {/* Room's contents. The node is the portal target; what lands in
-                  it is `ChatView`'s own `ChannelRail`, unchanged. Rendered on
-                  the collapsed rail too — the rail has a compact variant, and
-                  dropping the channel list at 3rem is exactly the regression
-                  issue #1018 filed about the approvals badge. */}
-              {expanded && section.slot === "room" && (
-                <div
-                  ref={setElement}
-                  data-testid="room-rail-slot"
-                  // Scrolls within the section rather than truncating behind a
-                  // "show all". A channel list is scanned, not read once: an
-                  // operator looks for a name they already know, and a list
-                  // that hides its tail behind a control makes the one thing
-                  // they came for the one thing they cannot see. Scrolling
-                  // costs a gesture only at the sizes where a truncation would
-                  // cost a click plus a gesture anyway.
-                  className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
-                />
-              )}
-            </SidebarMenuItem>
-          );
-        })}
-      </SidebarMenu>
-    </SidebarGroup>
+            {/* Room's contents. The node is the portal target; what lands in it
+                is `ChatView`'s own `ChannelRail`, unchanged — see
+                `room-rail.tsx`. It scrolls rather than truncating behind a
+                "show all": a channel list is scanned for a name you already
+                know, and hiding its tail behind a control makes the one thing
+                you came for the one thing you cannot see. */}
+            {active.slot === "room" && (
+              <div
+                ref={setElement}
+                data-testid="room-rail-slot"
+                className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
+              />
+            )}
+          </SidebarGroup>
+        </>
+      )}
+    </>
   );
 }

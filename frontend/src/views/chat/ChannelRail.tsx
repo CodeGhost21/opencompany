@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ChevronRight,
   CircleDot,
   Hash,
   Lock,
+  type LucideIcon,
   PanelRight,
   Plus,
   Radio,
@@ -135,33 +136,6 @@ export function ChannelRail({
         className,
       )}
     >
-      {/* No caption, and no heading. The Room row directly above this list
-          already names it, and a heading here would sit inside the sidebar's
-          `Main navigation` landmark, ahead of the page's own `h1` — the ordering
-          defect issue #1392 was filed for. The "New message" door is the only
-          thing this row still carries, so it sits alone on the right. */}
-      <div className="flex items-center justify-end px-1 pt-1 pb-0.5">
-        {onStartDirectMessage && (
-          <NewMessageDialog
-            directMessages={directMessages}
-            onSelect={onStartDirectMessage}
-            trigger={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-8"
-                aria-label="New message"
-                disabled={directMessages.length === 0}
-                title="New message"
-              >
-                <SquarePen className="size-4" />
-              </Button>
-            }
-          />
-        )}
-      </div>
-
       {sections.map((section) =>
         section.id === "operator" ? (
           <PinnedOperatorRow
@@ -175,7 +149,28 @@ export function ChannelRail({
           <Section
             key={section.id}
             section={section}
-            onAdd={section.id === "channels" ? onAddChannel : undefined}
+            // Each section header carries its own door, and only its own.
+            // Channels gets "+" (create a channel); Direct messages gets the
+            // compose pencil, because a DM is what it starts. It used to float
+            // alone above the whole list, attached to nothing and reading as
+            // chrome for the rail rather than an action on a section.
+            action={
+              section.id === "channels" ? (
+                onAddChannel && <SectionAction onClick={onAddChannel} label="New channel" icon={Plus} />
+              ) : section.id === "dms" && onStartDirectMessage ? (
+                <NewMessageDialog
+                  directMessages={directMessages}
+                  onSelect={onStartDirectMessage}
+                  trigger={
+                    <SectionAction
+                      label="New message"
+                      icon={SquarePen}
+                      disabled={directMessages.length === 0}
+                    />
+                  }
+                />
+              ) : undefined
+            }
             activeId={activeId}
             unread={unread}
             mentions={mentions}
@@ -218,7 +213,7 @@ function PinnedOperatorRow({
   if (!channel) return null;
   const hasUnread = unread > 0 && !active;
   return (
-    <div className="mt-2 border-t px-2 pt-2">
+    <div className="mt-2 border-t pt-2">
       <button
         type="button"
         onClick={() => onSelect(channel.id)}
@@ -311,6 +306,41 @@ function CompactChannelRow({
   );
 }
 
+/**
+ * One section header's door, on the right of its caption.
+ *
+ * One component for both, so "+" on Channels and the compose pencil on Direct
+ * messages read as the same kind of affordance — same size, same hit area, same
+ * hover — rather than two controls that happen to sit in the same place.
+ */
+function SectionAction({
+  label,
+  icon: Icon,
+  onClick,
+  disabled,
+  ...rest
+}: {
+  label: string;
+  icon: LucideIcon;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      // The whole of what a screen reader gets for an icon-only control.
+      aria-label={label}
+      className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+      {...rest}
+    >
+      <Icon className="size-3.5" aria-hidden />
+    </button>
+  );
+}
+
 function Section({
   section,
   activeId,
@@ -319,7 +349,7 @@ function Section({
   onSelect,
   open,
   onToggle,
-  onAdd,
+  action,
 }: {
   section: ChannelSection;
   activeId: string | null;
@@ -328,8 +358,8 @@ function Section({
   onSelect: (id: string) => void;
   open: boolean;
   onToggle: () => void;
-  /** Renders a "+" beside the header — the Channels section's create door. */
-  onAdd?: () => void;
+  /** This section's own door, rendered at the right of its caption. */
+  action?: ReactNode;
 }) {
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
@@ -339,13 +369,22 @@ function Section({
     : 0;
 
   return (
-    <section className="group/section select-none px-2 pt-2">
+    // No horizontal padding of its own. This rail was written as a standalone
+    // column with its own gutter; inside the sidebar that gutter doubles up
+    // against `SidebarGroup`'s `px-3` and pushes every channel row 8px right of
+    // the four nav rows above — which is what made the list read as a panel
+    // pasted into the column rather than part of it. Measured, not guessed: the
+    // nav row's box starts at x=12 and its icon at x=20, and with this removed
+    // a channel row lands on exactly the same two numbers.
+    <section className="group/section select-none pt-2">
       <div className="flex items-center gap-0.5">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        // `px-2`, matching the nav rows above: the caption's chevron then
+        // stands on the same vertical line as their icons.
+        className="flex w-full min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight
           className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
@@ -374,17 +413,7 @@ function Section({
           </span>
         )}
       </button>
-      {onAdd && (
-        <button
-          type="button"
-          onClick={onAdd}
-          title="New channel"
-          aria-label="New channel"
-          className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <Plus className="size-3.5" aria-hidden />
-        </button>
-      )}
+      {action}
       </div>
 
       {open && (

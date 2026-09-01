@@ -94,7 +94,7 @@ import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { DEFAULT_VIEW, VIEWS, type View } from "@/lib/console-routes";
+import { DEFAULT_VIEW, isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
 import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
