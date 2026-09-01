@@ -33,6 +33,10 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+// The title row's readers, so a policy written HERE reaches the pill without
+// waiting for its 30s poll. Not a cycle: `use-autonomy` imports only
+// `@/api/policy` and `@/lib/visible-poll`.
+import { applyAutonomy } from "@/hooks/use-autonomy";
 import { cn } from "@/lib/utils";
 
 /**
@@ -464,22 +468,40 @@ export function PolicySettings({ client, company }: Props) {
    * `takesEffect` overrides the host's generic timing line for a save whose
    * effect does not wait for the next turn — the deadline, whose new TTL the
    * live gate enforces immediately.
+   *
+   * **Returns whether the write actually landed.** It is not a formality: a
+   * body this rejects is a FAILED write, and its callers hand that answer to
+   * confirmation dialogs which close on success and stay open for a retry on
+   * failure. Returning nothing let `saveTier`, `reset` and `commitSpendCap`
+   * report `true` after showing an error, so a tier escalation, a loosening
+   * reset or a spend-cap raise that the host answered with rubbish closed its
+   * dialog as though the operator's change had been made — a *widening* the
+   * console then claimed had happened and had not.
    */
   const apply = (
     next: PolicyStatus,
     message: string,
     resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
     takesEffect?: string,
-  ) => {
+  ): boolean => {
     // Every write path funnels through here, so this is the one place the
     // settings page has to fence: a PUT or DELETE that answers 200 with
     // something that is not a policy must not be put on screen. Reported the
     // way a failed save is, and the previously loaded policy stands.
     if (!isPolicyStatus(next)) {
       toast.error(NOT_A_POLICY);
-      return;
+      return false;
     }
     setStatus(next);
+    // The title row reads the same policy through `useAutonomy`, on a 30s
+    // poll, and it is mounted on every view including this one. Without this
+    // hand-off a change made HERE left the pill an inch above the card stating
+    // the previous tier for up to half a minute — and in the direction that
+    // matters most, a widening looks like the restrictive tier is still in
+    // force. Same value, same scope, same fence: this is the host's own
+    // response, already checked by `isPolicyStatus` above, so the row is
+    // handed a value the host returned rather than an optimistic guess.
+    applyAutonomy(client, company, next);
     const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
     if (alwaysAsk) {
       setDraftAlways(next.alwaysApprove.join(", "));
@@ -493,6 +515,7 @@ export function PolicySettings({ client, company }: Props) {
       setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     }
     toast.success(message, { description: takesEffect ?? next.takesEffect });
+    return true;
   };
 
   const saveTier = async (mode: string) => {
@@ -510,12 +533,15 @@ export function PolicySettings({ client, company }: Props) {
       // current company's state — the read path's `live` guard, applied to the
       // write path.
       if (!isCurrentScope({ client, company })) return false;
-      apply(next, "Autonomy tier updated", {
+      // `return apply(...)`, not `apply(...); return true`. A rejected body is
+      // a failed write, and the confirmation dialog behind a tier escalation
+      // has to stay open for the retry rather than close on a change that did
+      // not happen.
+      return apply(next, "Autonomy tier updated", {
         alwaysAsk: !dirty,
         spendCap: false,
         deadline: false,
       });
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not change the tier.",
@@ -657,7 +683,9 @@ export function PolicySettings({ client, company }: Props) {
       // A reset for a company this card no longer shows must not overwrite the
       // current company's state.
       if (!isCurrentScope({ client, company })) return false;
-      apply(
+      // Propagated for the same reason `saveTier` propagates it: a loosening
+      // reset is confirmed, and a rejected body must keep that confirmation up.
+      return apply(
         next,
         "Reverted to the manifest's policy",
         undefined,
@@ -677,7 +705,6 @@ export function PolicySettings({ client, company }: Props) {
           ? "takes effect immediately — parked approvals are re-checked against the manifest deadline"
           : undefined,
       );
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not reset the policy.",
@@ -752,14 +779,16 @@ export function PolicySettings({ client, company }: Props) {
       // A save for a company this card no longer shows must not overwrite the
       // current company's state.
       if (!isCurrentScope({ client, company })) return false;
-      apply(
+      // Propagated: a cap RAISE is confirmed, and a rejected body must keep
+      // that confirmation up rather than close it on a widening that did not
+      // land.
+      return apply(
         next,
         "Spend cap updated",
         // An unsaved always-ask edit and a half-typed deadline are the
         // operator's; the PUT only touched the cap.
         { alwaysAsk: !dirty, deadline: false },
       );
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not save the spend cap.",
