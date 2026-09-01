@@ -19,6 +19,22 @@ const RUN_STATE_LABEL: Record<NodeRunState, string> = {
   declined: "not needed",
 };
 
+/** The tooltip on a node's run-state badge (issue #981; #1990 review).
+ *
+ * `declined` used to fall through to the generic "This node finished."
+ * default, which reads as an ordinary completion for a step the judge
+ * decided was not needed at all. */
+export function runStateTitle(
+  runState: NodeRunState,
+  reportUndelivered: boolean,
+): string {
+  if (runState === "running") return "This node is executing now.";
+  if (runState === "error") return "This node failed.";
+  if (runState === "declined") return "This node was not needed.";
+  if (reportUndelivered) return "This step ran. Its report did not go out.";
+  return "This node finished.";
+}
+
 /** Badge tint per run state — read alongside the ring, never instead of it, so
  * the state does not rely on colour alone. */
 const RUN_STATE_BADGE: Record<NodeRunState, string> = {
@@ -73,19 +89,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
             )}
             // "running" is now reported by the engine (issue #382), not a
             // derived frontier — the node really is executing when this shows.
-            // Issue #981: the last arm used to say "This node finished." on a
-            // node whose report was refused, which is true and reads as a
-            // promise it cannot make. It now says what it is actually a verdict
-            // on, and the strip below says the rest.
-            title={
-              runState === "running"
-                ? "This node is executing now."
-                : runState === "error"
-                  ? "This node failed."
-                  : d.reportUndelivered
-                    ? "This step ran. Its report did not go out."
-                    : "This node finished."
-            }
+            title={runStateTitle(runState, Boolean(d.reportUndelivered))}
           >
             {RUN_STATE_LABEL[runState]}
           </span>
