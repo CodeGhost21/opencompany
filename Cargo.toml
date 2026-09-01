@@ -594,6 +594,7 @@ whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", b
 
 [dev-dependencies]
 tempfile = "3"
+tinyflows = { version = "0.8", features = ["mock"] }
 
 # The upstream driver-conformance suite (`assert_provider`, `retains_writes`),
 # run in `src/store/memory/upstream_conformance_test.rs` against the providers
