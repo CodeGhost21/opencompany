@@ -212,10 +212,18 @@ where
         .map_err(|error| io_err(path, error))?
         .len();
 
-    // Bytes of a line whose start lies further back than the chunk just read.
-    // They are carried until the read that contains that start, and only then
-    // is the line complete.
-    let mut carry: Vec<u8> = Vec::new();
+    // Fragments of a line whose start lies further back than the chunk just
+    // read, in file order. They are carried until the read that contains that
+    // start, and only then is the line complete.
+    //
+    // **A list, not one buffer** (coderabbit on #1972). Splicing the carry into
+    // each chunk and the grown fragment back out copied the pending line once
+    // per read, so a record spanning n chunks cost O(n²) bytes moved — and
+    // nothing bounds a journaled message's length, so the shape of a history
+    // read was decided by whatever the largest record in the file happened to
+    // be. Each fragment is now written once and joined once, at the read that
+    // completes the line.
+    let mut carry: Vec<Vec<u8>> = Vec::new();
     while pos > 0 {
         let take = TAIL_CHUNK_BYTES.min(pos);
         pos -= take;
@@ -226,43 +234,76 @@ where
         file.read_exact(&mut chunk)
             .await
             .map_err(|error| io_err(path, error))?;
-        chunk.extend_from_slice(&carry);
 
         let mut segments: Vec<&[u8]> = chunk.split(|byte| *byte == b'\n').collect();
+        // The last segment runs to the end of the chunk, so it is the *head* of
+        // whatever is already pending — never a line of its own.
+        let tail = segments.pop().expect("split yields at least one segment");
+        if segments.is_empty() {
+            // No newline in this read at all: the whole chunk is more of the
+            // same line, and nothing can be emitted yet.
+            carry.insert(0, tail.to_vec());
+            if pos == 0 {
+                // The head of the file, so the pending line is complete. The
+                // walk is over either way, so the caller's "stop" needs no
+                // separate exit here.
+                let line = carry.concat();
+                let _ = emit(path, &line, &mut keep)?;
+            }
+            continue;
+        }
+        carry.insert(0, tail.to_vec());
+        let completed = std::mem::take(&mut carry).concat();
+        if !emit(path, &completed, &mut keep)? {
+            return Ok(());
+        }
         // The first segment starts before `pos`, so it is only a whole line
         // once the read has reached the head of the file.
-        carry = if pos == 0 {
-            Vec::new()
+        let whole = if pos == 0 {
+            &segments[..]
         } else {
-            segments.remove(0).to_vec()
+            carry.push(segments[0].to_vec());
+            &segments[1..]
         };
-        for segment in segments.iter().rev() {
-            // **Strict, like the walk this replaced.** `BufReader::lines`
-            // failed the request on invalid UTF-8, and that is the posture a
-            // request-time reader has to keep: silently omitting a corrupted
-            // reply or approval makes it indistinguishable from an event that
-            // never happened, and a history page that is quietly short is worse
-            // than one that says it could not be read (codex on #1972).
-            let line = std::str::from_utf8(segment)
-                .map_err(|error| {
-                    io_err(
-                        path,
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("an event-log line is not valid UTF-8: {error}"),
-                        ),
-                    )
-                })?
-                .trim();
-            if line.is_empty() {
-                continue;
-            }
-            if !keep(line)? {
+        for segment in whole.iter().rev() {
+            if !emit(path, segment, &mut keep)? {
                 return Ok(());
             }
         }
     }
     Ok(())
+}
+
+/// One line from the backwards walk, handed to the caller.
+///
+/// Returns whether the walk should continue, so a caller that has what it
+/// wants stops the reads rather than the loop.
+///
+/// **Strict, like the walk this replaced.** `BufReader::lines` failed the
+/// request on invalid UTF-8, and that is the posture a request-time reader has
+/// to keep: silently omitting a corrupted reply or approval makes it
+/// indistinguishable from an event that never happened, and a history page that
+/// is quietly short is worse than one that says it could not be read (codex on
+/// #1972).
+fn emit<F>(path: &Path, segment: &[u8], keep: &mut F) -> Result<bool>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    let line = std::str::from_utf8(segment)
+        .map_err(|error| {
+            io_err(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("an event-log line is not valid UTF-8: {error}"),
+                ),
+            )
+        })?
+        .trim();
+    if line.is_empty() {
+        return Ok(true);
+    }
+    keep(line)
 }
 
 async fn append_line_inner(path: &Path, line: &str, sync: bool) -> Result<()> {
@@ -3240,6 +3281,36 @@ mod test {
         assert_eq!(read[0], "line-799");
         assert_eq!(read[400], long, "the over-long line is whole");
         assert_eq!(read[800], "line-0");
+    }
+
+    /// A record spanning **many** reads, not just two.
+    ///
+    /// The carry is a list of fragments joined once at the read that completes
+    /// the line, so the order they are collected in is what a wrong
+    /// front-insert would scramble — and a scrambled join is still a valid
+    /// string of the right length, which the two-chunk case above is too short
+    /// to expose. Forty chunks also puts a floor under the copying: the
+    /// splice-per-read version this replaced moved ~40x more bytes for this one
+    /// record than the file contains (coderabbit on #1972).
+    #[tokio::test]
+    async fn a_record_spanning_many_reads_is_joined_in_order() {
+        let root = tmp_root();
+        // Distinguishable content, so a mis-ordered join fails rather than
+        // matching a repeated byte by luck.
+        let mut long = String::new();
+        let mut n = 0u64;
+        while (long.len() as u64) < TAIL_CHUNK_BYTES * 40 {
+            long.push_str(&format!("{n:012} "));
+            n += 1;
+        }
+        let body = format!("before\n{long}\nafter\n");
+        let path = write_file(&root, "e.jsonl", &body).await;
+
+        let read = backwards(&path).await;
+        assert_eq!(read.len(), 3, "three lines, however many reads they took");
+        assert_eq!(read[0], "after");
+        assert_eq!(read[1], long.trim(), "the record is whole and in order");
+        assert_eq!(read[2], "before");
     }
 
     /// The walk stops the moment the caller has what it wants — the whole

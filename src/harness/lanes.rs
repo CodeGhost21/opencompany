@@ -88,6 +88,7 @@ fn resolve_acp_engine(
     acp_agents: Option<AcpFactory<'_>>,
     workspace_root: &std::path::Path,
     agent_models: &std::collections::HashMap<String, String>,
+    desks: Vec<(String, String)>,
 ) -> std::result::Result<Arc<dyn RunTurn>, String> {
     // Validation guarantees `acp` is `Some` and `transport` is one of
     // `ACP_TRANSPORTS` on every harness that reaches here — this crate's own
@@ -112,7 +113,8 @@ fn resolve_acp_engine(
     factory
         .build(agent_id, acp.model.as_deref(), agent_models, workspace_root)
         .map(|agent| {
-            Arc::new(crate::harness::acp::run_turn::AcpRunTurn::new(agent)) as Arc<dyn RunTurn>
+            Arc::new(crate::harness::acp::run_turn::AcpRunTurn::new(agent).with_desks(desks))
+                as Arc<dyn RunTurn>
         })
         .map_err(|error| format!("`{agent_id}` could not be started: {error}"))
 }
@@ -126,8 +128,21 @@ fn resolve_acp_engine(
     _acp_agents: Option<AcpFactory<'_>>,
     _workspace_root: &std::path::Path,
     _agent_models: &std::collections::HashMap<String, String>,
+    _desks: Vec<(String, String)>,
 ) -> std::result::Result<Arc<dyn RunTurn>, String> {
     Err(unavailable_reason("acp"))
+}
+
+/// This company's `(desk id, desk name)` pairs, for an engine that has to
+/// canonicalise a chat selector without a store — see
+/// [`AcpRunTurn::session_key`](crate::harness::acp::run_turn).
+fn declared_desks(record: &CompanyRecord) -> Vec<(String, String)> {
+    record
+        .manifest
+        .group_chats
+        .iter()
+        .map(|chat| (chat.id.clone(), chat.name.clone()))
+        .collect()
 }
 
 /// The engines a company's declared harnesses resolve to on this host.
@@ -295,6 +310,7 @@ pub fn build(
             acp_agents,
             &base.workspace_root,
             &agent_models_on(record, &default_harness_id, &default_harness_id),
+            declared_desks(record),
         ) {
             Ok(engine) => Some(engine),
             Err(reason) => {
@@ -326,6 +342,7 @@ pub fn build(
                 acp_agents,
                 &base.workspace_root,
                 &agent_models_on(record, &harness.id, &default_harness_id),
+                declared_desks(record),
             ) {
                 Ok(engine) => lanes.push((harness.id.clone(), engine)),
                 Err(reason) => unavailable.push((harness.id.clone(), reason)),
@@ -348,6 +365,7 @@ pub fn build(
             acp_agents,
             &base.workspace_root,
             &agent_models_on(record, &id, &default_harness_id),
+            declared_desks(record),
         ) {
             Ok(engine) => lanes.push((id, engine)),
             Err(reason) => unavailable.push((id, reason)),

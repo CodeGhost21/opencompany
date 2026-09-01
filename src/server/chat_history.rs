@@ -68,24 +68,55 @@ pub async fn resolve_seed_desk(
     company: &CompanyId,
     chat_id: Option<&str>,
 ) -> (String, String) {
-    let Some(desk) = chat_id else {
-        return (GENERAL_DESK.to_string(), GENERAL_DESK.to_string());
+    let Some(desk) = trivially_resolved(chat_id) else {
+        // Only a named desk needs the manifest, and only then is it read.
+        return match store.load(company).await {
+            Ok(Some(record)) => desk_aliases(&record, chat_id),
+            // A store miss or read error must not fail the turn — fall back to
+            // the verbatim selector, which still owns everything journaled
+            // under that exact string (the common case, where the console
+            // addresses id == name).
+            Ok(None) | Err(_) => {
+                let desk = chat_id.unwrap_or(GENERAL_DESK);
+                (desk.to_string(), desk.to_string())
+            }
+        };
     };
-    if is_general_chat(Some(desk)) {
-        return (desk.to_string(), desk.to_string());
+    desk
+}
+
+/// [`resolve_seed_desk`] for a caller that already holds the record.
+///
+/// The cycle's briefings do: they are handed a `&CompanyRecord` and were paying
+/// for a `load` per message to answer a question the record in their hand
+/// already answers. Same resolution, no store round-trip — and one body, so the
+/// two cannot drift into disagreeing about what a desk id means.
+pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, String) {
+    if let Some(resolved) = trivially_resolved(chat_id) {
+        return resolved;
     }
-    match store.load(company).await {
-        Ok(Some(record)) => record
-            .manifest
-            .group_chats
-            .iter()
-            .find(|chat| chat.id.eq_ignore_ascii_case(desk) || chat.name.eq_ignore_ascii_case(desk))
-            .map(|chat| (chat.id.clone(), chat.name.clone()))
-            .unwrap_or_else(|| (desk.to_string(), desk.to_string())),
-        // A store miss or read error must not fail the turn — fall back to the
-        // verbatim selector, which still owns everything journaled under that
-        // exact string (the common case, where the console addresses id == name).
-        Ok(None) | Err(_) => (desk.to_string(), desk.to_string()),
+    let desk = chat_id.unwrap_or(GENERAL_DESK);
+    record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id.eq_ignore_ascii_case(desk) || chat.name.eq_ignore_ascii_case(desk))
+        .map(|chat| (chat.id.clone(), chat.name.clone()))
+        .unwrap_or_else(|| (desk.to_string(), desk.to_string()))
+}
+
+/// The two selectors that resolve without consulting a manifest at all.
+///
+/// `None` is the General desk — an unaddressed message is *routed* there
+/// (`chat_and_emit`), so treating it as "addressed to nothing" is what left
+/// those turns out of every desk-scoped read. Any other General spelling
+/// short-circuits too: they all fold in [`same_conversation`], so `(chat, chat)`
+/// already owns each other's lines.
+fn trivially_resolved(chat_id: Option<&str>) -> Option<(String, String)> {
+    match chat_id {
+        None => Some((GENERAL_DESK.to_string(), GENERAL_DESK.to_string())),
+        Some(desk) if is_general_chat(Some(desk)) => Some((desk.to_string(), desk.to_string())),
+        Some(_) => None,
     }
 }
 
