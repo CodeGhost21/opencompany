@@ -94,11 +94,13 @@ layer contents*, not from configuration or engine self-report. This is stronger
 than the conformance suite (tinymemory#18 §E1) currently implies and should be an
 explicit acceptance gate.
 
-Two upstream defects behind this are filed:
+Two upstream defects sit behind this: concept reflection cannot resolve the
+router two other lanes use, and facts never extract, so beliefs can never build.
+Reproductions are recorded at
 [cortexdb-releases#1](https://github.com/cortexdbai/cortexdb-releases/issues/1)
-(concept reflection cannot resolve the router two other lanes use) and
-[#2](https://github.com/cortexdbai/cortexdb-releases/issues/2) (facts never
-extract, so beliefs can never build).
+and [#2](https://github.com/cortexdbai/cortexdb-releases/issues/2); both are
+closed there because that tracker is scoped to packaging, and they are being
+raised with CortexDB directly.
 
 ## A conformant driver cannot be written against v0.9.8
 
@@ -134,9 +136,10 @@ reported `deleted.events: 2` for a selector naming one event id. That is a lot
 of correctness risk to absorb for something an upstream `on_conflict: replace`
 would remove entirely.
 
-Filed upstream as
-[cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3).
-**Phase 1 is blocked on that, not on our effort.**
+The reproduction is recorded at
+[cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3)
+and is being raised with CortexDB directly, alongside the licensing question.
+**Phase 1 is blocked on their answer, not on our effort.**
 
 ## Belief revision is not reachable
 
@@ -274,6 +277,9 @@ not.
 - Is there an undocumented prerequisite for fact extraction that we missed?
 - Will Cortex add an upsert path? Without one, the only route is a stateful
   driver carrying its own key index — is that acceptable, or disqualifying?
+- Self-hosted deployments have no support channel we can reach: the public
+  tracker is packaging-only and Cortex Cloud support presumes a customer
+  relationship. That is worth settling in the same conversation as licensing.
 - If Facts and Beliefs stay unreachable, does Cortex still beat `supermemory` /
   `mem0` / `cognee` on retrieval alone — and is that enough to justify running
   one instance per tenant?
