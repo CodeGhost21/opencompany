@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{OpenCompanyError, Result, WorkflowProblem};
 
@@ -199,6 +200,25 @@ impl WorkflowFile {
             .iter()
             .find(|node| node.kind == WorkflowNodeKind::Trigger && node.schedule.is_some())
             .and_then(|node| node.schedule.as_deref())
+    }
+
+    /// A structural content fingerprint of this graph's nodes and edges.
+    ///
+    /// Deterministic within one build (it hashes the `Debug` rendering of
+    /// `nodes` and `edges`, which is stable for a fixed field/vec order), so a
+    /// value computed when a run pauses on this graph and one computed later
+    /// against a freshly loaded copy compare equal iff nothing about the graph
+    /// changed in between. Used to detect a workflow edited while an approval
+    /// or a blocked node was still pending on it, so a resume does not feed a
+    /// stale checkpoint into a graph that has since moved on.
+    pub fn content_fingerprint(&self) -> String {
+        let digest = Sha256::digest(format!("{:?}|{:?}", self.nodes, self.edges).as_bytes());
+        let mut out = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
     }
 
     /// Whether this graph has any node that could actually do something

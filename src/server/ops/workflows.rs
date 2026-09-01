@@ -2766,6 +2766,8 @@ pub(crate) struct WorkflowRunOutcome {
     scheduled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_semantic: Option<crate::ports::ResumeSemantic>,
     /// The same delivery rows a manual run's response carries — including
     /// `target`, which the run response already ships to this same console.
     deliveries: Vec<crate::ports::DeliveryReport>,
@@ -3068,6 +3070,7 @@ pub(crate) fn fold_run_events(
                 // The run history fold does not surface who started a run
                 // (issue #1862 prerequisite is data-only for now).
                 started_by: _,
+                resume_semantic,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -3083,6 +3086,7 @@ pub(crate) fn fold_run_events(
                     workflow_id,
                     scheduled,
                     run_id: Some(run_id),
+                    resume_semantic,
                     deliveries: Vec::new(),
                     pending_approvals: Vec::new(),
                     error: None,
@@ -3234,6 +3238,7 @@ pub(crate) fn fold_run_events(
                     workflow_id,
                     scheduled,
                     run_id,
+                    resume_semantic: None,
                     deliveries,
                     pending_approvals,
                     error,
@@ -4558,6 +4563,7 @@ mod tests {
                 workflow_id: "wf".to_string(),
                 scheduled: false,
                 run_id: Some("run-1".to_string()),
+                resume_semantic: None,
                 deliveries: Vec::new(),
                 pending_approvals: Vec::new(),
                 error: None,
@@ -7188,6 +7194,7 @@ mod tests {
                         run_id: ctx.run_id.clone(),
                         scheduled: false,
                         started_by: None,
+                        resume_semantic: None,
                     },
                 )
                 .await
@@ -7755,6 +7762,7 @@ mod tests {
                         run_id: run_id.to_string(),
                         scheduled,
                         started_by: None,
+                        resume_semantic: None,
                     },
                 )
                 .await
@@ -9090,6 +9098,7 @@ mod tests {
                 workflow_id: "wf".to_string(),
                 scheduled: false,
                 run_id: Some(format!("run-{seq}")),
+                resume_semantic: None,
                 deliveries: Vec::new(),
                 pending_approvals: Vec::new(),
                 error: None,
