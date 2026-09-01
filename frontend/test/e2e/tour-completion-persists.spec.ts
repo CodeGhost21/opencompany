@@ -38,7 +38,7 @@ type Page = import("@playwright/test").Page;
  * it — the e2e project has no `@/*` alias — and it rots just as loudly: the
  * per-step wait below reads the card's own "Step N of M" chip.
  */
-const TOUR_STOPS = 8;
+const TOUR_STOPS = 7;
 
 /** The welcome card's heading; its presence is the whole symptom of #1408. */
 const WELCOME = "Welcome to your company";
