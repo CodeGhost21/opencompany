@@ -2307,8 +2307,247 @@ impl CompanyRuntime {
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
+            // Issue #1863: a resolved blocker re-enters the stopped step rather
+            // than redispatching a grant or running a brain continuation. The
+            // answer was armed on the grant set's blocker side-channel by
+            // `apply_blocker_reply`; taking it here both recognises the blocker
+            // and consumes it, and every non-blocker resolution finds nothing
+            // and falls through to `continue_turn` unchanged.
+            #[cfg(feature = "openhuman")]
+            if let CompanyEvent::ApprovalResolved { approval_id, .. } = &event
+                && let Some(resolution) = rt.grants.take_blocker_resolution(approval_id)
+            {
+                return rt.resume_blocker(approval_id, resolution).await;
+            }
             rt.continue_turn(event).await
         })
+    }
+
+    /// Re-enters the step a resolved blocker stopped, carrying the operator's
+    /// answer (issue #1863) — the resume half `park_blocker` deliberately left
+    /// inert.
+    ///
+    /// The fork the whole tier turns on, reached from
+    /// [`spawn_follow_up`](Self::spawn_follow_up) once the verdict is durable.
+    /// A resuming verdict re-dispatches the stopped work carrying the answer; a
+    /// [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) settles it and
+    /// starts nothing — the short-circuit that runs *before* any cycle. Which
+    /// step is re-entered is read off the blocker's own
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep): a board card is
+    /// moved back into In Progress so its dispatch edge fires; a workflow node
+    /// is handed the answer for its run; a bare agent question just carries the
+    /// answer back into the DM it was asked in.
+    ///
+    /// The step rides on the resolution itself — the journal scrubs a parked
+    /// effect's payload, so it is captured at resolve time — while the DM thread
+    /// is read off the approval's origin, which is not scrubbed. The answer is
+    /// retired from the re-arm queue once re-entered, so the next boot does not
+    /// resume it a second time.
+    #[cfg(feature = "openhuman")]
+    async fn resume_blocker(
+        self: &Arc<Self>,
+        approval_id: &ApprovalId,
+        resolution: crate::ports::blockers::BlockerResolution,
+    ) -> Result<CycleReport> {
+        let thread = self
+            .journal
+            .approval_conversation(approval_id)
+            .and_then(|conversation| conversation.thread);
+        let outcome = self
+            .drive_blocker_resume(&resolution, resolution.step.as_ref(), thread.as_deref())
+            .await;
+        // Retire the armed answer whether or not the drive succeeded: a failed
+        // resume is reported, not retried forever, and re-arming it would resume
+        // twice on the next boot. Best-effort — the durable verdict already
+        // stands.
+        if let Err(err) = self.journal.record_blocker_resumed(approval_id).await {
+            tracing::warn!(
+                company = %self.id,
+                %approval_id,
+                error = %err,
+                "[blockers] a blocker resumed but its consume-record failed; the next boot may \
+                 re-arm the answer"
+            );
+        }
+        outcome?;
+        Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// Routes a resolved blocker to the right resume by its
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep) (issue #1863).
+    #[cfg(feature = "openhuman")]
+    async fn drive_blocker_resume(
+        self: &Arc<Self>,
+        resolution: &crate::ports::blockers::BlockerResolution,
+        step: Option<&crate::ports::blockers::BlockerStep>,
+        thread: Option<&str>,
+    ) -> Result<()> {
+        use crate::ports::blockers::BlockerStep;
+
+        match step {
+            Some(BlockerStep::Task { task_id }) => {
+                if resolution.resumes() {
+                    self.resume_task_card(task_id, resolution, thread).await
+                } else {
+                    self.cancel_task_card(task_id, thread).await
+                }
+            }
+            Some(BlockerStep::Node { run_id, node_id }) => {
+                self.resume_node_blocker(run_id, node_id, resolution, thread)
+                    .await
+            }
+            // An agent question with no step behind it — there is nothing to
+            // re-dispatch, so carrying the answer back into its DM is the whole
+            // of the resume.
+            None => {
+                self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+                    .await
+            }
+        }
+    }
+
+    /// Re-dispatches a board card a blocker had paused, moving it back into In
+    /// Progress so its dispatch edge fires (issue #1863).
+    ///
+    /// The move rides through [`upsert_task`](Self::upsert_task), the one write
+    /// site that carries the dispatch edge — the opposite choice from
+    /// [`return_expired_blocker_card`](crate::runtime::advance::return_expired_blocker_card),
+    /// which uses the plain port precisely so it does *not* re-dispatch. An
+    /// [`Amend`](crate::ports::blockers::BlockerVerdict::Amend) carries the
+    /// operator's answer onto the card note first, so the re-run reads the
+    /// correction. A card an operator has since dragged out of `paused` is left
+    /// alone — the same guard the expiry mover keeps.
+    #[cfg(feature = "openhuman")]
+    async fn resume_task_card(
+        self: &Arc<Self>,
+        task_id: &str,
+        resolution: &crate::ports::blockers::BlockerResolution,
+        thread: Option<&str>,
+    ) -> Result<()> {
+        use crate::ports::blockers::BlockerVerdict;
+
+        let Some(mut card) = self
+            .ops
+            .tasks
+            .list(&self.id)
+            .await?
+            .into_iter()
+            .find(|t| t.id == task_id)
+        else {
+            return self
+                .post_blocker_resume_note(
+                    thread,
+                    "That card is no longer on the board, so there's nothing to pick back up.",
+                )
+                .await;
+        };
+        if card.column != crate::ports::tasks::COLUMN_PAUSED {
+            // Someone has already moved it on; a resume must not yank it back.
+            return Ok(());
+        }
+        if resolution.verdict == BlockerVerdict::Amend && !resolution.answer.trim().is_empty() {
+            card.note = Some(crate::runtime::advance::append_result(
+                card.note.as_deref(),
+                "operator",
+                &resolution.answer,
+            ));
+        }
+        card.column = IN_PROGRESS.to_string();
+        card.updated_at_millis = now_millis();
+        self.upsert_task(&card).await?;
+        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+            .await
+    }
+
+    /// Settles a blocked card the operator cancelled, moving it back to To-do
+    /// carrying the reason and starting nothing (issue #1863).
+    ///
+    /// The plain [`TaskStore::upsert`] port, never
+    /// [`upsert_task`](Self::upsert_task): a cancel must not fire a dispatch. The
+    /// bounce chip marks it as not-fresh for a board scan, exactly as the expiry
+    /// mover marks a card nobody answered.
+    #[cfg(feature = "openhuman")]
+    async fn cancel_task_card(self: &Arc<Self>, task_id: &str, thread: Option<&str>) -> Result<()> {
+        let Some(mut card) = self
+            .ops
+            .tasks
+            .list(&self.id)
+            .await?
+            .into_iter()
+            .find(|t| t.id == task_id)
+        else {
+            return Ok(());
+        };
+        if card.column != crate::ports::tasks::COLUMN_PAUSED {
+            return Ok(());
+        }
+        card.note = Some(crate::runtime::advance::append_result(
+            card.note.as_deref(),
+            "operator",
+            BLOCKER_CANCELLED,
+        ));
+        card.column = TODO.to_string();
+        card.bounced = Some(BLOCKER_CANCELLED.to_string());
+        card.updated_at_millis = now_millis();
+        self.ops.tasks.upsert(&self.id, &card).await?;
+        self.post_blocker_resume_note(
+            thread,
+            "Okay — I've cancelled that. It's back in To-do if you want to pick it up later.",
+        )
+        .await
+    }
+
+    /// Carries a resolved workflow-node blocker's answer back into the run
+    /// (issue #1863).
+    ///
+    /// A [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) settles the
+    /// run and starts nothing. A resuming verdict banks the answer (already
+    /// durable) and delivers it into the DM the question was asked in, so the
+    /// operator's decision is never silently dropped. Re-executing the node from
+    /// the run's trigger input — retry re-runs it, amend injects the value, skip
+    /// treats it satisfied — is the workflow engine's own resume seam (issue
+    /// #1864's node-level restart lives beside it); this hands the answer across
+    /// without disturbing that machinery.
+    #[cfg(feature = "openhuman")]
+    async fn resume_node_blocker(
+        self: &Arc<Self>,
+        run_id: &str,
+        _node_id: &str,
+        resolution: &crate::ports::blockers::BlockerResolution,
+        thread: Option<&str>,
+    ) -> Result<()> {
+        if !resolution.resumes() {
+            let outcome =
+                crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
+                    .with_error(BLOCKER_CANCELLED);
+            if let Err(err) = self.ops.runs.finish_run(&self.id, run_id, outcome).await {
+                tracing::warn!(
+                    company = %self.id,
+                    run = %run_id,
+                    error = %err,
+                    "[blockers] a cancelled workflow-node blocker's run could not be settled"
+                );
+            }
+            return self
+                .post_blocker_resume_note(thread, "Okay — I've cancelled that workflow step.")
+                .await;
+        }
+        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+            .await
+    }
+
+    /// Posts a resume acknowledgement into the DM the blocker was asked in
+    /// (issue #1863), attributed to the teammate whose DM it is — the same
+    /// durable [`AgentReply`](CompanyEvent::AgentReply) shape
+    /// [`post_blocker_prompt`](Self::post_blocker_prompt) writes, so it threads
+    /// and reloads like any transcript line. A no-op when the blocker was raised
+    /// in no conversation.
+    #[cfg(feature = "openhuman")]
+    async fn post_blocker_resume_note(&self, thread: Option<&str>, text: &str) -> Result<()> {
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        self.post_blocker_prompt(thread, text).await
     }
 
     /// Durably banks a blocked-node approval the moment its verdict is known,
@@ -5235,14 +5474,19 @@ impl CompanyRuntime {
         }
     }
 
-    /// Records the operator's verdict on a blocker group (issue #1862), lowering
-    /// the four-way intent onto the existing Approve/Deny resolve surface and
-    /// **fanning it to every member** of the group.
+    /// Records the operator's verdict on a blocker group and **drives the
+    /// resume** (issue #1863), fanning it to every member of the group.
     ///
-    /// `retry` re-approves, `skip`/`cancel` deny, and `amend` overlays the
-    /// operator's correction onto the parked effect. Every arm is durably
-    /// recorded and inert until #1863 — the verdict is banked, no stopped step
-    /// re-runs here.
+    /// The four-way intent is banked as a durable
+    /// [`BlockerResolution`](crate::ports::blockers::BlockerResolution) and armed
+    /// on the grant set's blocker side-channel **before** the detached follow-up
+    /// spawns, so a restart mid-resume replays the answer rather than dropping
+    /// it — the same restart-durable ordering the blocked-node bank keeps. Each
+    /// id is then resolved with the two-value event verdict the operator's
+    /// answer lowers onto (Retry/Amend/Skip approve, Cancel denies), and
+    /// [`spawn_follow_up`](Self::spawn_follow_up)'s blocker fork re-enters the
+    /// stopped step carrying the resolution — a resuming verdict re-dispatches
+    /// the work, a cancel settles it and starts nothing.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn apply_blocker_reply(
         self: &Arc<Self>,
@@ -5252,28 +5496,59 @@ impl CompanyRuntime {
         by: Option<&Actor>,
     ) -> Result<()> {
         use crate::company::task_intent::BlockerReplyIntent;
+        use crate::ports::blockers::{BlockerPayload, BlockerVerdict};
 
+        let verdict = match intent {
+            BlockerReplyIntent::Retry => BlockerVerdict::Retry,
+            BlockerReplyIntent::Amend => BlockerVerdict::Amend,
+            BlockerReplyIntent::Skip => BlockerVerdict::Skip,
+            BlockerReplyIntent::Cancel => BlockerVerdict::Cancel,
+            // Not a verdict; the caller runs it as an ordinary turn.
+            BlockerReplyIntent::Unrelated => return Ok(()),
+        };
+        // Only an amend carries the operator's words back into the step; the
+        // other verdicts need none, so their answer stays empty.
+        let answer = if verdict == BlockerVerdict::Amend {
+            text.to_string()
+        } else {
+            String::new()
+        };
+        // The stopped step each blocker re-enters, read off the **still-parked**
+        // effect's full payload before any resolve pops it — the journal scrubs
+        // that payload the moment the approval leaves the pending set, so it must
+        // be captured now and banked on the resolution. Snapshotted once so a
+        // group's later members are still resolvable after the first is popped.
+        let pending = self.journal.pending();
+        let step_of = |id: &ApprovalId| {
+            pending
+                .iter()
+                .find(|parked| &parked.id == id)
+                .and_then(|parked| {
+                    serde_json::from_value::<BlockerPayload>(parked.effect.payload.clone()).ok()
+                })
+                .and_then(|payload| payload.step)
+        };
         let actor = by.cloned().unwrap_or_else(|| Actor {
             kind: ActorKind::Operator,
             id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
         });
         for id in ids {
-            match intent {
-                BlockerReplyIntent::Retry => {
-                    self.resolve_approval(id, Verdict::Approve, actor.clone())
-                        .await?;
-                }
-                BlockerReplyIntent::Skip | BlockerReplyIntent::Cancel => {
-                    self.resolve_approval(id, Verdict::Deny, actor.clone())
-                        .await?;
-                }
-                BlockerReplyIntent::Amend => {
-                    let overlay = serde_json::json!({ "amendment": text });
-                    self.resolve_approval_amended(id, overlay, actor.clone())
-                        .await?;
-                }
-                BlockerReplyIntent::Unrelated => {}
-            }
+            let resolution = crate::ports::blockers::BlockerResolution {
+                verdict,
+                answer: answer.clone(),
+                step: step_of(id),
+            };
+            // Bank durably, then arm the side-channel, then resolve — the same
+            // journal-before-live ordering `mint_grant` keeps, so a crash
+            // between the two replays as "still armed" and re-resumes rather
+            // than losing the operator's decision. `resolve_approval` settles
+            // the event verdict and spawns the follow-up that reads the answer.
+            self.journal
+                .record_blocker_resolution(id, &resolution)
+                .await?;
+            self.grants.arm_blocker_resolution(id, resolution.clone());
+            self.resolve_approval(id, verdict.event_verdict(), actor.clone())
+                .await?;
         }
         Ok(())
     }
@@ -5860,6 +6135,31 @@ pub(crate) enum BlockerReplyPlan {
     },
     /// Several blockers pend and the reply named none — ask which, settle none.
     AskWhich { prompt: String },
+}
+
+/// The reason stamped on a card an operator cancelled from its blocker DM
+/// (issue #1863). Its own wording — nothing failed and nothing timed out; the
+/// operator chose to stop the work.
+#[cfg(feature = "openhuman")]
+const BLOCKER_CANCELLED: &str =
+    "cancelled from the blocker chat — the work was stopped, not failed";
+
+/// The one line posted back into a blocker's DM when its answer re-enters the
+/// stopped step (issue #1863), phrased per verdict so the operator sees what
+/// their answer did.
+#[cfg(feature = "openhuman")]
+fn blocker_resume_note(resolution: &crate::ports::blockers::BlockerResolution) -> String {
+    use crate::ports::blockers::BlockerVerdict;
+    match resolution.verdict {
+        BlockerVerdict::Retry => "Got it — picking that back up now.".to_string(),
+        BlockerVerdict::Amend => {
+            "Thanks — using that and carrying on from where it stopped.".to_string()
+        }
+        BlockerVerdict::Skip => "Okay — skipping that and moving on.".to_string(),
+        // Cancel never reaches here: it does not resume, and its callers post
+        // their own settle notice.
+        BlockerVerdict::Cancel => "Okay — cancelled.".to_string(),
+    }
 }
 
 /// The line asked back when a DM holds several distinct blocked things and the
@@ -9140,6 +9440,333 @@ mod tests {
             assert!(
                 matches!(cross, BlockerReplyPlan::NotBlocker),
                 "the same verdict from another conversation settles nothing"
+            );
+        }
+    }
+
+    /// Resuming a parked blocker (issue #1863): an operator's answer re-enters
+    /// the stopped step — a task card is re-dispatched, a cancel settles it —
+    /// and a blocker's inert effect is never executed.
+    #[cfg(feature = "openhuman")]
+    mod blocker_resume {
+        use crate::company::blocker_sender::BlockerSenderSignals;
+        use crate::company::runtime::CompanyRuntime;
+        use crate::company::task_intent::BlockerReplyIntent;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+        use crate::ports::tasks::{
+            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+        };
+        use crate::ports::types::CompanyId;
+        use std::path::Path;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        async fn build(home: &Path) -> Arc<CompanyRuntime> {
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            )
+            .expect("manifest");
+            Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .build()
+                    .await
+                    .expect("runtime"),
+            )
+        }
+
+        async fn runtime() -> (Arc<CompanyRuntime>, TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-blocker-resume-")
+                .tempdir()
+                .expect("tempdir");
+            let runtime = build(home.path()).await;
+            (runtime, home)
+        }
+
+        fn blocker(task_id: &str) -> BlockerPayload {
+            BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Provider,
+                step: Some(BlockerStep::Task {
+                    task_id: task_id.to_string(),
+                }),
+                reason: format!("the model id `gpt-nope` was rejected for {task_id}"),
+                needed: "a model id this provider serves".to_string(),
+                group_key: None,
+            }
+        }
+
+        fn assignee(id: &str) -> BlockerSenderSignals {
+            BlockerSenderSignals {
+                started_by: None,
+                owner_desk: None,
+                assignee: Some(id.to_string()),
+            }
+        }
+
+        fn card(id: &str, column: &str) -> TaskRecord {
+            TaskRecord {
+                id: id.to_string(),
+                title: "Draft the launch note".to_string(),
+                note: None,
+                column: column.to_string(),
+                priority: "medium".to_string(),
+                assignee: "eng".to_string(),
+                updated_at_millis: 1,
+                origin_chat_id: Some("dm:eng".to_string()),
+                origin_parent: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
+                bounced: None,
+            }
+        }
+
+        async fn seed(runtime: &Arc<CompanyRuntime>, c: &TaskRecord) {
+            runtime
+                .ops
+                .tasks
+                .upsert(&runtime.id, c)
+                .await
+                .expect("seed card");
+        }
+
+        async fn stored(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
+            runtime
+                .ops
+                .tasks
+                .list(&runtime.id)
+                .await
+                .expect("list")
+                .into_iter()
+                .find(|t| t.id == id)
+                .expect("card exists")
+        }
+
+        /// The headline of the tier: an operator's "retry" moves the paused card
+        /// back into In Progress so its dispatch edge fires, and the blocker is
+        /// cleared.
+        #[tokio::test]
+        async fn retry_redispatches_the_paused_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "go ahead and retry", None)
+                .await
+                .expect("resumes");
+
+            assert!(
+                runtime.pending_approvals().is_empty(),
+                "the answered blocker is retired"
+            );
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_IN_PROGRESS,
+                "a retry re-enters the stopped card through the dispatch edge"
+            );
+        }
+
+        /// An amend carries the operator's answer onto the card so the re-run
+        /// reads the correction, and re-dispatches it.
+        #[tokio::test]
+        async fn amend_carries_the_answer_onto_the_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Amend,
+                    "use gpt-4o-mini instead",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(after.column, COLUMN_IN_PROGRESS);
+            let note = after.note.expect("the answer is on the card");
+            assert!(
+                note.contains("use gpt-4o-mini instead"),
+                "the re-run must read the operator's correction: {note}"
+            );
+        }
+
+        /// A skip proceeds past the blocker — the card re-dispatches without a
+        /// correction.
+        #[tokio::test]
+        async fn skip_redispatches_the_paused_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Skip, "skip it", None)
+                .await
+                .expect("resumes");
+
+            assert_eq!(stored(&runtime, "t-1").await.column, COLUMN_IN_PROGRESS);
+        }
+
+        /// A cancel settles the card and starts nothing: it lands back in To-do
+        /// carrying the reason, and — the sharpest risk — the paused card is not
+        /// re-dispatched.
+        #[tokio::test]
+        async fn cancel_settles_the_card_to_todo() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Cancel, "cancel it", None)
+                .await
+                .expect("settles");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_TODO,
+                "a cancel abandons the work rather than re-dispatching it"
+            );
+            assert!(after.bounced.is_some(), "the card is marked not-fresh");
+        }
+
+        /// The guard the whole tier turns on: a blocker's effect is inert, so a
+        /// resuming verdict (mapped to Approve) must **never** execute it. The
+        /// execute path records an `EffectExecuted` key; the resume path records
+        /// none.
+        #[tokio::test]
+        async fn a_resolved_blocker_never_executes_its_effect() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            let approval_id = ids[0].clone();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await
+                .expect("resumes");
+
+            assert!(
+                !runtime
+                    .journal
+                    .is_executed(&format!("approval:{approval_id}")),
+                "a resolving blocker verdict must route to resume, never perform_effect"
+            );
+        }
+
+        /// A card an operator has since dragged out of `paused` is theirs — a
+        /// resume must not yank it back, exactly as the expiry mover leaves it.
+        #[tokio::test]
+        async fn a_card_moved_out_of_paused_is_not_yanked_back() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_TODO)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await
+                .expect("resumes");
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_TODO,
+                "a card the operator already moved on is left where they put it"
+            );
+        }
+
+        /// Restart durability: a blocker parked before a restart is resolved
+        /// after it — the runtime rebuilt from the journal still resumes.
+        #[tokio::test]
+        async fn a_blocker_parked_before_a_restart_still_resumes_after_it() {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-blocker-durable-")
+                .tempdir()
+                .expect("tempdir");
+            let first = build(home.path()).await;
+            seed(&first, &card("t-1", COLUMN_PAUSED)).await;
+            first
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            drop(first);
+
+            // A fresh runtime over the same journal and board — a restart.
+            let second = build(home.path()).await;
+            let ids: Vec<_> = second
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            assert_eq!(ids.len(), 1, "the parked blocker survived the restart");
+
+            second
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await
+                .expect("resumes");
+
+            assert_eq!(
+                stored(&second, "t-1").await.column,
+                COLUMN_IN_PROGRESS,
+                "a blocker parked before the restart re-enters the card after it"
             );
         }
     }
