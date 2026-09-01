@@ -101,9 +101,13 @@ describe("the Connections section", () => {
     // credential is the engine the provider list runs on. Splitting them would
     // separate a credential from what it unlocks, which is the one thing this
     // whole section is arranged around not doing.
+    // Matched at the JSX element boundary rather than as a substring. A bare
+    // `toContain("<ComposioSection")` is satisfied by `<ComposioSectionAnything`,
+    // so renaming the element past it proved nothing — verified by mutating it
+    // to `<ComposioSectionRemoved`, which passed.
     const oauth = read("views/OAuthView.tsx");
-    expect(oauth).toContain("<ComposioSection");
-    expect(oauth).toContain("<ProvidersSection");
+    expect(oauth).toMatch(/<ComposioSection[\s/>]/);
+    expect(oauth).toMatch(/<ProvidersSection[\s/>]/);
   });
 });
 
@@ -131,6 +135,14 @@ describe("the guided tour's Connect-your-tools stop", () => {
     // which is why this is asserted rather than left to the browser.
     const shell = read("components/app-shell.tsx");
     expect(shell).toContain('data-tour={`nav-${item.view}`}');
-    expect(shell).toContain('{ view: "connections", label: "Connections", icon: Plug }');
+    // Anchored to the start of the line, so a **commented-out** row does not
+    // satisfy it. `toContain` did: `// { view: "connections", … }` still holds
+    // the substring, and a commented row renders no anchor at all — which is
+    // precisely how `#/pages` spent four months unreachable behind a row that
+    // read as present (issue #1311). Verified by commenting this row out; the
+    // substring form passed, this form fails.
+    expect(shell).toMatch(
+      /^\s*\{ view: "connections", label: "Connections", icon: Plug \},$/m,
+    );
   });
 });
