@@ -2228,7 +2228,7 @@ async fn park_pending_gates(
                 serde_json::json!(started_by),
             );
             payload.insert(
-                "thread_id".to_string(),
+                crate::runtime::workflow_resume::PAYLOAD_THREAD_ID.to_string(),
                 serde_json::json!(checkpoint_thread_id),
             );
         }

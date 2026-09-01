@@ -241,6 +241,8 @@ pub const PAYLOAD_INPUT: &str = "input";
 /// than resetting to the `scheduled`-derived default every resumed run's
 /// `scheduled` (always `false`, issue #542) would otherwise stamp.
 pub const PAYLOAD_STARTED_BY: &str = "started_by";
+/// The durable tinyflows lineage used for a node-level continuation.
+pub const PAYLOAD_THREAD_ID: &str = "thread_id";
 /// The payload key holding this lineage's delivery ledger (issue #438) — the
 /// reports a continuation must NOT send again.
 pub const PAYLOAD_DELIVERED: &str = "delivered";
@@ -1049,15 +1051,32 @@ async fn spawn_continuation(
     // Issue #978 sharpens why that must be surfaced rather than logged: a batch
     // gets ONE spawn attempt, and every card that would have retried it is
     // already consumed, so a swallowed refusal loses the run with no way back.
-    let (run_id, _handle) =
-        WorkflowSpawn::new(runtime, runner).spawn_as(workflow, input, false, false, started_by)?;
+    let checkpoint_thread_id = effect
+        .payload
+        .get(PAYLOAD_THREAD_ID)
+        .and_then(Value::as_str);
+    let node_restart = checkpoint_resume_available(runtime, checkpoint_thread_id).await;
+    let ws = WorkflowSpawn::new(runtime, runner);
+    let (ctx, guard) = runtime.run_supervisor().begin(&workflow.id, false)?;
+    let ctx = ctx.with_started_by(started_by);
+    let ctx = if node_restart {
+        ctx.with_checkpoint_resume(
+            checkpoint_thread_id.expect("checked checkpoint lineage"),
+            approved.to_vec(),
+            denied.to_vec(),
+        )
+    } else {
+        ctx.with_resume_semantic(crate::ports::ResumeSemantic::ReRunFromTrigger)
+    };
+    let (run_id, _handle) = ws.spawn_admitted(ctx, guard, workflow, input, false);
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,
         approved = ?approved,
         denied = ?denied,
         %run_id,
-        "workflow: an approved gate started a continuation run; upstream nodes re-execute"
+        semantic = if node_restart { "nodeRestart" } else { "reRunFromTrigger" },
+        "workflow: an approved gate started a continuation run"
     );
     Ok(())
 }
@@ -1141,6 +1160,7 @@ pub async fn spawn_blocked_node_continuation(
     workflow_id: &str,
     input: Value,
     started_by: crate::ports::types::StartedBy,
+    checkpoint_thread_id: Option<String>,
 ) -> Result<()> {
     let Some(runner) = runtime.workflow_runner().cloned() else {
         return Err(OpenCompanyError::InvalidRequest(format!(
@@ -1178,7 +1198,19 @@ pub async fn spawn_blocked_node_continuation(
     // already-admitted `ctx` (rather than via `spawn_as`, which owns its own
     // `begin` call) so this still gets the split-`begin`/dispatch-marker
     // ordering below.
+    let node_restart = checkpoint_resume_available(runtime, checkpoint_thread_id.as_deref()).await;
     let ctx = ctx.with_started_by(started_by);
+    let ctx = if node_restart {
+        ctx.with_checkpoint_resume(
+            checkpoint_thread_id
+                .as_deref()
+                .expect("checked checkpoint lineage"),
+            Vec::new(),
+            Vec::new(),
+        )
+    } else {
+        ctx.with_resume_semantic(crate::ports::ResumeSemantic::ReRunFromTrigger)
+    };
     // Issue #1825 (P1 follow-up): abort rather than launch unmarked. Warning
     // and proceeding anyway broke the exact invariant `BlockedNodeDispatched`'s
     // own doc comment depends on — "no marker" must mean "nothing launched",
@@ -1209,10 +1241,29 @@ pub async fn spawn_blocked_node_continuation(
         company = %runtime.id(),
         workflow = %workflow_id,
         %run_id,
-        "workflow: an approved agent-node call started a continuation run; the whole graph \
-         re-executes and the minted grant lets the identical call pass"
+        semantic = if node_restart { "nodeRestart" } else { "reRunFromTrigger" },
+        "workflow: an approved agent-node call started a continuation run"
     );
     Ok(())
+}
+
+#[cfg(feature = "openhuman")]
+async fn checkpoint_resume_available(runtime: &CompanyRuntime, thread_id: Option<&str>) -> bool {
+    let (Some(store), Some(thread_id)) = (runtime.workflow_checkpoints(), thread_id) else {
+        return false;
+    };
+    match store.has_resume_point(thread_id).await {
+        Ok(available) => available,
+        Err(error) => {
+            tracing::warn!(%thread_id, %error, "workflow: checkpoint lookup failed; falling back to trigger re-run");
+            false
+        }
+    }
+}
+
+#[cfg(not(feature = "openhuman"))]
+async fn checkpoint_resume_available(_runtime: &CompanyRuntime, _thread_id: Option<&str>) -> bool {
+    false
 }
 
 /// The trigger input a continuation run starts with: the paused run's own
