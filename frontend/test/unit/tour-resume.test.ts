@@ -82,9 +82,8 @@ describe("the stop-view ⇄ resume-marker contract", () => {
 
   it("leaves the lookup unambiguous, so a resume lands on the stop that armed it", () => {
     // The controller resolves a marker with `findIndex` — FIRST match wins.
-    // Views are not unique across the tour (there are two `overview` stops and
-    // two `chat` stops), so this is only safe while the arming stop is the sole
-    // holder of its view. Add a second Connections stop ahead of this one and
+    // Views are not unique across the tour (three stops are on `chat`), so this
+    // is only safe while the arming stop is the sole holder of its view. Add a second Connections stop ahead of this one and
     // the operator silently resumes on the wrong one; nothing else would catch
     // that, because the tour still runs and still shows *a* stop.
     const sharingItsView = TOUR.filter((s) => s.view === connections!.view);
