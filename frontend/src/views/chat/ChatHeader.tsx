@@ -1,5 +1,5 @@
-import { useState, type Ref } from "react";
-import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, PanelRight, Users } from "lucide-react";
+import { useState } from "react";
+import { Check, CircleDot, Copy, Hash, Lock, PanelLeft, Users } from "lucide-react";
 
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -20,17 +20,6 @@ interface Props {
    * follows for a control that would do nothing.
    */
   onOpenRail?: () => void;
-  /** The app sidebar is a 3rem icon rail, so the channel list is compact. */
-  channelsCollapsed: boolean;
-  /** Collapses or expands the app sidebar the channel list lives in. */
-  onToggleChannels: () => void;
-  /**
-   * Where the shell restores focus after this header's own toggle unmounts the
-   * compact rail's expand button (issue #1340). The header toggle is mounted on
-   * both density states, so it is the one control the shell can count on to
-   * carry focus across the switch.
-   */
-  channelsToggleRef?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -52,9 +41,6 @@ export function ChatHeader({
   membersOpen,
   onToggleMembers,
   onOpenRail,
-  channelsCollapsed,
-  onToggleChannels,
-  channelsToggleRef,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const title = channelTitle(channel);
@@ -84,17 +70,14 @@ export function ChatHeader({
         </Button>
       )}
 
-      <Button
-        ref={channelsToggleRef}
-        variant="ghost"
-        size="icon"
-        className="hidden size-8 md:inline-flex"
-        onClick={onToggleChannels}
-        aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}
-        title={channelsCollapsed ? "Expand channels" : "Collapse channels"}
-      >
-        {channelsCollapsed ? <PanelRight className="size-4" /> : <PanelLeft className="size-4" />}
-      </Button>
+      {/* No density toggle here any more.
+
+          It used to collapse the chat rail, which was this view's own column.
+          The rail is a section of the app sidebar now, so collapsing it IS
+          collapsing the sidebar — and the console already has one control for
+          that, on the content card's leading seam, forty pixels to the left of
+          where this button sat (`SidebarCollapseButton`, issue #1177). Two
+          buttons doing one job, side by side, is worse than either. */}
 
       <div className="group/title flex min-w-0 flex-1 items-center gap-1.5">
         <KindIcon channel={channel} />

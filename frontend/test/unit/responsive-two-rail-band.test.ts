@@ -50,15 +50,17 @@ describe("chat has no second rail left to band with (issues #1383, four-row side
     expect(chatView).not.toMatch(/className=\{cn\("lg:hidden"/);
   });
 
-  it("offers the phone's reveal and the desktop collapse at the sidebar's own breakpoint", () => {
-    // `useIsMobile` flips at exactly 768px, which is Tailwind's `md`. Both of
-    // these controls act on the sidebar, so they change hands there and not at
-    // `lg` — the two agree by construction rather than by coincidence.
+  it("offers the phone's reveal at the sidebar's own breakpoint, and nothing else", () => {
+    // `useIsMobile` flips at exactly 768px, which is Tailwind's `md`. This
+    // control acts on the sidebar, so it changes hands there and not at `lg` —
+    // the two agree by construction rather than by coincidence.
     expect(chatHeader).toContain("size-8 md:hidden");
-    expect(chatHeader).toContain('className="hidden size-8 md:inline-flex"');
-    expect(chatHeader).toContain(
-      'aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}',
-    );
+    // And the header's density toggle is GONE: collapsing the channel list is
+    // collapsing the sidebar now, and `SidebarCollapseButton` already does
+    // that, forty pixels to its left (issue #1177). `chat-rail-focus.test.ts`
+    // holds the focus hand-off that moved with it.
+    expect(chatHeader).not.toContain("Collapse channels");
+    expect(chatHeader).not.toContain("md:inline-flex");
   });
 });
 

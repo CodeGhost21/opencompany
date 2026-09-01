@@ -490,12 +490,6 @@ export function ChatView({
   const [railOpenSections, setRailOpenSections] = useState<Record<string, boolean>>({});
   const toggleRailSection = (id: string) =>
     setRailOpenSections((prev) => ({ ...prev, [id]: !(prev[id] ?? true) }));
-  // The header's density toggle stays mounted across a collapse/expand, but the
-  // compact rail's expand button does not — expanding unmounts it while a
-  // keyboard user is still focused on it, dropping them at the document. The
-  // ref lets the expand action hand focus to the header toggle instead (the
-  // fix for the rail's issue #1340 focus review).
-  const channelsToggleRef = useRef<HTMLButtonElement>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   /** Your own avatar reference, once `loadViewer` has resolved who you are. */
   const [youAvatar, setYouAvatar] = useState<string | undefined>(undefined);
@@ -597,11 +591,18 @@ export function ChatView({
   function toggleChannels() {
     const expanding = channelsCollapsed;
     roomRail.expand();
-    // Expanding from the compact rail unmounts the button that carried focus;
-    // hand it to the header toggle, which is mounted on both density states.
-    // Collapsing from the header's own toggle leaves that button mounted, and
-    // the focus it already holds is the right place to stay.
-    if (expanding) channelsToggleRef.current?.focus();
+    // Expanding unmounts the compact rail's own expand button while a keyboard
+    // user is still on it, dropping them at the document (issue #1340). Hand
+    // focus to the sidebar's collapse control, which is the one control mounted
+    // on BOTH density states now that the chat header no longer carries a
+    // duplicate of it. Queried by its test id rather than threaded as a ref:
+    // it is rendered by the shell, two components above this one, and that id
+    // is already the contract `sidebar-toggle-reachable.spec.ts` pins it by.
+    if (expanding) {
+      window.requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>('[data-testid="sidebar-collapse"]')?.focus(),
+      );
+    }
   }
 
   const boot = useCallback(async () => {
@@ -2062,9 +2063,6 @@ export function ChatView({
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
           onOpenRail={roomRail.reveal}
-          channelsCollapsed={channelsCollapsed}
-          onToggleChannels={toggleChannels}
-          channelsToggleRef={channelsToggleRef}
         />
 
         <div className="flex min-h-0 flex-1">
