@@ -13595,6 +13595,7 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[cfg(feature = "openhuman")]
     fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::TaskRecord {
         crate::ports::tasks::TaskRecord {
             id: id.to_string(),
