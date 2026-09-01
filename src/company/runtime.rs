@@ -3529,7 +3529,10 @@ impl CompanyRuntime {
 
     /// The card id a review `parent` anchors to. A settle pill names it
     /// directly; the relay bubble carries `task_id: None` by construction, so
-    /// its adjacent settle pill in the same conversation is the anchor.
+    /// it is anchored to its settle pill only once [`is_relay_bubble_for`]
+    /// confirms `parent` is that pill's own relay — proximity to *some*
+    /// earlier pill is not enough, since an ordinary chat turn in the same
+    /// desk carries the same `task_id: None` shape.
     #[cfg(feature = "openhuman")]
     async fn review_anchor_card(&self, desk: &str, parent: EventSeq) -> Option<String> {
         let stored = self.events.read_from(&self.id, parent, 1).await.ok()?;
@@ -3544,36 +3547,81 @@ impl CompanyRuntime {
                 chat_id,
                 ..
             } if crate::server::chat_history::same_conversation(Some(&chat_id), Some(desk)) => {
-                self.settle_pill_before(desk, parent).await
+                let (pill_seq, task_id) = self.settle_pill_before(desk, parent).await?;
+                self.is_relay_bubble_for(desk, pill_seq, parent)
+                    .await
+                    .then_some(task_id)
             }
             _ => None,
         }
     }
 
-    /// The card id of the most recent settle pill before `before` whose origin
-    /// conversation is `desk` — the anchor for a relay bubble the operator
-    /// replied to.
+    /// The seq and card id of the most recent settle pill before `before`
+    /// whose origin conversation is `desk` — a *candidate* anchor for a relay
+    /// bubble the operator replied to, still to be confirmed by
+    /// [`is_relay_bubble_for`].
     #[cfg(feature = "openhuman")]
-    async fn settle_pill_before(&self, desk: &str, before: EventSeq) -> Option<String> {
+    async fn settle_pill_before(&self, desk: &str, before: EventSeq) -> Option<(EventSeq, String)> {
         const WINDOW: usize = 24;
         self.events
             .read_before(&self.id, Some(before), WINDOW)
             .await
             .ok()?
             .into_iter()
-            .find_map(|stored| match stored.event {
-                CompanyEvent::DeskTaskCompleted {
-                    task_id,
-                    origin_chat_id,
-                    ..
-                } if origin_chat_id.as_deref().is_some_and(|origin| {
-                    crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-                }) =>
-                {
-                    Some(task_id)
+            .find_map(|stored| {
+                let seq = stored.seq;
+                match stored.event {
+                    CompanyEvent::DeskTaskCompleted {
+                        task_id,
+                        origin_chat_id,
+                        ..
+                    } if origin_chat_id.as_deref().is_some_and(|origin| {
+                        crate::server::chat_history::same_conversation(Some(origin), Some(desk))
+                    }) =>
+                    {
+                        Some((seq, task_id))
+                    }
+                    _ => None,
                 }
-                _ => None,
             })
+    }
+
+    /// Whether `parent` is the relay bubble `pill` actually produced: the
+    /// first `AgentReply` (`task_id: None`) posted to `desk` after `pill`,
+    /// with no other settle pill for `desk` interleaved.
+    ///
+    /// Without this check, any later ordinary chat turn in the same desk —
+    /// also an `AgentReply` with `task_id: None` — would satisfy the "reply
+    /// targets the relay bubble" test just by being the nearest one before
+    /// whatever the operator replied to, silently turning a normal reply into
+    /// review feedback on a card the operator never looked at.
+    #[cfg(feature = "openhuman")]
+    async fn is_relay_bubble_for(&self, desk: &str, pill: EventSeq, parent: EventSeq) -> bool {
+        const WINDOW: usize = 24;
+        let Ok(forward) = self.events.read_from(&self.id, pill, WINDOW).await else {
+            return false;
+        };
+        for stored in forward.into_iter().skip(1) {
+            let seq = stored.seq;
+            match stored.event {
+                CompanyEvent::AgentReply {
+                    task_id: None,
+                    chat_id,
+                    ..
+                } if crate::server::chat_history::same_conversation(Some(&chat_id), Some(desk)) => {
+                    return seq == parent;
+                }
+                CompanyEvent::DeskTaskCompleted { origin_chat_id, .. }
+                    if origin_chat_id.as_deref().is_some_and(|origin| {
+                        crate::server::chat_history::same_conversation(Some(origin), Some(desk))
+                    }) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// The card with id `task_id`, but only when it is an `in_review`
@@ -7531,6 +7579,37 @@ mod tests {
             assert!(
                 rt.review_feedback_target("marketing", pill).await.is_none(),
                 "a reply in another desk must not review this desk's card"
+            );
+        }
+
+        /// Codex #3903031192: a settle pill's relay bubble is the only reply
+        /// target that anchors to its card. A later, unrelated `AgentReply` in
+        /// the same desk — an ordinary chat turn — carries the identical
+        /// `task_id: None` shape, so a reply to *that* message must not be
+        /// mistaken for review feedback on the earlier card just because the
+        /// pill is still the nearest one before it.
+        #[tokio::test]
+        async fn the_resolver_declines_a_later_ordinary_reply_that_is_not_the_relay() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            let true_relay = append(&rt, relay_bubble("strategy")).await;
+            let later_ordinary_turn = append(&rt, relay_bubble("strategy")).await;
+
+            assert_eq!(
+                rt.review_feedback_target("strategy", true_relay)
+                    .await
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "the pill's own relay bubble still anchors to its card"
+            );
+            assert!(
+                rt.review_feedback_target("strategy", later_ordinary_turn)
+                    .await
+                    .is_none(),
+                "replying to a later ordinary turn must run a normal turn, not \
+                 re-open the earlier card just because the pill is still the \
+                 nearest one before it"
             );
         }
 
