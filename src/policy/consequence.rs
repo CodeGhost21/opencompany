@@ -1473,22 +1473,38 @@ fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
 /// arguments, not of the tool's name. "Fetch from `docs.rs` for the next few
 /// days" is a sentence; "make any HTTP request" is not.
 ///
-/// The classification is [`Standing::ScopedGrantable`] **only when a host can be
-/// read**, and [`Standing::PerCall`] otherwise. That coupling is load-bearing
-/// rather than tidy: a grant is minted with the scope
-/// [`standing_scope_of`] returns, and
+/// Both fields turn on the same read: whether [`web_fetch_scope_of`] can name a
+/// concrete host.
+///
+/// * A resolvable host is [`Reach::ExternalRead`] (free under `supervised` and
+///   `auto`) and [`Standing::ScopedGrantable`] — a card the operator actually
+///   read, for a destination they actually saw.
+/// * An unreadable URL — no `url` key, an unparseable string, or an unresolved
+///   workflow expression such as `=item.endpoint` — falls back to
+///   [`Reach::Consequence`] and [`Standing::PerCall`], the same gated shape
+///   [`DECLARED`] gives the tool by default. "Free" is earned by a destination
+///   the operator can see, not by a call merely shaped like a read; a call
+///   whose destination is chosen at run time by an upstream value is exactly
+///   the dynamic-destination case the workflow gate's own
+///   `an_unresolved_url_gates_and_says_the_destination_is_not_known_yet` pins.
+///
+/// The standing half is also load-bearing beyond that: a grant is minted with
+/// the scope [`standing_scope_of`] returns, and
 /// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
 /// treats an unscoped grant as admitting **everything**. Were an unreadable URL
 /// still grantable, approving one card would mint a grant admitting every host
-/// on earth. Tying the two answers to one function makes that unrepresentable.
-///
+/// on earth. Tying both answers to one read makes that unrepresentable.
 fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
-    Consequence {
-        group: EffectGroup::Other,
-        reach: Reach::ExternalRead,
-        standing: match web_fetch_scope_of(args) {
-            Some(_) => Standing::ScopedGrantable,
-            None => Standing::PerCall,
+    match web_fetch_scope_of(args) {
+        Some(_) => Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::ExternalRead,
+            standing: Standing::ScopedGrantable,
+        },
+        None => Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::Consequence,
+            standing: Standing::PerCall,
         },
     }
 }
@@ -2658,6 +2674,13 @@ mod tests {
                 "an unreadable URL must not be grantable: {unreadable}"
             );
             assert_eq!(
+                verdict.reach,
+                Reach::Consequence,
+                "an unreadable URL must stay gated, not free: {unreadable}"
+            );
+            assert!(verdict.reach.parks_under_supervision(), "{unreadable}");
+            assert!(verdict.parks_under_auto(), "{unreadable}");
+            assert_eq!(
                 standing_scope_of(WEB_FETCH, &unreadable),
                 None,
                 "{unreadable}"
@@ -2678,6 +2701,26 @@ mod tests {
             assert!(!verdict.parks_under_auto(), "{method}");
             assert!(verdict.reach.denied_under_readonly(), "{method}");
             assert!(!verdict.reach.costs_money(), "{method}");
+        }
+    }
+
+    /// A read-shaped method whose URL is a runtime expression — `=item.endpoint`
+    /// is tinyflows' own unresolved-value prefix — names no host yet. Free
+    /// classification is earned by a destination the operator can see; an
+    /// upstream node choosing the destination at run time is the case the
+    /// workflow gate's own
+    /// `an_unresolved_url_gates_and_says_the_destination_is_not_known_yet` pins.
+    #[test]
+    fn a_runtime_resolved_get_target_stays_gated() {
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            let verdict = consequence_of(
+                "http_request",
+                &json!({ "method": method, "url": "=item.endpoint" }),
+            );
+            assert_eq!(verdict.reach, Reach::Consequence, "{method}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{method}");
+            assert!(verdict.reach.parks_under_supervision(), "{method}");
+            assert!(verdict.parks_under_auto(), "{method}");
         }
     }
 
