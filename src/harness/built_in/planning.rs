@@ -343,7 +343,7 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
     }
     let token = card.updated_at_millis;
 
-    let evidence = match gather_evidence(&runtime, &card).await {
+    let mut evidence = match gather_evidence(&runtime, &card).await {
         Ok(evidence) => evidence,
         Err(err) => {
             tracing::warn!(
@@ -368,6 +368,7 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
         }
     };
     record_usage(&runtime, &planner, &task_id, &usage).await;
+    refresh_native_capabilities(&runtime, &mut evidence, &card).await;
 
     let prerequisites = verify_prerequisites(&runtime, &evidence, &draft.prerequisites).await;
     let candidates = resolve_assignee_candidates(&evidence, &draft.assignee_candidates);
@@ -877,6 +878,13 @@ struct Evidence {
     /// prerequisite naming one of these is satisfied by the built-in tool
     /// rather than parked on a connection it never needed.
     native_capabilities: HashSet<String>,
+    /// Carried alongside `native_capabilities` so
+    /// [`refresh_native_capabilities`] can recompute the latter — through the
+    /// same [`native_capabilities_of`] call [`gather_evidence`] made — without
+    /// re-deriving these two backend checks from `runtime.workflow_harness_deps`
+    /// a second time.
+    search_backend_configured: bool,
+    media_backend_configured: bool,
 }
 
 impl Evidence {
@@ -1325,7 +1333,54 @@ async fn gather_evidence(
         mail_configured: runtime.mail().is_some(),
         composio_credential,
         native_capabilities,
+        search_backend_configured,
+        media_backend_configured,
     })
+}
+
+/// Re-resolves [`Evidence::native_capabilities`] against the tenant's spend as
+/// of right now.
+///
+/// [`gather_evidence`] resolves the live capability filter *before*
+/// [`call_model`] runs, so it reflects the budget as it stood before the
+/// planning call's own tokens were charged. [`record_usage`] charges those
+/// tokens — a planning sample counts toward the capability-tier ceiling the
+/// same as any other completion — and [`verify_prerequisites`] runs after
+/// that charge. Without this re-resolve, a tenant whose planning call itself
+/// crosses a namespace's budget still has that namespace's evidence stamped
+/// native off the pre-charge filter, while `HarnessPool::ensure` strips the
+/// tool from the belt the dispatched agent actually gets.
+///
+/// A no-op when there is no plan to resolve against: the no-plan
+/// `deps.capabilities` value and the no-deps `AllowAll` default do not depend
+/// on spend, so nothing this pass charged could have changed them.
+async fn refresh_native_capabilities(
+    runtime: &Arc<CompanyRuntime>,
+    evidence: &mut Evidence,
+    card: &TaskRecord,
+) {
+    let Some(deps) = runtime.workflow_harness_deps.as_ref() else {
+        return;
+    };
+    let Some(plan) = deps.plan.as_ref() else {
+        return;
+    };
+    let capabilities = crate::harness::built_in::capability_budget::resolve_filter(
+        plan,
+        deps.meter.as_deref(),
+        runtime.id(),
+        now_millis(),
+    )
+    .await;
+    let fixed_assignee =
+        resolve_working_teammate(&evidence.record, &evidence.teammates, &card.assignee);
+    evidence.native_capabilities = native_capabilities_of(
+        &evidence.teammates,
+        fixed_assignee,
+        evidence.search_backend_configured,
+        evidence.media_backend_configured,
+        &capabilities,
+    );
 }
 
 /// Whether **any** Composio credential resolves for this company — presence

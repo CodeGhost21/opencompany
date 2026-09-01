@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use tinyagents::harness::model::{ChatModel, ModelResponse};
+use tinyagents::harness::usage::Usage;
 use tinyagents::{Result as TaResult, TinyAgentsError};
 
 use super::*;
@@ -38,6 +39,9 @@ use tempfile;
 /// no secret and no tool.
 struct ScriptedModel {
     reply: Option<String>,
+    /// Token usage the call reports, mirrored onto the [`ModelResponse`] so a
+    /// test can control what [`record_usage`] charges for this call.
+    usage: Option<Usage>,
     calls: AtomicUsize,
     prompts: StdMutex<Vec<String>>,
     /// Simulates a provider that never answers, for the timeout path.
@@ -48,6 +52,19 @@ impl ScriptedModel {
     fn replying(reply: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             reply: Some(reply.into()),
+            usage: None,
+            calls: AtomicUsize::new(0),
+            prompts: StdMutex::new(Vec::new()),
+            hang: false,
+        })
+    }
+
+    /// Same as [`Self::replying`], but the response carries `usage` — for
+    /// tests that need [`record_usage`] to charge a specific token amount.
+    fn replying_with_usage(reply: impl Into<String>, usage: Usage) -> Arc<Self> {
+        Arc::new(Self {
+            reply: Some(reply.into()),
+            usage: Some(usage),
             calls: AtomicUsize::new(0),
             prompts: StdMutex::new(Vec::new()),
             hang: false,
@@ -57,6 +74,7 @@ impl ScriptedModel {
     fn failing() -> Arc<Self> {
         Arc::new(Self {
             reply: None,
+            usage: None,
             calls: AtomicUsize::new(0),
             prompts: StdMutex::new(Vec::new()),
             hang: false,
@@ -101,7 +119,13 @@ impl ChatModel<()> for ScriptedModel {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
         match &self.reply {
-            Some(reply) => Ok(ModelResponse::assistant(reply.clone())),
+            Some(reply) => {
+                let response = ModelResponse::assistant(reply.clone());
+                Ok(match self.usage {
+                    Some(usage) => response.with_usage(usage),
+                    None => response,
+                })
+            }
             None => Err(TinyAgentsError::Model("the brain is down".to_string())),
         }
     }
@@ -232,6 +256,8 @@ fn evidence() -> Evidence {
         mail_configured: false,
         composio_credential: true,
         native_capabilities: HashSet::new(),
+        search_backend_configured: false,
+        media_backend_configured: false,
     }
 }
 
@@ -1182,6 +1208,137 @@ allow = ["search"]
         "a BYO search key added after boot must reach the evidence the same live \
          way it reaches the roster, not stay hidden behind the stale boot snapshot: {:?}",
         evidence.native_capabilities
+    );
+}
+
+/// `gather_evidence` resolves the capability filter live, but it does so
+/// *before* [`call_model`] runs — and `run_planning_pass` charges that call's
+/// own tokens through
+/// [`record_usage`] only afterward. A tenant sitting just under a namespace's
+/// budget, whose planning call is itself what tips the spend over, must not
+/// have that namespace's evidence stamped native off the pre-charge filter —
+/// `HarnessPool::ensure` re-resolves fresh before the dispatched agent's turn
+/// and would strip the tool the card's evidence just told the operator it had.
+///
+/// The plan budgets `shell` at 300 tokens (Daily) with 250 already spent —
+/// under budget, so the filter `gather_evidence` resolves before the model
+/// call allows `shell`. The scripted model's own reply reports 100 more
+/// tokens, which `record_usage` charges to the SAME meter this plan reads
+/// from — pushing the period's spend to 350, over the 300 budget. The
+/// prerequisite the model asked about names `shell` as a `connection`, the
+/// same claim shape `verify_connection` short-circuits `Satisfied` for a
+/// native capability.
+#[tokio::test]
+async fn native_shell_evidence_reflects_the_planning_calls_own_charge() {
+    let manifest: CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Ops"
+tools = ["shell"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["shell"]
+"#,
+    )
+    .expect("fixture manifest parses");
+
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-planning-charge-crosses-budget-")
+        .tempdir()
+        .expect("tempdir");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme-charge-crosses-budget"))
+        .build()
+        .await
+        .expect("runtime");
+
+    // Pre-existing spend: 250 of a 300-token daily `shell` budget — under
+    // budget, so the filter `gather_evidence` resolves before the model call
+    // still allows `shell`.
+    runtime
+        .usage()
+        .record(
+            runtime.id(),
+            &crate::ports::usage::UsageSample {
+                at_millis: crate::ports::now_millis(),
+                agent: "maya".into(),
+                provider: "managed".into(),
+                input_tokens: 200,
+                output_tokens: 50,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+                kind: crate::ports::usage::SampleKind::Inference,
+                run_id: None,
+                model: None,
+            },
+        )
+        .await
+        .expect("seed the prior spend");
+
+    let plan = crate::harness::capability_budget::CapabilityPlan {
+        period: crate::harness::capability_budget::BudgetPeriod::Daily,
+        budgets: std::collections::BTreeMap::from([("shell".to_string(), 300u64)]),
+        total_budget: None,
+    };
+    // The SAME meter `record_usage` charges the planning call's tokens to —
+    // proving the re-resolve reads the spend this very pass just wrote, not a
+    // second, disconnected meter.
+    let deps = crate::harness::workflow_wiring_deps(
+        &runtime,
+        Some(runtime.usage().clone()),
+        crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        Some(plan),
+    );
+    runtime.set_workflow_harness_deps(deps);
+
+    let reply = r#"{"description":"Run the release script","steps":[{"title":"Run it","detail":"execute the release script locally"}],
+        "prerequisites":[{"kind":"connection","name":"shell","why":"the release script runs on this host"}],
+        "risks":[],"verification":"the script exits 0","scope":"the release script only"}"#;
+    let model = ScriptedModel::replying_with_usage(
+        reply,
+        Usage {
+            input_tokens: 80,
+            output_tokens: 20,
+            ..Default::default()
+        },
+    );
+    runtime.set_planner(Arc::new(TaskPlanner::new(model, "chat-v1")));
+
+    let runtime = Arc::new(runtime);
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-charge", "maya"))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-charge".to_string()).await;
+
+    let after = read(&runtime, "t-charge").await;
+    let plan = after.plan.expect("the brief is on the card");
+    let shell = plan
+        .prerequisites
+        .iter()
+        .find(|p| p.name == "shell")
+        .expect("the shell prerequisite was verified");
+    assert_ne!(
+        shell.status,
+        PrereqStatus::Satisfied,
+        "the planning call's own 100 tokens push the 250-already-spent tenant past the \
+         300-token shell budget — evidence resolved before that charge must not still report \
+         shell native: {shell:?}"
+    );
+    assert_eq!(
+        after.column,
+        crate::ports::tasks::COLUMN_PAUSED,
+        "a shell prerequisite that is no longer satisfied is a blocker, so the card must not \
+         dispatch on a belt that will have the tool stripped"
     );
 }
 
