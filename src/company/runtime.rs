@@ -3684,6 +3684,11 @@ impl CompanyRuntime {
     /// `in_review → in_progress` through [`upsert_task`](Self::upsert_task),
     /// whose dispatch edge fires a fresh run that reads the appended note back
     /// through the card's task instruction.
+    ///
+    /// A blank `feedback` leaves the card untouched rather than re-dispatching
+    /// it: nothing was appended for the fresh run to read, so a re-run would
+    /// repeat the same attempt against the same instruction with nothing new
+    /// to act on.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn apply_review_feedback(
         self: &Arc<Self>,
@@ -3691,6 +3696,9 @@ impl CompanyRuntime {
         feedback: &str,
         author: Option<&Actor>,
     ) -> Result<TaskRecord> {
+        if feedback.trim().is_empty() {
+            return Ok(card.clone());
+        }
         tracing::debug!(
             company = %self.id,
             task = %card.id,
@@ -3698,13 +3706,11 @@ impl CompanyRuntime {
             "[review] applying feedback; re-dispatching the card"
         );
         let mut next = card.clone();
-        if !feedback.trim().is_empty() {
-            next.note = Some(crate::runtime::delegation::append_note(
-                next.note.as_deref(),
-                crate::harness::built_in::lifecycle::REVIEWER_ATTRIBUTION,
-                feedback,
-            ));
-        }
+        next.note = Some(crate::runtime::delegation::append_note(
+            next.note.as_deref(),
+            crate::harness::built_in::lifecycle::REVIEWER_ATTRIBUTION,
+            feedback,
+        ));
         next.column = IN_PROGRESS.to_string();
         next.updated_at_millis = now_millis();
         self.upsert_task(&next).await
@@ -7796,6 +7802,29 @@ mod tests {
             assert!(
                 note.contains("[writer] first draft"),
                 "the prior note is preserved: {note}"
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_feedback_does_not_redispatch() {
+            let (rt, _home) = runtime().await;
+            let mut seeded = card("t-1", "strategy", COLUMN_IN_REVIEW);
+            seeded.note = Some("[writer] first draft".to_string());
+            seed(&rt, &seeded).await;
+
+            rt.apply_review_feedback(&seeded, "   ", None)
+                .await
+                .expect("empty feedback is accepted, not rejected");
+
+            let after = stored(&rt, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_REVIEW,
+                "a Revise with nothing to say must not re-dispatch the card"
+            );
+            assert_eq!(
+                after.note.as_deref(),
+                Some("[writer] first draft"),
+                "no reviewer block is appended when there is no feedback"
             );
         }
 
