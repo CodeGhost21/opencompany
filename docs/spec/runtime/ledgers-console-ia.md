@@ -366,6 +366,76 @@ removing a sidebar row. A future change that parks a complete surface must add
 its visible notice in the same change; a future change that retires one must
 replace the route deliberately.
 
+## Rule 7: Connections is a section, not two settings tabs
+
+Added after the fact, by the change that moved OAuth and MCP Servers out of
+Settings. Recorded here because this file says at the bottom that it is the one
+to update first when the console IA changes.
+
+**What moved.** Two settings sub-pages became a top-level nav row with two
+sub-pages of its own:
+
+| address | before | after |
+| --- | --- | --- |
+| `#/connections` | rewritten → `#/settings/oauth` | **real** — the section, defaulting to Apps |
+| `#/connections/apps` | — | the accounts page, renamed from OAuth |
+| `#/connections/mcp` | — | the MCP page |
+| `#/oauth` | → `#/settings/oauth` | → `#/connections/apps` |
+| `#/mcp` | → `#/settings/mcp` | → `#/connections/mcp` |
+| `#/settings/oauth` | the page | → `#/connections/apps` |
+| `#/settings/mcp` | the page | → `#/connections/mcp` |
+| `#/settings/connections` | **dead** — silently landed on General | → `#/connections` |
+
+**Why a section and not a settings tab.** The same argument
+`docs/spec/runtime/finance-console.md` makes about Billing, and the one that
+took Brain out of the rail. Settings is where an operator changes how the
+company is configured — a place they visit once, on the way to something else.
+Which apps the company can act through, and which tool servers its teammates can
+call, is not that: it is read repeatedly, it changes as the work changes, and an
+operator arrives at it asking "can my teammates do X yet?". Two clicks down a
+settings rail is the wrong depth for a question asked that often.
+
+**Why only two of the five.** Inference, Hosting and Search stayed in Settings'
+Integrations group, which survives with three rows. Each is a credential form
+that belongs beside the one thing it unlocks — the model, the deploy target, the
+search provider — which is the argument `views/settings-pages.ts` makes twice.
+Filing them under a section named for the act of connecting would undo it.
+
+**This is not a revert of the Connections split.** A single "Connections" *page*
+once carried five subjects — accounts, MCP, inference, channels, repositories —
+and was deliberately broken apart because each was something an operator
+scrolled past on the way to another. That decision was about one question per
+page, and it stands: Apps and MCP Servers are still two pages. What is new is
+that they have a parent. Composio stays on the Apps page for the same rule read
+the other way: `ProvidersSection` reads Composio's credential state to decide
+what every provider tile renders, so splitting them would separate a credential
+from the thing it unlocks.
+
+**Why "Apps".** "OAuth" names the protocol a connection happens to run on rather
+than what an operator is looking for, which is Gmail, Slack, Notion — and under
+a parent already called Connections it said the same word twice. Only the
+surface strings change; the file, the component and every internal name stay
+`OAuth*`, exactly the split Rule 1 makes for "ledger".
+
+**Rule 6 is satisfied by promotion, not by an exemption.** Both pages gained a
+nav row rather than losing one, so neither needs one of Rule 6's four
+treatments. What Rule 6 governs here is the addresses they left behind: all four
+are **retired** in its sense — routed through `REWRITE_RETIRED` to the real
+successor, with no page left pretending to be a live destination.
+`#/settings/connections` is the case that shows why that clause is not
+bookkeeping. It named no `SETTINGS_PAGES` id, so the unknown-sub repair dropped
+the operator on **General** — a real page that was not the one the link
+promised, which is worse than an address that plainly fails, because it looks
+like it worked. It was live in four places in the setup flow the whole time.
+
+**The nav row sits between Finance and Workflows.** Finance and Connections are
+the two rows about the world outside this company — the money it moves through
+Chargebee and PayPal, and the apps and tool servers its teammates act through.
+Workflows and Observatory are the "what the agents did" pair and read as one
+thing when adjacent. Draft 1 above counted 9 fixed `NAV` entries against the
+15-list cap; this makes 10, which does not change that draft's arithmetic enough
+to reopen it.
+
 ## What stays out of scope
 
 - `LedgerSpec`, the fold, `LedgerStore`, the derived-Markdown guard, and every
