@@ -717,6 +717,69 @@ fn native_capabilities_narrow_to_the_fixed_assignee() {
     assert!(set.contains("search"), "{set:?}");
 }
 
+/// `native_capabilities_of` takes `media_backend_configured` as a plain bool,
+/// so it cannot see the gap this test closes: `gather_evidence` used to derive
+/// that bool from `deps.media.is_some()` alone, while `media_tools` — the
+/// function that actually builds the belt — additionally refuses any backend
+/// whose URL isn't exactly HTTPS. A `deps.media` present but pointed at a
+/// non-HTTPS host wired zero media tools yet still read as natively satisfied.
+/// `gather_evidence` now reuses `MediaBackend::is_https`, the same predicate
+/// `media_tools` gates on, so the two cannot diverge again.
+#[tokio::test]
+async fn native_media_evidence_requires_an_https_backend() {
+    let manifest: CompanyManifest = toml::from_str(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "maya"
+role = "Writer"
+tools = ["media"]
+
+[policy]
+mode = "full"
+
+[tools]
+allow = ["media"]
+"#,
+    )
+    .expect("fixture manifest parses");
+
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-planning-media-")
+        .tempdir()
+        .expect("tempdir");
+    let mut runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme-media"))
+        .build()
+        .await
+        .expect("runtime");
+
+    let mut deps = crate::harness::workflow_wiring_deps(
+        &runtime,
+        None,
+        crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        None,
+    );
+    deps.media = Some(crate::harness::toolbelt::MediaBackend {
+        backend_url: "http://media.example".to_string(),
+        auth_token: "tok".to_string(),
+    });
+    runtime.set_workflow_harness_deps(deps);
+
+    let runtime = Arc::new(runtime);
+    let evidence = gather_evidence(&runtime, &card("c1", "maya"))
+        .await
+        .expect("evidence");
+
+    assert!(
+        !evidence.native_capabilities.contains("media"),
+        "a non-HTTPS media backend must not be reported as natively wired: {:?}",
+        evidence.native_capabilities
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #886: the evidence pack's Composio credential is the resolver's answer
 // ---------------------------------------------------------------------------

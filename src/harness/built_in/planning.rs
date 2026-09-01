@@ -959,6 +959,11 @@ fn settled_assignee(card_assignee: &str, proposed: Option<String>) -> Option<Str
 /// deployment (or BYO setup) with neither backend configured held no
 /// `web_search` tool at all; before this fix it was still reported native and
 /// satisfied, so a card's evidence and dispatch's actual belt disagreed.
+/// `media_backend_configured` also asks
+/// [`MediaBackend::is_https`](crate::harness::toolbelt::MediaBackend::is_https),
+/// the same predicate [`media_tools`](crate::harness::toolbelt::media_tools)
+/// gates on — a `deps.media` present but pointed at a non-HTTPS host wires no
+/// tool either, so the evidence has to fail closed the same way.
 /// `search_backend_configured`/`media_backend_configured` close that gap —
 /// pass `false` for a namespace this deployment cannot back regardless of
 /// grants.
@@ -1205,7 +1210,9 @@ async fn gather_evidence(
         .map(|deps| {
             (
                 deps.search.is_some() || deps.tenant_search.is_some(),
-                deps.media.is_some(),
+                deps.media
+                    .as_ref()
+                    .is_some_and(|backend| backend.is_https()),
             )
         })
         // No deps attached means no deployment to ask — fail closed rather
