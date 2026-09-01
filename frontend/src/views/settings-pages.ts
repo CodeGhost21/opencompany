@@ -9,11 +9,9 @@
 // that again — a page id that is not here is a type error.
 
 import {
-  Blocks,
   BrainCircuit,
   ChartColumnBig,
   Globe,
-  KeyRound,
   Search,
   type LucideIcon,
   Settings2,
@@ -39,10 +37,22 @@ export const SETTINGS_PAGES = [
   },
   // One question per page. "Connections" carried five — third-party accounts,
   // MCP servers, inference, channels, repositories — so each was something an
-  // operator scrolled past on the way to another. The first three are pages
-  // now; the last two left the product.
-  { id: "oauth", label: "OAuth", icon: KeyRound, hint: "Third-party accounts you act through", group: "integrations" },
-  { id: "mcp", label: "MCP Servers", icon: Blocks, hint: "Tool servers and their tools", group: "integrations" },
+  // operator scrolled past on the way to another. The first three became pages;
+  // the last two left the product.
+  //
+  // Two of those three then left this rail entirely: third-party accounts (as
+  // **Apps**) and MCP servers are the Connections section now, at
+  // `#/connections/apps` and `#/connections/mcp`, because what the company can
+  // act through is something an operator reads repeatedly rather than
+  // configures once. Both `#/settings/oauth` and `#/settings/mcp` still
+  // resolve, rewritten onto the section by `console-route-rewrites.ts`, so
+  // every link minted while they lived here works.
+  //
+  // Inference stayed, and so did Hosting and Search below it, for the reason
+  // stated twice in this file: a credential form belongs beside the one thing
+  // it unlocks. The model, the deploy target and the search provider are three
+  // such things; filing them under a section named for the act of connecting
+  // would separate each credential from what it is for.
   { id: "inference", label: "Inference", icon: BrainCircuit, hint: "The model teammates think with", group: "integrations" },
   // A credential form belongs beside what it unlocks. An operator looking for
   // "where do I put my Vercel token" searches for hosting, so it sits here
@@ -102,11 +112,16 @@ export function settingsPageLabel(page: SettingsPage): string {
  * The console hash a link to one Settings sub-page needs.
  *
  * Typed for the same reason `settingsPageLabel` is: a link written against this
- * cannot outlive the page it points at. `#/settings/connections` is still
- * hard-coded in three places in `SetupDialog`, pointing at a page that stopped
- * existing when Connections was split into OAuth / MCP / Inference — which is
- * the failure issue #1476 was filed for, one release earlier, over a different
- * dead link.
+ * cannot outlive the page it points at.
+ *
+ * `#/settings/connections` was the standing counter-example: hard-coded in four
+ * places across `SetupController` and `SetupDialog`, naming a page that stopped
+ * existing when Connections was split into OAuth / MCP / Inference, and so
+ * repaired onto General — a dead link that looked like a working one, which is
+ * the failure issue #1476 was filed for a release earlier. All four are typed
+ * calls to this function now, and all four turned out to mean Inference: every
+ * one of them is reached because the company has no usable model. The address
+ * itself also answers again, rewritten onto the Connections section.
  */
 export function settingsHref(page: SettingsPage): string {
   return `#/settings/${page}`;

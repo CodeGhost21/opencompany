@@ -8,6 +8,7 @@ import {
   type LucideIcon,
   MessagesSquare,
   Network,
+  Plug,
   ShieldCheck,
   BookText,
   Wallet,
@@ -169,6 +170,7 @@ import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { UnknownRouteView } from "@/views/UnknownRouteView";
+import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -334,6 +336,21 @@ const NAV: NavItem[] = [
   // Chargebee and PayPal surfaces the host had no HTTP route for until
   // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
   { view: "finances", label: "Finance", icon: Wallet },
+  // Beside Finance, and above the Workflows/Observatory pair, because that is
+  // the seam it belongs on. Finance and Connections are the two rows about the
+  // world *outside* this company — the money it moves through Chargebee and
+  // PayPal, and the apps and tool servers its teammates act through — while
+  // Workflows and Observatory are the "what the agents did" pair and read as
+  // one thing when adjacent. Splitting either pair to slot this in would cost
+  // more than it bought.
+  //
+  // Not in Settings, which is where it used to live as two sub-pages. A
+  // settings rail is for configuration an operator sets once; which apps the
+  // company can act through is something they come back to and read, and it
+  // changes as the work does — the same argument that moved Billing out to
+  // Finance (docs/spec/runtime/finance-console.md) and Brain out to its own
+  // row. See docs/spec/runtime/ledgers-console-ia.md, Rule 7.
+  { view: "connections", label: "Connections", icon: Plug },
   { view: "workflows", label: "Workflows", icon: Workflow },
   // What the agents actually did, run by run — the read-only companion to
   // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
@@ -1174,8 +1191,8 @@ export function AppShell({
   // Runs once; StrictMode's double invoke is harmless because the first run
   // clears the params the second reads.
   //
-  // The accounts page is `#/settings/oauth` since the Connections split, so the
-  // bounce-back lands there rather than on a top-level view.
+  // The accounts page is `#/connections/apps` since it left the settings rail
+  // for the Connections section, so the bounce-back lands there.
   //
   // Before issue #300 the host answered a cancelled or expired handshake with a
   // JSON body, which the browser rendered as the page — a dead end with no way
@@ -1198,7 +1215,7 @@ export function AppShell({
       "",
       window.location.pathname + (query ? `?${query}` : "") + stripLegacyConnectParams(window.location.hash),
     );
-    setView("settings", "oauth");
+    setView("connections", "apps");
     // The callback param carries the raw provider id (e.g. "slack"); show the
     // catalog display name ("Slack") when we know it, falling back to the id.
     const providerName = providerId
@@ -3968,6 +3985,14 @@ export function AppShell({
                 onNavigate={(page) => navigate("finances", page)}
               />
             </Suspense>
+          )}
+          {view === "connections" && (
+            <ConnectionsSection
+              client={client}
+              company={company}
+              sub={sub}
+              onNavigate={(page) => navigate("connections", page)}
+            />
           )}
           {view === "settings" && (
             <SettingsSection
