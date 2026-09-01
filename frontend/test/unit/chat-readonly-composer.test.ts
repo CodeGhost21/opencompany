@@ -202,7 +202,7 @@ describe("a writable channel still renders the whole composer", () => {
 });
 
 describe("the harness-unavailable notice sits next to the composer", () => {
-  it("renders the notice, unchanged, on a writable channel", async () => {
+  it("renders the notice on a writable channel, saying all three things", async () => {
     await mount("main", "unavailable");
 
     const strip = banner();
@@ -210,10 +210,13 @@ describe("the harness-unavailable notice sits next to the composer", () => {
     expect(strip?.textContent).toContain(
       "This host cannot reach a model — no agent harness is available.",
     );
+    // The sentence lost its directional word when the strip moved (see the
+    // render site) and kept everything else: not the teammate they appear
+    // under, from the offline echo brain, and no setting changes it.
     expect(strip?.textContent).toContain(
-      "The replies below come from the offline echo brain rather than the teammate they " +
-        "appear under. No setting changes that: it takes a host built and started with the " +
-        "harness.",
+      "The replies in this conversation come from the offline echo brain rather than the " +
+        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "started with the harness.",
     );
   });
 

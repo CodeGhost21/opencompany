@@ -2195,6 +2195,14 @@ export function ChatView({
                 caveat about what sending produces has nothing left to qualify —
                 and the composer it would sit above is not rendered at all.
 
+                All four states below say "the replies in this conversation", not
+                "the replies below". They said "below" while this strip sat above
+                the transcript, and moving it made that word point at the composer
+                and the keyboard hint instead of at any reply — the copy asserted
+                a position rather than a fact. Direction-free is what keeps the
+                sentence true wherever this strip is put next; do not reintroduce
+                a directional word here.
+
                 `role="status"` (not `alert`) for the reason
                 `components/ui/alert.tsx` gives — a notice present on mount should
                 not interrupt a screen reader. */}
@@ -2211,9 +2219,9 @@ export function ChatView({
                       <span className="font-medium text-foreground">
                         Teammates can&apos;t think yet.
                       </span>{" "}
-                      This company has no model configured, so the replies below come from the
-                      offline echo brain rather than the teammate they appear under. Choose a
-                      provider in{" "}
+                      This company has no model configured, so the replies in this
+                      conversation come from the offline echo brain rather than the teammate
+                      they appear under. Choose a provider in{" "}
                       <a
                         className="font-medium text-foreground underline-offset-4 hover:underline"
                         href={settingsHref("inference")}
@@ -2236,8 +2244,9 @@ export function ChatView({
                         Teammates can&apos;t think yet — the model isn&apos;t live.
                       </span>{" "}
                       A provider is configured, but this company&apos;s runtime was built before
-                      it was saved, so the replies below still come from the offline echo brain
-                      rather than the teammate they appear under. Finish the switch in{" "}
+                      it was saved, so the replies in this conversation still come from the
+                      offline echo brain rather than the teammate they appear under. Finish
+                      the switch in{" "}
                       <a
                         className="font-medium text-foreground underline-offset-4 hover:underline"
                         href={settingsHref("inference")}
@@ -2252,9 +2261,9 @@ export function ChatView({
                       <span className="font-medium text-foreground">
                         This host cannot reach a model — no agent harness is available.
                       </span>{" "}
-                      The replies below come from the offline echo brain rather than the teammate
-                      they appear under. No setting changes that: it takes a host built and
-                      started with the harness.
+                      The replies in this conversation come from the offline echo brain
+                      rather than the teammate they appear under. No setting changes that:
+                      it takes a host built and started with the harness.
                     </>
                   )}
                   {/* The host is on the echo brain and cannot say why: it could
@@ -2269,10 +2278,10 @@ export function ChatView({
                       <span className="font-medium text-foreground">
                         Teammates can&apos;t think, and this host can&apos;t say why.
                       </span>{" "}
-                      Its inference configuration could not be read, so the replies below come
-                      from the offline echo brain rather than the teammate they appear under.
-                      Until the host can read that configuration, saving a provider is not known
-                      to help.
+                      Its inference configuration could not be read, so the replies in this
+                      conversation come from the offline echo brain rather than the teammate
+                      they appear under. Until the host can read that configuration, saving a
+                      provider is not known to help.
                     </>
                   )}
                 </span>
