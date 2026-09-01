@@ -5694,6 +5694,58 @@ mod tests {
         );
     }
 
+    /// Companion to `a_grant_scoped_to_one_provider_does_not_admit_another_providers_read`,
+    /// for `web_fetch`'s own host scope. Pinned directly against
+    /// `standing_grant_allows` for the same reason that one is: under
+    /// `supervised`/`auto`, `Reach::ExternalRead` no longer parks, so `check()`
+    /// allows an external read long before any grant is consulted and a
+    /// `check()`-level assertion would prove nothing about scope enforcement
+    /// (`batch_grants_leave_external_reads_free` documents exactly that). The
+    /// scope machinery — `admits_scope`'s exact host match — still exists and
+    /// still refuses a grant with the wrong scope; this is the test that says
+    /// so.
+    #[test]
+    fn a_web_fetch_grant_scoped_to_one_host_does_not_admit_another() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None)
+            .with_requests(queue)
+            .with_agent("seo");
+        grants.grant_standing(scoped_standing(
+            "seo",
+            crate::policy::consequence::WEB_FETCH,
+            "https://espn.com",
+            far_future(),
+        ));
+
+        assert!(
+            p.standing_grant_allows(
+                "web_fetch",
+                &serde_json::json!({ "url": "https://espn.com/nba/scores" })
+            ),
+            "the granted host admits its own fetch"
+        );
+
+        assert!(
+            !p.standing_grant_allows(
+                "web_fetch",
+                &serde_json::json!({ "url": "https://bbc.com/sport/football" })
+            ),
+            "a grant scoped to one host does not admit a different one"
+        );
+
+        assert!(
+            !p.standing_grant_allows("web_fetch", &serde_json::json!({ "url": "not-a-url" })),
+            "an unresolvable URL has no scope for a scoped grant to admit"
+        );
+
+        assert_eq!(
+            grants.standing_count(),
+            1,
+            "none of those checks spent the permission"
+        );
+    }
+
     /// **Replay compatibility (issue #457).** A grant journaled before the scope
     /// field existed comes back unscoped, and an unscoped grant admits the tool
     /// exactly as it did before — otherwise this change would silently void
