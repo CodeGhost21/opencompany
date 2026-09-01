@@ -3411,6 +3411,34 @@ impl CompanyRuntime {
     /// landed.
     #[cfg(feature = "openhuman")]
     async fn journal_dispatch_replies(&self, report: &CycleReport) {
+        // Issue #1890 D/B: the conversation each relayed card was raised in.
+        //
+        // A dispatched card's relay used to land unparented, so a delegated
+        // request produced an answer inside its thread and then one or two
+        // loose bubbles about the same work beside it in the channel. That was
+        // tolerable while only hand-opened threads existed and most channels
+        // were flat; once every exchange is a thread it is simply the work
+        // reporting back to the wrong place.
+        //
+        // The card already knows, since #1890 B records the thread it was
+        // raised in — so this reads what the card recorded rather than deriving
+        // it a second way, the same discipline the settle marker follows.
+        //
+        // One `list`, and only when something here actually names a card:
+        // relays are the minority of responses and most cycles journal none.
+        let origins: std::collections::HashMap<String, Option<EventSeq>> =
+            if report.responses.iter().any(|r| r.task_id.is_some()) {
+                self.tasks()
+                    .list(&self.id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|card| (card.id, card.origin_parent))
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+
         for response in &report.responses {
             let Some(chat_id) = response
                 .reply_to
@@ -3419,6 +3447,14 @@ impl CompanyRuntime {
             else {
                 continue;
             };
+            // `None` when the card names no thread, when it has been deleted,
+            // or when this relay names no card at all — each of which is the
+            // channel-level conversation, which is where these landed before.
+            let parent = response
+                .task_id
+                .as_deref()
+                .and_then(|id| origins.get(id).copied())
+                .flatten();
             // Scanned host-side from the reply text, same as
             // `publish_continuation` and `journal_chat_replies` — the
             // console's picker never touched this message.
@@ -3441,7 +3477,7 @@ impl CompanyRuntime {
                 .append(
                     &self.id,
                     CompanyEvent::AgentReply {
-                        parent: None,
+                        parent,
                         chat_id: chat_id.to_string(),
                         // Issue #885: the author, falling back to the
                         // destination only when the producer named none —
@@ -6234,7 +6270,7 @@ mod tests {
         use crate::ports::brain::CycleHost;
         use crate::ports::tasks::COLUMN_IN_PROGRESS;
         use crate::ports::types::{
-            CycleRequest, CycleResult, EventSeq, OutboundMessage, ReplyTo, TokenUsage,
+            CycleRequest, CycleResult, OutboundMessage, ReplyTo, TokenUsage,
         };
 
         /// Answers a `TaskDispatched { task_id: "t-1" }` with a
@@ -6325,7 +6361,7 @@ mod tests {
 
         let events = runtime
             .events
-            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
             .await
             .expect("read journal");
         let relays: Vec<_> = events
@@ -6462,6 +6498,9 @@ mod tests {
             assignee: origin.to_string(),
             updated_at_millis: 0,
             origin_chat_id: Some(origin.to_string()),
+            // Channel-level, like every card this test raises: it is about
+            // which surface a relay lands on, not which thread (#1890).
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6647,6 +6686,104 @@ mod tests {
         assert_eq!(
             chat_id, "",
             "General's own empty chat_id must be preserved verbatim"
+        );
+    }
+
+    /// Issue #1890: a relayed card reports back into the conversation that
+    /// raised it, not beside it.
+    ///
+    /// Found by hand-testing, not by a suite. A delegated request produced the
+    /// orchestrator's answer inside its thread and then the delegate's reply
+    /// and the relay bubble loose in the channel — three bubbles for one ask,
+    /// two of them in the wrong place. Invisible while only hand-opened threads
+    /// existed; obvious the moment every exchange is one.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
+        let (rt, _home_dir) = runtime_with_events().await;
+        let id = rt.id().clone();
+        let root = crate::ports::types::EventSeq::new(41);
+
+        let mut card = crate::ports::tasks::TaskRecord {
+            id: "t-relay".to_string(),
+            title: "Draft the launch email".to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: "writer".to_string(),
+            updated_at_millis: 0,
+            origin_chat_id: Some("general".to_string()),
+            origin_parent: Some(root),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let relay = |task: Option<&str>| crate::ports::types::OutboundMessage {
+            message_id: None,
+            task_id: task.map(str::to_string),
+            channel: "ceo".to_string(),
+            agent: None,
+            text: "the delegate finished it".to_string(),
+            mentions: Vec::new(),
+            reply_to: Some(crate::ports::types::ReplyTo {
+                chat_id: "general".to_string(),
+            }),
+            steps: Vec::new(),
+        };
+
+        let report = crate::runtime::types::CycleReport {
+            responses: vec![relay(Some("t-relay"))],
+            ..Default::default()
+        };
+        rt.journal_dispatch_replies(&report).await;
+
+        let logged = rt
+            .events()
+            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let threaded = logged.iter().rev().find_map(|e| match &e.event {
+            CompanyEvent::AgentReply { parent, .. } => Some(*parent),
+            _ => None,
+        });
+        assert_eq!(
+            threaded,
+            Some(Some(root)),
+            "the relay joins the thread the card recorded at raise time"
+        );
+
+        // And a card raised at channel level still relays flat — `None` is the
+        // channel-level conversation, not a gap.
+        card.id = "t-flat".to_string();
+        card.origin_parent = None;
+        rt.tasks().upsert(&id, &card).await.unwrap();
+        let report = crate::runtime::types::CycleReport {
+            responses: vec![relay(Some("t-flat"))],
+            ..Default::default()
+        };
+        rt.journal_dispatch_replies(&report).await;
+
+        let logged = rt
+            .events()
+            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let last = logged.iter().rev().find_map(|e| match &e.event {
+            CompanyEvent::AgentReply { parent, .. } => Some(*parent),
+            _ => None,
+        });
+        assert_eq!(
+            last,
+            Some(None),
+            "a channel-level card relays into the channel"
         );
     }
 
