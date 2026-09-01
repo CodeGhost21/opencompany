@@ -871,8 +871,23 @@ async fn run_workflow_inner(
                     }),
                 });
             }
+            // Coderabbit review on #1990: scrubbed and noticed here, ONCE,
+            // before branching on whether a block also happened this run —
+            // not only inside the `blocked.is_empty()` arm below. A halted
+            // node's row is settled the same way whether or not a sibling
+            // branch also blocked, so both exits must treat it the same way;
+            // the halt-only exit previously carried its own copy of this and
+            // the halt-plus-block exit below had none, leaving a halted
+            // sibling's rejected reply in the persisted snapshot and its
+            // "no further work needed" notice unraised whenever a run halted
+            // one branch and blocked another.
+            let partial_output = without_node_ids(partial_output, &halted_nodes);
+            for node_id in &halted_nodes {
+                notices.push(format!(
+                    "The step \"{node_id}\" concluded that no further work was needed."
+                ));
+            }
             if blocked.is_empty() {
-                let partial_output = without_node_ids(partial_output, &halted_nodes);
                 if !persist_run_output(
                     run_output_store.as_deref(),
                     &record.id,
@@ -884,11 +899,6 @@ async fn run_workflow_inner(
                 .await
                 {
                     notices.push(run_output_persist_failed_notice());
-                }
-                for node_id in &halted_nodes {
-                    notices.push(format!(
-                        "The step \"{node_id}\" concluded that no further work was needed."
-                    ));
                 }
                 return Ok(WorkflowRun {
                     output: serde_json::json!({ "nodes": partial_output }),
@@ -1438,7 +1448,17 @@ fn reclassify_capped_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], cappe
         // both must not have this flip hide the approval behind a plain
         // failure — the same direction `only_expected_nodes_errored`'s guard
         // already leans in.
-        if row.status != WorkflowNodeStatus::Blocked && capped.iter().any(|id| id == &row.node_id) {
+        //
+        // Coderabbit review on #1990: `Declined` joins that exemption for the
+        // same reason. When `retry.max_attempts > 1`, a node whose judge
+        // halted it benignly can be retried, and if that retry then hits the
+        // iteration cap, `RunCappedNodes` names the same node id
+        // `reclassify_halted_nodes` already settled `Declined` — a correct,
+        // more specific fact that a plain `Error` must not overwrite.
+        if row.status != WorkflowNodeStatus::Blocked
+            && row.status != WorkflowNodeStatus::Declined
+            && capped.iter().any(|id| id == &row.node_id)
+        {
             row.status = WorkflowNodeStatus::Error;
         }
     }
@@ -2523,6 +2543,25 @@ mod tests {
             nodes[0].status,
             WorkflowNodeStatus::Blocked,
             "a blocked node must never be relabelled Error"
+        );
+    }
+
+    /// Coderabbit review on #1990: when `retry.max_attempts > 1`, tinyflows can
+    /// retry a node after its judge answered `halt_benign` on an earlier
+    /// attempt. If that retry itself hits the iteration cap, `RunCappedNodes`
+    /// picks up the same node id `reclassify_halted_nodes` already relabelled
+    /// `Declined` — and without this guard, `Blocked` was the only status this
+    /// function refused to override, so it would flip a correct benign-stop row
+    /// to `Error` and raise a false failure notice for a node that already
+    /// settled its more specific, correct fact.
+    #[test]
+    fn reclassify_capped_nodes_never_overrides_an_already_declined_row() {
+        let mut nodes = vec![node_row("verify", WorkflowNodeStatus::Declined)];
+        reclassify_capped_nodes(&mut nodes, &["verify".to_string()]);
+        assert_eq!(
+            nodes[0].status,
+            WorkflowNodeStatus::Declined,
+            "a benign-halt row must never be relabelled Error"
         );
     }
 
