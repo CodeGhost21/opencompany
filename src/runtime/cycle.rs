@@ -50,6 +50,7 @@ use crate::runtime::grants::{
 };
 use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
+use crate::server::chat_history;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
 /// The `Effect::kind` for an outbound email send. Shared between where the
@@ -95,6 +96,85 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// builds its input from this constant so a wording change fails the test rather
 /// than silently un-splitting the message.
 pub(crate) const OPEN_WORK_ANNOTATION: &str = "\n\n[Open work already handed to you";
+
+/// Where the thread index begins on an operator message (issue #1890 E,
+/// written by [`inject_thread_index`](CycleRunner::inject_thread_index)).
+///
+/// The fourth machine-appended part of an operator message, on exactly
+/// [`OPEN_WORK_ANNOTATION`]'s terms: in-memory only, never journaled, and
+/// stripped by [`operator_words`](crate::runtime::delegation::operator_words)
+/// before anything reasons about what the operator asked for.
+///
+/// # What it is for
+///
+/// A thread scoped to itself (#1890 A) is **cold by construction**: the turn
+/// answering in it sees that thread and nothing else, which is the whole point
+/// and also means it does not know what else its channel is about. A reference
+/// to "the other thread" resolves to nothing, and a channel-level turn asked
+/// "where are we?" can speak only for the channel line.
+///
+/// This is the orientation, folded into the prompt rather than into history —
+/// because history is what A scoped, and widening it again would undo A. The
+/// same seam and the same terms as its three siblings.
+///
+/// # Sized for deciding, never for knowing
+///
+/// Each line is the root's own opening words, its state, and its recency, and
+/// **that is the whole budget**. If lines grow long enough to answer *from*,
+/// the flat channel window A removed has been rebuilt in the prompt and paid
+/// for twice — the failure this constant's own shape has to prevent.
+///
+/// The opening words are the operator's, verbatim and truncated, never
+/// summarised: summarising costs a model call per thread per turn and loses the
+/// exact words a later reference will echo. They are the discriminator, so
+/// "the launch email one" resolves.
+///
+/// # Default is not to read
+///
+/// Most turns reference nothing outside their own thread, so the instruction
+/// gates on an *explicit* reference. Over-reading is the failure mode to guard
+/// hardest: an agent that pulls three threads to be safe has silently undone A.
+/// Where a reference is ambiguous across the index, asking beats guessing and
+/// beats reading all three.
+pub(crate) const THREAD_INDEX_ANNOTATION: &str = "\n\n[Other conversations in this channel";
+
+/// Where the settled-work briefing begins on an operator message addressed to a
+/// conversation that has raised work (issue #1890 C, written by
+/// [`inject_handed_task_awareness`](CycleRunner::inject_handed_task_awareness)).
+///
+/// The third machine-appended part of an operator message, on exactly
+/// [`OPEN_WORK_ANNOTATION`]'s terms: in-memory only, never journaled, and
+/// stripped by [`operator_words`](crate::runtime::delegation::operator_words)
+/// before anything reasons about what the operator asked for.
+///
+/// # What it is for
+///
+/// A card raised from a conversation settles, and `chat_history::owns` files a
+/// `finished → In review` marker back into that conversation — so the operator
+/// can see it. The **model** cannot: the chat seed drops the marker for want of
+/// a conversational body, which is correct (a settle is not a turn) and leaves
+/// the one durable fact answering *"did that ship?"* on screen and absent from
+/// context. This is that fact, as briefing rather than as a turn.
+///
+/// # Why not a seed line
+///
+/// `seed_resume_from_messages` recognises `user`, `agent` and `assistant`, and
+/// **falls back to the user role for anything else** — losing context being
+/// worse than mislabelling it, on its own terms. So a marker emitted into the
+/// seed under a `system` role would reach the model as though the operator had
+/// typed "finished → In review". Worse than dropping it, and the reason C is a
+/// briefing at all. The seed would also only be rebuilt on a *switch*, so a
+/// settle landing mid-conversation would never arrive.
+///
+/// # It reports the board, not the marker
+///
+/// The console's marker is rendered from the journal and frozen at settle time;
+/// a card dragged to Done afterwards still reads `finished → In review` on
+/// screen. This briefing reads the card's **current** column instead, so it
+/// answers "did that ship?" with where the work actually is. The two can
+/// therefore disagree, deliberately: the screen is a record of what happened,
+/// and this is a statement of what is true now.
+pub(crate) const SETTLED_WORK_ANNOTATION: &str = "\n\n[Work raised in this conversation";
 
 /// Where the builder-pass briefing begins on a `workflow`-deliverable operator
 /// message (issue #845, written by
@@ -775,10 +855,11 @@ impl<'a> CycleRunner<'a> {
         // are how "hi" turned into a full agentic turn on staging.
         //
         // Ordering, not tidiness: `inject_handed_task_awareness` appends a
-        // briefing of the desk's open work to the message text, so a "hi" sent
-        // to a desk that is mid-task stops looking like "hi" one statement
-        // later. Reading the events first is what makes the fast path fire on
-        // exactly the messages it is for.
+        // briefing of the desk's open work — and, since #1890 C, of the work
+        // this conversation raised that has finished — to the message text, so
+        // a "hi" sent to a desk that is mid-task stops looking like "hi" one
+        // statement later. Reading the events first is what makes the fast path
+        // fire on exactly the messages it is for.
         let small_talk = record
             .as_ref()
             .and_then(|record| small_talk_result(record, &events));
@@ -791,8 +872,31 @@ impl<'a> CycleRunner<'a> {
             // Brain-agnostic (both brains read `req.events`); mutates only the
             // in-memory copy handed to the brain, never the durable log persisted
             // above.
-            if let Some(record) = &record {
-                self.inject_handed_task_awareness(record, &mut events).await;
+            if let Some(record) = &record
+                // Cheap exit before touching either store: no operator message,
+                // so no briefing has anywhere to land.
+                //
+                // Every operator message counts, addressed or not. `chat: None`
+                // is not "unaddressed" — `chat_and_emit` routes it to the
+                // General desk and every reader of the journal folds it there
+                // (`is_general_chat`), so requiring `Some` silently withheld
+                // both briefings from exactly the turns a bare REST or ACP
+                // caller sends: "did that ship?" answered blind, in the one
+                // conversation the console itself defaults to (codex on #1972).
+                && events
+                    .iter()
+                    .any(|e| matches!(e, CompanyEvent::OperatorMessage { .. }))
+            {
+                // One read, three briefings (#1890 C, E). The board answers
+                // "what are you working on?" and "did that ship?"; the journal
+                // answers "what else is this channel about?".
+                let cards = self.rt.tasks().list(&self.rt.id).await.unwrap_or_default();
+                self.inject_handed_task_awareness(record, &mut events, &cards)
+                    .await;
+                // Issue #1890 E: and where else this channel is talking, so a
+                // thread scoped to itself (#1890 A) is not also blind to its
+                // own channel. Same in-memory-only terms as its siblings.
+                self.inject_thread_index(record, &mut events, &cards).await;
             }
             // Issue #845: and when the operator asked for a workflow rather than a
             // one-off, tell the turn that the builder pass owns authoring it — so it
@@ -1170,39 +1274,60 @@ impl<'a> CycleRunner<'a> {
     /// is addressed or no open work matches. Mutates only the in-memory events
     /// handed to the brain, never the durable event log.
     ///
-    /// What it appends begins with [`OPEN_WORK_ANNOTATION`] — read that constant
-    /// before adding any code downstream that reasons about an operator message,
-    /// because after this runs the text is no longer only what the operator
-    /// typed.
+    /// # And a briefing of work this conversation raised that has finished
+    ///
+    /// Issue #1890 C. Two briefings, one card read, two different axes: the one
+    /// above matches on **who the work was handed to** and answers "what are you
+    /// working on?"; this one matches on **which conversation raised it** and
+    /// answers "did that ship?". A card can appear in either, both, or neither.
+    ///
+    /// It exists because the settle marker `chat_history::owns` files back into
+    /// the conversation reaches the *operator* and not the model: the chat seed
+    /// drops it for want of a conversational body, correctly, since a settle is
+    /// not a turn. See [`SETTLED_WORK_ANNOTATION`] for why a briefing rather
+    /// than a seed line, and why it reports the board rather than the marker.
+    ///
+    /// What it appends begins with [`OPEN_WORK_ANNOTATION`] or
+    /// [`SETTLED_WORK_ANNOTATION`] — read those constants before adding any code
+    /// downstream that reasons about an operator message, because after this
+    /// runs the text is no longer only what the operator typed.
     async fn inject_handed_task_awareness(
         &self,
         record: &CompanyRecord,
         events: &mut [CompanyEvent],
+        // Read once by the caller and shared with the thread index (#1890 E),
+        // which needs the same cards to say where a thread's work landed. Two
+        // `list` calls to answer related questions about one company is the
+        // cost the caller's cheap exit exists to avoid.
+        cards: &[TaskRecord],
     ) {
-        // Cheap exit before touching the task store: nothing is addressed.
-        if !events
-            .iter()
-            .any(|e| matches!(e, CompanyEvent::OperatorMessage { chat: Some(_), .. }))
-        {
-            return;
-        }
-        let cards = self.rt.tasks().list(&self.rt.id).await.unwrap_or_default();
         let open: Vec<&TaskRecord> = cards
             .iter()
             .filter(|c| c.column != "done" && !c.assignee.trim().is_empty())
             .collect();
-        if open.is_empty() {
+        // Issue #1890 C: the settled half, off the SAME read. Both briefings
+        // answer a question about this company's cards, and paying for two
+        // `list` calls to answer them separately would be the cost the cheap
+        // exit above exists to avoid.
+        let settled: Vec<&TaskRecord> = cards.iter().filter(|c| has_settled(c)).collect();
+        if open.is_empty() && settled.is_empty() {
             return;
         }
         for event in events.iter_mut() {
             let CompanyEvent::OperatorMessage {
-                text,
-                chat: Some(target),
-                ..
+                text, chat, parent, ..
             } = event
             else {
                 continue;
             };
+            // Both spellings of the addressed desk, resolved from the record
+            // already in hand. `None` resolves to General, which is where the
+            // route sent it.
+            let (desk_id, desk_name) = chat_history::desk_aliases(record, chat.as_deref());
+            let target = desk_id.clone();
+            // Bound before the borrow of `text` below, since both briefings
+            // append to it.
+            let thread = *parent;
             let mut lines: Vec<String> = open
                 .iter()
                 .filter(|c| assignment_matches(record, target.as_str(), &c.assignee))
@@ -1213,14 +1338,153 @@ impl<'a> CycleRunner<'a> {
                     _ => format!("- {}", c.title),
                 })
                 .collect();
+            if !lines.is_empty() {
+                lines.sort();
+                text.push_str(&format!(
+                    "{OPEN_WORK_ANNOTATION} (answer truthfully if asked what you are \
+working on):\n{}\n]",
+                    lines.join("\n")
+                ));
+            }
+            // Issue #1890 C. Matched on the **conversation the card was raised
+            // in**, not on who it was handed to — the question this answers is
+            // "did the thing I asked for here ship?", and the answer is the
+            // same whoever ran it. That is a different axis from the briefing
+            // above, which is why this is a second pass rather than a wider
+            // filter on the first.
+            //
+            // Both halves of the origin, since #1890 B: the channel through
+            // `same_conversation` (which folds General's four spellings), and
+            // the thread verbatim.
+            //
+            // **Both desk spellings**, like `chat_history::owns`. This filter
+            // originally compared the addressed selector verbatim, on the
+            // argument that both sides are the raw chat id stamped from this
+            // same field — which holds only while every caller spells the desk
+            // the same way. They do not: a card raised by a client addressing
+            // the desk by id, and a later "did that ship?" addressing it by
+            // name, are the same conversation and compared unequal, so the
+            // briefing went missing exactly when the operator was asking for it
+            // (codex on #1972).
+            let mut done: Vec<&&TaskRecord> = settled
+                .iter()
+                .filter(|c| {
+                    let origin = c.origin_chat_id.as_deref();
+                    (chat_history::same_conversation(origin, Some(desk_id.as_str()))
+                        || chat_history::same_conversation(origin, Some(desk_name.as_str())))
+                        && c.origin_parent == thread
+                })
+                .collect();
+            if done.is_empty() {
+                continue;
+            }
+            // Most recent first: "did that ship?" is nearly always about the
+            // latest thing, and the cap below cuts the tail.
+            done.sort_by_key(|c| std::cmp::Reverse(c.updated_at_millis));
+            let omitted = done.len().saturating_sub(SETTLED_WORK_BRIEFING_MAX);
+            let lines: Vec<String> = done
+                .iter()
+                .take(SETTLED_WORK_BRIEFING_MAX)
+                .map(|c| settled_briefing_line(c))
+                .collect();
+            // The truncation is DECLARED, never silent. A model handed 5 of 28
+            // with no marker answers "that is everything" confidently and
+            // wrongly — the same rule the epic sets for its thread index.
+            let tail = if omitted > 0 {
+                format!("\n- (and {omitted} more, not listed)")
+            } else {
+                String::new()
+            };
+            text.push_str(&format!(
+                "{SETTLED_WORK_ANNOTATION} has finished — this is where each card \
+stands now, which may differ from the marker in the transcript):\n{}{tail}\n]",
+                lines.join("\n")
+            ));
+        }
+    }
+
+    /// Folds an index of the channel's other live threads into each addressed
+    /// operator message (issue #1890 E). See [`THREAD_INDEX_ANNOTATION`].
+    ///
+    /// Separate from [`inject_handed_task_awareness`](Self::inject_handed_task_awareness)
+    /// because it reads a different store — the journal rather than the board —
+    /// and must be skippable on a host with no event log wired, which the board
+    /// briefings are not.
+    ///
+    /// `settled` is passed in rather than re-read: the caller has just listed
+    /// the cards, and a second `list` to answer a related question about the
+    /// same company is the cost that function's cheap exit exists to avoid.
+    async fn inject_thread_index(
+        &self,
+        record: &CompanyRecord,
+        events: &mut [CompanyEvent],
+        cards: &[TaskRecord],
+    ) {
+        let settled: Vec<&TaskRecord> = cards.iter().filter(|c| has_settled(c)).collect();
+        let log = self.rt.events();
+        for event in events.iter_mut() {
+            let CompanyEvent::OperatorMessage {
+                text, chat, parent, ..
+            } = event
+            else {
+                continue;
+            };
+            let current = *parent;
+            // Both spellings, resolved the way the seed resolves them.
+            //
+            // Passing the addressed id as both terms looked harmless and was
+            // not: a named desk's id and its display name are different
+            // strings, messages are journaled under either, and `owns` takes
+            // two terms precisely so neither is orphaned. With one, every
+            // thread stored under the other alias vanished from the index — so
+            // a desk whose name differs from its id got a short index or none
+            // at all (codex + coderabbit on #1972).
+            //
+            // From the record the caller already holds rather than a `load` per
+            // message: same answer, no store round-trip, and `None` resolves to
+            // the General desk the route sent it to.
+            let (desk_id, desk_name) = chat_history::desk_aliases(record, chat.as_deref());
+            let page = match log.read_before(&self.rt.id, None, THREAD_INDEX_PAGE).await {
+                Ok(page) => page,
+                // A read failure costs the turn its orientation and nothing
+                // else. The same posture `build_chat_seed` takes: a briefing is
+                // an enhancement, and failing the turn over one would be worse
+                // than answering without it.
+                Err(error) => {
+                    tracing::warn!(
+                        company = %self.rt.id,
+                        %error,
+                        "[thread-index] journal read failed; the turn answers without orientation"
+                    );
+                    return;
+                }
+            };
+            let (lines, omitted) =
+                thread_index(&page, &desk_id, &desk_name, current, text, &settled);
             if lines.is_empty() {
                 continue;
             }
-            lines.sort();
+            // The truncation is DECLARED. A selection presented as an
+            // enumeration is answered from confidently and wrongly.
+            let tail = if omitted > 0 {
+                format!("\n- (and {omitted} older, not listed)")
+            } else {
+                String::new()
+            };
+            // **The instruction is half the mechanism.** Without the gate an
+            // agent reads every thread it is shown "to be safe", which rebuilds
+            // the flat channel window this epic removed — in the prompt, and
+            // paid for twice. With it, the index is a pointer: enough to notice
+            // a reference, never enough to answer from.
             text.push_str(&format!(
-                "{OPEN_WORK_ANNOTATION} (answer truthfully if asked what you are \
-working on):\n{}\n]",
-                lines.join("\n")
+                "{THREAD_INDEX_ANNOTATION}, for reference only — do NOT read or \
+answer from them unless this message explicitly refers to one, and if a \
+reference could mean more than one, ask which):\n{}{tail}\n]",
+                lines
+                    .iter()
+                    .map(ThreadLine::render)
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ));
         }
     }
@@ -3314,6 +3578,259 @@ impl<'a> CycleHostImpl<'a> {
 /// task-card title derived from a delegation instruction (which may be a whole
 /// paragraph). Falls back to a short cap of the whole string when there is no
 /// line break. UTF-8-safe: never slices mid-codepoint.
+/// How many settled cards the briefing lists before it starts counting
+/// (issue #1890 C).
+///
+/// Sized for **deciding, not for knowing**: enough that "did that ship?" is
+/// answered from the briefing on any ordinary conversation, small enough that a
+/// long-lived channel's whole board history is not re-sent on every turn. What
+/// does not fit is declared as a count rather than dropped — see the write site.
+const SETTLED_WORK_BRIEFING_MAX: usize = 5;
+
+/// How many threads the index lists before it starts counting (issue #1890 E).
+///
+/// A handful, because this is a **selection and not an enumeration**: a channel
+/// accumulates roots without limit, and what does not fit is declared as a
+/// count. A model handed 5 of 28 with no marker answers "that is everything"
+/// confidently and wrongly.
+const THREAD_INDEX_MAX: usize = 5;
+
+/// How much of the journal's tail the index is drawn from (issue #1890 E).
+///
+/// **Liveness, expressed as a bound.** A thread is "live" here if it has
+/// activity inside the page the chat seed already walks — which is the same
+/// window the turn's own history comes from, so the index cannot name a
+/// conversation the turn could not otherwise have heard of.
+///
+/// Cheap since #1890 G: a tail page is read from the end of the journal rather
+/// than by streaming it from the head, so this costs the page and not the
+/// company's history.
+const THREAD_INDEX_PAGE: usize = 256;
+
+/// One line of the index — a thread the turn may decide to ask about.
+struct ThreadLine {
+    /// The root's sequence, which is the **handle** `read_thread` takes
+    /// (issue #1890 F).
+    ///
+    /// Carried even though a reader gains nothing from seeing it, because the
+    /// alternative is a tool that matches on the opening words — and a model
+    /// paraphrases rather than quotes. Strict matching then fails an obviously
+    /// correct reference, and loose matching reads the *wrong* thread while
+    /// looking like success, which is the cross-thread leak #1890 A exists to
+    /// prevent arriving through the tool instead of the seed. An id is either
+    /// in the index or it is not.
+    root: EventSeq,
+    /// The root's own opening words, truncated. The discriminator, and what a
+    /// later reference will echo.
+    opening: String,
+    /// How many replies hang off it.
+    replies: usize,
+    /// Where its work landed, when a card raised in it has settled — the fact
+    /// #1890 B made answerable by recording a card's thread.
+    landed: Option<String>,
+    /// The newest sequence in the thread, for ordering by recency.
+    latest: EventSeq,
+}
+
+impl ThreadLine {
+    /// `- [41] "draft the launch email" — 4 replies`
+    ///
+    /// State before count where there is one: "finished → In review" answers
+    /// the question a reader is actually asking, and a reply count is only how
+    /// busy it was.
+    ///
+    /// The id leads because it is the one part a tool call must reproduce
+    /// exactly; the words are what a *reference* will echo, and they follow.
+    fn render(&self) -> String {
+        let id = self.root.value();
+        match (&self.landed, self.replies) {
+            (Some(landing), _) => format!("- [{id}] {:?} — {landing}", self.opening),
+            (None, 0) => format!("- [{id}] {:?} — no reply yet", self.opening),
+            (None, 1) => format!("- [{id}] {:?} — 1 reply", self.opening),
+            (None, n) => format!("- [{id}] {:?} — {n} replies", self.opening),
+        }
+    }
+}
+
+/// The channel's other live threads, newest first (issue #1890 E).
+///
+/// `current` is the thread the turn is answering in, excluded from its own
+/// index — `None` for a channel-level turn, which therefore sees every thread,
+/// and that asymmetry is the "both directions" the epic asks for rather than
+/// two separate mechanisms.
+///
+/// Reads one bounded tail page and derives the roots from it; a thread whose
+/// last activity fell outside that page is not live and is not listed. The
+/// landing comes from the settled cards already in hand, matched on the thread
+/// each recorded at raise time (#1890 B).
+fn thread_index(
+    page: &[crate::ports::types::StoredEvent],
+    desk_id: &str,
+    desk_name: &str,
+    current: Option<EventSeq>,
+    // The message being answered, so it never appears in its own index.
+    //
+    // At channel level `current` is `None` — there is no thread to exclude —
+    // but the message has already been journaled by the time the cycle runs,
+    // so it is itself an unparented root on the page and the index would list
+    // the very message it is attached to. Matched on text for the same reason
+    // `chat_seed::strip_current_message` is: the in-memory event carries no
+    // sequence to compare against. The same trap applies and is worth naming —
+    // a *different* thread opened with identical wording is excluded too,
+    // which costs one line of orientation and never shows a reader their own
+    // message back as somebody else's conversation.
+    current_message: &str,
+    settled: &[&TaskRecord],
+) -> (Vec<ThreadLine>, usize) {
+    use std::collections::HashMap;
+
+    let mut roots: HashMap<EventSeq, ThreadLine> = HashMap::new();
+    let mut replies: HashMap<EventSeq, usize> = HashMap::new();
+    // The newest sequence seen in each thread, tracked **independently of the
+    // roots map** because the page arrives newest-first: a reply is met before
+    // the root it hangs off is inserted, so updating the line in place found
+    // nothing and every thread kept its root's own sequence as its recency.
+    // A channel with more than `THREAD_INDEX_MAX` roots then cut the live old
+    // thread in favour of quiet newer ones — the exact inversion the ordering
+    // exists to prevent (codex + coderabbit on #1972).
+    let mut latest: HashMap<EventSeq, EventSeq> = HashMap::new();
+
+    for stored in page {
+        if !crate::server::chat_history::owns(desk_id, desk_name, &stored.event) {
+            continue;
+        }
+        match &stored.event {
+            // A root: an operator message that hangs off nothing. Only an
+            // operator message opens a thread — an agent reply is always
+            // parented to the question it answers.
+            CompanyEvent::OperatorMessage {
+                text, parent: None, ..
+            } => {
+                let opening = first_line(text, 120);
+                if opening.is_empty() {
+                    continue;
+                }
+                roots.insert(
+                    stored.seq,
+                    ThreadLine {
+                        root: stored.seq,
+                        opening,
+                        replies: 0,
+                        landed: None,
+                        latest: stored.seq,
+                    },
+                );
+            }
+            CompanyEvent::OperatorMessage {
+                parent: Some(root), ..
+            }
+            | CompanyEvent::AgentReply {
+                parent: Some(root), ..
+            } => {
+                *replies.entry(*root).or_default() += 1;
+                let seen = latest.entry(*root).or_insert(stored.seq);
+                *seen = (*seen).max(stored.seq);
+            }
+            _ => {}
+        }
+    }
+
+    let mut lines: Vec<ThreadLine> = roots
+        .into_iter()
+        .filter(|(seq, line)| {
+            Some(*seq) != current
+                && !(!line.opening.is_empty()
+                    && current_message.trim().starts_with(line.opening.as_str()))
+        })
+        .map(|(seq, mut line)| {
+            line.replies = replies.get(&seq).copied().unwrap_or(0);
+            // A thread with no activity keeps its root's own sequence, which is
+            // when it was opened — the only recency it has.
+            line.latest = latest.get(&seq).copied().unwrap_or(seq).max(seq);
+            // Where the work raised in this thread landed, if any did. The
+            // question "did that ship?" for a thread the turn is not in.
+            line.landed = settled
+                .iter()
+                .find(|card| card.origin_parent == Some(seq))
+                .map(|card| {
+                    format!(
+                        "finished → {}",
+                        crate::ports::tasks::column_label(&card.column)
+                    )
+                });
+            line
+        })
+        .collect();
+
+    // Most recent first, so "the other one" resolves to the thread most likely
+    // meant, and the cap cuts the stale tail rather than the live head.
+    lines.sort_by_key(|line| std::cmp::Reverse(line.latest));
+    let omitted = lines.len().saturating_sub(THREAD_INDEX_MAX);
+    lines.truncate(THREAD_INDEX_MAX);
+    (lines, omitted)
+}
+
+/// Has this card **stopped**, in the sense the transcript's `finished → …`
+/// marker means (issue #1890 C)?
+///
+/// "Stopped" is not "succeeded": a cancelled or failed dispatch settles too, and
+/// saying so is the whole point — the misleading case this briefing exists for
+/// is precisely the run that stopped without finishing the work. The same
+/// reading [`CompanyEvent::DeskTaskCompleted`] itself takes.
+///
+/// # `todo` is the hard arm, and it is [`TaskRecord::bounced`]'s question
+///
+/// Every other column answers from its id alone. `todo` cannot: it is **both**
+/// the failure landing and the fresh state, so a card that bounced there off a
+/// failed run is indistinguishable from one nobody has touched — which is the
+/// gap issue #1865 added `bounced` to close, on the board, for a human reader.
+/// This is the same distinction for a model reader, so it asks the same field
+/// rather than inventing a second rule. A card re-dispatched after a bounce
+/// clears the marker (`todo` → `in_progress`), so it correctly stops reading as
+/// settled the moment it is running again.
+///
+/// `planning` and `in_progress` are never settled — a pass or an attempt is
+/// live — and a briefing that called them finished would be the exact
+/// "concluded the work had finished when it had in fact parked" misreading
+/// issue #377 set out to remove.
+fn has_settled(card: &TaskRecord) -> bool {
+    match card.column.as_str() {
+        crate::ports::tasks::COLUMN_IN_REVIEW
+        | crate::ports::tasks::COLUMN_DONE
+        | crate::ports::tasks::COLUMN_PAUSED => true,
+        COLUMN_TODO => card.bounced.is_some(),
+        // `planning`, `in_progress`, and any column a newer host names that
+        // this build has not heard of. Silence is the safe answer for an
+        // unknown state: claiming a card finished is a lie, claiming nothing is
+        // a gap the operator can still see on their own board.
+        _ => false,
+    }
+}
+
+/// One settled card, as the briefing states it (issue #1890 C).
+///
+/// The landing label comes from [`crate::ledger::board`] through
+/// `column_label`, so this is not a fourth transcription of the column names —
+/// the same discipline `chat_history::dispatch_marker_text` follows, and for
+/// the same reason: a renamed column must not half-land.
+///
+/// A bounced card carries **why**. Without the reason "finished → To-do" reads
+/// as though the work were merely queued, which is the misreading the whole
+/// bounced/fresh distinction exists to prevent.
+fn settled_briefing_line(card: &TaskRecord) -> String {
+    let landing = crate::ports::tasks::column_label(&card.column);
+    match &card.bounced {
+        Some(reason) if !reason.trim().is_empty() => {
+            format!(
+                "- {} — finished → {landing} ({})",
+                card.title,
+                first_line(reason, 120)
+            )
+        }
+        _ => format!("- {} — finished → {landing}", card.title),
+    }
+}
+
 fn first_line(text: &str, max: usize) -> String {
     let line = text
         .lines()
@@ -9827,8 +10344,19 @@ members = ["writer"]
             "the report carries the seq the caller supplied, not one of its own"
         );
 
-        // And the brain saw both, so skipping the append did not skip the input.
-        assert_eq!(*seen.lock().expect("seen"), ["first", "second"]);
+        // And the brain saw both, so skipping the append did not skip the
+        // input.
+        //
+        // By prefix, not equality: this is an identity check — did each input
+        // reach the brain — and the brain's copy is where the cycle's in-memory
+        // briefings land. Both messages here are unaddressed, which is the
+        // General desk, so the second one arrives carrying the thread index for
+        // the first (#1890 E). Asserting the exact bytes would make every
+        // briefing this file adds a failure of a test about append counts.
+        let seen = seen.lock().expect("seen").clone();
+        assert_eq!(seen.len(), 2, "both inputs reached the brain: {seen:?}");
+        assert!(seen[0].starts_with("first"), "{seen:?}");
+        assert!(seen[1].starts_with("second"), "{seen:?}");
     }
 
     /// A pre-journaled cycle moves the caller's run row to `Running` **inside**
@@ -10032,5 +10560,764 @@ members = ["writer"]
             }
             ref other => panic!("{other:?}"),
         }
+    }
+
+    /* ---- issue #1890 C: settle markers reach the model ---- */
+
+    /// The settled predicate, column by column.
+    ///
+    /// Named cases rather than a loop, because the interesting arm is `todo` —
+    /// it is both the failure landing and the fresh state, and the whole point
+    /// of the sub-issue is that those two must not read the same.
+    #[test]
+    fn a_card_has_settled_only_once_its_run_stopped() {
+        let card = |column: &str, bounced: Option<&str>| TaskRecord {
+            id: "t-1".to_string(),
+            title: "Ship the thing".to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "engineer".to_string(),
+            updated_at_millis: 0,
+            origin_chat_id: None,
+            origin_parent: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: bounced.map(str::to_string),
+        };
+        // Stopped, whether or not it succeeded — the misleading case this
+        // briefing exists for is the run that stopped without finishing.
+        assert!(has_settled(&card(
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            None
+        )));
+        assert!(has_settled(&card(crate::ports::tasks::COLUMN_DONE, None)));
+        assert!(has_settled(&card(crate::ports::tasks::COLUMN_PAUSED, None)));
+        // Still running. Calling either of these finished is exactly the
+        // "concluded the work had finished when it had in fact parked"
+        // misreading #377 set out to remove.
+        assert!(!has_settled(&card(
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            None
+        )));
+        assert!(!has_settled(&card(
+            crate::ports::tasks::COLUMN_PLANNING,
+            None
+        )));
+        // The hard arm. A bounced card has run and stopped; a fresh one has
+        // not, and they share a column — which is the gap #1865's `bounced`
+        // exists to close, asked here rather than re-decided.
+        assert!(has_settled(&card(
+            COLUMN_TODO,
+            Some("the dispatch failed: provider timeout")
+        )));
+        assert!(
+            !has_settled(&card(COLUMN_TODO, None)),
+            "a card nobody has touched must not read as finished work"
+        );
+    }
+
+    /// A bounced card states **why**, and the landing label comes from the
+    /// ledger rather than a fourth transcription of the column names.
+    #[test]
+    fn a_settled_line_names_the_landing_and_a_bounce_names_its_reason() {
+        let mut card = TaskRecord {
+            id: "t-1".to_string(),
+            title: "Draft the investor update".to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: "writer".to_string(),
+            updated_at_millis: 0,
+            origin_chat_id: None,
+            origin_parent: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        assert_eq!(
+            settled_briefing_line(&card),
+            "- Draft the investor update — finished → In review"
+        );
+
+        card.column = COLUMN_TODO.to_string();
+        card.bounced = Some("the dispatch failed: provider timeout".to_string());
+        assert_eq!(
+            settled_briefing_line(&card),
+            "- Draft the investor update — finished → To-do (the dispatch failed: provider \
+timeout)",
+            "without the reason, 'finished → To-do' reads as merely queued"
+        );
+    }
+
+    /// The whole of what C repairs, end to end through the injector.
+    ///
+    /// A card raised in a thread settles; the operator asks in that same
+    /// thread; the turn is handed the fact. And — the half that makes it worth
+    /// having — a card raised in a *sibling* thread of the same channel is not,
+    /// because a briefing that leaked across threads would undo sub-issue A one
+    /// message later.
+    #[tokio::test]
+    async fn a_settled_card_briefs_the_thread_that_raised_it_and_no_other() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt
+            .store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the company record");
+
+        let mut mine = settled_card("t-mine", "Draft the launch email");
+        mine.origin_chat_id = Some("growth".to_string());
+        mine.origin_parent = Some(EventSeq::new(41));
+        let mut sibling = settled_card("t-sibling", "Pull the Q3 CAC");
+        sibling.origin_chat_id = Some("growth".to_string());
+        sibling.origin_parent = Some(EventSeq::new(43));
+        // Raised in the same channel, but at channel level rather than in a
+        // thread. `None` is a conversation of its own, not a wildcard.
+        let mut channel_level = settled_card("t-channel", "Renew the domain");
+        channel_level.origin_chat_id = Some("growth".to_string());
+        for card in [&mine, &sibling, &channel_level] {
+            rt.tasks().upsert(&id, card).await.unwrap();
+        }
+
+        let mut events = vec![operator_in_thread("growth", Some(41), "make it shorter")];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
+            .await;
+        let text = message_text(&events[0]);
+
+        assert!(
+            text.contains(SETTLED_WORK_ANNOTATION),
+            "the thread's own settled work is briefed: {text}"
+        );
+        assert!(text.contains("Draft the launch email"), "{text}");
+        assert!(
+            !text.contains("Pull the Q3 CAC"),
+            "a sibling thread's work must not leak into this one: {text}"
+        );
+        assert!(
+            !text.contains("Renew the domain"),
+            "nor the channel-level conversation's: {text}"
+        );
+        // And the operator's own words survive the append, which is the whole
+        // reason `operator_words` cuts on this marker.
+        assert!(text.starts_with("make it shorter"), "{text}");
+    }
+
+    /// A card still running is never called finished — the "concluded the work
+    /// had finished when it had in fact parked" misreading #377 exists to
+    /// remove, in briefing form.
+    #[tokio::test]
+    async fn work_still_running_is_not_briefed_as_finished() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt
+            .store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the company record");
+
+        let mut running = settled_card("t-running", "Rebuild the pricing page");
+        running.column = crate::ports::tasks::COLUMN_IN_PROGRESS.to_string();
+        running.origin_chat_id = Some("growth".to_string());
+        rt.tasks().upsert(&id, &running).await.unwrap();
+
+        let mut events = vec![operator_in_thread("growth", None, "did that ship?")];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
+            .await;
+        let text = message_text(&events[0]);
+        assert!(
+            !text.contains(SETTLED_WORK_ANNOTATION),
+            "nothing has settled, so there is no settled briefing at all: {text}"
+        );
+    }
+
+    /// Past the cap the briefing **says so**. A model handed 5 of 9 with no
+    /// marker answers "that is everything" confidently and wrongly, which is
+    /// worse than the silence it replaced.
+    #[tokio::test]
+    async fn a_truncated_settled_briefing_declares_what_it_left_out() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt
+            .store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the company record");
+
+        let total = SETTLED_WORK_BRIEFING_MAX + 4;
+        for n in 0..total {
+            let mut card = settled_card(&format!("t-{n}"), &format!("Card number {n}"));
+            card.origin_chat_id = Some("growth".to_string());
+            // Ascending, so the newest is the highest-numbered — the order the
+            // briefing keeps and the cap cuts against.
+            card.updated_at_millis = n as u64;
+            rt.tasks().upsert(&id, &card).await.unwrap();
+        }
+
+        let mut events = vec![operator_in_thread("growth", None, "where are we?")];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
+            .await;
+        let text = message_text(&events[0]);
+
+        assert!(
+            text.contains(&format!(
+                "(and {} more, not listed)",
+                total - SETTLED_WORK_BRIEFING_MAX
+            )),
+            "the truncation is declared, never silent: {text}"
+        );
+        // Most recent first, so the newest card is in and the oldest is out.
+        assert!(
+            text.contains(&format!("Card number {}", total - 1)),
+            "the newest settle is what 'did that ship?' is about: {text}"
+        );
+        assert!(
+            !text.contains("Card number 0 "),
+            "the oldest is what the cap cuts: {text}"
+        );
+    }
+
+    /// A settled card in one channel says nothing in another. The briefing is
+    /// scoped by the conversation that raised the work, not by the company.
+    #[tokio::test]
+    async fn a_settled_card_says_nothing_in_another_channel() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt
+            .store
+            .load(&id)
+            .await
+            .unwrap()
+            .expect("the company record");
+
+        let mut card = settled_card("t-growth", "Draft the launch email");
+        card.origin_chat_id = Some("growth".to_string());
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let mut events = vec![operator_in_thread("engineering", None, "what's up?")];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.expect("list"),
+            )
+            .await;
+        let text = message_text(&events[0]);
+        assert!(!text.contains(SETTLED_WORK_ANNOTATION), "{text}");
+        assert!(!text.contains("Draft the launch email"), "{text}");
+    }
+
+    /// A card that has settled, ready for a test to point at a conversation.
+    fn settled_card(id: &str, title: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: title.to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            // Empty on purpose: the settled briefing matches on the
+            // conversation that raised the card, never on who ran it, so an
+            // unassigned card must still brief — and this also keeps these
+            // fixtures out of the OPEN_WORK briefing, whose filter requires a
+            // non-empty assignee.
+            assignee: String::new(),
+            updated_at_millis: 0,
+            origin_chat_id: None,
+            origin_parent: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        }
+    }
+
+    fn operator_in_thread(chat: &str, parent: Option<u64>, text: &str) -> CompanyEvent {
+        CompanyEvent::OperatorMessage {
+            text: text.to_string(),
+            by: None,
+            chat: Some(chat.to_string()),
+            parent: parent.map(EventSeq::new),
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    fn message_text(event: &CompanyEvent) -> &str {
+        match event {
+            CompanyEvent::OperatorMessage { text, .. } => text.as_str(),
+            other => panic!("expected an operator message, got {other:?}"),
+        }
+    }
+
+    /* ---- issue #1890 E: the thread index ---- */
+
+    fn op(
+        seq: u64,
+        chat: &str,
+        parent: Option<u64>,
+        text: &str,
+    ) -> crate::ports::types::StoredEvent {
+        crate::ports::types::StoredEvent {
+            seq: EventSeq::new(seq),
+            company: CompanyId::new("acme"),
+            event: CompanyEvent::OperatorMessage {
+                text: text.to_string(),
+                by: None,
+                chat: Some(chat.to_string()),
+                parent: parent.map(EventSeq::new),
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            },
+            at_millis: seq,
+        }
+    }
+
+    fn agent_reply(seq: u64, chat: &str, parent: u64) -> crate::ports::types::StoredEvent {
+        crate::ports::types::StoredEvent {
+            seq: EventSeq::new(seq),
+            company: CompanyId::new("acme"),
+            event: CompanyEvent::AgentReply {
+                chat_id: chat.to_string(),
+                agent_id: "ceo".to_string(),
+                text: "an answer".to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                parent: Some(EventSeq::new(parent)),
+                mentions: Vec::new(),
+                mention_depth: 0,
+            },
+            at_millis: seq,
+        }
+    }
+
+    /// The index is the channel's other threads — the turn's own is excluded,
+    /// because a thread does not need pointing at itself and the line would
+    /// spend budget saying nothing.
+    #[test]
+    fn the_index_lists_the_other_threads_and_not_this_one() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            agent_reply(42, "growth", 41),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+            agent_reply(44, "growth", 43),
+        ];
+        let (lines, omitted) =
+            thread_index(&page, "growth", "growth", Some(EventSeq::new(41)), "", &[]);
+        assert_eq!(omitted, 0);
+        let rendered: Vec<String> = lines.iter().map(ThreadLine::render).collect();
+        assert_eq!(
+            rendered,
+            vec![format!(r#"- [{}] "what's our Q3 CAC?" — 1 reply"#, 43)]
+        );
+    }
+
+    /// A channel-level turn is in no thread, so it sees them all. That is the
+    /// epic's "both directions" falling out of one rule rather than needing two.
+    #[test]
+    fn a_channel_level_turn_sees_every_thread() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(lines.len(), 2);
+    }
+
+    /// Newest first, so "the other one" resolves to the thread most likely
+    /// meant — and so the cap below cuts the stale tail rather than the live
+    /// head.
+    /// **Fed newest-first, the way `read_before` delivers it.**
+    ///
+    /// The original version of this test built the page in ascending order,
+    /// which production never produces — and that hid the bug it was meant to
+    /// pin: a reply is met *before* its root, so updating the root's line in
+    /// place found nothing and every thread kept its opening sequence as its
+    /// recency (codex + coderabbit on #1972).
+    #[test]
+    fn the_index_is_ordered_by_recency() {
+        let mut page = vec![
+            op(10, "growth", None, "the old one"),
+            op(11, "growth", None, "the middle one"),
+            agent_reply(30, "growth", 10), // revives the oldest root
+            op(12, "growth", None, "the newest root"),
+        ];
+        page.sort_by_key(|e| std::cmp::Reverse(e.seq));
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(
+            lines.iter().map(|l| l.opening.clone()).collect::<Vec<_>>(),
+            vec!["the old one", "the newest root", "the middle one"],
+            "recency is the thread's LAST activity, not when it opened"
+        );
+    }
+
+    /// Past the cap the index **says so**. A selection presented as an
+    /// enumeration is answered from confidently and wrongly — the same rule
+    /// #1890 C's briefing follows.
+    #[test]
+    fn a_truncated_index_declares_what_it_left_out() {
+        let total = THREAD_INDEX_MAX + 3;
+        let page: Vec<crate::ports::types::StoredEvent> = (0..total)
+            .map(|n| op(100 + n as u64, "growth", None, &format!("topic {n}")))
+            .collect();
+        let (lines, omitted) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(lines.len(), THREAD_INDEX_MAX);
+        assert_eq!(omitted, 3);
+        // The newest survive; the oldest are what the cap cut.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.opening == format!("topic {}", total - 1))
+        );
+        assert!(!lines.iter().any(|l| l.opening == "topic 0"));
+    }
+
+    /// A manifest whose desk id and display name are different strings — the
+    /// only shape in which an alias bug is visible at all.
+    fn manifest_with_named_desk() -> CompanyManifest {
+        toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+
+            [[group_chat]]
+            id = "growth_desk"
+            name = "Growth"
+            "#,
+        )
+        .expect("parse manifest")
+    }
+
+    /// The card was raised addressing the desk by **name**; the follow-up
+    /// addresses it by id. Same desk, same thread, so the briefing is owed.
+    ///
+    /// The filter compared the two selectors verbatim, on the argument that
+    /// both sides are the raw chat id stamped from the same field. That holds
+    /// only while every caller spells the desk the same way — the console does,
+    /// a REST or ACP client need not — and when it broke, the briefing went
+    /// missing exactly when the operator asked "did that ship?" (codex on
+    /// #1972).
+    ///
+    /// **This direction, and not its mirror.** Resolution canonicalises the
+    /// addressed selector to the desk *id*, so a name-addressed message already
+    /// finds an id-stamped card with one term. Only a card stamped under the
+    /// name needs the second, which makes the reverse pairing the one that can
+    /// tell the fix from its absence — the first draft of this test used it and
+    /// passed with the fix reverted.
+    #[tokio::test]
+    async fn a_settled_card_is_briefed_through_the_desks_other_spelling() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest_with_named_desk())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt.store.load(&id).await.unwrap().expect("the record");
+
+        let mut card = settled_card("t-id", "Draft the launch email");
+        card.origin_chat_id = Some("Growth".to_string());
+        card.origin_parent = Some(EventSeq::new(41));
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let mut events = vec![operator_in_thread(
+            "growth_desk",
+            Some(41),
+            "did that ship?",
+        )];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.unwrap(),
+            )
+            .await;
+        let text = message_text(&events[0]);
+
+        assert!(
+            text.contains("Draft the launch email"),
+            "the name-stamped card is the id-addressed desk's own work: {text}"
+        );
+    }
+
+    /// An unaddressed message is the General desk, not "addressed to nothing".
+    ///
+    /// `chat_and_emit` routes a request that omits `chat` to General and every
+    /// reader of the journal folds `None` there, but the briefings required
+    /// `Some` — so a bare REST or ACP caller asking "did that ship?" was
+    /// answered blind, in the one conversation the console itself defaults to
+    /// (codex on #1972).
+    #[tokio::test]
+    async fn an_unaddressed_message_is_briefed_as_the_general_desk() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt.store.load(&id).await.unwrap().expect("the record");
+
+        let mut card = settled_card("t-general", "Renew the domain");
+        // Journaled by a client that named the desk; the message below names
+        // nothing. Both are General, so they are one conversation.
+        card.origin_chat_id = Some("General".to_string());
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            text: "did that ship?".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        }];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.unwrap(),
+            )
+            .await;
+        let text = message_text(&events[0]);
+
+        assert!(
+            text.contains("Renew the domain"),
+            "an unaddressed turn is owed the General desk's briefing: {text}"
+        );
+    }
+
+    /// End to end through the injector: a turn answering in one thread is told
+    /// what else its channel is about, and told **not to read it**.
+    ///
+    /// The gate is half the mechanism. Without it an agent pulls every thread
+    /// it is shown "to be safe", which rebuilds the flat channel window #1890 A
+    /// removed — in the prompt, and paid for twice.
+    #[tokio::test]
+    async fn a_threaded_turn_is_oriented_without_being_invited_to_read() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        for stored in [
+            op(41, "growth", None, "draft the launch email"),
+            agent_reply(42, "growth", 41),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+        ] {
+            rt.events().append(&id, stored.event).await.unwrap();
+        }
+
+        // Answering inside thread 41 — the seqs the fixture appended start at
+        // 1, so the roots are whatever the log assigned; read them back.
+        let page = rt.events().read_before(&id, None, 64).await.unwrap();
+        let first_root = page
+            .iter()
+            .rev()
+            .find_map(|e| match &e.event {
+                CompanyEvent::OperatorMessage { parent: None, .. } => Some(e.seq),
+                _ => None,
+            })
+            .expect("a root");
+
+        let mut events = vec![operator_in_thread(
+            "growth",
+            Some(first_root.value()),
+            "make it shorter",
+        )];
+        let record = rt.store.load(&id).await.unwrap().unwrap();
+        CycleRunner::new(&rt)
+            .inject_thread_index(&record, &mut events, &[])
+            .await;
+        let text = message_text(&events[0]);
+
+        assert!(text.starts_with("make it shorter"), "{text}");
+        assert!(text.contains(THREAD_INDEX_ANNOTATION), "{text}");
+        assert!(
+            text.contains("what's our Q3 CAC?"),
+            "the other thread is named: {text}"
+        );
+        assert!(
+            !text.contains("draft the launch email"),
+            "but not the one being answered in: {text}"
+        );
+        assert!(
+            text.contains("do NOT read or answer from them"),
+            "the gate rides with the index or the index undoes A: {text}"
+        );
+    }
+
+    /// A channel with no other thread gets no index at all — an empty briefing
+    /// is prompt budget spent to say nothing.
+    #[tokio::test]
+    async fn a_channel_with_nothing_else_open_gets_no_index() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut events = vec![operator_in_thread("growth", None, "anything happening?")];
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        CycleRunner::new(&rt)
+            .inject_thread_index(&record, &mut events, &[])
+            .await;
+        assert!(!message_text(&events[0]).contains(THREAD_INDEX_ANNOTATION));
+    }
+
+    /// A message never appears in its own index.
+    ///
+    /// At channel level there is no thread to exclude, but the operator's
+    /// message is journaled before the cycle runs — so it is an unparented root
+    /// on the page, and without this the index shows a reader their own message
+    /// back as somebody else's conversation. Found by
+    /// `redeem_replays_the_markers_attachments`, which printed the index into
+    /// its failure message.
+    #[test]
+    fn a_message_is_not_listed_in_its_own_index() {
+        let page = vec![
+            op(41, "growth", None, "review the attached report"),
+            op(43, "growth", None, "what's our Q3 CAC?"),
+        ];
+        let (lines, _) = thread_index(
+            &page,
+            "growth",
+            "growth",
+            None,
+            "review the attached report",
+            &[],
+        );
+        assert_eq!(
+            lines.iter().map(|l| l.opening.clone()).collect::<Vec<_>>(),
+            vec!["what's our Q3 CAC?"],
+            "the message being answered is not one of its own other conversations"
+        );
+    }
+
+    /// A thread whose work settled says where it landed — the question a reader
+    /// is actually asking, and answerable only because #1890 B records which
+    /// thread raised a card.
+    #[test]
+    fn a_thread_whose_work_settled_says_where_it_landed() {
+        let page = vec![op(41, "growth", None, "draft the launch email")];
+        let mut card = settled_card("t-1", "Draft the launch email");
+        card.origin_chat_id = Some("growth".to_string());
+        card.origin_parent = Some(EventSeq::new(41));
+        let settled = vec![&card];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &settled);
+        assert_eq!(
+            lines[0].render(),
+            format!(
+                r#"- [{}] "draft the launch email" — finished → In review"#,
+                41
+            ),
+            "state beats a reply count: it is what a reader is asking"
+        );
+    }
+
+    /// Another channel's threads are another channel's business. An index that
+    /// crossed channels would be a wider leak than the one this epic closed.
+    #[test]
+    fn the_index_never_crosses_channels() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            op(42, "engineering", None, "the migration plan"),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].opening, "draft the launch email");
+    }
+
+    /// An agent reply never opens a thread — it is always parented to the
+    /// question it answers, so treating one as a root would invent a
+    /// conversation the operator never started.
+    #[test]
+    fn an_agent_reply_is_never_a_root() {
+        let page = vec![
+            op(41, "growth", None, "draft the launch email"),
+            agent_reply(42, "growth", 41),
+        ];
+        let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one root, not two: {lines:?}",
+            lines = lines.len()
+        );
     }
 }
