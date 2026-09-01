@@ -972,13 +972,22 @@ pub async fn resume_run(runtime: &CompanyRuntime, turn: &str) -> Result<()> {
         denied = released.denied.len(),
         "workflow: the run's gates are all decided; starting ONE continuation for the batch"
     );
-    spawn_continuation(
+    if let Err(error) = spawn_continuation(
         runtime,
         &released.effect,
         &released.approved,
         &released.denied,
     )
     .await
+    {
+        // Every error here is terminal for this lineage: `release(turn)`
+        // above already took the batch out of `workflow_gates()` for good,
+        // so nothing will retry `released.effect`'s checkpoint thread. Prune
+        // it the same way the all-denied arm above does.
+        prune_checkpoint_lineage_for_effect(runtime, &released.effect).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// What an approved workflow gate does at the moment its effect is performed
@@ -3069,6 +3078,99 @@ mode = "full"
             remaining.is_empty(),
             "a wholly refused batch starts no continuation, so its checkpoint lineage must be \
              pruned: {remaining:?}"
+        );
+    }
+
+    /// A gate batch's continuation admission can fail terminally too, not
+    /// just resolve to no run at all. Here the batch has real approvals and a
+    /// live checkpoint, but the run supervisor is already at its ceiling when
+    /// `resume_run` tries to spawn the continuation — `spawn_continuation`'s
+    /// `begin(...)?` refuses with `WorkflowRunLimit`, and the release above
+    /// already took the batch out of `workflow_gates()` for good, so nothing
+    /// will ever retry this lineage. Its checkpoint must not outlive that
+    /// refusal on disk.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_gate_batch_prunes_its_checkpoint_when_admission_hits_the_run_ceiling() {
+        use tinyflows::graph::Checkpointer;
+
+        let home = seed_home();
+        let mut rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+            .with_seed_dir(home.path().to_path_buf())
+            .build()
+            .await
+            .expect("runtime builds");
+        let runner = Arc::new(RecordingRunner::default());
+        rt.set_workflow_runner(runner.clone());
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                home.path().join("checkpoints"),
+            ),
+        );
+        checkpoints
+            .put(tinyflows::graph::Checkpoint {
+                thread_id: "run-that-paused".to_string(),
+                checkpoint_id: "c1".to_string(),
+                run_id: Some("run-that-paused".to_string()),
+                parent_checkpoint_id: None,
+                namespace: Vec::new(),
+                state: json!({}),
+                next_nodes: vec![tinyflows::graph::ids::NodeId::new("gate")],
+                completed_tasks: Vec::new(),
+                pending_writes: Vec::new(),
+                interrupts: Vec::new(),
+                pending_activations: None,
+                barrier_arrivals: Vec::new(),
+                metadata: Value::Null,
+            })
+            .await
+            .expect("seed checkpoint");
+        rt.set_workflow_checkpoints(checkpoints.clone());
+        rt.set_run_supervisor(crate::runtime::RunSupervisor::with_limit(1));
+        let rt = Arc::new(rt);
+
+        // Occupy the run supervisor's only slot so `spawn_continuation`'s own
+        // `begin(...)?` refuses once this test releases the gate batch below.
+        let (_ctx, _guard) = rt
+            .run_supervisor()
+            .begin("someone-elses-run", false)
+            .expect("the ceiling has room for the first run");
+
+        let turn = workflow_turn_key("run-that-paused");
+        let mut effect = gate_effect(
+            "gated",
+            "gate",
+            &json!({ "request": "x" }),
+            "run-that-paused",
+            &[],
+            &[],
+            None,
+        );
+        if let Value::Object(ref mut payload) = effect.payload {
+            payload.insert(PAYLOAD_THREAD_ID.to_string(), json!("run-that-paused"));
+        }
+        let id = ApprovalId::new("gate-1");
+        rt.workflow_gates().arm(&turn, &id, &effect);
+        rt.workflow_gates().decide(&turn, &id, Verdict::Approve);
+
+        let err = resume_run(&rt, &turn)
+            .await
+            .expect_err("the run supervisor is already at its ceiling");
+        assert!(
+            matches!(err, OpenCompanyError::WorkflowRunLimit { .. }),
+            "expected the ceiling refusal to surface rather than something else: {err}"
+        );
+        assert!(runner.started().is_empty(), "admission never happened");
+
+        let remaining = checkpoints
+            .get_thread("run-that-paused")
+            .await
+            .expect("checkpoint read");
+        assert!(
+            remaining.is_empty(),
+            "a batch whose continuation could not be admitted is just as terminal for this \
+             lineage as an all-denied batch, and its checkpoint must be pruned the same way: \
+             {remaining:?}"
         );
     }
 
