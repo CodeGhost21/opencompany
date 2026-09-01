@@ -1889,15 +1889,16 @@ impl Tool for ListTasksTool {
                         continue;
                     }
                     let attempt = match &self.runs {
-                        Some(runs) => latest_attempt_label(
-                            &runs
-                                .list_runs(
-                                    &self.company,
-                                    &RunFilter::for_task(c.id.as_str()).with_limit(1),
-                                )
-                                .await
-                                .unwrap_or_default(),
-                        ),
+                        Some(runs) => match runs
+                            .list_runs(
+                                &self.company,
+                                &RunFilter::for_task(c.id.as_str()).with_limit(1),
+                            )
+                            .await
+                        {
+                            Ok(rows) => latest_attempt_label(&rows),
+                            Err(_) => Some("attempt status unavailable".to_string()),
+                        },
                         None => None,
                     };
                     md.push_str(&format!(
@@ -2046,57 +2047,70 @@ impl Tool for ReadTaskTool {
         md.push_str("\n## Attempts\n");
         let mut attempt_count = 0usize;
         match &self.runs {
-            Some(runs) => {
-                let mut attempts = runs
-                    .list_runs(&self.company, &RunFilter::for_task(task_id))
-                    .await
-                    .unwrap_or_default();
-                attempt_count = attempts.len();
-                if attempts.is_empty() {
-                    md.push_str("_No attempts yet._\n");
-                } else {
-                    // `list_runs` is newest-first; render the timeline oldest-first.
-                    attempts.reverse();
-                    for run in &attempts {
-                        md.push_str(&format!(
-                            "- attempt {} — {}",
-                            run.attempt,
-                            run.status.as_str()
-                        ));
-                        if let Some(err) = &run.error {
-                            md.push_str(&format!(" — {}", truncate_chars(err, 200)));
+            Some(runs) => match runs
+                .list_runs(&self.company, &RunFilter::for_task(task_id))
+                .await
+            {
+                Ok(mut attempts) => {
+                    attempt_count = attempts.len();
+                    if attempts.is_empty() {
+                        md.push_str("_No attempts yet._\n");
+                    } else {
+                        // `list_runs` is newest-first; render the timeline oldest-first.
+                        attempts.reverse();
+                        for run in &attempts {
+                            md.push_str(&format!(
+                                "- attempt {} — {}",
+                                run.attempt,
+                                run.status.as_str()
+                            ));
+                            if let Some(err) = &run.error {
+                                md.push_str(&format!(" — {}", truncate_chars(err, 200)));
+                            }
+                            md.push('\n');
                         }
-                        md.push('\n');
                     }
                 }
-            }
+                Err(err) => {
+                    tracing::debug!(company = %self.company, task_id, error = %err, "read_task: run-history read failed");
+                    md.push_str(
+                        "_Run history unavailable — the run store couldn't be read. This is \
+                         NOT the same as no attempts._\n",
+                    );
+                }
+            },
             None => md.push_str("_Run history unavailable._\n"),
         }
 
         md.push_str("\n## Output\n");
         match &self.artifacts {
-            Some(artifacts) => {
-                let published = artifacts
-                    .list(&self.company, Some(task_id))
-                    .await
-                    .unwrap_or_default();
-                if published.is_empty() {
-                    md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
-                } else {
-                    for artifact in &published {
-                        let preview = artifact
-                            .latest()
-                            .map(|v| truncate_chars(v.body.trim(), 400))
-                            .unwrap_or_default();
-                        md.push_str(&format!(
-                            "- **{}** ({}): {}\n",
-                            artifact.title,
-                            artifact.kind.as_str(),
-                            preview
-                        ));
+            Some(artifacts) => match artifacts.list(&self.company, Some(task_id)).await {
+                Ok(published) => {
+                    if published.is_empty() {
+                        md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
+                    } else {
+                        for artifact in &published {
+                            let preview = artifact
+                                .latest()
+                                .map(|v| truncate_chars(v.body.trim(), 400))
+                                .unwrap_or_default();
+                            md.push_str(&format!(
+                                "- **{}** ({}): {}\n",
+                                artifact.title,
+                                artifact.kind.as_str(),
+                                preview
+                            ));
+                        }
                     }
                 }
-            }
+                Err(err) => {
+                    tracing::debug!(company = %self.company, task_id, error = %err, "read_task: artifact read failed");
+                    md.push_str(
+                        "_Output unavailable — the artifact store couldn't be read. This is \
+                         NOT the same as nothing published._\n",
+                    );
+                }
+            },
             None => md.push_str(&output_stamp_markdown(card.output.as_ref(), false)),
         }
 
@@ -2192,21 +2206,31 @@ impl Tool for ReadRunTool {
 
         // Agent-attempt path first — the common case (`list_tasks` /
         // `read_task` both surface this id).
-        if let Some(runs) = &self.runs
-            && let Ok(Some(run)) = runs.get_run(&self.company, run_id).await
-        {
-            let mut md = format!("# Attempt {} — {}\n", run.attempt, run.status.as_str());
-            if let Some(task_id) = &run.task_id {
-                md.push_str(&format!("- **Task**: `{task_id}`\n"));
+        if let Some(runs) = &self.runs {
+            match runs.get_run(&self.company, run_id).await {
+                Ok(Some(run)) => {
+                    let mut md = format!("# Attempt {} — {}\n", run.attempt, run.status.as_str());
+                    if let Some(task_id) = &run.task_id {
+                        md.push_str(&format!("- **Task**: `{task_id}`\n"));
+                    }
+                    md.push_str(&format!("- **Agent**: {}\n", run.agent_id));
+                    if let Some(err) = &run.error {
+                        md.push_str(&format!("- **Error**: {}\n", truncate_chars(err, 300)));
+                    }
+                    return Ok(ToolResult::success_with_markdown(
+                        json!({ "run_id": run.id, "kind": "attempt", "status": run.status.as_str() }),
+                        md,
+                    ));
+                }
+                // Not an attempt row — fall through to the workflow-run path.
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::debug!(company = %self.company, run_id, error = %err, "read_run: run-store read failed");
+                    return Ok(ToolResult::error(format!(
+                        "Couldn't read the run store: {err}"
+                    )));
+                }
             }
-            md.push_str(&format!("- **Agent**: {}\n", run.agent_id));
-            if let Some(err) = &run.error {
-                md.push_str(&format!("- **Error**: {}\n", truncate_chars(err, 300)));
-            }
-            return Ok(ToolResult::success_with_markdown(
-                json!({ "run_id": run.id, "kind": "attempt", "status": run.status.as_str() }),
-                md,
-            ));
         }
 
         // Workflow-run path: fold the journal, the same fold the console's
@@ -2220,10 +2244,18 @@ impl Tool for ReadRunTool {
                 "No run `{run_id}` found, and no event log wired to check workflow runs."
             )));
         };
-        let rows = events
+        let rows = match events
             .read_from(&self.company, EventSeq::new(0), usize::MAX)
             .await
-            .unwrap_or_default();
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::debug!(company = %self.company, run_id, error = %err, "read_run: event log read failed");
+                return Ok(ToolResult::error(format!(
+                    "Couldn't read the event journal: {err}"
+                )));
+            }
+        };
         let (folded, _read_through) = crate::server::ops::workflows::fold_run_events(rows, None);
         let Some(outcome) = folded
             .into_iter()
@@ -12157,6 +12189,293 @@ name = "Morning"
         assert!(
             !out.contains("Nothing published yet"),
             "must not claim nothing happened when the card recorded an attempt: {out}"
+        );
+    }
+
+    /// A run store that cannot answer, so a run-history read failure never
+    /// collapses into "no attempts" or a missing run — the same distinction
+    /// `list_tasks`/`read_task`'s board read already makes for [`TaskStore`].
+    struct BrokenRunStore;
+
+    #[async_trait]
+    impl RunStore for BrokenRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<RunRecord> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-store read failure".into(),
+            ))
+        }
+        async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-history read failure".into(),
+            ))
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn read_task_reports_run_history_unavailable_instead_of_no_attempts_on_a_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Investigate the outage",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let runs: Arc<dyn RunStore> = Arc::new(BrokenRunStore);
+        let tool = ReadTaskTool::new(company, Some(tasks), Some(runs), None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("No attempts yet"),
+            "a run-history read failure must not look like a card nobody attempted: {out}"
+        );
+        assert!(out.contains("Run history unavailable"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_reports_attempt_status_unavailable_on_a_run_history_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Draft the memo",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "maya",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let runs: Arc<dyn RunStore> = Arc::new(BrokenRunStore);
+        let tool = ListTasksTool::new(company, Some(tasks), Some(runs));
+        let out = tool.execute(json!({})).await.unwrap().output_for_llm(true);
+
+        assert!(
+            out.contains("attempt status unavailable"),
+            "a per-card run-history read failure must not render identically to a card with \
+             no attempt clause at all: {out}"
+        );
+    }
+
+    /// A run store that answers `get_run` but never `list_runs`, to isolate
+    /// [`ReadRunTool`]'s agent-attempt lookup from its journal fallback.
+    struct FailingGetRun;
+
+    #[async_trait]
+    impl RunStore for FailingGetRun {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<RunRecord> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<RunRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated run-store read failure".into(),
+            ))
+        }
+        async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<RunRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn read_run_reports_a_run_store_failure_instead_of_a_missing_run() {
+        let runs: Arc<dyn RunStore> = Arc::new(FailingGetRun);
+        let tool = ReadRunTool::new(CompanyId::new("acme"), Some(runs), None);
+        let result = tool.execute(json!({ "run_id": "r-1" })).await.unwrap();
+        assert!(
+            result.is_error,
+            "a run-store read failure must be a refusal, not a fabricated miss"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("No run"),
+            "must not claim the run doesn't exist when the run store couldn't be read: {text}"
+        );
+    }
+
+    /// An event log that always fails `read_from`, to prove
+    /// [`ReadRunTool`]'s workflow-run fallback distinguishes a journal read
+    /// failure from a genuinely absent run.
+    struct BrokenEventLog;
+
+    #[async_trait]
+    impl EventLog for BrokenEventLog {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
+            unreachable!("read_run only reads")
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+            Err(OpenCompanyError::Store(
+                "simulated event-log read failure".into(),
+            ))
+        }
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn read_run_reports_an_event_log_failure_instead_of_a_missing_run() {
+        let events: Arc<dyn EventLog> = Arc::new(BrokenEventLog);
+        let tool = ReadRunTool::new(CompanyId::new("acme"), None, Some(events));
+        let result = tool.execute(json!({ "run_id": "wf-1" })).await.unwrap();
+        assert!(
+            result.is_error,
+            "an event-log read failure must be a refusal, not a fabricated miss"
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("not an agent attempt and not a workflow run"),
+            "must not claim the run doesn't exist when the event log couldn't be read: {text}"
+        );
+    }
+
+    /// An artifact store that cannot answer, so an output-surface read
+    /// failure never collapses into "nothing published".
+    struct BrokenArtifactStore;
+
+    #[async_trait]
+    impl ArtifactStore for BrokenArtifactStore {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            _task_id: Option<&str>,
+        ) -> crate::Result<Vec<crate::ports::artifacts::ArtifactRecord>> {
+            Err(OpenCompanyError::Store(
+                "simulated artifact-store read failure".into(),
+            ))
+        }
+        async fn get(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<crate::ports::artifacts::ArtifactRecord>> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _artifact: &crate::ports::artifacts::ArtifactRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn read_task_reports_output_unavailable_on_an_artifact_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    "Reply to the customer",
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let artifacts: Arc<dyn ArtifactStore> = Arc::new(BrokenArtifactStore);
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            !out.contains("Nothing published yet"),
+            "an artifact-store read failure must not look like a genuinely empty store: {out}"
         );
     }
 }
