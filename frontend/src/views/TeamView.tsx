@@ -428,18 +428,21 @@ export function TeamView({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/*
-        Headed "Company", not "Team" (issue #1141). This grid is no longer a
-        page of its own — bare `#/team` redirects to `#/company` — it is the
-        Company page's Cards half, and the org chart beside it heads the same
-        way. Two headings over one page's two halves is how an operator ends
-        up believing they are on two different pages.
+        Headed "Agents", not "Team" (issue #1141) and not "Company" any more.
+        This grid is no longer a page of its own — bare `#/team` redirects to
+        `#/company` — it is what the sidebar's **Agents** row leads to, and a
+        page has to be called what the row that reaches it is called.
+
+        "Company" was right while the row said Company. Under a section ALSO
+        called Company it said the word twice and named nothing: the page is
+        the roster, so it is the agents.
 
         Issue #1207 put the actions on the heading's row rather than on a row of
         their own; `PageHeader` is where that shape lives now (issue #1763), and
         `company-header` still names the row the two share.
       */}
       <PageHeader
-        title="Company"
+        title="Agents"
         width="5xl"
         rowTestId="company-header"
         description={

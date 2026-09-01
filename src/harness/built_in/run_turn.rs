@@ -77,10 +77,13 @@ impl RunTurn for HarnessRunTurn {
         agent_id: &str,
         message: &str,
         control: &SteerControl,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.pool
-            .run_steered_background(company, agent_id, message, &self.deps, control, run_sink)
+            .run_steered_background(
+                company, agent_id, message, &self.deps, control, chat, run_sink,
+            )
             .await
     }
 

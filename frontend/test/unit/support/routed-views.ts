@@ -7,6 +7,7 @@
  */
 
 import type { View } from "@/lib/console-routes";
+import type { ConnectionPage } from "@/views/connection-pages";
 import type { FinancePage } from "@/views/finance/FinanceSection";
 import type { SettingsPage } from "@/views/settings-pages";
 
@@ -54,8 +55,9 @@ import type { SettingsPage } from "@/views/settings-pages";
  *
  *   - `page-header-precedes-every-return.test.ts` asks a strictly weaker,
  *     decidable question — is there *any* JSX `return` textually above the
- *     header? — over every routed view and every settings page, so a new route
- *     is covered the day it is added.
+ *     header? — over every routed view and over every sub-page of the three
+ *     sections below (Settings, Finance, Connections), so a new route or a new
+ *     sub-page is covered the day it is added.
  *   - `settings-page-named-in-every-state.test.ts` renders six of those pages
  *     in their loading and error states and asks the DOM for the `h1`, which
  *     is the only evidence that actually proves it.
@@ -155,6 +157,12 @@ export const NAMED_BY: Record<View, Names> = {
   pages: [{ pageHeader: "PagesView.tsx" }],
   /** See `FINANCE_NAMED_BY`: `#/finances/<page>` is a three-page section. */
   finances: [{ pageHeader: "FinancesView.tsx" }],
+  /**
+   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is a two-page section.
+   * `ConnectionsSection` is the rail frame; the pages carry the headings. The
+   * bare route renders Apps, so that is the leaf named here.
+   */
+  connections: [{ pageHeader: "OAuthView.tsx" }],
   /** `SettingsSection` is the tab frame; `SettingsView` is the page. */
   settings: [{ pageHeader: "SettingsView.tsx" }],
   feedback: [{ pageHeader: "FeedbackView.tsx" }],
@@ -183,7 +191,7 @@ export const NAMED_BY: Record<View, Names> = {
 
 /**
  * The same question one level down: Settings is a single routed view whose
- * `sub` segment picks one of ten pages, each of which draws its own
+ * `sub` segment picks one of seven pages, each of which draws its own
  * `PageHeader`. `#/settings/people` is an address an operator can bookmark, so
  * "the routed views are covered" is not the whole answer — `PeopleView`'s
  * loading state had no `h1` and no routed-view check could have seen it.
@@ -195,13 +203,39 @@ export const NAMED_BY: Record<View, Names> = {
 export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   general: "SettingsView.tsx",
   people: "PeopleView.tsx",
-  oauth: "OAuthView.tsx",
-  mcp: "McpServersView.tsx",
   inference: "InferenceView.tsx",
   hosting: "HostingView.tsx",
   search: "SearchView.tsx",
   skills: "SkillsView.tsx",
+  // The run index is a settings page now; the shell hands the pane in rather
+  // than `SettingsSection` importing it, so the lazy boundary and its loading
+  // title stay in one place. A single run keeps its own `#/observatory/<runId>`
+  // route, which is why this file is also `NAMED_BY.observatory`.
+  observatory: "observatory/ObservatoryView.tsx",
   usage: "UsageView.tsx",
+};
+
+/**
+ * Connections is the third section like Settings: one routed view whose `sub`
+ * segment picks one of two pages, each drawing its own `PageHeader`.
+ * `#/connections/mcp` is a bookmarkable address and `mcp` is not a `View`, so
+ * the routed-view sweep cannot see it — the same blind spot `#/settings/people`
+ * and `#/finances/wallet` have.
+ *
+ * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a third connections
+ * page with no row is a compile error.
+ *
+ * Both files were rows in `SETTINGS_NAMED_BY` until the section was built. The
+ * pages did not change; only which table has to account for them did — and
+ * moving them is what briefly dropped `McpServersView` out of
+ * `page-header-precedes-every-return.test.ts` altogether, since that test swept
+ * the two other section tables and not this one (codex review on #1977). Apps
+ * kept its cover by luck rather than by rule: it is also `NAMED_BY.connections`,
+ * the leaf the bare route renders. Both sweeps read this table now.
+ */
+export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
+  apps: "OAuthView.tsx",
+  mcp: "McpServersView.tsx",
 };
 
 /**
@@ -215,11 +249,11 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
  * `Record<FinancePage, …>` over `FINANCE_PAGES`, so a fourth finance page with
  * no row is a compile error.
  *
- * These two and `company` are the complete set of sub-dispatching routes. The
+ * These three and `company` are the complete set of sub-dispatching routes. The
  * check was a grep over `src/views/**` for `sub ===`, `if (sub)` and
  * `resolve*Page`: it finds `CompanyView` (three leaves, enumerated above),
  * `TeamView` (`AgentDetailView`, enumerated), `app-shell`'s `MANAGE_SEGMENT`
- * split under `ledgers` (enumerated), `SettingsSection`, and this. `ChatView`
+ * split under `ledgers` (enumerated), `SettingsSection`, `ConnectionsSection`, and this. `ChatView`
  * and `LedgersView` also read `sub`, but to select a channel or a list *within
  * themselves* rather than to render a different component, so they contribute
  * no leaf.

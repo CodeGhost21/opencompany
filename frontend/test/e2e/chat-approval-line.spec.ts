@@ -86,9 +86,15 @@ function console_(page: Page): Locator {
  * fragment-only `page.goto` is a same-document navigation the console may or
  * may not have re-rendered by the time the next locator is queried; the nav
  * button is both deterministic and the path the issue actually describes.
+ *
+ * By **view id**, not by lowercasing a label. The two are deliberately allowed
+ * to differ — the `chat` view's row says "Room", the `workflows` view's says
+ * "Flows", the `ledgers` view's has said "Work" since #1284 — and `data-tour`
+ * follows the id so an anchor does not move when a word does. Deriving the
+ * selector from the label made that a silent break rather than a rename.
  */
-async function navigate(page: Page, label: string, expectView: RegExp) {
-  await page.locator(`[data-tour="nav-${label.toLowerCase()}"]`).getByRole("button").click();
+async function navigate(page: Page, view: string, expectView: RegExp) {
+  await page.locator(`[data-tour="nav-${view}"]`).getByRole("button").click();
   await expect(page).toHaveURL(expectView);
 }
 
@@ -100,7 +106,9 @@ async function decideFrom(page: Page, channelId: string, action: "Approve" | "De
   await page.goto(`/#/chat/${channelId}`);
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 
-  await navigate(page, "Approvals", /#\/approvals/);
+  // Approvals has no sidebar row any more — it is an icon in the window's
+  // title row, which this spec is not about. The address is what it needs.
+  await page.goto("/#/approvals");
   const button = page.getByRole("button", { name: action });
   await expect(button).toBeVisible({ timeout: 30_000 });
   await button.click();
@@ -119,7 +127,7 @@ test("the line recording a decision is visible in a real channel", async ({ page
 
   // Back in the channel the operator was last in — the console keeps that
   // across the trip to Approvals, which is the whole of the fix.
-  await navigate(page, "Chat", /#\/chat/);
+  await navigate(page, "chat", /#\/chat/);
   // The stub above answers without `stillAwaiting`, which is the pre-#561 host.
   // Nothing is claimed about what happens next in that case — "recorded" is the
   // whole promise, and the optimistic sentence this used to assert is exactly
@@ -140,7 +148,7 @@ test("a decision the host refuses says so in the same channel", async ({ page })
 
   await decideFrom(page, ENGINEERING, "Approve");
 
-  await navigate(page, "Chat", /#\/chat/);
+  await navigate(page, "chat", /#\/chat/);
   // The half that used to be indistinguishable from success.
   await expect(console_(page).getByText(/Couldn't record your decision/)).toBeVisible({
     timeout: 30_000,
@@ -164,6 +172,6 @@ test("with no channel ever opened, the decision still reaches the first desk", a
   await expect(decline).toBeVisible({ timeout: 30_000 });
   await decline.click();
 
-  await navigate(page, "Chat", /#\/chat/);
+  await navigate(page, "chat", /#\/chat/);
   await expect(console_(page).getByText(/^Declined:/)).toBeVisible({ timeout: 30_000 });
 });

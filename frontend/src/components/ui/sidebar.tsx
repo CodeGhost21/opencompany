@@ -34,6 +34,28 @@ const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
 
+/**
+ * The persisted open/closed state, or `undefined` if nothing has been stored.
+ *
+ * `setOpen` below has always written this cookie. Upstream shadcn reads it on
+ * the server and hands it back as `defaultOpen`; this console has no server
+ * render, so nothing ever read it and the write was dead — collapsing the
+ * sidebar survived until the next reload and no further.
+ *
+ * That turned load-bearing when the channel list became a section of this
+ * sidebar: the rail used to persist its own collapsed flag in `localStorage`
+ * (`lib/chat-rail.ts`), and the sidebar's cookie was meant to replace it. A
+ * write-only cookie replaces nothing, so the operator's density choice silently
+ * became session-only (codex P2 review on #1987).
+ */
+function readSidebarCookie(): boolean | undefined {
+  if (typeof document === "undefined") return undefined
+  const match = document.cookie.match(
+    new RegExp(`(?:^|;\\s*)${SIDEBAR_COOKIE_NAME}=(true|false)(?:;|$)`),
+  )
+  return match ? match[1] === "true" : undefined
+}
+
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
   open: boolean
@@ -73,7 +95,9 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(defaultOpen)
+  // Seeded from the cookie `setOpen` writes, so the choice survives a reload.
+  // See `readSidebarCookie`. `defaultOpen` still decides on a first visit.
+  const [_open, _setOpen] = React.useState(() => readSidebarCookie() ?? defaultOpen)
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
@@ -676,63 +700,24 @@ function SidebarMenuBadge({
   )
 }
 
-/**
- * The attention mark that survives collapse (issue #1018).
+/*
+ * `SidebarMenuDot` used to live here — the attention mark that survived the
+ * rail collapsing (issue #1018).
  *
- * # Why this exists beside `SidebarMenuBadge` rather than replacing it
+ * It existed for one reason: `SidebarMenuBadge` carries
+ * `group-data-[collapsible=icon]:hidden`, so the approvals count — the
+ * sidebar's only attention signal — vanished the moment the sidebar collapsed
+ * to icons, and a collapsed rail showing nothing is indistinguishable from
+ * all-clear. The dot was the same `pending` value rendered small enough to
+ * survive 32px, mirrored so exactly one of the two ever showed.
  *
- * [`SidebarMenuBadge`] carries `group-data-[collapsible=icon]:hidden`, and that
- * is correct: a two-digit count does not fit a 32px rail, which is why upstream
- * hides it. The defect was that the count was the sidebar's **only** attention
- * signal, so hiding it hid the fact that anything was waiting at all — a
- * collapsed rail showing nothing is indistinguishable from all-clear.
- *
- * This is the exact mirror of that rule: `hidden` until the rail collapses, then
- * shown. So precisely one of the two renders at any width — a count while there
- * is room to read one, a mark when there is not. Both are driven from the same
- * value, so the collapsed and expanded states can never disagree.
- *
- * # Why a dot and not the number
- *
- * The same reason the select popup fades its clipped row rather than adding a
- * count beside its trigger (issue #975): a signal that has to be *read* does not
- * survive being shrunk. A mark does. What it deliberately does not do is claim
- * how many — the number stays the badge's job, and the accessible name below is
- * where the count goes for anyone who cannot see the mark.
- *
- * `--status-blocked` is the console's existing "waiting on a person" amber, the
- * same one the workflow run panel uses for a parked gate, so this introduces no
- * new colour vocabulary.
+ * The signal has moved to the window's title row (`ApprovalsButton`), which is
+ * chrome: it does not collapse, and it is on screen on every page in every
+ * sidebar state. The disappearance the dot was protecting against can no longer
+ * happen, so the dot is deleted rather than left as a second mechanism for a
+ * count that is no longer here. Do not re-add it without re-adding a sidebar
+ * badge for it to mirror.
  */
-function SidebarMenuDot({
-  className,
-  label,
-  ...props
-}: React.ComponentProps<"span"> & { label: string }) {
-  return (
-    <span
-      data-slot="sidebar-menu-dot"
-      data-sidebar="menu-dot"
-      // `role="img"` + `aria-label` because a bare coloured span is invisible to
-      // a screen reader, and colour alone is not a signal everyone receives. The
-      // label names WHAT is waiting and HOW MANY, so the information the badge
-      // carried visually is not lost with it.
-      role="img"
-      aria-label={label}
-      title={label}
-      className={cn(
-        // `ring-chrome`, not `ring-sidebar` (issue #1178). The ring is a
-        // CUT-OUT: 2px of the ground punched around the dot so it reads off
-        // whatever is behind it. The collapsed rail — the only state this dot
-        // renders in — sits on the window chrome now, so a ring painted
-        // `--sidebar` draws a mismatched halo instead of a cut-out.
-        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full bg-[var(--status-blocked)] ring-2 ring-chrome select-none group-data-[collapsible=icon]:block",
-        className
-      )}
-      {...props}
-    />
-  )
-}
 
 function SidebarMenuSkeleton({
   className,
@@ -847,7 +832,6 @@ export {
   SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
-  SidebarMenuDot,
   SidebarMenuItem,
   SidebarMenuSkeleton,
   SidebarMenuSub,

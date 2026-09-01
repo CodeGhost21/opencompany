@@ -39,7 +39,10 @@ use crate::ports::tasks::{
 use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
-use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment_matches};
+use crate::runtime::cycle::{
+    BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, SETTLED_WORK_ANNOTATION, THREAD_INDEX_ANNOTATION,
+    assignment_matches,
+};
 
 /// One agent turn, abstracted so delegation orchestration never touches the
 /// harness-specific [`HarnessDeps`](crate::harness::HarnessDeps).
@@ -127,12 +130,19 @@ pub trait RunTurn: Send + Sync {
     /// [`run_steered`](Self::run_steered). It is *this* method the dispatched
     /// card's own turns pass a sink to, which is what makes the card's trace
     /// durable while the turn runs even though nothing is streamed.
+    ///
+    /// `chat` is the conversation the turn belongs to, which is **not** implied
+    /// by the absence of a stream (issue #1890 I). A dispatched card passes
+    /// [`ChatTarget::default`] and binds to nothing; an approval's re-issued
+    /// call passes the conversation the approval was raised in, so it runs
+    /// against that thread's history rather than whatever was loaded last.
     async fn run_steered_background(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
         control: &SteerControl,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
 
@@ -422,6 +432,7 @@ impl RunTurn for NoTurn {
         _agent_id: &str,
         _message: &str,
         _control: &SteerControl,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
@@ -3570,6 +3581,13 @@ fn work_words(text: &str) -> Vec<String> {
 /// work verbs, so every `workflow` message would read as substantial no matter
 /// what the operator actually typed.
 ///
+/// Issue #1890 C added a fourth: [`SETTLED_WORK_ANNOTATION`], briefing the turn
+/// on work raised in this conversation that has since finished. Missing it would
+/// be the "thanks!" bug a third time, and with a nastier loop than #176's: the
+/// settled briefing grows as cards *finish*, so every completed card would make
+/// the next message likelier to open one, which would in time finish and
+/// lengthen the briefing again.
+///
 /// Issue #1682 added a third: the attachment markers
 /// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
 /// appends when a message carries files. The harness brain feeds the agent
@@ -3580,6 +3598,8 @@ pub(crate) fn operator_words(message: &str) -> &str {
     let cut = [
         message.find(OPEN_WORK_ANNOTATION),
         message.find(BUILDER_ANNOTATION),
+        message.find(SETTLED_WORK_ANNOTATION),
+        message.find(THREAD_INDEX_ANNOTATION),
         message.find(crate::brain::medulla::effects::ATTACHMENT_MARKER_PREFIX),
     ]
     .into_iter()
@@ -3679,6 +3699,37 @@ tokio::task_local! {
     /// scope: no tools to loop on, no pre-turn memory retrieval, and no prior
     /// task's thread goal re-injected (issue #1725). Absent = a normal turn.
     pub(crate) static CHAT_ONLY_TURN: bool;
+}
+
+tokio::task_local! {
+    /// The conversation the current turn is answering in (issue #1890 F).
+    ///
+    /// A task-local for the reason [`CHAT_ONLY_TURN`] is one: a tool's belt is
+    /// built once per agent and a turn's conversation changes every message, so
+    /// the tool cannot be handed it at construction. This is the ambient fact a
+    /// tool reads at call time.
+    ///
+    /// It carries the **channel**, which is what scopes `read_thread`: a tool
+    /// able to read any thread in any channel would reintroduce through the
+    /// back door the leak #1890 A closed at the seed.
+    static TURN_CONVERSATION: Option<String>;
+}
+
+/// Run `fut` with the current turn's channel set (issue #1890 F).
+pub(crate) async fn with_turn_conversation<F: std::future::Future>(
+    chat_id: Option<String>,
+    fut: F,
+) -> F::Output {
+    TURN_CONVERSATION.scope(chat_id, fut).await
+}
+
+/// The channel the current turn is answering in, or `None` outside one — a
+/// dispatched card, a workflow node, or any path that never set it.
+///
+/// `None` is a refusal for `read_thread` rather than a wildcard: a turn with no
+/// conversation has no threads it is entitled to read.
+pub(crate) fn turn_conversation() -> Option<String> {
+    TURN_CONVERSATION.try_with(Clone::clone).ok().flatten()
 }
 
 /// Run `fut` with the [`CHAT_ONLY_TURN`] hint set to `chat_only`.
@@ -4028,6 +4079,84 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         // …and in the other order, since nothing pins which is appended first.
         let reversed = format!("ship the audit{BUILDER_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]");
         assert_eq!(operator_words(&reversed), "ship the audit");
+    }
+
+    /// Issue #1890 C: nor is the settled-work briefing.
+    ///
+    /// The same trap a third time, with the nastiest loop of the three. #176's
+    /// briefing grew as cards were *opened*; this one grows as cards **finish**,
+    /// so an unstripped message would open a card on every "thanks!" in a
+    /// productive channel, and each of those cards would in time finish and
+    /// lengthen the briefing again. Built from the shared constant, so rewording
+    /// the briefing fails this test rather than silently restoring the bug.
+    #[test]
+    fn the_cycles_settled_work_briefing_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{SETTLED_WORK_ANNOTATION} has finished — this is where each card stands \
+now, which may differ from the marker in the transcript):\n- Read the pricing repository and \
+write a summary of its module layout — finished → In review\n- Draft the investor update for \
+the quarter — finished → To-do (the dispatch failed: provider timeout)\n]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped briefing really does read as work — which is why the \
+             strip has to happen, not merely why it is tidy"
+        );
+    }
+
+    /// All three briefings can land on one message — a desk-addressed
+    /// `workflow` request in a conversation that has raised work before gets
+    /// every one of them. The cut is a `min` over all four markers, so whichever
+    /// lands first ends the operator's words.
+    #[test]
+    fn operator_words_cuts_at_the_first_of_every_briefing() {
+        let all = format!(
+            "ship the audit{OPEN_WORK_ANNOTATION} …]{BUILDER_ANNOTATION} …]\
+{SETTLED_WORK_ANNOTATION} …]{THREAD_INDEX_ANNOTATION} …]"
+        );
+        assert_eq!(operator_words(&all), "ship the audit");
+        // …and in every other order, since nothing pins which is appended
+        // first and the cut is a `min` rather than a chain.
+        for reordered in [
+            format!("ship the audit{SETTLED_WORK_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]"),
+            format!("ship the audit{THREAD_INDEX_ANNOTATION} …]{BUILDER_ANNOTATION} …]"),
+            format!("ship the audit{BUILDER_ANNOTATION} …]{THREAD_INDEX_ANNOTATION} …]"),
+        ] {
+            assert_eq!(operator_words(&reordered), "ship the audit");
+        }
+    }
+
+    /// Issue #1890 E: nor is the thread index.
+    ///
+    /// The fourth appended block, and the trap a fourth time. This one is a
+    /// list of other people's questions — the most work-shaped prose any of
+    /// the four carries, since every line is literally something an operator
+    /// asked for. Unstripped, a channel with a few live threads would open a
+    /// card on every "thanks!", and each card would settle and add a
+    /// `finished → …` line to the index that opened the next one.
+    #[test]
+    fn the_cycles_thread_index_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{THREAD_INDEX_ANNOTATION}, for reference only — do NOT read or answer from \
+them unless this message explicitly refers to one, and if a reference could mean more than one, \
+ask which):\n- \"draft the launch email\" — 4 replies\n- \"build the migration plan\" — \
+finished → In review\n]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped index really does read as work — it is a list of \
+             requests — which is why the strip has to happen"
+        );
     }
 
     /// An attachment marker rides the same composed text the agent sees, and
@@ -4438,6 +4567,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             agent_id: &str,
             message: &str,
             control: &SteerControl,
+            _chat: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, Some(control)).await)
