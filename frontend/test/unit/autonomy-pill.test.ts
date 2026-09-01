@@ -247,7 +247,7 @@ describe("the pill", () => {
     expect(pill()!.className).not.toContain("py-0.5");
   });
 
-  it("drops the sentence below the lg breakpoint and keeps the tier's name", () => {
+  it("drops the sentence below the ladder's first step and keeps the tier's name", () => {
     // The degradation the 880px minimum window forces, made explicit: the
     // sentence is hidden, the tier is not. A pill that had silently dropped
     // the tier would look identical to a company with no policy at all.
@@ -256,7 +256,9 @@ describe("the pill", () => {
       "[data-testid=autonomy-consequence]",
     ) as HTMLElement;
     expect(sentence.className).toContain("hidden");
-    expect(sentence.className).toContain("lg:inline");
+    // The rung `TITLE_BAR_LADDER.autonomySentence` hands it: gone below 1280,
+    // which is the ladder's first step. Not chosen here — see that constant.
+    expect(sentence.className).toContain("xl:inline");
     // The label carries no responsive visibility class of its own.
     const label = Array.from(pill()!.children).find(
       (c) => c.textContent === "Auto",
