@@ -101,6 +101,7 @@ import {
   offersDeliverableChoice,
   operatorSection,
   resolveDmChannelId,
+  reviewCardIdForThread,
   toggleReaction,
   type DecidedApproval,
   type HistoryHydration,
@@ -465,6 +466,7 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  const [reviewingCardId, setReviewingCardId] = useState<string | null>(null);
   /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
    * so only that notice's button shows a busy state. */
   const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
@@ -1813,6 +1815,34 @@ export function ChatView({
   }
 
   /**
+   * Settle the in-review dispatch card a finished card's settle pill links to.
+   * Approve finishes it; Revise re-runs it with a note — though the console
+   * reaches Revise through a thread reply, not this button.
+   *
+   * The board move is left to the host's own `task_card_changed` over the SSE
+   * feed — the same path a drag settles through — so the Approve control drops
+   * off the pill the moment the card leaves `in_review`. This only carries the
+   * verdict and its busy state; `taskId` is the pill's card, used to gate that
+   * busy state, while the host resolves the card from the thread.
+   */
+  async function reviewCard(taskId: string, decision: "approve" | "revise") {
+    if (reviewingCardId || activeThreadId === undefined) return;
+    setReviewingCardId(taskId);
+    try {
+      await client.reviewCard(activeThreadId, decision, undefined, company);
+      toast.success(decision === "approve" ? "Card approved." : "Sent for another pass.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : "Couldn't record that review.",
+      );
+    } finally {
+      setReviewingCardId(null);
+    }
+  }
+
+  /**
    * The Add-Credits CTA (issue #1846): redeems the parked marker and
    * re-dispatches the original message. The redeemed turn's own reply arrives
    * over the SSE feed like any other, so there is nothing to inject here on
@@ -2027,6 +2057,12 @@ export function ChatView({
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
   const threadReplies = parent ? messages.filter((m) => m.parentId === parent.id) : [];
+  // Whether this thread hangs off a settled `in_review` card's review surface,
+  // so the composer frames a reply as another pass.
+  const threadReviewing =
+    parent !== undefined && taskStatusByTaskId !== undefined
+      ? reviewCardIdForThread(parent, messages, taskStatusByTaskId) !== undefined
+      : false;
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -2203,6 +2239,8 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+              reviewingCardId={reviewingCardId}
               resolveAttachmentUrl={resolveAttachmentUrl}
               taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
@@ -2314,6 +2352,7 @@ export function ChatView({
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
               readOnly={readOnly}
+              reviewing={threadReviewing}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) => {

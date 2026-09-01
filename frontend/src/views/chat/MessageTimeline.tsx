@@ -67,6 +67,13 @@ interface Props {
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
   /**
+   * Settles the in-review card a finished card's settle pill links to — the
+   * Approve control on that pill. Absent where review is not wired.
+   */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** The card whose review verdict is in flight, if any. */
+  reviewingCardId?: string | null;
+  /**
    * Resolves a stored attachment's bytes to an object URL for the transcript
    * (issue #1682). Threaded from the shell, which holds the authenticated
    * client the blob route needs. Absent where nothing renders attachments.
@@ -166,6 +173,8 @@ export function MessageTimeline({
   onReact,
   onDismissCard,
   dismissingCardId,
+  onReviewCard,
+  reviewingCardId,
   resolveAttachmentUrl,
   taskStatusByTaskId,
   onStartBrief,
@@ -380,6 +389,8 @@ export function MessageTimeline({
                 onReact={onReact}
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
+                onReviewCard={onReviewCard}
+                reviewingCardId={reviewingCardId}
                 resolveAttachmentUrl={resolveAttachmentUrl}
                 taskStatusByTaskId={taskStatusByTaskId}
                 now={now ?? Date.now()}

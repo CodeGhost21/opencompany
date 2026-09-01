@@ -17,6 +17,7 @@ import {
   type Desk,
 } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
+import type { TaskStatus } from "@/api/tasks";
 
 /**
  * A host desk (`GET .../desks`), shaped into the console's `Desk`. The host
@@ -30,6 +31,37 @@ import { initials as nameInitials, type TeamMember } from "@/lib/team";
  * company declared. Dropping them here is what made every channel show the
  * whole company (issue #369).
  */
+/**
+ * The in-review dispatch card a chat thread is reviewing, or `undefined` when
+ * `parent` is not a review surface.
+ *
+ * A parent is a review surface when it is the card's settle pill — a system
+ * marker carrying its `taskId` — or the relay bubble that followed it, a
+ * company line with no `taskId` anchored to the nearest settle pill before it
+ * in the same transcript. Either way the card must still be in `in_review`;
+ * one already approved or re-running is no longer open for review.
+ */
+export function reviewCardIdForThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): string | undefined {
+  const inReview = (taskId: string | undefined): taskId is string =>
+    taskId !== undefined && statusByTaskId[taskId]?.column === "in_review";
+  if (parent.from === "system") {
+    return inReview(parent.taskId) ? parent.taskId : undefined;
+  }
+  if (parent.from !== "company" || parent.taskId) return undefined;
+  const index = messages.findIndex((m) => m.id === parent.id);
+  if (index < 0) return undefined;
+  for (let i = index - 1; i >= 0; i--) {
+    const prior = messages[i];
+    if (prior.from !== "system" || !prior.taskId) continue;
+    return inReview(prior.taskId) ? prior.taskId : undefined;
+  }
+  return undefined;
+}
+
 export function deskFromDto(d: DeskDto): Desk {
   const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return {

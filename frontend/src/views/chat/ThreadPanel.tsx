@@ -50,6 +50,13 @@ interface Props {
    */
   readOnly?: boolean;
   /**
+   * Whether this thread hangs off a settled `in_review` dispatch card's review
+   * surface — its settle pill or the relay bubble that followed it. When set, a
+   * reply here is review feedback that re-runs the card, so the composer says
+   * so instead of reading like an ordinary reply.
+   */
+  reviewing?: boolean;
+  /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
    *
@@ -138,6 +145,7 @@ export function ThreadPanel({
   youAvatar,
   resolveAttachmentUrl,
   onSend,
+  reviewing,
   onClose,
   typingNames = [],
   onTyping,
@@ -193,9 +201,21 @@ export function ThreadPanel({
       </div>
 
       <TypingLine names={typingNames} />
+      {reviewing && !readOnly && (
+        <p className="border-t bg-muted/40 px-4 py-1.5 text-xs text-muted-foreground">
+          This card is ready for review. A reply sends it back for another pass
+          with your notes.
+        </p>
+      )}
       <MessageComposer
         compact
-        placeholder={readOnly ? "This channel is read-only" : "Reply…"}
+        placeholder={
+          readOnly
+            ? "This channel is read-only"
+            : reviewing
+              ? "Send for another pass…"
+              : "Reply…"
+        }
         disabled={sending || readOnly}
         mentionables={mentionables}
         channelMemberIds={channelMemberIds}
