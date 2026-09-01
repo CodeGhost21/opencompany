@@ -6412,104 +6412,6 @@ mod tests {
     /// `run_task`/`refuse_dispatch` return no relay for one at all, which is
     /// this exact "no `reply_to`" shape.
     #[cfg(feature = "openhuman")]
-    /// Issue #1890: a relayed card reports back into the conversation that
-    /// raised it, not beside it.
-    ///
-    /// Found by hand-testing, not by a suite. A delegated request produced the
-    /// orchestrator's answer inside its thread and then the delegate's reply
-    /// and the relay bubble loose in the channel — three bubbles for one ask,
-    /// two of them in the wrong place. Invisible while only hand-opened threads
-    /// existed; obvious the moment every exchange is one.
-    #[tokio::test]
-    async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
-        let (rt, _home_dir) = runtime_with_events().await;
-        let id = rt.id().clone();
-        let root = crate::ports::types::EventSeq::new(41);
-
-        let mut card = crate::ports::tasks::TaskRecord {
-            id: "t-relay".to_string(),
-            title: "Draft the launch email".to_string(),
-            note: None,
-            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
-            priority: "medium".to_string(),
-            assignee: "writer".to_string(),
-            updated_at_millis: 0,
-            origin_chat_id: Some("general".to_string()),
-            origin_parent: Some(root),
-            parent_task_id: None,
-            output: None,
-            plan: None,
-            planning_attempts: Vec::new(),
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
-            workflow_proposal: None,
-            origin_run_id: None,
-            origin_workflow_id: None,
-            bounced: None,
-        };
-        rt.tasks().upsert(&id, &card).await.unwrap();
-
-        let relay = |task: Option<&str>| crate::ports::types::OutboundMessage {
-            message_id: None,
-            task_id: task.map(str::to_string),
-            channel: "ceo".to_string(),
-            agent: None,
-            text: "the delegate finished it".to_string(),
-            mentions: Vec::new(),
-            reply_to: Some(crate::ports::types::ReplyTo {
-                chat_id: "general".to_string(),
-            }),
-            steps: Vec::new(),
-        };
-
-        let report = crate::runtime::types::CycleReport {
-            responses: vec![relay(Some("t-relay"))],
-            ..Default::default()
-        };
-        rt.journal_dispatch_replies(&report).await;
-
-        let logged = rt
-            .events()
-            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
-            .await
-            .unwrap();
-        let threaded = logged.iter().rev().find_map(|e| match &e.event {
-            CompanyEvent::AgentReply { parent, .. } => Some(*parent),
-            _ => None,
-        });
-        assert_eq!(
-            threaded,
-            Some(Some(root)),
-            "the relay joins the thread the card recorded at raise time"
-        );
-
-        // And a card raised at channel level still relays flat — `None` is the
-        // channel-level conversation, not a gap.
-        card.id = "t-flat".to_string();
-        card.origin_parent = None;
-        rt.tasks().upsert(&id, &card).await.unwrap();
-        let report = crate::runtime::types::CycleReport {
-            responses: vec![relay(Some("t-flat"))],
-            ..Default::default()
-        };
-        rt.journal_dispatch_replies(&report).await;
-
-        let logged = rt
-            .events()
-            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
-            .await
-            .unwrap();
-        let last = logged.iter().rev().find_map(|e| match &e.event {
-            CompanyEvent::AgentReply { parent, .. } => Some(*parent),
-            _ => None,
-        });
-        assert_eq!(
-            last,
-            Some(None),
-            "a channel-level card relays into the channel"
-        );
-    }
-
-    #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
         use crate::CycleReport;
@@ -6611,6 +6513,104 @@ mod tests {
         assert_eq!(
             chat_id, "",
             "General's own empty chat_id must be preserved verbatim"
+        );
+    }
+
+    /// Issue #1890: a relayed card reports back into the conversation that
+    /// raised it, not beside it.
+    ///
+    /// Found by hand-testing, not by a suite. A delegated request produced the
+    /// orchestrator's answer inside its thread and then the delegate's reply
+    /// and the relay bubble loose in the channel — three bubbles for one ask,
+    /// two of them in the wrong place. Invisible while only hand-opened threads
+    /// existed; obvious the moment every exchange is one.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
+        let (rt, _home_dir) = runtime_with_events().await;
+        let id = rt.id().clone();
+        let root = crate::ports::types::EventSeq::new(41);
+
+        let mut card = crate::ports::tasks::TaskRecord {
+            id: "t-relay".to_string(),
+            title: "Draft the launch email".to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: "writer".to_string(),
+            updated_at_millis: 0,
+            origin_chat_id: Some("general".to_string()),
+            origin_parent: Some(root),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let relay = |task: Option<&str>| crate::ports::types::OutboundMessage {
+            message_id: None,
+            task_id: task.map(str::to_string),
+            channel: "ceo".to_string(),
+            agent: None,
+            text: "the delegate finished it".to_string(),
+            mentions: Vec::new(),
+            reply_to: Some(crate::ports::types::ReplyTo {
+                chat_id: "general".to_string(),
+            }),
+            steps: Vec::new(),
+        };
+
+        let report = crate::runtime::types::CycleReport {
+            responses: vec![relay(Some("t-relay"))],
+            ..Default::default()
+        };
+        rt.journal_dispatch_replies(&report).await;
+
+        let logged = rt
+            .events()
+            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let threaded = logged.iter().rev().find_map(|e| match &e.event {
+            CompanyEvent::AgentReply { parent, .. } => Some(*parent),
+            _ => None,
+        });
+        assert_eq!(
+            threaded,
+            Some(Some(root)),
+            "the relay joins the thread the card recorded at raise time"
+        );
+
+        // And a card raised at channel level still relays flat — `None` is the
+        // channel-level conversation, not a gap.
+        card.id = "t-flat".to_string();
+        card.origin_parent = None;
+        rt.tasks().upsert(&id, &card).await.unwrap();
+        let report = crate::runtime::types::CycleReport {
+            responses: vec![relay(Some("t-flat"))],
+            ..Default::default()
+        };
+        rt.journal_dispatch_replies(&report).await;
+
+        let logged = rt
+            .events()
+            .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let last = logged.iter().rev().find_map(|e| match &e.event {
+            CompanyEvent::AgentReply { parent, .. } => Some(*parent),
+            _ => None,
+        });
+        assert_eq!(
+            last,
+            Some(None),
+            "a channel-level card relays into the channel"
         );
     }
 

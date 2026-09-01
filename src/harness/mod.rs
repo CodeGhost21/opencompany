@@ -44,6 +44,11 @@ mod cap_publish_test;
 /// bubble saying so, and the notice never reaches memory. Test-only.
 #[cfg(test)]
 mod cap_turn_test;
+/// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
+/// `pages_write` / `pages_delete` over `pages/<slug>/` in the same
+/// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
+/// `page.tsx` to `page.compiled.mjs` via `swc_core`. See
+/// `docs/spec/runtime/pages.md`.
 pub mod pages_tools;
 /// Issue #1776: the pass that drafts ONE teammate's mandate or persona for an
 /// operator who then keeps it or throws it away. One tool-less model call that
@@ -63,11 +68,10 @@ pub mod spend;
 /// its step cap. Test-only.
 #[cfg(test)]
 mod spend_halt_turn_test;
-/// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
-/// `pages_write` / `pages_delete` over `pages/<slug>/` in the same
-/// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
-/// `page.tsx` to `page.compiled.mjs` via `swc_core`. See
-/// `docs/spec/runtime/pages.md`.
+/// Issue #1890 F: `read_thread`, which follows a reference the operator makes
+/// to another conversation in the channel a turn is answering in. Scoped
+/// through the same `owns` predicate the chat seed uses, so it cannot reach a
+/// thread the isolation was built to keep out. See [`thread_tools`].
 pub mod thread_tools;
 
 /// The ACP `RunTurn`, under the path it had before the split.

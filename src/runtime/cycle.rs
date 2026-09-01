@@ -1410,12 +1410,21 @@ stands now, which may differ from the marker in the transcript):\n{}{tail}\n]",
                 continue;
             };
             let current = *parent;
-            // Both terms are the chat id the operator addressed, which is what
-            // every message in this channel was journaled under — `owns` folds
-            // General's spellings through `same_conversation` either way. The
-            // desk *name* term exists for histories journaled under a name, and
-            // an index drawn from one addressed page does not need it.
-            let (desk_id, desk_name) = (target.as_str(), target.as_str());
+            // Both spellings, resolved the way the seed resolves them.
+            //
+            // Passing the addressed id as both terms looked harmless and was
+            // not: a named desk's id and its display name are different
+            // strings, messages are journaled under either, and `owns` takes
+            // two terms precisely so neither is orphaned. With one, every
+            // thread stored under the other alias vanished from the index — so
+            // a desk whose name differs from its id got a short index or none
+            // at all (codex + coderabbit on #1972).
+            let (desk_id, desk_name) = crate::server::chat_history::resolve_seed_desk(
+                &self.rt.store,
+                &self.rt.id,
+                Some(target.as_str()),
+            )
+            .await;
             let page = match log.read_before(&self.rt.id, None, THREAD_INDEX_PAGE).await {
                 Ok(page) => page,
                 // A read failure costs the turn its orientation and nothing
@@ -1431,7 +1440,8 @@ stands now, which may differ from the marker in the transcript):\n{}{tail}\n]",
                     return;
                 }
             };
-            let (lines, omitted) = thread_index(&page, desk_id, desk_name, current, text, &settled);
+            let (lines, omitted) =
+                thread_index(&page, &desk_id, &desk_name, current, text, &settled);
             if lines.is_empty() {
                 continue;
             }
@@ -3657,6 +3667,14 @@ fn thread_index(
 
     let mut roots: HashMap<EventSeq, ThreadLine> = HashMap::new();
     let mut replies: HashMap<EventSeq, usize> = HashMap::new();
+    // The newest sequence seen in each thread, tracked **independently of the
+    // roots map** because the page arrives newest-first: a reply is met before
+    // the root it hangs off is inserted, so updating the line in place found
+    // nothing and every thread kept its root's own sequence as its recency.
+    // A channel with more than `THREAD_INDEX_MAX` roots then cut the live old
+    // thread in favour of quiet newer ones — the exact inversion the ordering
+    // exists to prevent (codex + coderabbit on #1972).
+    let mut latest: HashMap<EventSeq, EventSeq> = HashMap::new();
 
     for stored in page {
         if !crate::server::chat_history::owns(desk_id, desk_name, &stored.event) {
@@ -3691,9 +3709,8 @@ fn thread_index(
                 parent: Some(root), ..
             } => {
                 *replies.entry(*root).or_default() += 1;
-                if let Some(line) = roots.get_mut(root) {
-                    line.latest = line.latest.max(stored.seq);
-                }
+                let seen = latest.entry(*root).or_insert(stored.seq);
+                *seen = (*seen).max(stored.seq);
             }
             _ => {}
         }
@@ -3708,6 +3725,9 @@ fn thread_index(
         })
         .map(|(seq, mut line)| {
             line.replies = replies.get(&seq).copied().unwrap_or(0);
+            // A thread with no activity keeps its root's own sequence, which is
+            // when it was opened — the only recency it has.
+            line.latest = latest.get(&seq).copied().unwrap_or(seq).max(seq);
             // Where the work raised in this thread landed, if any did. The
             // question "did that ship?" for a thread the turn is not in.
             line.landed = settled
@@ -10938,14 +10958,22 @@ timeout)",
     /// Newest first, so "the other one" resolves to the thread most likely
     /// meant — and so the cap below cuts the stale tail rather than the live
     /// head.
+    /// **Fed newest-first, the way `read_before` delivers it.**
+    ///
+    /// The original version of this test built the page in ascending order,
+    /// which production never produces — and that hid the bug it was meant to
+    /// pin: a reply is met *before* its root, so updating the root's line in
+    /// place found nothing and every thread kept its opening sequence as its
+    /// recency (codex + coderabbit on #1972).
     #[test]
     fn the_index_is_ordered_by_recency() {
-        let page = vec![
+        let mut page = vec![
             op(10, "growth", None, "the old one"),
             op(11, "growth", None, "the middle one"),
             agent_reply(30, "growth", 10), // revives the oldest root
             op(12, "growth", None, "the newest root"),
         ];
+        page.sort_by_key(|e| std::cmp::Reverse(e.seq));
         let (lines, _) = thread_index(&page, "growth", "growth", None, "", &[]);
         assert_eq!(
             lines.iter().map(|l| l.opening.clone()).collect::<Vec<_>>(),

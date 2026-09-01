@@ -342,6 +342,7 @@ pub fn build_agent(
         tools.push(Box::new(crate::harness::thread_tools::ReadThreadTool::new(
             company.clone(),
             events,
+            deps.store.clone(),
         )));
     }
     #[cfg(feature = "mcp")]

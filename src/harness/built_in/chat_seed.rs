@@ -42,7 +42,6 @@ use std::sync::Arc;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, StoredEvent};
 use crate::ports::{CompanyStore, EventLog};
 use crate::server::chat_history;
-use crate::server::ops::language::DEFAULT_DESK;
 
 /// What a chat turn needs to build its recent-history seed, carried into
 /// [`super::CompanyAgent::run_with_steer`] rather than an already-projected
@@ -72,7 +71,7 @@ pub struct ChatSeedRequest {
     /// The company journal [`build_chat_seed`] projects the seed from.
     pub events: Arc<dyn EventLog>,
     /// Resolves the incoming chat id to its desk id/name pair (see
-    /// [`resolve_seed_desk`]).
+    /// [`chat_history::resolve_seed_desk`]).
     pub store: Arc<dyn CompanyStore>,
     /// The thread this turn belongs to, as its root message's sequence
     /// position — `None` for a turn posted straight into the channel.
@@ -94,7 +93,8 @@ impl ChatSeedRequest {
     /// duplicate, in one call: the two steps
     /// [`super::CompanyAgent::run_with_steer`]'s switch branch needs, together.
     pub async fn build(&self, company: &CompanyId, chat_id: &str) -> Vec<(String, String)> {
-        let (desk_id, desk_name) = resolve_seed_desk(&self.store, company, Some(chat_id)).await;
+        let (desk_id, desk_name) =
+            chat_history::resolve_seed_desk(&self.store, company, Some(chat_id)).await;
         let mut seed = build_chat_seed(
             &self.events,
             company,
@@ -125,51 +125,6 @@ pub const CHAT_SEED_WINDOW: usize = 30;
 /// turns, so the event page is larger than the message window — mirrors
 /// [`chat_history::history_for_desk`]'s `EVENT_PAGE`.
 const EVENT_PAGE: usize = 512;
-
-/// Resolves an incoming `chat_id` to the `(desk_id, desk_name)` pair
-/// [`chat_history::owns`] filters on, exactly as the REST history route's
-/// `resolve_desk` does (issue #65).
-///
-/// `owns` matches a stored event's chat id against *both* the desk id and the
-/// desk name, because a named desk's messages can be journaled under either
-/// spelling. Passing `(chat_id, chat_id)` for a desk the operator addressed by
-/// id would therefore silently miss any line stored under its name — a seed that
-/// "looks fixed" but is empty. So a non-General selector is resolved against the
-/// manifest's group chats the same way the console resolves it.
-///
-/// * `None` → the synthetic General/operator desk.
-/// * A General spelling (`"main"` / `"general"` / `""`) short-circuits: every
-///   spelling folds together in [`chat_history::same_conversation`], so no
-///   manifest read is needed and `(chat, chat)` already owns all of them.
-/// * Anything else is matched (case-insensitive, by id or name) against the
-///   manifest's group chats; an unmatched selector passes through as `(id, name)
-///   = (chat, chat)`, so an ad-hoc thread id still finds what was journaled under
-///   that exact string.
-pub async fn resolve_seed_desk(
-    store: &Arc<dyn CompanyStore>,
-    company: &CompanyId,
-    chat_id: Option<&str>,
-) -> (String, String) {
-    let Some(desk) = chat_id else {
-        return (DEFAULT_DESK.to_string(), DEFAULT_DESK.to_string());
-    };
-    if chat_history::is_general_chat(Some(desk)) {
-        return (desk.to_string(), desk.to_string());
-    }
-    match store.load(company).await {
-        Ok(Some(record)) => record
-            .manifest
-            .group_chats
-            .iter()
-            .find(|chat| chat.id.eq_ignore_ascii_case(desk) || chat.name.eq_ignore_ascii_case(desk))
-            .map(|chat| (chat.id.clone(), chat.name.clone()))
-            .unwrap_or_else(|| (desk.to_string(), desk.to_string())),
-        // A store miss or read error must not fail the turn — fall back to the
-        // verbatim selector, which still owns everything journaled under that
-        // exact string (the common case, where the console addresses id == name).
-        Ok(None) | Err(_) => (desk.to_string(), desk.to_string()),
-    }
-}
 
 /// Does this owned event belong to `thread_root`'s conversation?
 ///
@@ -281,15 +236,28 @@ struct SeedEntry {
 /// above already accepts and for the same reason: a shorter recent window is a
 /// degradation, and re-walking the journal to top it back up is a defect.
 fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
-    let mut seen: std::collections::HashSet<EventSeq> = std::collections::HashSet::new();
+    let mut answered: std::collections::HashSet<EventSeq> = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
-        if let Some(root) = entry.parent
-            && !seen.insert(root)
-        {
-            continue;
+        match entry.parent {
+            // A root: always the channel's own line.
+            None => out.push((entry.role.to_string(), entry.text)),
+            Some(root) => {
+                // **The reply, and only an agent's.** Deduping on the parent
+                // alone kept whichever parented line came first — and inside a
+                // thread that is often the operator's own follow-up, so the
+                // channel seeded a question, the operator asking again, and no
+                // answer at all, while the agent's reply was dropped as a
+                // duplicate (coderabbit on #1972).
+                //
+                // An operator's follow-up is thread body: it belongs to the
+                // thread's own seed, never to the channel's, which is why it is
+                // dropped here rather than counted.
+                if entry.role == "agent" && answered.insert(root) {
+                    out.push((entry.role.to_string(), entry.text));
+                }
+            }
         }
-        out.push((entry.role.to_string(), entry.text));
     }
     out
 }
@@ -1107,6 +1075,32 @@ mod tests {
         );
     }
 
+    /// The channel keeps the **agent's** reply, not whichever parented line
+    /// came first.
+    ///
+    /// Deduping on the parent alone kept the operator's own follow-up when one
+    /// preceded the answer, so the channel seeded a question, the operator
+    /// asking again, and no reply at all — while the agent's actual answer was
+    /// dropped as a duplicate (coderabbit on #1972). A follow-up is thread
+    /// body; it belongs to the thread's seed, never to the channel's.
+    #[tokio::test]
+    async fn the_channel_keeps_the_agents_reply_not_a_follow_up() {
+        let log = FixedLog(vec![
+            operator(41, Some("growth"), "draft the launch email"),
+            operator_in(42, Some("growth"), "THREAD-FOLLOWUP", 41),
+            reply_in(43, "growth", "here is a draft", 41),
+        ]);
+        let seed = seed_of_thread(log, "growth", None, "").await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "draft the launch email".to_string()),
+                ("agent".to_string(), "here is a draft".to_string()),
+            ],
+            "the answer, not the operator asking twice: {seed:?}"
+        );
+    }
+
     /// The narrowing is the channel's rule alone. A turn answering inside a
     /// thread needs that thread's whole exchange; handing it the question and
     /// one reply out of several would be a worse seed than the leak #1890 A
@@ -1351,121 +1345,6 @@ mod tests {
             vec![("user".to_string(), "prior turn".to_string())],
             "the raw journaled text is a prefix of the attachment-augmented \
              message, so the trailing duplicate must still be dropped"
-        );
-    }
-
-    // ---- resolve_seed_desk ------------------------------------------------
-
-    struct RecordStore(Option<CompanyRecord>);
-
-    #[async_trait]
-    impl CompanyStore for RecordStore {
-        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
-            Ok(self.0.clone())
-        }
-        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
-            unreachable!("resolve only reads")
-        }
-        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
-            unreachable!("resolve only reads")
-        }
-        async fn append_ledger(
-            &self,
-            _id: &CompanyId,
-            _entry: crate::ports::types::LedgerEntry,
-        ) -> crate::Result<()> {
-            unreachable!("resolve only reads")
-        }
-    }
-
-    use crate::ports::types::{CompanyRecord, CompanySummary};
-
-    fn record_with_group_chat(id: &str, name: &str) -> CompanyRecord {
-        let manifest = toml::from_str(&format!(
-            r#"
-[company]
-name = "Acme"
-
-[policy]
-mode = "full"
-
-[[agent]]
-id = "ceo"
-role = "Chief Executive"
-description = "Sets direction."
-
-[[group_chat]]
-id = "{id}"
-name = "{name}"
-"#,
-        ))
-        .expect("valid manifest");
-        CompanyRecord {
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            overlay_tool_grants: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-            id: CompanyId::new("acme"),
-            manifest,
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            setup: None,
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-        }
-    }
-
-    async fn resolve(store: RecordStore, chat_id: Option<&str>) -> (String, String) {
-        let store: Arc<dyn CompanyStore> = Arc::new(store);
-        resolve_seed_desk(&store, &CompanyId::new("acme"), chat_id).await
-    }
-
-    #[tokio::test]
-    async fn resolve_none_is_the_general_desk() {
-        assert_eq!(
-            resolve(RecordStore(None), None).await,
-            (DEFAULT_DESK.to_string(), DEFAULT_DESK.to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_general_spelling_short_circuits_without_a_store_read() {
-        // The store would panic on `save`/`list`, but a General spelling must not
-        // even reach `load` — it returns `(chat, chat)`, which owns folds.
-        assert_eq!(
-            resolve(RecordStore(None), Some("main")).await,
-            ("main".to_string(), "main".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_named_desk_by_id_returns_the_manifest_name() {
-        // Addressed by id; the seed must carry the name too, or a line journaled
-        // under the name would be missed. This is the exact "looks fixed but seeds
-        // nothing" trap the resolution guards against.
-        let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
-        assert_eq!(
-            resolve(store, Some("eng-123")).await,
-            ("eng-123".to_string(), "Engineering".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_unmatched_selector_passes_through_verbatim() {
-        let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
-        assert_eq!(
-            resolve(store, Some("ad-hoc-thread")).await,
-            ("ad-hoc-thread".to_string(), "ad-hoc-thread".to_string())
         );
     }
 

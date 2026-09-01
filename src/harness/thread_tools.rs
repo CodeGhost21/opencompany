@@ -66,11 +66,28 @@ const THREAD_SEARCH_PAGE: usize = 1024;
 pub struct ReadThreadTool {
     company: CompanyId,
     events: Arc<dyn EventLog>,
+    /// Resolves the addressed chat id to the desk's `(id, name)` pair.
+    ///
+    /// Both are needed: a named desk's id and its display name are different
+    /// strings and a message is journaled under whichever the caller used, so
+    /// `owns` takes two terms. With one, a root stored under the other alias
+    /// reads as belonging to a different channel and is refused — a same-desk
+    /// thread the operator can see, that the tool insists is not theirs
+    /// (codex + coderabbit on #1972).
+    store: Arc<dyn crate::ports::store::CompanyStore>,
 }
 
 impl ReadThreadTool {
-    pub fn new(company: CompanyId, events: Arc<dyn EventLog>) -> Self {
-        Self { company, events }
+    pub fn new(
+        company: CompanyId,
+        events: Arc<dyn EventLog>,
+        store: Arc<dyn crate::ports::store::CompanyStore>,
+    ) -> Self {
+        Self {
+            company,
+            events,
+            store,
+        }
     }
 }
 
@@ -126,6 +143,14 @@ impl Tool for ReadThreadTool {
             ));
         };
 
+        // The desk's own id and name, resolved the way the seed resolves them.
+        let (desk_id, desk_name) = crate::server::chat_history::resolve_seed_desk(
+            &self.store,
+            &self.company,
+            Some(channel.as_str()),
+        )
+        .await;
+
         let page = match self
             .events
             .read_before(&self.company, None, THREAD_SEARCH_PAGE)
@@ -144,7 +169,7 @@ impl Tool for ReadThreadTool {
         let mut found_root = false;
         let mut owned_elsewhere = false;
         for stored in page.iter().rev() {
-            let in_channel = crate::server::chat_history::owns(&channel, &channel, &stored.event);
+            let in_channel = crate::server::chat_history::owns(&desk_id, &desk_name, &stored.event);
             let (parent, line) = match &stored.event {
                 CompanyEvent::OperatorMessage { parent, text, .. } => {
                     (*parent, format!("operator: {text}"))
@@ -188,8 +213,15 @@ impl Tool for ReadThreadTool {
             )));
         }
 
+        // Keep the NEWEST turns, not the oldest. `turns` is oldest-first, so a
+        // plain `truncate` kept the opening of the thread and dropped its
+        // conclusion — while the notice below said the opposite, so a request
+        // about what was decided would be answered from the part before anyone
+        // decided anything (codex + coderabbit on #1972).
         let omitted = turns.len().saturating_sub(THREAD_TURN_LIMIT);
-        turns.truncate(THREAD_TURN_LIMIT);
+        if omitted > 0 {
+            turns.drain(..omitted);
+        }
         let mut body = turns.join("\n");
         if omitted > 0 {
             // Declared, never silent — `query_company`'s lesson.
@@ -272,8 +304,21 @@ mod test {
         }
     }
 
-    fn tool(events: Vec<StoredEvent>) -> ReadThreadTool {
-        ReadThreadTool::new(CompanyId::new("acme"), Arc::new(FixedLog(events)))
+    fn tool(events: Vec<StoredEvent>) -> (ReadThreadTool, tempfile::TempDir) {
+        // A real store, so desk resolution runs the way it does in production
+        // rather than being stubbed past. With no company record on disk,
+        // `resolve_seed_desk` passes the addressed id through verbatim as both
+        // terms — which is the shape these fixtures journal under.
+        let dir = tempfile::Builder::new()
+            .prefix("read-thread-")
+            .tempdir()
+            .expect("tempdir");
+        let store: Arc<dyn crate::ports::store::CompanyStore> =
+            Arc::new(crate::store::FsCompanyStore::new(dir.path()));
+        (
+            ReadThreadTool::new(CompanyId::new("acme"), Arc::new(FixedLog(events)), store),
+            dir,
+        )
     }
 
     /// Run `fut` as a turn answering in `channel`.
@@ -283,7 +328,7 @@ mod test {
 
     #[tokio::test]
     async fn it_reads_a_thread_oldest_first() {
-        let tool = tool(vec![
+        let (tool, _dir) = tool(vec![
             op(41, "growth", None, "draft the launch email"),
             reply(42, "growth", 41, "here is a draft"),
             op(43, "growth", Some(41), "make it shorter"),
@@ -303,7 +348,7 @@ mod test {
     /// the leak #1890 A closed, arriving through the tool.
     #[tokio::test]
     async fn it_returns_only_the_requested_thread() {
-        let tool = tool(vec![
+        let (tool, _dir) = tool(vec![
             op(41, "growth", None, "draft the launch email"),
             reply(42, "growth", 41, "here is a draft"),
             op(43, "growth", None, "what's our Q3 CAC?"),
@@ -322,7 +367,7 @@ mod test {
     /// a retry that will also fail.
     #[tokio::test]
     async fn a_thread_in_another_channel_is_refused_and_says_so() {
-        let tool = tool(vec![
+        let (tool, _dir) = tool(vec![
             op(41, "engineering", None, "the migration plan"),
             reply(42, "engineering", 41, "here it is"),
         ]);
@@ -341,7 +386,7 @@ mod test {
     /// no threads it is entitled to read. `None` is a refusal, not a wildcard.
     #[tokio::test]
     async fn a_turn_with_no_conversation_may_read_nothing() {
-        let tool = tool(vec![op(41, "growth", None, "draft the launch email")]);
+        let (tool, _dir) = tool(vec![op(41, "growth", None, "draft the launch email")]);
         let out = in_channel(None, tool.execute(json!({ "root": 41 })))
             .await
             .unwrap();
@@ -351,7 +396,7 @@ mod test {
 
     #[tokio::test]
     async fn an_unknown_root_says_it_may_be_out_of_the_window() {
-        let tool = tool(vec![op(41, "growth", None, "draft the launch email")]);
+        let (tool, _dir) = tool(vec![op(41, "growth", None, "draft the launch email")]);
         let out = in_channel(Some("growth"), tool.execute(json!({ "root": 999 })))
             .await
             .unwrap();
@@ -362,13 +407,40 @@ mod test {
     /// Truncation is DECLARED — `query_company`'s lesson, where a partial list
     /// read as complete and "we have no record of that" became a conclusion the
     /// orchestrator could reach from it.
+    /// The cut keeps the **newest** turns.
+    ///
+    /// `turns` is oldest-first, so a plain `truncate` kept the opening of the
+    /// thread and dropped its conclusion — while the notice said the opposite,
+    /// so a question about what was decided would be answered from the part
+    /// before anything was (codex + coderabbit on #1972).
+    #[tokio::test]
+    async fn a_long_thread_keeps_the_newest_turns() {
+        let mut events = vec![op(1, "growth", None, "the root")];
+        for n in 0..THREAD_TURN_LIMIT + 5 {
+            events.push(reply(10 + n as u64, "growth", 1, &format!("turn {n}")));
+        }
+        let (tool, _dir) = tool(events);
+        let out = in_channel(Some("growth"), tool.execute(json!({ "root": 1 })))
+            .await
+            .unwrap();
+        let last = THREAD_TURN_LIMIT + 4;
+        assert!(
+            out.output().contains(&format!("turn {last}")),
+            "the thread's conclusion must survive the cut: {out:?}"
+        );
+        assert!(
+            !out.output().contains("turn 0\n") && !out.output().ends_with("turn 0"),
+            "and its opening is what gets dropped: {out:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_long_thread_declares_what_it_left_out() {
         let mut events = vec![op(1, "growth", None, "the root")];
         for n in 0..THREAD_TURN_LIMIT + 5 {
             events.push(reply(10 + n as u64, "growth", 1, &format!("turn {n}")));
         }
-        let tool = tool(events);
+        let (tool, _dir) = tool(events);
         let out = in_channel(Some("growth"), tool.execute(json!({ "root": 1 })))
             .await
             .unwrap();
@@ -382,7 +454,7 @@ mod test {
 
     #[tokio::test]
     async fn a_missing_root_argument_is_a_refusal_not_a_panic() {
-        let tool = tool(vec![]);
+        let (tool, _dir) = tool(vec![]);
         let out = in_channel(Some("growth"), tool.execute(json!({})))
             .await
             .unwrap();
@@ -394,7 +466,7 @@ mod test {
     /// grant path a write would have to pass.
     #[test]
     fn the_tool_is_read_only() {
-        let tool = tool(vec![]);
+        let (tool, _dir) = tool(vec![]);
         assert!(matches!(tool.permission_level(), PermissionLevel::ReadOnly));
         assert_eq!(tool.name(), READ_THREAD_TOOL);
     }

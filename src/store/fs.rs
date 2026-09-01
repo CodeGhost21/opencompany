@@ -237,14 +237,23 @@ where
             segments.remove(0).to_vec()
         };
         for segment in segments.iter().rev() {
-            let line = match std::str::from_utf8(segment) {
-                Ok(line) => line.trim(),
-                // A line this build cannot decode is skipped rather than
-                // failing the page, matching the lenient posture the readers
-                // around it take: a transcript that renders all but one line
-                // beats one that renders none.
-                Err(_) => continue,
-            };
+            // **Strict, like the walk this replaced.** `BufReader::lines`
+            // failed the request on invalid UTF-8, and that is the posture a
+            // request-time reader has to keep: silently omitting a corrupted
+            // reply or approval makes it indistinguishable from an event that
+            // never happened, and a history page that is quietly short is worse
+            // than one that says it could not be read (codex on #1972).
+            let line = std::str::from_utf8(segment)
+                .map_err(|error| {
+                    io_err(
+                        path,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("an event-log line is not valid UTF-8: {error}"),
+                        ),
+                    )
+                })?
+                .trim();
             if line.is_empty() {
                 continue;
             }

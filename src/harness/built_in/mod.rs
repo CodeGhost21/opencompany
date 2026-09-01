@@ -3962,7 +3962,19 @@ impl HarnessPool {
         // rides on the stream, so an approval's re-issued call — unstreamed,
         // but raised in a conversation — can read that conversation's threads
         // like any other turn.
-        let turn_chat = chat.chat_id.map(str::to_string);
+        // Route first, caller second — the same order `turn_chat_id` resolves
+        // in one frame down, and for the same reason: the live route has
+        // already folded an unaddressed message onto `DEFAULT_DESK`, so reading
+        // `chat.chat_id` alone yields `None` there, which `read_thread` treats
+        // as a refusal. A turn on the General desk could then not read its own
+        // channel's threads (coderabbit on #1972).
+        let turn_chat = stream_ctx
+            .as_ref()
+            .and_then(|ctx| match &ctx.route {
+                crate::turn_stream::LiveRoute::Chat { chat_id } => Some(chat_id.clone()),
+                crate::turn_stream::LiveRoute::Workflow { .. } => None,
+            })
+            .or_else(|| chat.chat_id.map(str::to_string));
         let (outcome, turn_costs) = crate::runtime::delegation::with_turn_conversation(
             turn_chat,
             deps.approval_requests.turn_scoped(agent.run_with_steer(
