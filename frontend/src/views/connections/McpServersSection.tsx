@@ -689,13 +689,13 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   return (
     <section className="space-y-3">
       {/* `h2` in both chromes, and it lands one level under the page's `h1`
-          either way (issue #1392). Inline on Connections it is a peer of
+          either way (issue #1392). Inline on Apps it is a peer of
           the company key, Composio and providers, which all head their
           sections at the same level —
           `test/unit/connections-section-heading-level.test.ts` holds them
           together, because promoting this one alone would read to a screen
           reader as though every section after it were a subsection of MCP
-          Servers. Standalone on `#/settings/mcp` the page's own `h1` is "MCP
+          Servers. Standalone on `#/connections/mcp` the page's own `h1` is "MCP
           Servers", so this names what it actually heads there instead of
           repeating it. */}
       <div className="flex items-center gap-2">

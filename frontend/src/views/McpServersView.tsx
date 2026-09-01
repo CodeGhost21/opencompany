@@ -15,7 +15,7 @@ interface Props {
 }
 
 /**
- * Settings, MCP Servers: the company's tool servers, said two ways.
+ * Connections, MCP Servers: the company's tool servers, said two ways.
  *
  * **Connections** is the list — a row per server with its status and its
  * controls as icons. **mcp.json** is the same configuration as one document, in
@@ -31,8 +31,8 @@ interface Props {
  * one source of truth per question, and a tab does not break it.
  *
  * The rows live in [`McpServersSection`](./connections/McpServersSection.tsx),
- * which the Connections page also renders inline — that is the same surface, not
- * a copy.
+ * which the Apps page also renders inline — that is the same surface, not a
+ * copy.
  */
 export function McpServersView({ client, company }: Props) {
   // Adding or removing a server changes what tools the company's agents can
