@@ -29,6 +29,28 @@ interface Reader {
 }
 
 /**
+ * A policy **and the scope it describes**, held together.
+ *
+ * The scope travels with the value because a company switch is a render, not
+ * an effect. `useState` survives the change of `company` — nothing about a new
+ * dependency array empties it — and the clear below runs in a *passive* effect,
+ * which React schedules AFTER paint. So the first frame of the new company was
+ * drawn with the previous company's tier still in state, and the title row
+ * names the company an inch to the left of the pill: a confident, attributed,
+ * wrong answer about what a different company's agents may do.
+ *
+ * Pairing the two makes that unrepresentable rather than merely unlikely. The
+ * hook returns the policy only while the snapshot's scope is still the scope
+ * being asked about, so the switch frame answers `null` — which this hook
+ * documents as a real answer, and which the pill renders as nothing at all.
+ */
+interface Snapshot {
+  client: OpenCompanyClient;
+  company: string | null;
+  policy: PolicyStatus;
+}
+
+/**
  * Every mounted reader. In practice there is exactly one — the shell's — but
  * the scope is compared anyway (see {@link applyAutonomy}) so that a second
  * console mounted beside it could never be handed another company's tier.
@@ -87,7 +109,7 @@ export function useAutonomy(
   client: OpenCompanyClient,
   company: string | null,
 ): PolicyStatus | null {
-  const [policy, setPolicy] = useState<PolicyStatus | null>(null);
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   useEffect(() => {
     let live = true;
     // Serialize refreshes, exactly as `useApprovalDeadline` does: a slow
@@ -104,7 +126,16 @@ export function useAutonomy(
     // Clear on a company switch. Carrying the previous company's tier into the
     // new one's title bar would be a wrong answer rather than a stale one —
     // the row names the company beside it.
-    setPolicy(null);
+    //
+    // This is the second of two clears, not the only one, and it is the weaker
+    // of the two: a passive effect runs after paint, so on its own it lets one
+    // frame of the new company render under the old company's tier. The scope
+    // check on the returned value is what actually fences that frame. This call
+    // still earns its place — it drops the reference rather than leaving a
+    // previous company's policy alive in state, so switching A → B → A does not
+    // paint A's minutes-old tier back before the first read of the new mount
+    // lands.
+    setSnapshot(null);
     const refresh = () => {
       if (refreshing) {
         queued = true;
@@ -119,7 +150,9 @@ export function useAutonomy(
           // had and states nothing new — because the alternative is putting it
           // on screen, where the first `tiers.find` throws and takes the whole
           // console down with it. See the note on the predicate.
-          if (live && issued === generation && isPolicyStatus(next)) setPolicy(next);
+          if (live && issued === generation && isPolicyStatus(next)) {
+            setSnapshot({ client, company, policy: next });
+          }
         })
         .catch(() => {
           // Silent, like the deadline read. A host that cannot answer leaves
@@ -144,7 +177,7 @@ export function useAutonomy(
         // as a GET can.
         if (!live || !isPolicyStatus(next)) return;
         generation += 1;
-        setPolicy(next);
+        setSnapshot({ client, company, policy: next });
       },
     };
     readers.add(reader);
@@ -156,5 +189,10 @@ export function useAutonomy(
       dispose();
     };
   }, [client, company]);
-  return policy;
+  // The scope check, not a bare `return snapshot?.policy`. See {@link Snapshot}:
+  // state outlives the dependency change that invalidates it, and the effect
+  // that clears it runs after the frame that would have shown it.
+  return snapshot && snapshot.client === client && snapshot.company === company
+    ? snapshot.policy
+    : null;
 }
