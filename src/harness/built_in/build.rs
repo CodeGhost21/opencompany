@@ -899,13 +899,21 @@ pub fn build_agent(
     // budget is exhausted, `filter_by_capabilities` strips every
     // `composio_*` tool from the belt below — without this check the brief
     // would still tell the agent to call one.
+    //
+    // The native side of that same check was missed here: `tools` above is
+    // still the pre-filter belt (`filter_by_capabilities` does not run until
+    // below), so a tier denying e.g. `search` while admitting `composio`
+    // rendered a brief claiming the built-in search tool as a Composio
+    // fallback reason — a tool absent from this agent's actual final belt.
+    // [`toolbelt::native_caps_for_composio_brief`] applies the same
+    // `namespace_denied` check `filter_by_capabilities` is about to apply per
+    // tool, so this stays in lockstep with the filter below without needing
+    // the already-filtered belt in hand.
     #[cfg(feature = "composio")]
     if toolbelt::composio_capability_admits(composio_toolkits.is_some(), &deps.capabilities)
         && let Some(toolkits) = composio_toolkits.as_deref()
     {
-        let native_caps: Vec<&str> = toolbelt::native_capabilities_on_belt(&tools)
-            .into_iter()
-            .collect();
+        let native_caps = toolbelt::native_caps_for_composio_brief(&tools, &deps.capabilities);
         persona.push_str(&crate::harness::composio_catalog::composio_brief(
             toolkits,
             &native_caps,
