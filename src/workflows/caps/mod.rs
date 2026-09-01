@@ -2602,15 +2602,20 @@ impl HarnessAgentRunner {
                     // deliverable. Re-verify before accepting.
                     let recovered_and_sufficient = match &recovered.evidence {
                         Some(evidence) => {
-                            let mut augmented = outcome.reply.clone();
-                            augmented.push_str("\n\nRecovered company context:\n");
-                            augmented.push_str(evidence);
+                            let augmented = format!(
+                                "{}\n\nRecovered company context:\n{evidence}",
+                                outcome.reply
+                            );
+                            let verified = crate::workflows::judge::augment_with_recovery(
+                                &outcome.reply,
+                                evidence,
+                            );
                             let reverdict = crate::workflows::judge::judge_sufficiency(
                                 &self.deps,
                                 &self.company,
                                 crate::workflows::judge::JudgeInput {
                                     instruction: &message,
-                                    output: &augmented,
+                                    output: &verified,
                                     criteria,
                                     execution_failed: false,
                                 },

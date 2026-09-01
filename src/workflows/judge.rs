@@ -19,6 +19,7 @@ const MAX_RECOVERY_CHARS: usize = 4_000;
 const INSTRUCTION_CAP: usize = 8_000;
 const INSTRUCTION_TAIL_RESERVE: usize = 2_000;
 const OUTPUT_CAP: usize = 20_000;
+const RECOVERED_CONTEXT_HEADING: &str = "\n\nRecovered company context:\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SufficiencyVerdict {
@@ -124,6 +125,14 @@ fn user_prompt(input: JudgeInput<'_>) -> String {
         input.execution_failed,
         cap(input.output, OUTPUT_CAP),
     )
+}
+
+/// Composes a reply and the evidence recovery found into the text the
+/// re-verification pass judges, keeping the evidence inside [`OUTPUT_CAP`].
+pub(crate) fn augment_with_recovery(reply: &str, evidence: &str) -> String {
+    let block = format!("{RECOVERED_CONTEXT_HEADING}{evidence}");
+    let room = OUTPUT_CAP.saturating_sub(block.chars().count() + 1);
+    format!("{}{block}", cap(reply, room))
 }
 
 fn parse_verdict(text: &str) -> Option<SufficiencyVerdict> {
@@ -463,6 +472,31 @@ mod tests {
             "the run request must survive the instruction cap"
         );
         assert!(prompt.contains("Request for this run:"));
+    }
+
+    #[test]
+    fn recovered_evidence_stays_inside_the_judge_output_window() {
+        let reply = "R".repeat(OUTPUT_CAP + 5_000);
+        let evidence = "the renewal date is 2026-11-04";
+        let verified = augment_with_recovery(&reply, evidence);
+        let prompt = user_prompt(JudgeInput {
+            instruction: "draft it",
+            output: &verified,
+            criteria: None,
+            execution_failed: false,
+        });
+        assert!(
+            prompt.contains(evidence),
+            "recovered evidence must reach the judge, not fall past the output cap"
+        );
+        assert!(verified.chars().count() <= OUTPUT_CAP);
+    }
+
+    #[test]
+    fn recovery_augmentation_leaves_a_short_reply_whole() {
+        let verified = augment_with_recovery("the draft", "a recovered fact");
+        assert!(verified.starts_with("the draft"));
+        assert!(verified.ends_with("a recovered fact"));
     }
 
     #[test]
