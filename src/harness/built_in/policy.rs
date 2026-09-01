@@ -5518,14 +5518,16 @@ mod tests {
                 "a subdomain is still an external read — `{tier}`"
             );
 
-            assert_eq!(
-                p.check(&request(
-                    "web_fetch",
-                    serde_json::json!({ "url": "not-a-url" })
-                ))
-                .await,
-                ToolPolicyDecision::Allow,
-                "the tool rejects malformed URLs after policy classification — `{tier}`"
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "not-a-url" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "a URL with no readable host stays gated rather than free — `{tier}`"
             );
         }
     }
