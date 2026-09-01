@@ -186,9 +186,11 @@ that has no shell at all.
 
 **Anything that cuts a hole in the chrome must ask for the chrome.** A `ring-2`
 around a status dot is a cut-out of the ground behind it, not a decoration. The
-two in the shell — `SidebarMenuDot`'s attention dot on the collapsed rail and
-the host switcher's status dot — take `ring-chrome`, because that is what is
-actually behind them now. `ring-sidebar` there paints a halo.
+one left in the shell — the host switcher's status dot — takes `ring-chrome`,
+because that is what is actually behind it now. `ring-sidebar` there paints a
+halo. There were two: the collapsed rail's attention dot went with
+`SidebarMenuDot` when the approvals count moved into the window's title row,
+which is chrome that never collapses.
 
 **`--accent-foreground` stays neutral.** 40 call sites pair `bg-accent` with
 `text-accent-foreground`; brand text on every hover would make the console
