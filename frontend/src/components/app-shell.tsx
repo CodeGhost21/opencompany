@@ -1,19 +1,4 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Activity,
-  // AppWindow,  // re-add with the Pages nav entry below
-  Brain,
-  FolderClosed,
-  LayoutDashboard,
-  type LucideIcon,
-  MessagesSquare,
-  Network,
-  ShieldCheck,
-  BookText,
-  Wallet,
-  Workflow,
-} from "lucide-react";
-
 import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
@@ -27,18 +12,11 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarGroup,
   SidebarFooter,
   SidebarInset,
-  SidebarMenu,
-  SidebarMenuBadge,
-  SidebarMenuDot,
-  SidebarMenuButton,
-  SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
@@ -47,11 +25,8 @@ import { HostSwitcher } from "@/components/host-switcher";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
-import {
-  SidebarCollapseButton,
-  RESTING_ROW,
-  SidebarUtilityBar,
-} from "@/components/sidebar-controls";
+import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
+import { SidebarNavigation } from "@/components/sidebar-navigation";
 import { SetupController } from "@/setup/SetupController";
 import {
   arrivedViaSetupHandoff,
@@ -116,7 +91,7 @@ import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
-import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { VIEWS, type View } from "@/lib/console-routes";
 import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
@@ -233,129 +208,11 @@ const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default:
 // shell that renders those views.
 export type { View };
 
-interface NavItem {
-  view: View;
-  label: string;
-  icon: LucideIcon;
-}
-
-function SidebarNavigation({
-  view,
-  pending,
-  onNavigate,
-}: {
-  view: View;
-  pending: number;
-  onNavigate: (view: View) => void;
-}) {
-  const { isMobile, setOpenMobile } = useSidebar();
-
-  const navigate = useCallback(
-    (next: View) => {
-      onNavigate(next);
-      if (isMobile) setOpenMobile(false);
-    },
-    [isMobile, onNavigate, setOpenMobile],
-  );
-
-  return (
-    <SidebarGroup>
-      <SidebarMenu>
-        {NAV.map((item) => (
-          <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
-            <SidebarMenuButton
-              isActive={isNavigationActive(item.view, view)}
-              tooltip={item.label}
-              onClick={() => navigate(item.view)}
-              className={RESTING_ROW}
-            >
-              <item.icon />
-              <span>{item.label}</span>
-            </SidebarMenuButton>
-            {item.view === "approvals" && pending > 0 && (
-              <>
-                <SidebarMenuBadge>{pending}</SidebarMenuBadge>
-                {/* Issue #1018: the badge is the sidebar's only attention
-                    signal and `SidebarMenuBadge` hides itself on the
-                    collapsed rail, so a collapsed sidebar said nothing was
-                    waiting. The dot is the same `pending` value rendered
-                    so it survives 32px — not a second source, so it cannot
-                    disagree with the badge or fork the count contract
-                    #932 pins. Exactly one of the two is visible at a
-                    time. */}
-                <SidebarMenuDot
-                  label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
-                />
-              </>
-            )}
-          </SidebarMenuItem>
-        ))}
-      </SidebarMenu>
-    </SidebarGroup>
-  );
-}
-
-// One flat list. The nav was grouped under "Operate" and "Configure" when the
-// second group held five entries; now that configuration is a section of its
-// own, a heading over two rows labelled more than it sorted.
-//
-// "Work" (issue #1284, Rule 2 of docs/spec/runtime/ledgers-console-ia.md) is
-// one static row landing on Tasks by default; every other list the company
-// holds (Goals, Decisions, whatever it declared) is reachable from a
-// switcher on `LedgersView`'s own page title, not a second nav element.
-// Three other shapes were tried and rejected first: a row per list (unusable
-// at the 12-declared-list cap — 15 list rows plus 8 other NAV entries), a
-// collapsible sidebar section (still wrong premise: a declared list is read
-// occasionally, mostly written by agents, not a surface an operator works
-// out of the way Tasks is), and a tab strip (solved scaling but taxed the
-// most-visited screen with a permanent band for lists rarely opened) — see
-// the doc for the full reasoning on each. Do not re-add any of them without
-// reading that doc first.
-const NAV: NavItem[] = [
-  { view: "overview", label: "Overview", icon: LayoutDashboard },
-  // Issue #311: the company's structure, and the only way in to desk
-  // creation and membership since #302 unmounted the flat Desks page.
-  { view: "company", label: "Company", icon: Network },
-  { view: "chat", label: "Chat", icon: MessagesSquare },
-  // Tasks by default; every other list the company holds is one click away
-  // through the switcher on `LedgersView`'s own title. See the comment above
-  // `NAV` for why this is one row rather than one per list or a tab strip.
-  { view: "ledgers", label: "Work", icon: BookText },
-  { view: "workspace", label: "Workspace", icon: FolderClosed },
-  // What the company remembers, beside what it keeps. It was a settings
-  // sub-page, which put a surface an operator *reads* behind the rail where
-  // they *change* things — and three clicks in front of "does it already know
-  // this". `#/settings/brain` and `#/memory` both rewrite onto this row.
-  { view: "brain", label: "Brain", icon: Brain },
-  { view: "approvals", label: "Approvals", icon: ShieldCheck },
-  // Re-listed. Issue #302 parked the flat Finances page — a single ledger
-  // projection with nowhere to go. What comes back is a section: that same
-  // projection as Overview, plus Invoicing and Wallet, which are the live
-  // Chargebee and PayPal surfaces the host had no HTTP route for until
-  // `server::ops::finance`. See docs/spec/runtime/finance-console.md.
-  { view: "finances", label: "Finance", icon: Wallet },
-  { view: "workflows", label: "Workflows", icon: Workflow },
-  // What the agents actually did, run by run — the read-only companion to
-  // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
-  { view: "observatory", label: "Observatory", icon: Activity },
-  // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
-  // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
-  // "something an agent built" surfaces, as opposed to the fixed views above.
-  // Pages is deliberately not offered in the nav (issues #1171, #1172). Do not
-  // "fix" the omission by adding it back. What keeps `#/pages` answering is its
-  // entry in `@/lib/console-routes`, NOT this commented row — a commented row
-  // routes nothing, which is exactly how the address died for four months
-  // (issue #1311). Remove a nav row here and the surface is hidden; remove it
-  // from `console-routes.ts` and the surface is gone.
-  // { view: "pages", label: "Pages", icon: AppWindow },
-  // Settings is NOT here, and its absence is deliberate in the same way the
-  // Pages line above is. It is a utility, not a place an operator works, so it
-  // sits on the sidebar's utility bar with Feedback, Discord and Collapse
-  // (`SidebarUtilityBar`) — which still carries the `data-tour="nav-settings"`
-  // anchor the guided tour spotlights. `#/settings` keeps answering because of
-  // its entry in `@/lib/console-routes`; removing THAT is what would take the
-  // surface away.
-];
+// The nav model and the rows that render it live in
+// `@/components/sidebar-navigation` — the four sections, what is filed under
+// each, and the sub-navigation the sidebar draws beneath the active one. It is
+// a module of its own for the same reason `console-routes.ts` is: the unit lane
+// runs with no React plugin, so a table it can import is a table it can pin.
 
 // The console is hash-routed, so a normal `href="#main-content"` would also
 // be treated as a route change. Keep the conventional fragment for link
@@ -3490,7 +3347,7 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} pending={pending} onNavigate={setView} />
+          <SidebarNavigation view={view} sub={sub} onNavigate={setView} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on

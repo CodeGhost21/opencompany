@@ -174,10 +174,24 @@ export const VIEWS: View[] = Object.keys(ROUTABLE) as View[];
 /**
  * Whether a sidebar destination owns the current view.
  *
- * Task cards keep their own deep-linkable `tasks` route, but the board that
- * owns them lives under Work (`ledgers`). Keeping that parent destination
- * active makes the detail screen read as part of the same work surface.
+ * The three views with no row of their own but an obvious owner. Each is a
+ * Rule-6 deep-link destination (`docs/spec/runtime/ledgers-console-ia.md`):
+ * routable, linked to from all over the console, and not a place you navigate
+ * to from the sidebar.
+ *
+ * - A task card (`#/tasks/<id>`) is a card on the board Work draws.
+ * - A teammate (`#/team/<id>`) is a seat on the org chart Agents draws.
+ * - A desk transcript (`#/conversation`) is the surface Room replaces.
+ *
+ * Without this the sidebar empties the moment an operator opens one of them:
+ * the row they came from goes dark, and — since the restructure into sections —
+ * the whole section collapses, taking its sub-navigation with it. The detail
+ * screen should read as part of the surface it was opened from.
  */
 export function isNavigationActive(item: View, view: View): boolean {
-  return item === view || (item === "ledgers" && view === "tasks");
+  if (item === view) return true;
+  if (item === "ledgers" && view === "tasks") return true;
+  if (item === "company" && view === "team") return true;
+  if (item === "chat" && view === "conversation") return true;
+  return false;
 }
