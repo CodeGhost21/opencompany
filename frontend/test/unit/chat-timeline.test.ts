@@ -79,6 +79,57 @@ describe("buildTimeline", () => {
   });
 
   /**
+   * A colleague is not the runtime.
+   *
+   * `fromHistory` projects `from` off `mine`, so another signed-in person's
+   * reply arrives as `company` and is told apart only by `byPerson`. Without
+   * that term their message was promoted just as the operator's own follow-up
+   * had been — the same defect, for every viewer except the one who wrote it
+   * (codex + coderabbit on #2001).
+   */
+  it("keeps a thread folded when a colleague replied before the runtime did", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "can we ship?" }),
+        message({
+          id: "b",
+          from: "company",
+          byPerson: true,
+          text: "asking the team",
+          parentId: "a",
+          at: T0 + 1,
+        }),
+        message({ id: "c", from: "company", text: "yes", parentId: "a", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a"]);
+    expect(entries[0].replies.map((r) => r.id)).toEqual(["b", "c"]);
+  });
+
+  /**
+   * `undefined` is not `true`, and the difference is what keeps the ordinary
+   * case working: every locally built company line — this console's own POST,
+   * an `AgentReplyEvent` — leaves `byPerson` unset, and only `fromHistory` ever
+   * sets it. Reading "unset" as "might be a person" would fold the live answer
+   * this promotion exists for.
+   */
+  it("still promotes a runtime answer that carries no byPerson at all", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "can we ship?" }),
+        message({ id: "b", from: "company", text: "yes", parentId: "a", at: T0 + 1 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a", "b"]);
+  });
+
+  /**
    * A settle marker is runtime-generated but it is not an answer, and #1890 B
    * put markers in the thread that raised the card on purpose. Promoting one
    * into the channel would undo that from the render side.

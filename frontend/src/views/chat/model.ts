@@ -1084,7 +1084,19 @@ function inlineFirstReplies(
     // runtime-generated but it is not an answer, and #1890 B put markers in the
     // thread that raised the card on purpose. Promoting one back into the
     // channel would undo that from the render side.
-    if (first === undefined || first.from !== "company") continue;
+    //
+    // **`from` alone does not say "the runtime wrote this".** `fromHistory`
+    // projects `from` off `mine`, so *another signed-in person's* reply arrives
+    // as `company` too, carrying `byPerson` to tell them apart — and without
+    // that term a colleague answering first was promoted exactly as the
+    // operator's own follow-up had been, reproducing this defect for everyone
+    // except the viewer (codex + coderabbit on #2001).
+    //
+    // Only an explicit `true` blocks it. `undefined` means the host did not
+    // say, and it is what *every* locally built company line carries — this
+    // console's own POST, an `AgentReplyEvent` — so reading it as "might be a
+    // person" would fold the live answer this promotion exists for.
+    if (first === undefined || first.from !== "company" || first.byPerson) continue;
     const answer = position.get(first.id);
     if (root === undefined || answer === undefined) continue;
     const own = new Set(bucket.map((r) => r.id));
