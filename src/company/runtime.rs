@@ -3576,7 +3576,7 @@ impl CompanyRuntime {
         desk: &str,
         parent: EventSeq,
     ) -> Result<Option<TaskRecord>> {
-        let Some(task_id) = self.review_anchor_card(desk, parent).await else {
+        let Some(task_id) = self.review_anchor_card(desk, parent).await? else {
             return Ok(None);
         };
         self.review_card_in_review(&task_id, desk).await
@@ -3588,26 +3588,34 @@ impl CompanyRuntime {
     /// confirms `parent` is that pill's own relay — proximity to *some*
     /// earlier pill is not enough, since an ordinary chat turn in the same
     /// desk carries the same `task_id: None` shape.
+    ///
+    /// `Err` when the event log itself failed to answer — kept distinct from
+    /// `Ok(None)` so a transient read failure surfaces to the caller instead
+    /// of being read as "not a review anchor" and running the operator's note
+    /// as an ordinary chat turn.
     #[cfg(feature = "openhuman")]
-    async fn review_anchor_card(&self, desk: &str, parent: EventSeq) -> Option<String> {
-        let stored = self.events.read_from(&self.id, parent, 1).await.ok()?;
-        let stored = stored.into_iter().next()?;
+    async fn review_anchor_card(&self, desk: &str, parent: EventSeq) -> Result<Option<String>> {
+        let stored = self.events.read_from(&self.id, parent, 1).await?;
+        let Some(stored) = stored.into_iter().next() else {
+            return Ok(None);
+        };
         if stored.seq != parent {
-            return None;
+            return Ok(None);
         }
         match stored.event {
-            CompanyEvent::DeskTaskCompleted { task_id, .. } => Some(task_id),
+            CompanyEvent::DeskTaskCompleted { task_id, .. } => Ok(Some(task_id)),
             CompanyEvent::AgentReply {
                 task_id: None,
                 chat_id,
                 ..
             } if crate::server::chat_history::same_conversation(Some(&chat_id), Some(desk)) => {
-                let (pill_seq, task_id) = self.settle_pill_before(desk, parent).await?;
-                self.is_relay_bubble_for(desk, pill_seq, parent)
-                    .await
-                    .then_some(task_id)
+                let Some((pill_seq, task_id)) = self.settle_pill_before(desk, parent).await? else {
+                    return Ok(None);
+                };
+                let is_relay = self.is_relay_bubble_for(desk, pill_seq, parent).await?;
+                Ok(is_relay.then_some(task_id))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
@@ -3624,17 +3632,24 @@ impl CompanyRuntime {
     /// [`RELAY_SCAN_MAX_PAGES`] rather than one page — generous enough that a
     /// real reply-to-relay never hits it, but not the unbounded walk to
     /// genesis a desk that never dispatched anything would otherwise force.
+    ///
+    /// `Err` when the event log failed to answer a page read, threaded
+    /// through rather than collapsed to "no pill found" for the same reason
+    /// as [`review_anchor_card`].
     #[cfg(feature = "openhuman")]
-    async fn settle_pill_before(&self, desk: &str, before: EventSeq) -> Option<(EventSeq, String)> {
+    async fn settle_pill_before(
+        &self,
+        desk: &str,
+        before: EventSeq,
+    ) -> Result<Option<(EventSeq, String)>> {
         let mut cursor = Some(before);
         for _ in 0..RELAY_SCAN_MAX_PAGES {
             let page = self
                 .events
                 .read_before(&self.id, cursor, RELAY_SCAN_PAGE)
-                .await
-                .ok()?;
+                .await?;
             if page.is_empty() {
-                return None;
+                return Ok(None);
             }
             cursor = page.last().map(|stored| stored.seq);
             let found = page.into_iter().find_map(|stored| {
@@ -3654,10 +3669,10 @@ impl CompanyRuntime {
                 }
             });
             if found.is_some() {
-                return found;
+                return Ok(found);
             }
         }
-        None
+        Ok(None)
     }
 
     /// Whether `parent` is the relay bubble `pill` actually produced: the
@@ -3676,19 +3691,25 @@ impl CompanyRuntime {
     /// the next `DeskTaskCompleted` for `desk` always ends it — so
     /// [`RELAY_SCAN_MAX_PAGES`] is a safety cap against a desk that never
     /// settles again, not the wall this search actually relies on.
+    ///
+    /// `Err` when the event log failed to answer a page read, threaded
+    /// through rather than collapsed to "not the relay" for the same reason
+    /// as [`review_anchor_card`].
     #[cfg(feature = "openhuman")]
-    async fn is_relay_bubble_for(&self, desk: &str, pill: EventSeq, parent: EventSeq) -> bool {
+    async fn is_relay_bubble_for(
+        &self,
+        desk: &str,
+        pill: EventSeq,
+        parent: EventSeq,
+    ) -> Result<bool> {
         let mut cursor = pill;
         for page_index in 0..RELAY_SCAN_MAX_PAGES {
-            let Ok(forward) = self
+            let forward = self
                 .events
                 .read_from(&self.id, cursor, RELAY_SCAN_PAGE)
-                .await
-            else {
-                return false;
-            };
+                .await?;
             if forward.is_empty() {
-                return false;
+                return Ok(false);
             }
             let skip = if page_index == 0 { 1 } else { 0 };
             for stored in forward.iter().skip(skip) {
@@ -3703,24 +3724,24 @@ impl CompanyRuntime {
                         Some(desk),
                     ) =>
                     {
-                        return seq == parent;
+                        return Ok(seq == parent);
                     }
                     CompanyEvent::DeskTaskCompleted { origin_chat_id, .. }
                         if origin_chat_id.as_deref().is_some_and(|origin| {
                             crate::server::chat_history::same_conversation(Some(origin), Some(desk))
                         }) =>
                     {
-                        return false;
+                        return Ok(false);
                     }
                     _ => {}
                 }
             }
             cursor = match forward.last() {
                 Some(last) => EventSeq::new(last.seq.value().saturating_add(1)),
-                None => return false,
+                None => return Ok(false),
             };
         }
-        false
+        Ok(false)
     }
 
     /// The card with id `task_id`, but only when it is an `in_review`
@@ -7674,6 +7695,82 @@ mod tests {
         }
 
         async fn runtime_with_tasks(tasks: Option<Arc<dyn TaskStore>>) -> (Arc<Runtime>, TempDir) {
+            runtime_with(tasks, None).await
+        }
+
+        /// An [`EventLog`](crate::ports::events::EventLog) decorator whose
+        /// reads can be switched to fail after setup, so a test can seed real
+        /// events through a working log and then drive the review-anchor
+        /// lookup through the read-failure arm. `append`/`subscribe` always
+        /// delegate to a real [`FsEventLog`](crate::store::fs::FsEventLog) so
+        /// seeding never observes the failure and behaves exactly as
+        /// production does.
+        struct FailingReadsEventLog {
+            inner: crate::store::fs::FsEventLog,
+            fail_reads: std::sync::atomic::AtomicBool,
+        }
+
+        impl FailingReadsEventLog {
+            fn new(inner: crate::store::fs::FsEventLog) -> Self {
+                Self {
+                    inner,
+                    fail_reads: std::sync::atomic::AtomicBool::new(false),
+                }
+            }
+
+            fn fail_reads_from_now_on(&self) {
+                self.fail_reads
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl crate::ports::events::EventLog for FailingReadsEventLog {
+            async fn append(&self, id: &CompanyId, event: CompanyEvent) -> crate::Result<EventSeq> {
+                self.inner.append(id, event).await
+            }
+
+            async fn read_from(
+                &self,
+                id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+                if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::error::OpenCompanyError::Harness(
+                        "the event log is unavailable".to_string(),
+                    ));
+                }
+                self.inner.read_from(id, seq, limit).await
+            }
+
+            async fn read_before(
+                &self,
+                id: &CompanyId,
+                before: Option<EventSeq>,
+                limit: usize,
+            ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+                if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::error::OpenCompanyError::Harness(
+                        "the event log is unavailable".to_string(),
+                    ));
+                }
+                self.inner.read_before(id, before, limit).await
+            }
+
+            fn subscribe(
+                &self,
+                id: &CompanyId,
+            ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
+            {
+                self.inner.subscribe(id)
+            }
+        }
+
+        async fn runtime_with(
+            tasks: Option<Arc<dyn TaskStore>>,
+            events: Option<Arc<dyn crate::ports::events::EventLog>>,
+        ) -> (Arc<Runtime>, TempDir) {
             let home = tempfile::Builder::new()
                 .prefix("opencompany-review-")
                 .tempdir()
@@ -7689,6 +7786,9 @@ mod tests {
                     .with_id(CompanyId::new("acme"));
             if let Some(tasks) = tasks {
                 builder = builder.with_tasks(tasks);
+            }
+            if let Some(events) = events {
+                builder = builder.with_events(events);
             }
             let runtime = Arc::new(builder.build().await.expect("runtime"));
             (runtime, home)
@@ -7924,6 +8024,53 @@ mod tests {
                 .expect_err(
                     "a storage failure must not be read as 'no review target' and fall \
                      through to an ordinary chat turn",
+                );
+            assert!(
+                matches!(err, crate::error::OpenCompanyError::Harness(_)),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        /// Codex #3905522633: the same gap `397807637` closed for
+        /// `TaskStore::list`, one layer over — the `EventLog` reads inside
+        /// `review_anchor_card`/`settle_pill_before`/`is_relay_bubble_for`
+        /// must not collapse a transient read failure into "not a review
+        /// anchor" and let `chat_and_emit` run the operator's review note as
+        /// an ordinary chat turn.
+        #[tokio::test]
+        async fn an_event_log_read_failure_surfaces_as_an_error_not_a_missing_anchor() {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-review-events-")
+                .tempdir()
+                .expect("tempdir");
+            let events = Arc::new(FailingReadsEventLog::new(
+                crate::store::fs::FsEventLog::new(home.path().to_path_buf()),
+            ));
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[group_chat]]\nid = \"strategy\"\nname = \"Strategy\"\nmembers = [\"ceo\"]\n",
+            )
+            .expect("manifest");
+            let runtime = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .with_events(events.clone())
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            seed(&runtime, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            let pill = append(&runtime, settle_pill("t-1", "strategy")).await;
+
+            events.fail_reads_from_now_on();
+
+            let err = runtime
+                .review_feedback_target("strategy", pill)
+                .await
+                .expect_err(
+                    "an event-log read failure must not be read as 'not a review anchor' \
+                     and fall through to an ordinary chat turn",
                 );
             assert!(
                 matches!(err, crate::error::OpenCompanyError::Harness(_)),
