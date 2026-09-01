@@ -5,6 +5,8 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getPolicy,
+  isPolicyStatus,
+  NOT_A_POLICY,
   type PolicyStatus,
   resetPolicy,
   setPolicy,
@@ -31,6 +33,10 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+// The title row's readers, so a policy written HERE reaches the pill without
+// waiting for its 30s poll. Not a cycle: `use-autonomy` imports only
+// `@/api/policy` and `@/lib/visible-poll`.
+import { applyAutonomy } from "@/hooks/use-autonomy";
 import { cn } from "@/lib/utils";
 
 /**
@@ -91,6 +97,57 @@ export function widensAutonomy(
   const fromIndex = tiers.findIndex((tier) => tier.value === from);
   const toIndex = tiers.findIndex((tier) => tier.value === to);
   return fromIndex !== -1 && toIndex > fromIndex;
+}
+
+/**
+ * The words the widening confirmation is made of, exported because there are
+ * now **two** ways to reach the same decision.
+ *
+ * The tier is also changeable from the window's title row (`AutonomyPill`), and
+ * a second confirmation written there would be a second set of words free to
+ * drift from these — one dialog saying "Give teammates more autonomy?" and
+ * another saying something else about the identical act. The comparison itself
+ * is already shared ([`widensAutonomy`]); this shares the sentence that explains
+ * it, so the two entry points cannot disagree about what is being agreed to.
+ *
+ * Literals and a function rather than a shared component: this page reaches the
+ * same dialog from three different decisions (a tier, a spend-cap raise, a
+ * reset) and only the tier one is shared, so a component would have to carry
+ * all three.
+ */
+export const AUTONOMY_CONFIRM_TITLE = "Give teammates more autonomy?";
+
+/** The cancel label. It names the outcome, not the gesture: nothing changes. */
+export const AUTONOMY_CONFIRM_CANCEL = "Keep current setting";
+
+/** The confirm label for a tier widening. */
+export const AUTONOMY_CONFIRM_ACTION = "Give more autonomy";
+
+/**
+ * The standing note under a tier widening.
+ *
+ * True in this build and load-bearing: the gate runs with policy HITL disabled
+ * (`src/runtime/builder.rs`), so what still stops an agent is an explicit
+ * `request_approval` rather than the tier. An operator agreeing to a wider tier
+ * is entitled to read that wherever they can agree to it.
+ */
+export const AUTONOMY_PROMPTS_NOTE =
+  "Approval prompts remain explicit through request_approval.";
+
+/**
+ * What changes, in the host's own words on both sides of the move.
+ *
+ * Both descriptions are the host's (`TIER_TEXT`, `src/server/ops/policy.rs`),
+ * never a paraphrase — that prose is server-side precisely so it tracks the gate
+ * it describes. `current` is optional because a console running against a newer
+ * host can be sitting on a mode it has no text for; the sentence then names only
+ * what the operator is moving *to*, which is the half that still matters.
+ */
+export function tierWideningExplanation(
+  current: string | undefined,
+  next: PolicyStatus["tiers"][number],
+): string {
+  return `Instead of: ${current ?? ""} With ${next.label}: ${next.description} They will use the ${next.label} setting on their next turn.`;
 }
 
 /** Whether replacing the current spend cap with the manifest cap loosens it. */
@@ -321,6 +378,11 @@ export function PolicySettings({ client, company }: Props) {
       setDraftDeadline("");
       try {
         const next = await getPolicy(client, company);
+        // A body that is not a policy is a load FAILURE, not a policy. Left
+        // unchecked it reaches `next.alwaysApprove.join(...)` two lines down,
+        // and a throw there unmounts the console — there is no error boundary.
+        // The `catch` below already knows how to say so.
+        if (!isPolicyStatus(next)) throw new Error(NOT_A_POLICY);
         // A response for a company this `load` no longer describes must not
         // overwrite the current company's state: when the scope changes mid-
         // flight, the effect's cleanup flips `live` for the stale request, so
@@ -406,14 +468,40 @@ export function PolicySettings({ client, company }: Props) {
    * `takesEffect` overrides the host's generic timing line for a save whose
    * effect does not wait for the next turn — the deadline, whose new TTL the
    * live gate enforces immediately.
+   *
+   * **Returns whether the write actually landed.** It is not a formality: a
+   * body this rejects is a FAILED write, and its callers hand that answer to
+   * confirmation dialogs which close on success and stay open for a retry on
+   * failure. Returning nothing let `saveTier`, `reset` and `commitSpendCap`
+   * report `true` after showing an error, so a tier escalation, a loosening
+   * reset or a spend-cap raise that the host answered with rubbish closed its
+   * dialog as though the operator's change had been made — a *widening* the
+   * console then claimed had happened and had not.
    */
   const apply = (
     next: PolicyStatus,
     message: string,
     resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
     takesEffect?: string,
-  ) => {
+  ): boolean => {
+    // Every write path funnels through here, so this is the one place the
+    // settings page has to fence: a PUT or DELETE that answers 200 with
+    // something that is not a policy must not be put on screen. Reported the
+    // way a failed save is, and the previously loaded policy stands.
+    if (!isPolicyStatus(next)) {
+      toast.error(NOT_A_POLICY);
+      return false;
+    }
     setStatus(next);
+    // The title row reads the same policy through `useAutonomy`, on a 30s
+    // poll, and it is mounted on every view including this one. Without this
+    // hand-off a change made HERE left the pill an inch above the card stating
+    // the previous tier for up to half a minute — and in the direction that
+    // matters most, a widening looks like the restrictive tier is still in
+    // force. Same value, same scope, same fence: this is the host's own
+    // response, already checked by `isPolicyStatus` above, so the row is
+    // handed a value the host returned rather than an optimistic guess.
+    applyAutonomy(client, company, next);
     const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
     if (alwaysAsk) {
       setDraftAlways(next.alwaysApprove.join(", "));
@@ -427,6 +515,7 @@ export function PolicySettings({ client, company }: Props) {
       setDraftDeadline((next.approvalTtlHours ?? 24).toString());
     }
     toast.success(message, { description: takesEffect ?? next.takesEffect });
+    return true;
   };
 
   const saveTier = async (mode: string) => {
@@ -444,12 +533,15 @@ export function PolicySettings({ client, company }: Props) {
       // current company's state — the read path's `live` guard, applied to the
       // write path.
       if (!isCurrentScope({ client, company })) return false;
-      apply(next, "Autonomy tier updated", {
+      // `return apply(...)`, not `apply(...); return true`. A rejected body is
+      // a failed write, and the confirmation dialog behind a tier escalation
+      // has to stay open for the retry rather than close on a change that did
+      // not happen.
+      return apply(next, "Autonomy tier updated", {
         alwaysAsk: !dirty,
         spendCap: false,
         deadline: false,
       });
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not change the tier.",
@@ -591,7 +683,9 @@ export function PolicySettings({ client, company }: Props) {
       // A reset for a company this card no longer shows must not overwrite the
       // current company's state.
       if (!isCurrentScope({ client, company })) return false;
-      apply(
+      // Propagated for the same reason `saveTier` propagates it: a loosening
+      // reset is confirmed, and a rejected body must keep that confirmation up.
+      return apply(
         next,
         "Reverted to the manifest's policy",
         undefined,
@@ -611,7 +705,6 @@ export function PolicySettings({ client, company }: Props) {
           ? "takes effect immediately — parked approvals are re-checked against the manifest deadline"
           : undefined,
       );
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not reset the policy.",
@@ -686,14 +779,16 @@ export function PolicySettings({ client, company }: Props) {
       // A save for a company this card no longer shows must not overwrite the
       // current company's state.
       if (!isCurrentScope({ client, company })) return false;
-      apply(
+      // Propagated: a cap RAISE is confirmed, and a rejected body must keep
+      // that confirmation up rather than close it on a widening that did not
+      // land.
+      return apply(
         next,
         "Spend cap updated",
         // An unsaved always-ask edit and a half-typed deadline are the
         // operator's; the PUT only touched the cap.
         { alwaysAsk: !dirty, deadline: false },
       );
-      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not save the spend cap.",
@@ -1102,9 +1197,7 @@ export function PolicySettings({ client, company }: Props) {
                 }}
               >
                 <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    Give teammates more autonomy?
-                  </AlertDialogTitle>
+                  <AlertDialogTitle>{AUTONOMY_CONFIRM_TITLE}</AlertDialogTitle>
                   <AlertDialogDescription>
                     {pendingCapRaise !== null ? (
                       <>
@@ -1154,32 +1247,25 @@ export function PolicySettings({ client, company }: Props) {
                           </>
                         )}
                       </>
-                    ) : (
-                      <>
-                        Instead of:{" "}
-                        {
-                          status.tiers.find(
-                            (tier) => tier.value === status.mode,
-                          )?.description
-                        }{" "}
-                        With {tierAwaitingConfirmation?.label}:{" "}
-                        {tierAwaitingConfirmation?.description} They will use
-                        the {tierAwaitingConfirmation?.label} setting on their
-                        next turn.
-                      </>
-                    )}
+                    ) : tierAwaitingConfirmation ? (
+                      tierWideningExplanation(
+                        status.tiers.find((tier) => tier.value === status.mode)
+                          ?.description,
+                        tierAwaitingConfirmation,
+                      )
+                    ) : null}
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingCapRaise !== null
                       ? "This threshold remains inactive while policy HITL is disabled."
                       : resetAwaitingConfirmation
                         ? "Reset restores the stored policy fields; approval prompts remain explicit."
-                        : "Approval prompts remain explicit through request_approval."}
+                        : AUTONOMY_PROMPTS_NOTE}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel disabled={saving}>
-                    Keep current setting
+                    {AUTONOMY_CONFIRM_CANCEL}
                   </AlertDialogCancel>
                   <AlertDialogAction
                     data-testid="policy-tier-confirm"
@@ -1211,7 +1297,7 @@ export function PolicySettings({ client, company }: Props) {
                       ? `Raise cap to $${pendingCapRaise}`
                       : resetAwaitingConfirmation
                         ? "Revert and give more autonomy"
-                        : "Give more autonomy"}
+                        : AUTONOMY_CONFIRM_ACTION}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
