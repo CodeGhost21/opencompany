@@ -138,7 +138,7 @@ export function SidebarUtilityBar({
 }
 
 /**
- * Show or hide the sidebar. A button in the header, not a row in the nav.
+ * Show or hide the sidebar. A button on the content card's leading seam.
  *
  * ## Why it is not a row (issue #1177)
  *
@@ -151,32 +151,27 @@ export function SidebarUtilityBar({
  *
  * Colouring it differently would not have fixed that; the shape is what says
  * "row". So it stops using the row primitive altogether and becomes the
- * console's ordinary icon button, in the sidebar's header — which is the part
- * of the column that talks about the panel rather than about the company.
- * `SidebarContent` below it is the destinations, and the header/content
- * boundary now means something.
+ * console's ordinary icon button.
  *
- * ## Why it does not crowd the host switcher (issue #1174)
+ * ## Why it is not in the sidebar at all
  *
- * The switcher beside it is `h-12`, carries a filled glyph, a two-line
- * nameplate and the cross-host status dot. This is 28px, ghost, and dimmed at
- * rest. They also sit in separate elements, so hovering one never lights the
- * other — which is what stops the pair reading as a single control with a
- * chevron at one end and a panel glyph at the other.
+ * Its next home was the sidebar's own header, beside the host switcher. That
+ * put the control that *hides* a panel inside the panel it hides: collapsing
+ * the column took the button with it, and the rail had to keep a version of it
+ * standing in 32px of content box.
  *
- * ## The collapsed rail
+ * Both of those are gone now. The switcher moved to the window's title row
+ * (`window-title-bar.tsx`) and the header went with it, so this button is
+ * rendered from `app-shell.tsx` inside `SidebarInset`, absolutely positioned on
+ * the leading border of the content card — `left-(--frame-inset)` puts it at
+ * the edge and `-translate-x-1/2` straddles it. It is one control in both
+ * states, it points at the edge that moves, and it costs the page no layout.
+ * `sidebar-toggle-reachable.spec.ts` pins that placement.
  *
- * The rail is `--sidebar-width-icon` (3rem) and `SidebarHeader` is `p-2`, so
- * there are 32px of content box — exactly the switcher's glyph, and no room
- * for anything beside it. The header row therefore becomes a column on the
- * rail (see `app-shell.tsx`), and this button grows to `size-8` there so it
- * lands on the same 32px rhythm as every nav icon below it.
- *
- * It deliberately drops the `bg-primary` fill it used to take when collapsed.
- * That fill existed to make it findable in a column of identical nav icons; up
- * here it has only the switcher for company, and the switcher's glyph is
- * *already* a filled primary square. Two of those stacked would read as one
- * control, which is the failure the paragraph above exists to prevent.
+ * It carries its own fill at rest for the same reason: alone on a border, with
+ * no neighbours to belong to and no surface behind it, a ghost glyph read as
+ * something drawn on the seam rather than as something pressable. See the
+ * class list below.
  */
 export function SidebarCollapseButton() {
   const { toggleSidebar, state, isMobile } = useSidebar();
@@ -247,9 +242,14 @@ export function SidebarCollapseButton() {
               // also what every row in this column already hovers to.
                 "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent",
               "focus-visible:ring-sidebar-ring/50",
-              // 28px beside a 48px nameplate, 32px on the rail. See the note
-              // on the collapsed rail above.
-              "group-data-[collapsible=icon]:size-8",
+              // No `group-data-[collapsible=icon]:size-8` any more, and its
+              // absence is the point. `group` is on `[data-slot=sidebar]`
+              // (`ui/sidebar.tsx`) and this button is no longer inside it, so
+              // that variant could never match again — it would have been a
+              // class that reads as a collapsed-state size and silently is not.
+              // One size in both states, which is what a control on the seam
+              // wants: it does not live in the 3rem rail and has no rhythm of
+              // nav icons to land on.
             )}
           />
         }

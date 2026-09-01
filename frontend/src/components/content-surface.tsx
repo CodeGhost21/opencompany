@@ -66,7 +66,7 @@ export function ContentSurface({ children }: { children: ReactNode }) {
   return (
     <div className={CARD} data-testid="content-surface">
       {/* No drag band here any more.
-          
+
           This card carried one because the window drew no title bar of its own,
           so the top of the content was the only thing left to grab. There is a
           real full-width title row now (`window-title-bar.tsx`), which drags
