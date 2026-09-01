@@ -899,6 +899,11 @@ async fn run_workflow_inner(
             let mut nodes = nodes;
             reclassify_capped_nodes(&mut nodes, &capped.take());
             if is_genuine_failure {
+                // No continuation ever reuses a genuinely-failed run's thread
+                // id — only an approval or blocked-node resume does, and
+                // neither applies here — so its checkpoint lineage is prunable
+                // exactly like a clean settle or cancel.
+                prune_checkpoint_lineage(checkpoint_store.as_deref(), &checkpoint_thread_id).await;
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
                 if !persist_run_output(
@@ -2804,6 +2809,60 @@ to = "done"
     #[tokio::test]
     async fn a_blocked_agent_node_keeps_the_file_it_wrote_as_a_run_artifact() {
         assert_partial_run_artifact(true).await;
+    }
+
+    /// A genuinely failed checkpointed run has no continuation path — only an
+    /// approval or blocked-node resume reuses a run's thread id, and neither
+    /// applies to a plain failure — so its checkpoint lineage must be pruned
+    /// the same as a clean settle or a cancel, or it accumulates on disk
+    /// forever.
+    #[tokio::test]
+    async fn a_genuinely_failed_checkpointed_run_prunes_its_lineage() {
+        use tinyflows::graph::Checkpointer;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FsOps::new(dir.path()));
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace = Some(store.clone());
+        deps.run_output_store = Some(store.clone());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ArtifactWritingTurn {
+            workspace_root: deps.workspace_root.clone(),
+            approvals: deps.approval_requests.clone(),
+            blocked: false,
+        });
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                dir.path().join("checkpoints"),
+            ),
+        );
+        let ctx = WorkflowRunContext::new(false);
+        let thread_id = ctx.run_id.clone();
+
+        let result = run_workflow_lane_aware_checkpointed(
+            turn,
+            deps,
+            &record,
+            &artifact_graph(),
+            serde_json::json!({ "request": "make the report" }),
+            &ctx,
+            Some(checkpoints.clone()),
+        )
+        .await;
+        assert!(result.is_err(), "the synthetic failure must fail the run");
+
+        let remaining = checkpoints
+            .get_thread(&thread_id)
+            .await
+            .expect("checkpoint read");
+        assert!(
+            remaining.is_empty(),
+            "a genuinely failed run has no continuation path, so its checkpoint lineage must be \
+             pruned: {remaining:?}"
+        );
     }
 
     /// A turn double for a two-node chain: `capped_agent` always truncates at
