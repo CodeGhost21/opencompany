@@ -195,6 +195,14 @@ const LIST_TASKS_LIMIT: usize = 40;
 /// honest count of what was cut.
 const READ_TASK_ATTEMPTS_LIMIT: usize = 10;
 
+/// `read_task`'s cap on the rendered card title (issue #1859's follow-up
+/// review). The task-edit PATCH route persists an operator-pasted title
+/// verbatim and without a length limit; an unusually long one can otherwise
+/// consume `TOOL_RESULT_BUDGET_BYTES` before the `## Attempts` or `## Output`
+/// sections are reached, and `read_task` has no paging mechanism to recover
+/// them on a repeat call.
+const READ_TASK_TITLE_LIMIT: usize = 200;
+
 /// The id of the orchestrator agent for a roster: the first agent tagged
 /// `tier = "orchestrator"`, else the first roster agent, else `None` (empty
 /// roster). The fallback is what keeps a company with no tagged orchestrator
@@ -2040,7 +2048,7 @@ impl Tool for ReadTaskTool {
             )));
         };
 
-        let mut md = format!("# {}\n", card.title);
+        let mut md = format!("# {}\n", truncate_chars(&card.title, READ_TASK_TITLE_LIMIT));
         md.push_str(&format!(
             "- **Column**: {}\n- **Priority**: {}\n- **Assignee**: {}\n",
             column_label(&card.column),
@@ -12624,6 +12632,48 @@ name = "Morning"
         assert!(
             output_at > attempts_at,
             "the Output section must still be reachable after a long attempt history: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_bounds_the_rendered_title_so_attempts_and_output_stay_reachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        let company = CompanyId::new("acme");
+        let long_title = "x".repeat(5_000);
+        tasks
+            .upsert(
+                &company,
+                &task_card(
+                    "t-1",
+                    &long_title,
+                    crate::ports::tasks::COLUMN_IN_REVIEW,
+                    "engineer",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, None);
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        let header_line = out.lines().next().expect("header line present");
+        assert!(
+            header_line.chars().count() <= READ_TASK_TITLE_LIMIT + 2,
+            "an operator-pasted title must not render verbatim and unbounded, or it can \
+             consume the whole tool-result budget before later sections: {} chars",
+            header_line.chars().count()
+        );
+        let output_at = out.find("## Output").expect("Output section present");
+        let attempts_at = out.find("## Attempts").expect("Attempts section present");
+        assert!(
+            output_at > attempts_at,
+            "the Output section must stay reachable behind a very long card title: {} bytes total",
+            out.len()
         );
     }
 
