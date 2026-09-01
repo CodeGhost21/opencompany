@@ -106,6 +106,10 @@ export interface WorkflowNode {
     require: string;
     field?: string;
   };
+  /** Runs one semantic sufficiency judge pass after the deterministic check. */
+  verify?: {
+    criteria?: string;
+  };
   /** Where an `output` node's report goes when the run finishes. */
   destination?: WorkflowDestination;
 }
@@ -442,7 +446,7 @@ export interface WorkflowRunNode {
    * for a bug when the fix is a click in Approvals; rendering it as `ok` is the
    * lie the issue was filed about.
    */
-  status: "ok" | "error" | "blocked";
+  status: "ok" | "error" | "blocked" | "declined";
   /** Wall-clock duration of the node's execution, in milliseconds. */
   elapsedMs: number;
   /**

@@ -16,6 +16,7 @@ const RUN_STATE_LABEL: Record<NodeRunState, string> = {
   // Issue #881: the word an operator can act on. Not "failed" — nothing broke —
   // and not "done", which is precisely the claim this state exists to stop.
   blocked: "needs approval",
+  declined: "not needed",
 };
 
 /** Badge tint per run state — read alongside the ring, never instead of it, so
@@ -25,6 +26,7 @@ const RUN_STATE_BADGE: Record<NodeRunState, string> = {
   ok: "bg-status-done-soft text-status-done-text",
   error: "bg-status-failed-soft text-status-failed-text",
   blocked: "bg-status-blocked-soft text-[var(--status-blocked-text)]",
+  declined: "bg-status-idle-soft text-status-idle-text",
 };
 
 /** A custom xyflow node: emoji + colored header, name, and a one-line summary.

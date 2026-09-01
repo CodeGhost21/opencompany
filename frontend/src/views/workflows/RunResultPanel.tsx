@@ -618,6 +618,8 @@ function NodeTimeline({
                   ? "border-status-failed/40 bg-status-failed-soft"
                   : n.status === "blocked"
                     ? "border-status-blocked/50 bg-status-blocked-soft"
+                    : n.status === "declined"
+                      ? "border-status-idle/50 bg-status-idle-soft"
                     : "border-status-done/40 bg-status-done-soft"
               }`}
             >

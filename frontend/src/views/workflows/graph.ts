@@ -486,6 +486,7 @@ export function windowHasRunStart(
 function nodeStateFrom(status: string): NodeRunState {
   if (status === "ok") return "ok";
   if (status === "blocked") return "blocked";
+  if (status === "declined") return "declined";
   return "error";
 }
 
