@@ -149,6 +149,14 @@ money.** The line is one predicate,
 `Consequence::parks_under_auto` — a call parks under `auto` when it would park
 under `supervised` **and** it is not `Standing::Grantable`.
 
+The one deliberate exception is a read whose destination is bounded rather than
+unattended-anyway: `web_fetch` (and a read-shaped `http_request`) to a URL
+whose host can be read is `Reach::ExternalRead`, which does not park under
+`supervised` either — the operator sees the resolved host on the card the first
+time an unreadable one would have parked, not a blank check to "leave the
+building". An unreadable URL still falls back to `Consequence` and parks under
+both tiers.
+
 It reads the existing declaration rather than adding a list, because the split
 was already there and argued tool by tool. That reuse does widen what
 `Grantable` means — from "an operator may hand this to one teammate until a
