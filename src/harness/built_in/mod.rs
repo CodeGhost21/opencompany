@@ -3869,9 +3869,27 @@ impl HarnessPool {
         let augmented = if crate::runtime::delegation::is_chat_only_turn() {
             message.to_string()
         } else {
+            // **Retrieved on the operator's own words, injected into the
+            // composed message** (#1890 review). `message` may already carry
+            // this turn's in-memory briefings — open work, the settled-work
+            // digest, the thread index, attachment markers — and those are for
+            // the model to read, not for the store to search on. Retrieving on
+            // them made the query drift toward whatever the briefings happened
+            // to name: the settled digest is a list of finished card titles, so
+            // a conversation that had just closed some work recalled *that*
+            // work rather than what the operator was asking about, and grew
+            // more biased with every card that finished.
+            //
+            // `operator_words` is the existing seam for this — the same cut the
+            // triage decision takes, and for the same reason its docs give: the
+            // annotations are not something anybody typed.
             let hits = deps
                 .context
-                .search(company, message, memory_loop::RETRIEVE_TOP_K)
+                .search(
+                    company,
+                    crate::runtime::delegation::operator_words(message),
+                    memory_loop::RETRIEVE_TOP_K,
+                )
                 .await?;
             memory_loop::inject(message, &hits)
         };
@@ -6548,6 +6566,64 @@ description = "Builds the product."
             .await
             .unwrap();
         assert_eq!(stored.len(), 2, "the second turn stores its outcome too");
+    }
+
+    /// Recall is driven by **what the operator typed**, not by the briefings
+    /// this turn folded onto it.
+    ///
+    /// The composed message can carry the open-work briefing, the settled-work
+    /// digest, the thread index or attachment markers. Those are for the model
+    /// to read; searching on them makes the query something nobody asked. Under
+    /// this store's substring matching that costs the recall outright — any
+    /// briefing at all and nothing matches — and under a vector store it drifts
+    /// instead, toward whatever the briefing happens to name. The settled digest
+    /// is a list of finished card titles, so a conversation that had just closed
+    /// some work pulled *that* work in, and the bias grew with every card that
+    /// finished.
+    ///
+    /// Found by the `orchestration-simulation` E2E, which went red the moment
+    /// two cards settled in the conversation it drives (#1890 review).
+    #[tokio::test]
+    async fn recall_searches_the_operators_words_not_the_briefings() {
+        let fx = fixture();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        // Turn one stores an outcome whose body carries "alpha".
+        pool.run(
+            &rec.id,
+            "ceo",
+            "alpha task",
+            &fx.deps,
+            crate::runtime::delegation::ChatTarget::default(),
+        )
+        .await
+        .expect("first turn");
+
+        // Turn two asks the same thing, with a briefing folded on — the shape
+        // every turn takes once a card has settled in the conversation.
+        let briefed = format!(
+            "alpha{} has finished — this is where each card landed:\n- something else\n]",
+            crate::runtime::cycle::SETTLED_WORK_ANNOTATION
+        );
+        let second = pool
+            .run(
+                &rec.id,
+                "ceo",
+                &briefed,
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("second turn")
+            .reply;
+
+        assert!(
+            second.contains("Relevant prior work"),
+            "the operator asked about alpha, so alpha is recalled — the briefing \
+             appended after their words must not change what is searched for: {second:?}"
+        );
     }
 
     /// A pool serving one named harness builds only the agents bound to it.
