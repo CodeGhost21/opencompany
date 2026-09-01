@@ -58,6 +58,19 @@ interface RoomRailSlot {
    * rule this codebase follows for a control that would do nothing.
    */
   reveal?: () => void;
+  /**
+   * Closes the sheet after the rail has been used to go somewhere — the other
+   * half of `reveal`, and `undefined` at every width where the rail is a column
+   * beside the transcript rather than a sheet over it.
+   *
+   * Every other destination in the sidebar already does this: `SidebarNavigation`
+   * calls `setOpenMobile(false)` on each row it navigates. The channel list is a
+   * section of that same sidebar now, so picking a channel has to behave like
+   * picking a section — otherwise the sheet stays up covering the transcript it
+   * just switched to, and the operator has to dismiss it by hand to see what
+   * they chose (codex P2 review on #1987).
+   */
+  dismiss?: () => void;
 }
 
 const RoomRailSlotContext = createContext<RoomRailSlot | null>(null);
@@ -79,6 +92,7 @@ export function RoomRailSlotProvider({ children }: { children: ReactNode }) {
       expand: toggleSidebar,
       covering,
       reveal: isMobile ? () => setOpenMobile(true) : undefined,
+      dismiss: isMobile ? () => setOpenMobile(false) : undefined,
     }),
     [element, collapsed, covering, isMobile, setOpenMobile, toggleSidebar],
   );

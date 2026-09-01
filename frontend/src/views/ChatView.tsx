@@ -2014,6 +2014,15 @@ export function ChatView({
 
   function selectChannel(id: string) {
     onNavigate(id);
+    // On a phone the rail is painted inside the sidebar's sheet, which covers
+    // the whole screen. Navigating without closing it leaves the operator
+    // looking at the channel list they just chose from rather than the
+    // transcript they chose — and every other row in this sidebar closes the
+    // sheet as it navigates (`SidebarNavigation`), the channel list being one
+    // of its sections now (codex P2 review). `dismiss` is `undefined` at every
+    // width where the rail is a column beside the transcript, so this is a
+    // no-op on desktop rather than a second opinion about layout.
+    roomRail.dismiss?.();
   }
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
