@@ -104,6 +104,32 @@ export interface SetPolicyInput {
 }
 
 /**
+ * One renderable tier.
+ *
+ * Split out because `Array.isArray(tiers)` alone is not the fence it looks
+ * like: `{"tiers": [null]}` satisfies it, and the very next thing every reader
+ * does is `tiers.find((tier) => tier.value === ...)`, which throws on the first
+ * member. A body that passes the shape check and then crashes the render is the
+ * exact failure {@link isPolicyStatus} exists to stop, one level down.
+ *
+ * All three fields are required rather than optional, and that is safe against
+ * a real host: `TierDto` (`src/server/ops/policy.rs:96`) declares `value`,
+ * `label` and `description` as `&'static str`, so every tier the runtime serves
+ * carries all three. The leniency this fence deliberately keeps is at the
+ * *status* level — an optional field a host may not have grown yet — not here,
+ * where a partial member is a member the menu cannot draw.
+ */
+function isPolicyTier(value: unknown): value is PolicyTier {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const tier = value as Partial<PolicyTier>;
+  return (
+    typeof tier.value === "string" &&
+    typeof tier.label === "string" &&
+    typeof tier.description === "string"
+  );
+}
+
+/**
  * What a *renderable* policy is, as distinct from what the host sent.
  *
  * ## The crash this fences
@@ -133,6 +159,12 @@ export interface SetPolicyInput {
  * compare against. Every optional field stays optional: this is a crash fence,
  * not a schema, and a host that grows or drops a field must keep working. See
  * `knownTools` above.
+ *
+ * The two required lists are checked to their MEMBERS, though, because the
+ * container check alone does not fence what it is here to fence: `tiers: [null]`
+ * is an array, passes, and throws inside `tiers.find` on the very next line —
+ * the same blank console this predicate was written to stop. See
+ * {@link isPolicyTier}.
  */
 export function isPolicyStatus(body: unknown): body is PolicyStatus {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
@@ -140,7 +172,17 @@ export function isPolicyStatus(body: unknown): body is PolicyStatus {
   return (
     typeof candidate.mode === "string" &&
     Array.isArray(candidate.tiers) &&
-    Array.isArray(candidate.alwaysApprove)
+    // Each MEMBER, not just the container. See `isPolicyTier`: `[null]` passes
+    // `Array.isArray` and throws in `tiers.find` a moment later, which is the
+    // same blank console by a slightly longer route.
+    candidate.tiers.every(isPolicyTier) &&
+    Array.isArray(candidate.alwaysApprove) &&
+    // The list is rendered with `.join(", ")` and typed `string[]`, and a
+    // non-string member is a wrong sentence rather than a crash — the settings
+    // page would seed its always-ask box with "[object Object]" and save that
+    // back as a gate. A policy the console cannot state truthfully is not a
+    // renderable policy.
+    candidate.alwaysApprove.every((entry) => typeof entry === "string")
   );
 }
 

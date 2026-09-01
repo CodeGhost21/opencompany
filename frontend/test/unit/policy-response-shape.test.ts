@@ -56,6 +56,41 @@ const MALFORMED: [string, unknown][] = [
   ["an object with no mode", { ...WELL_FORMED, mode: undefined }],
   ["an object whose alwaysApprove is not a list", { ...WELL_FORMED, alwaysApprove: "shell" }],
   ["an error envelope answered with a 200", { error: "not_found", message: "no policy here" }],
+  // The container check alone let every one of these through, and each of them
+  // reaches a dereference the moment it is rendered. `tiers: [null]` is the one
+  // the reviewers named: `Array.isArray` says yes, and `tiers.find((tier) =>
+  // tier.value === status.mode)` throws on the first member — the same blank
+  // console, one line later than before.
+  ["a tier list holding a null", { ...WELL_FORMED, tiers: [null] }],
+  ["a tier list holding undefined", { ...WELL_FORMED, tiers: [undefined] }],
+  ["a tier list of bare mode words rather than objects", { ...WELL_FORMED, tiers: ["auto", "full"] }],
+  ["a tier list holding an array", { ...WELL_FORMED, tiers: [["auto", "Auto", "…"]] }],
+  [
+    "a tier with no value to match the mode against",
+    { ...WELL_FORMED, tiers: [{ label: "Auto", description: "…" }] },
+  ],
+  [
+    "a tier whose value is not a string",
+    { ...WELL_FORMED, tiers: [{ value: 2, label: "Auto", description: "…" }] },
+  ],
+  [
+    "a tier with no label to draw the row with",
+    { ...WELL_FORMED, tiers: [{ value: "auto", description: "…" }] },
+  ],
+  [
+    "a tier with no description to state the consequence with",
+    { ...WELL_FORMED, tiers: [{ value: "auto", label: "Auto" }] },
+  ],
+  [
+    "one bad tier among good ones",
+    { ...WELL_FORMED, tiers: [...WELL_FORMED.tiers, null] },
+  ],
+  // `alwaysApprove` is joined into the settings page's own text box and saved
+  // back from it. A non-string member does not throw — it renders as
+  // "[object Object]" and is then written back to the host as a gate.
+  ["an always-ask list holding a null", { ...WELL_FORMED, alwaysApprove: [null] }],
+  ["an always-ask list holding an object", { ...WELL_FORMED, alwaysApprove: [{ kind: "shell" }] }],
+  ["an always-ask list holding a number", { ...WELL_FORMED, alwaysApprove: ["shell", 7] }],
 ];
 
 describe("isPolicyStatus", () => {
@@ -81,5 +116,26 @@ describe("isPolicyStatus", () => {
     // A host that offers no selectable tiers renders a pill that states the
     // mode and opens an empty menu. That is a thin answer, not a broken one.
     expect(isPolicyStatus({ ...WELL_FORMED, tiers: [] })).toBe(true);
+  });
+
+  it("accepts a tier carrying fields this console has never heard of", () => {
+    // The member check is a crash fence like the one above it, not a schema.
+    // A newer host that grows a field on a tier must keep working, exactly as
+    // one that grows a field on the status does.
+    expect(
+      isPolicyStatus({
+        ...WELL_FORMED,
+        tiers: [
+          { value: "guarded", label: "Guarded", description: "Something newer.", badge: "beta" },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts an empty always-ask list, which is a real answer", () => {
+    // Most companies gate nothing by name. `[]` is the common case, not a
+    // degenerate one, and `.every` on it is vacuously true — asserted so a
+    // future member check cannot quietly start requiring a non-empty list.
+    expect(isPolicyStatus({ ...WELL_FORMED, alwaysApprove: [] })).toBe(true);
   });
 });
