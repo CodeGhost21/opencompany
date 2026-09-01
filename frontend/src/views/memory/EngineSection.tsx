@@ -52,15 +52,27 @@ interface Props {
 /** The probe line under the picker. */
 /// The standing status line beside the engine name.
 ///
-/// `healthy` alone is not the whole verdict: a bound engine can be answering
-/// and still have had a family time out, and that state is invisible if the row
-/// reads only the boolean. Refused families never reach here -- apply rejects
-/// those -- so the only caveat to carry is slowness.
-function healthLabel(healthy: boolean | undefined, slow?: string[]): string {
+/// `healthy` alone is not the whole verdict, and refused families **do** reach
+/// here. Apply rejects them, but *boot* binds-and-warns by design — a transient
+/// vendor outage must not crash-loop a tenant — so `healthy: true` alongside
+/// `unreachable: ["core"]` is the ordinary boot outcome for an engine that
+/// answers `/health` and refuses the reads the knowledge ports need. Reading
+/// the boolean alone put a green dot and "answering" on exactly that engine.
+///
+/// Refused outranks slow: one is the engine saying no, the other is it being
+/// busy.
+function healthLabel(
+  healthy: boolean | undefined,
+  slow?: string[],
+  unreachable?: string[],
+): string {
+  if (healthy === false) return "not answering — check the endpoint and key";
+  if (unreachable?.length) {
+    return `answering, but refusing ${unreachable.join(", ")} — reads against those will fail`;
+  }
   if (healthy === true) {
     return slow?.length ? `answering, but ${slow.join(", ")} timed out at the last probe` : "answering";
   }
-  if (healthy === false) return "not answering — check the endpoint and key";
   return "no probe — this engine has no health check to ask";
 }
 
@@ -157,21 +169,20 @@ export function EngineSection({ client, company, onApplied }: Props) {
       setDraft(null);
       setApiKey("");
       setUrl(applied.engineState.url ?? "");
+      // Independent facts, so independent toasts. These were an `if/else if`,
+      // which meant an apply that both needed a restart and had a family time
+      // out reported only the restart.
+      if (applied.engineState.slowFamilies?.length) {
+        toast.warning(
+          `${applied.engineState.slowFamilies.join(", ")} did not answer inside the probe budget — the engine may simply be loaded.`,
+        );
+      }
       if (applied.restartRequiredFor.length > 0) {
         // Named, never assumed: these companies are still running on the
         // previous engine, and saying "restart required" without saying which
         // would leave an operator unsure whether the change took at all.
         toast.warning(
           `Saved, but ${applied.restartRequiredFor.join(", ")} could not be rebuilt — restart the host for ${applied.restartRequiredFor.length > 1 ? "them" : "it"}.`,
-        );
-      } else if (applied.engineState.slowFamilies?.length) {
-        // Bound, but the probe did not get an answer from every family inside
-        // its budget. Apply deliberately does not refuse over that -- slow is
-        // not the same verdict as refused -- so the caveat has to reach the
-        // operator here. A bare success toast would let an operator who never
-        // pressed Test conclude the reads are fine when they just timed out.
-        toast.warning(
-          `Memory is now on ${applied.engine}, but ${applied.engineState.slowFamilies.join(", ")} did not answer inside the probe budget.`,
         );
       } else {
         toast.success(`Memory is now on ${applied.engine}.`);
@@ -222,15 +233,20 @@ export function EngineSection({ client, company, onApplied }: Props) {
                 // say the opposite of what is true.
                 state.active === "null"
                   ? "bg-status-blocked"
-                  : state.healthy === true
-                    ? "bg-status-done"
-                    : state.healthy === false
-                      ? "bg-status-failed"
-                      : "bg-muted-foreground/40",
+                  : // A refused family is a failure even when `/health` answers:
+                    // boot binds-and-warns, so this engine is live and cannot
+                    // serve the ports. Green here said the opposite.
+                    state.unreachableFamilies?.length
+                    ? "bg-status-failed"
+                    : state.healthy === true
+                      ? "bg-status-done"
+                      : state.healthy === false
+                        ? "bg-status-failed"
+                        : "bg-muted-foreground/40",
               )}
             />
             <span className="font-medium">{state.active}</span>
-            <span className="text-muted-foreground">· {healthLabel(state.healthy, state.slowFamilies)}</span>
+            <span className="text-muted-foreground">· {healthLabel(state.healthy, state.slowFamilies, state.unreachableFamilies)}</span>
           </span>
           {state.capabilities.length > 0 && (
             <span className="flex flex-wrap items-center gap-1.5">
