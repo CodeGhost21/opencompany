@@ -145,25 +145,18 @@ impl Reach {
 ///
 /// [`ScopedGrantable`](Self::ScopedGrantable) answers the first question `yes`
 /// and the second `no`: an operator may delegate it to one teammate until a
-/// deadline, and it still parks under `auto`. That variant exists because an
-/// outward fetch needs the delegation half and must not have the unattended
-/// half — see its own documentation.
+/// deadline, while the call's [`Reach`] still decides whether it parks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// An operator may grant this to a teammate until a deadline — **and**,
     /// since issue #560, may run unattended under the `auto` tier. See the note
     /// on [`Standing`] before loosening a tool to this.
     Grantable,
-    /// An operator may grant this to a teammate until a deadline, but it still
-    /// parks under `auto` (issue #673).
+    /// An operator may grant this to a teammate until a deadline, but the
+    /// standing itself does not confer unattended execution under `auto`.
     ///
-    /// The variant exists because the two questions [`Standing`] answers pull
-    /// apart for an outward fetch. "May maya fetch `https://docs.rs` for the
-    /// next few days?" is a sentence an operator can consent to. "May every
-    /// agent fetch any address, unattended, for as long as the company sits in
-    /// `auto`?" is not — and marking the tool [`Grantable`](Self::Grantable) to
-    /// obtain the first would have silently bought the second, because
-    /// [`Consequence::parks_under_auto`] reads exactly that field.
+    /// This preserves scoped delegation without making standing itself confer
+    /// unattended execution.
     ///
     /// A tool declared this way is only ever grantable **with a scope**: its
     /// declaration is argument-classified, so a call whose scope cannot be
@@ -333,11 +326,7 @@ pub(crate) const SHELL_COMMAND_KEY: &str = "command";
 /// way down a tier by labelling `rm -rf` a read would be the whole gate.
 pub(crate) const SHELL_CATEGORY_KEY: &str = "category";
 
-/// The outward-fetch tool a standing grant may be scoped to a host on (#673).
-///
-/// Only this one of the three web tools. `http_request` and `curl` can mutate,
-/// so a host-scoped grant on them would consent to *writing* to that host —
-/// a different act from the read this issue is about, and one nobody asked for.
+/// An outward-fetch tool whose standing grant may be scoped to a host.
 pub const WEB_FETCH: &str = "web_fetch";
 
 /// The argument key [`WEB_FETCH`] carries its absolute URL under.
@@ -503,10 +492,9 @@ const DECLARED: &[Declared] = &[
     // this layer does not get to see.
     d("git_operations", EffectGroup::Other, Reach::Consequence),
     // ---- Arbitrary code, arbitrary addresses -------------------------------
-    // The three shapes issue #444 names, plus the two web tools that share
-    // `http_request`'s shape. A standing grant on any of these is a standing
-    // grant on "anything the sandbox permits", which is not a sentence an
-    // operator can consent to.
+    // The broad execution and network shapes. A standing grant on any of these
+    // is a standing grant on "anything the sandbox permits", which is not a
+    // sentence an operator can consent to.
     d("shell", EffectGroup::Other, Reach::Consequence),
     // `read_workspace_state` sits here rather than with its fellow workspace
     // reads because of what it does, not what it is called (issue #459). It
@@ -884,7 +872,7 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 /// Issue #877 states the criterion this exists to meet: *"the coverage test
 /// keeps saying which tools answer from arguments and which from the table, so
 /// a new tool cannot quietly join the coarse side."* Before this, the four
-/// classifiers were four hand-written `if` arms in [`consequence_of`] and
+/// classifiers were hand-written `if` arms in [`consequence_of`] and
 /// [`declared_tools`] chained exactly one name — `composio_execute` — by hand.
 /// A fifth classifier could therefore be added, dispatched, and still be
 /// invisible to every test that walks [`declared_tools`], because nothing tied
@@ -897,11 +885,11 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 /// reach. `composio_execute` is the one entry with no row, which is why
 /// [`declared_tools`] has to union rather than concatenate.
 ///
-/// Ordered by the issue that added each, which is also the order they were
-/// dispatched in before:
+/// Ordered for reading:
 ///
 /// * `composio_execute` — #441, keyed on the action slug.
-/// * `web_fetch` — #673, keyed on the URL's host.
+/// * `web_fetch` / `curl` — keyed on the URL's host.
+/// * `http_request` — keyed on its method and URL host.
 /// * `shell` — #875, keyed on the command line.
 /// * `git_operations` — #877, keyed on the `operation`.
 /// * `mcp_call_tool` / `mcp_registry_tool_call` — #1124, keyed on the
@@ -921,6 +909,8 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 const ARGUMENT_GRADED: &[(&str, Grader)] = &[
     (COMPOSIO_EXECUTE, composio_execute_consequence),
     (WEB_FETCH, web_fetch_consequence),
+    ("http_request", http_request_consequence),
+    ("curl", curl_consequence),
     (SHELL, shell_consequence),
     (GIT_OPERATIONS, git_operations_consequence),
     (MCP_CALL_TOOL, mcp_call_tool_consequence),
@@ -977,7 +967,7 @@ fn tool_names(
 /// `args` are consulted, not decoration: `composio_execute` carries every
 /// Composio action under one name, so classifying it from the name alone
 /// collapsed a repository read and an outgoing email into the same verdict —
-/// and the cautious answer had to win for both (issue #441). Three more tools
+/// and the cautious answer had to win for both (issue #441). Additional tools
 /// have since joined it, and they are listed in [`ARGUMENT_GRADED`] rather than
 /// branched on here, so that the set of them can be tested rather than read off
 /// this function's body.
@@ -1490,19 +1480,37 @@ fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
 /// still grantable, approving one card would mint a grant admitting every host
 /// on earth. Tying the two answers to one function makes that unrepresentable.
 ///
-/// [`Reach`] is untouched: a fetch still reaches outside the company, so it
-/// still parks under `supervised`, and — via [`Standing::ScopedGrantable`] —
-/// still parks under `auto`. What changes is only that the operator now has
-/// something bounded to say yes to.
 fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
     Consequence {
         group: EffectGroup::Other,
-        reach: Reach::Consequence,
+        reach: Reach::ExternalRead,
         standing: match web_fetch_scope_of(args) {
             Some(_) => Standing::ScopedGrantable,
             None => Standing::PerCall,
         },
     }
+}
+
+fn curl_consequence(args: &serde_json::Value) -> Consequence {
+    web_fetch_consequence(args)
+}
+
+fn http_request_consequence(args: &serde_json::Value) -> Consequence {
+    let gated = Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    };
+    let Some(method) = args.get("method").and_then(|value| value.as_str()) else {
+        return gated;
+    };
+    if matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    ) {
+        return web_fetch_consequence(args);
+    }
+    gated
 }
 
 /// The consequence of running one shell command (issue #875).
@@ -2067,10 +2075,12 @@ fn shell_command_is_read(_command: &str, _declared: Option<&str>) -> bool {
 }
 
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
-    // Issue #673: the same one-function rule the Composio arm follows, for the
-    // same reason — the mint side and the live call must read the host with the
-    // identical code, or a grant could be minted that never matches its own tool.
-    if tool.eq_ignore_ascii_case(WEB_FETCH) {
+    // The mint side and the live call must read the host with identical code, or
+    // a grant could be minted that never matches its own tool.
+    if [WEB_FETCH, "http_request", "curl"]
+        .iter()
+        .any(|candidate| tool.eq_ignore_ascii_case(candidate))
+    {
         return web_fetch_scope_of(args);
     }
     if !tool.eq_ignore_ascii_case(COMPOSIO_EXECUTE) {
@@ -2910,9 +2920,7 @@ mod tests {
                 COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
             })),
             MOVED_BY_AUTO,
-            "a tool crossed the `auto` line once its arguments were read. An \
-             outward fetch must be delegable to one teammate (`ScopedGrantable`) \
-             WITHOUT running unattended for everyone under `auto` — see issue #673"
+            "a tool crossed the `auto` line once its arguments were read"
         );
 
         // The other direction, spelled out: the tools an operator would be
@@ -3756,7 +3764,7 @@ mod tests {
         assert!(all.contains(&COMPOSIO_EXECUTE));
         assert!(all.contains(&"shell"));
         // `composio_execute` is the one roster entry with no `DECLARED` row;
-        // the other three shadow theirs and are counted once.
+        // the other five shadow theirs and are counted once.
         assert_eq!(all.len(), DECLARED.len() + 1);
     }
 
@@ -3839,14 +3847,14 @@ mod tests {
     /// A roster entry that shadows a [`DECLARED`] row is counted **once**.
     ///
     /// The union is what makes the partition above meaningful: a concatenation
-    /// would double-count `shell`, `web_fetch` and `git_operations`, and every
+    /// would double-count the roster entries that keep fallback rows, and every
     /// caller that walks [`declared_tools`] as a set — `always_approve`,
     /// `judgement`, the harness roster — would silently do redundant work over
     /// duplicated names.
     #[test]
     fn a_roster_entry_that_shadows_a_table_row_is_enumerated_once() {
         let names: Vec<&str> = declared_tools().collect();
-        for tool in ["shell", WEB_FETCH, GIT_OPERATIONS] {
+        for tool in ["shell", WEB_FETCH, "http_request", "curl", GIT_OPERATIONS] {
             assert_eq!(
                 names.iter().filter(|name| **name == tool).count(),
                 1,
