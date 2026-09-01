@@ -55,8 +55,9 @@ import type { SettingsPage } from "@/views/settings-pages";
  *
  *   - `page-header-precedes-every-return.test.ts` asks a strictly weaker,
  *     decidable question — is there *any* JSX `return` textually above the
- *     header? — over every routed view and every settings page, so a new route
- *     is covered the day it is added.
+ *     header? — over every routed view and over every sub-page of the three
+ *     sections below (Settings, Finance, Connections), so a new route or a new
+ *     sub-page is covered the day it is added.
  *   - `settings-page-named-in-every-state.test.ts` renders six of those pages
  *     in their loading and error states and asks the DOM for the `h1`, which
  *     is the only evidence that actually proves it.
@@ -220,7 +221,12 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
  * page with no row is a compile error.
  *
  * Both files were rows in `SETTINGS_NAMED_BY` until the section was built. The
- * pages did not change; only which table has to account for them did.
+ * pages did not change; only which table has to account for them did — and
+ * moving them is what briefly dropped `McpServersView` out of
+ * `page-header-precedes-every-return.test.ts` altogether, since that test swept
+ * the two other section tables and not this one (codex review on #1977). Apps
+ * kept its cover by luck rather than by rule: it is also `NAMED_BY.connections`,
+ * the leaf the bare route renders. Both sweeps read this table now.
  */
 export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
   apps: "OAuthView.tsx",
