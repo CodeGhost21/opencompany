@@ -60,6 +60,38 @@ this does to the issue's own framing: "shared hosting" becomes shared
 then slots into `OPENCOMPANY_MEMORY_API_KEY` exactly like any other hosted
 engine's, and the migrate caution above is satisfied by construction.
 
+## What Cortex would and would not replace
+
+Worth stating plainly, because the two knobs are independent and it is easy to
+read one as the other.
+
+| Knob | Scope |
+|---|---|
+| `OPENCOMPANY_STORAGE` | the durable base for **all fourteen ports** — `fs`, `sqlite`, or `mongodb` |
+| `OPENCOMPANY_MEMORY` | an optional overlay for **three of them** — `MemoryStore`, `ContextStore`, `FactStore` |
+
+Where memory actually lives therefore depends on the overlay, not the base
+alone:
+
+- **`store` (default)** — memory reuses the base backend. Under
+  `OPENCOMPANY_STORAGE=mongodb`, memory *is* in MongoDB. This is what tenants
+  run today.
+- **`embedded`/tinycortex (removed)** — memory lived in the engine's own
+  filesystem workspace under `<OPENCOMPANY_DATA_DIR>/memory/`, **not** MongoDB.
+  Selecting it alongside `OPENCOMPANY_STORAGE=mongodb` was a **boot refusal**,
+  because `/data` is scratch in that mode and the memory would have been
+  silently lost on restart.
+- **`remote`** — memory lives in the hosted provider; the base backend keeps
+  the other eleven ports.
+
+So adopting Cortex is **not** replacing MongoDB. It carves three ports out of
+the base backend and leaves the other eleven — companies, events, secrets,
+tasks and the rest — exactly where they are. A tenant would run Mongo *and*
+Cortex, each owning a disjoint set of ports.
+
+That also bounds the blast radius of everything in this document: a Cortex
+outage costs a tenant its knowledge ports, not its company records.
+
 ## Capability audit: the strongest reason for caution
 
 `memory-engine.md` refuses a bind when a driver advertises a family it does not
@@ -127,6 +159,19 @@ CortexDB is an append-only event log. Measured against the deployment:
 The idempotency ledger is independent of the event store and survives
 `/v1/forget`, so delete-then-rewrite loses the original *and* refuses the
 replacement. It is strictly worse than not attempting it.
+
+**The engine can already do this; the HTTP surface cannot express it.** The
+embedded adapter that #1568 removed (`tinymemory-tinycortex`) forwards `store`
+straight through to the engine's own implementation, and that crate runs the
+*full* conformance suite over `TinycortexProvider`
+(`tests/full_provider_conformance.rs`) — including
+`assert_upsert_replaces_rather_than_duplicates`. The engine core therefore
+passes the exact assertion the hosted API fails.
+
+That makes the upstream ask narrow and concrete: expose over HTTP what the
+engine already implements and is already conformance-tested against, rather than
+add a capability. It also suggests the gap is an API-surface oversight rather
+than a deliberate design position.
 
 The only technically viable adapter keeps an **external index** of
 `(namespace, key) → event_id`, writes with fresh idempotency keys, and forgets
@@ -298,6 +343,10 @@ not.
 - Is there an undocumented prerequisite for fact extraction that we missed?
 - Will Cortex add an upsert path? Without one, the only route is a stateful
   driver carrying its own key index — is that acceptable, or disqualifying?
+- Is the embedded engine a fallback? `tinymemory-tinycortex` still exists and
+  still passes the full suite, so it is technically viable today with no
+  upstream dependency. #1568's PR body records only the mechanical removal and
+  no rationale, so whether this is a real option or a closed door is unresolved.
 - Self-hosted deployments have no support channel we can reach: the public
   tracker is packaging-only and Cortex Cloud support presumes a customer
   relationship. Worth settling when we contact them about the upsert gap.
