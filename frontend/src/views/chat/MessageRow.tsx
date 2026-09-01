@@ -42,8 +42,8 @@ interface Props {
    * wired review — the pill still renders.
    */
   onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
-  /** The card whose review verdict is in flight, if any. */
-  reviewingCardId?: string | null;
+  /** Every card whose review verdict is in flight, if any. */
+  reviewingCardIds?: ReadonlySet<string>;
   /**
    * Resolves an attachment's bytes to an object URL for preview/download
    * (issue #1682). Threaded from the shell, which holds the authenticated
@@ -225,7 +225,7 @@ export function MessageRow({
   onDismissCard,
   dismissingCardId,
   onReviewCard,
-  reviewingCardId,
+  reviewingCardIds,
   resolveAttachmentUrl,
   taskStatusByTaskId,
   now = Date.now(),
@@ -258,7 +258,7 @@ export function MessageRow({
     return (
       <SystemPill
         message={message}
-        reviewInFlight={reviewingCardId === message.taskId}
+        reviewInFlight={message.taskId !== undefined && (reviewingCardIds?.has(message.taskId) ?? false)}
         onReviewCard={
           isTaskInReview(taskStatus) && isLatestSettlePill !== false ? onReviewCard : undefined
         }

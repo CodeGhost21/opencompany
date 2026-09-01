@@ -71,8 +71,8 @@ interface Props {
    * Approve control on that pill. Absent where review is not wired.
    */
   onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
-  /** The card whose review verdict is in flight, if any. */
-  reviewingCardId?: string | null;
+  /** Every card whose review verdict is in flight, if any. */
+  reviewingCardIds?: ReadonlySet<string>;
   /**
    * Resolves a stored attachment's bytes to an object URL for the transcript
    * (issue #1682). Threaded from the shell, which holds the authenticated
@@ -174,7 +174,7 @@ export function MessageTimeline({
   onDismissCard,
   dismissingCardId,
   onReviewCard,
-  reviewingCardId,
+  reviewingCardIds,
   resolveAttachmentUrl,
   taskStatusByTaskId,
   onStartBrief,
@@ -390,7 +390,7 @@ export function MessageTimeline({
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
                 onReviewCard={onReviewCard}
-                reviewingCardId={reviewingCardId}
+                reviewingCardIds={reviewingCardIds}
                 resolveAttachmentUrl={resolveAttachmentUrl}
                 taskStatusByTaskId={taskStatusByTaskId}
                 now={now ?? Date.now()}
