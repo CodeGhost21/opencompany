@@ -83,6 +83,13 @@ pub const OPERATOR_ATTRIBUTION: &str = "operator";
 /// set rather than piggybacking on the cancel-attribution constant.
 pub const OPERATOR_REDIRECT_ATTRIBUTION: &str = "operator redirect";
 
+/// The note attribution for an operator's review feedback on a settled
+/// `in_review` card, relayed back into its origin thread. A distinct label so
+/// [`relay_text`] strips it as board chrome the same way it strips the
+/// operator's mid-flight redirect, rather than leaking a `[reviewer]` prefix
+/// into the relayed bubble.
+pub const REVIEWER_ATTRIBUTION: &str = "reviewer";
+
 /// How one dispatch run ended, independent of who ran it or what it said.
 ///
 /// This is the whole input to the lifecycle decision. Keeping it separate from
@@ -473,6 +480,7 @@ pub fn relay_text(
                 crate::runtime::advance::SYSTEM_ATTRIBUTION,
                 OPERATOR_ATTRIBUTION,
                 OPERATOR_REDIRECT_ATTRIBUTION,
+                REVIEWER_ATTRIBUTION,
                 responder,
                 orchestrator,
             ]
@@ -979,6 +987,21 @@ mod test {
             strip_note_attribution("[writer] see [ref] below", &["writer"]),
             "see [ref] below"
         );
+    }
+
+    /// A reviewer's feedback block is board chrome the relay strips: once a
+    /// re-run settles the card back to review, the relayed bubble carries the
+    /// reviewer's prose without the `[reviewer]` prefix, exactly as it strips
+    /// the operator's mid-flight redirect.
+    #[test]
+    fn the_relay_strips_a_reviewer_feedback_block() {
+        let noted = card(
+            COLUMN_IN_REVIEW,
+            Some("[writer] second draft\n\n[reviewer] tighten the intro"),
+        );
+        let text = relay_text(&noted, "writer", "ceo", &[]);
+        assert!(!text.contains("[reviewer]"), "{text}");
+        assert!(text.contains("tighten the intro"), "{text}");
     }
 
     /// PR #1949 review (Codex thread 3895066483): the strip used to treat ANY
