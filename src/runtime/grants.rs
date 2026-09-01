@@ -102,6 +102,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
+use crate::ports::blockers::BlockerResolution;
 use crate::ports::generate_id;
 use crate::ports::types::{
     Actor, ApprovalId, Attachment, CompanyEvent, CompanyId, EventSeq, Mention, MessageIntent,
@@ -600,6 +601,22 @@ struct GrantState {
     /// sweeps every checkout, so there is nothing left for a rehydrated mark to
     /// protect.
     pending: HashMap<ApprovalId, String>,
+    /// The operator's answer to a parked blocker, armed when the blocker is
+    /// resolved and read by the resume fork on the detached follow-up (issue
+    /// #1863).
+    ///
+    /// A side-channel disjoint from [`continuations`](Self::continuations) for
+    /// the same reason that map is disjoint from [`live`](Self::live): a blocker
+    /// answer is not authority to execute anything — a blocker's effect is inert
+    /// — so it must never be mistaken for a redeemable grant. It rides here so
+    /// [`CompanyRuntime::continue_turn`](crate::company::runtime::CompanyRuntime)
+    /// can recognise a resolution as a blocker's and re-enter the stopped step
+    /// carrying the answer, instead of falling through the grant-redemption path
+    /// that finds nothing and returns.
+    ///
+    /// Re-armed at boot from the journal, so a restart between the answer and
+    /// the re-entry resumes rather than dropping the operator's decision.
+    blocker_resolutions: HashMap<ApprovalId, BlockerResolution>,
 }
 
 /// Whether two recorded scopes overlap (issue #1458).
@@ -687,6 +704,48 @@ impl GrantSet {
         let continuation = state.continuations.remove(id)?;
         state.consumed_continuations.push(id.clone());
         Some(continuation)
+    }
+
+    /// Arms the operator's answer to a parked blocker (issue #1863), so the
+    /// detached follow-up recognises the resolution as a blocker's and re-enters
+    /// the stopped step carrying it.
+    pub fn arm_blocker_resolution(&self, id: &ApprovalId, resolution: BlockerResolution) {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .blocker_resolutions
+            .insert(id.clone(), resolution);
+    }
+
+    /// Reads a parked blocker's armed answer without consuming it.
+    pub fn peek_blocker_resolution(&self, id: &ApprovalId) -> Option<BlockerResolution> {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .blocker_resolutions
+            .get(id)
+            .cloned()
+    }
+
+    /// Consumes a parked blocker's armed answer as the resume fork takes it.
+    pub fn take_blocker_resolution(&self, id: &ApprovalId) -> Option<BlockerResolution> {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .blocker_resolutions
+            .remove(id)
+    }
+
+    /// Re-arms blocker answers from the journal at boot (issue #1863), the
+    /// blocker twin of [`rehydrate_continuations`](Self::rehydrate_continuations).
+    pub fn rehydrate_blocker_resolutions(
+        &self,
+        resolutions: impl IntoIterator<Item = (ApprovalId, BlockerResolution)>,
+    ) {
+        let mut state = self.inner.lock().expect("grant set poisoned");
+        for (id, resolution) in resolutions {
+            state.blocker_resolutions.insert(id, resolution);
+        }
     }
 
     /// Removes every grant minted more than `ttl_millis` before `now_millis`,
