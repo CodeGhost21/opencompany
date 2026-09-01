@@ -215,6 +215,48 @@ const SPAWN_DIRECTIVE = "SPAWNONE";
 const PLAN_DIRECTIVE = "__MOCK_PLAN__";
 
 /**
+ * The host's own briefing blocks, appended to an operator message before it
+ * reaches a model.
+ *
+ * These matter here because two of them quote **other messages verbatim**.
+ * `THREAD_INDEX_ANNOTATION` lists the opening words of the channel's other
+ * threads, truncated — so once a spec has opened a thread with a directive in
+ * it, every later message in that channel carries a chopped-off copy of that
+ * directive. A directive cut mid-payload is not a directive; it is a decoy that
+ * parses as nothing.
+ *
+ * Cutting at the earliest of these is what the host itself does to recover the
+ * operator's own words (`operator_words` in `src/runtime/delegation.rs`), and
+ * for the same reason: everything past the first marker was written by the
+ * host, not by the spec.
+ *
+ * Keep in step with the constants in `src/runtime/cycle.rs` and
+ * `src/brain/medulla/effects.rs`.
+ */
+const HOST_ANNOTATIONS = [
+  "\n\n[Open work already handed to you",
+  "\n\n[Other conversations in this channel",
+  "\n\n[Work raised in this conversation",
+  "\n\n[This request is already being built",
+  "\n\n[Attached file:",
+];
+
+/**
+ * The spec's own half of a message, with the host's briefings removed.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function specWords(text) {
+  let cut = text.length;
+  for (const marker of HOST_ANNOTATIONS) {
+    const at = text.indexOf(marker);
+    if (at >= 0 && at < cut) cut = at;
+  }
+  return text.slice(0, cut);
+}
+
+/**
  * How many steps of each plan have been served, keyed by the plan's own text.
  *
  * @type {Map<string, number>}
@@ -419,17 +461,42 @@ function findDirective(messages) {
  */
 function findPlan(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const text = textOf(messages[i]);
-    const at = text.indexOf(PLAN_DIRECTIVE);
-    if (at < 0) continue;
-    const steps = readJsonValue(text, at + PLAN_DIRECTIVE.length, "[", "]");
+    const text = specWords(textOf(messages[i]));
+    // Every occurrence, newest first — not just the first one.
+    //
+    // The host prepends context to an operator message: a `## Relevant prior
+    // work` digest of earlier tasks, then the operator's own words under
+    // `## Task`. The digest quotes those earlier messages *truncated*, so when
+    // a spec opens a thread with a directive in it, later messages carry a
+    // chopped-off copy of it BEFORE the live one.
+    //
+    // `indexOf` found the decoy, and a decoy is unparsable by construction.
+    // Scanning back through occurrences puts the operator's own directive --
+    // the last one in the text -- ahead of anything quoted above it.
+    const found = [];
+    for (let at = text.indexOf(PLAN_DIRECTIVE); at >= 0; at = text.indexOf(PLAN_DIRECTIVE, at + 1)) {
+      found.push(at);
+    }
+    let at = -1;
+    let steps = null;
+    for (let k = found.length - 1; k >= 0; k -= 1) {
+      const parsed = readJsonValue(text, found[k] + PLAN_DIRECTIVE.length, "[", "]");
+      if (Array.isArray(parsed)) {
+        at = found[k];
+        steps = parsed;
+        break;
+      }
+    }
+    if (found.length === 0) continue;
     if (!Array.isArray(steps)) {
-      // A broken spec, not a plain turn. Say so loudly rather than answering
-      // with text the spec will then fail on obscurely.
+      // Loud, because a spec that wrote bad JSON deserves to hear it — but keep
+      // scanning older messages rather than abandoning the thread. Returning
+      // null here let one truncated echo silence every real plan behind it.
       process.stderr.write(
-        `[mock brain] ${PLAN_DIRECTIVE} found but its JSON payload did not parse\n`,
+        `[mock brain] ${PLAN_DIRECTIVE} appears ${found.length}x in message ${i}; none of ` +
+          `them parsed, looking further back\n`,
       );
-      return null;
+      continue;
     }
     // Identity is the directive and the rest of its LINE — the same key shape
     // `SPAWNONE` uses, and for both of its reasons. It is stable across the
