@@ -146,8 +146,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await openWorkflow(page, secondName);
     await expect(page).toHaveURL(new RegExp(`#/workflows/${secondId}$`));
 
-    await page.getByRole("button", { name: "Workspace" }).click();
-    await page.getByRole("button", { name: "Workflows" }).click();
+    // Room and Flows: two section rows, both reachable in one click from
+    // anywhere. Workspace is a child under Company now, so stepping away
+    // through it would take two clicks and test the sidebar rather than the
+    // remembered workflow this spec is about.
+    await page.getByRole("button", { name: "Room", exact: true }).click();
+    await page.getByRole("button", { name: "Flows", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(secondName);
 
     await page.goto(`/#/workflows/${firstId}`);
@@ -156,8 +160,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     // is the flake, not the console.
     await expect(openWorkflowName(page)).toHaveText(firstName, { timeout: 30_000 });
 
-    await page.getByRole("button", { name: "Workspace" }).click();
-    await page.getByRole("button", { name: "Workflows" }).click();
+    // Room and Flows: two section rows, both reachable in one click from
+    // anywhere. Workspace is a child under Company now, so stepping away
+    // through it would take two clicks and test the sidebar rather than the
+    // remembered workflow this spec is about.
+    await page.getByRole("button", { name: "Room", exact: true }).click();
+    await page.getByRole("button", { name: "Flows", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(firstName);
   } finally {
     await deleteWorkflow(request, firstId);

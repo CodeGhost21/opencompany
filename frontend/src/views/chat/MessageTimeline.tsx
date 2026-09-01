@@ -387,6 +387,15 @@ export function MessageTimeline({
                 onRedeemBudgetPause={onRedeemBudgetPause}
                 redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
                 latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+                // Issue #1986: read off `channel.system` here rather than
+                // threaded down from `ChatView`, because this component already
+                // holds the channel and that flag *is* the predicate `ChatView`
+                // derives its own `readOnly` from — a second prop carrying the
+                // same fact through the same tree is one more thing that can
+                // disagree with it. See `MessageRow`'s `readOnly` doc for what
+                // it takes away (adding a reaction) and what it deliberately
+                // leaves (reactions already there, and the way into a thread).
+                readOnly={Boolean(channel.system)}
               />
             </div>
           ) : (
@@ -513,8 +522,16 @@ function ChannelIntro({
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
           offering "add a teammate here" over a channel that turns out to be full
-          of conversation reads as data loss. */}
-      {empty && !loading && channel.kind === "channel" && (
+          of conversation reads as data loss.
+
+          Not on the read-only Operator feed (`channel.system`, the same
+          predicate `ChatView` derives `readOnly` from). Neither opening exists
+          there: "Give the team a brief" prefills a composer that channel does
+          not render, and "Add people" opens a members pane `ChatView` gates
+          off on the same flag — so both were controls offering an action that
+          could not happen, under a notice saying there is nothing to reply to
+          here. */}
+      {empty && !loading && channel.kind === "channel" && !channel.system && (
         <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>

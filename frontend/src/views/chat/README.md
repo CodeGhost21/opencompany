@@ -94,6 +94,18 @@ folds the console's `main` to `General` and `resolve_desk_id("General")` then
 selects `ops`, so `@everyone` on the built-in row would have expanded to that
 desk's members while the row beside it routed by `ops`.
 
+**A General spelling in the address bar opens the line too.** The host folds
+four spellings into one conversation (`isGeneralChannel`, mirroring
+`is_general_chat`), and every consumer of a live frame already applies that
+fold; routing was the one place that did not, so which of `#/chat/main` and
+`#/chat/general` worked depended on how the company happened to be declared.
+`ChatView` now falls back to `generalChannelId` for a General-spelled segment
+that names no channel outright — exact ids are still asked first, so a real desk
+whose id *is* a General spelling still wins its own channel and nothing that
+already resolved is rerouted. The guided tour's two composer stops depend on
+this: they address `#/chat/main` explicitly so they cannot inherit the read-only
+Operator feed, which renders no composer for their spotlight to anchor on.
+
 **A teammate whose id is a General spelling does not take the line with it.**
 `mint_agent_id` reserves `main` and `General`, but a manifest can still declare
 one, and `GET chat/history?desk=main` answers with the folded General
@@ -164,6 +176,43 @@ no reactions, which is the truth about it. History journaled under the old
 counter-minted `member-N` teammate ids stays orphaned — there is no honest
 mapping from `member-3` to a person, and inventing one would be worse than the
 loss.
+
+### A read-only channel offers no new reaction (#1986)
+
+Issue #1986 was opened as a product question — is reacting to a read-only feed
+of workflow reports legitimate acknowledgement, or the same defect that #1757
+and #1984 fixed for the members pane and the composer? The operator's ruling is
+**no**. Reacting writes into the company's transcript exactly as sending does,
+and the host authorizes it through the very same gate (`chat_actor`,
+`src/server/operator.rs`, whose own doc says reacting "can be neither easier nor
+harder than saying something"), so a surface that states *there is nothing to
+reply to here* must not offer it either.
+
+`MessageTimeline` reads `channel.system` — the flag `ChatView` derives its own
+`readOnly` from, and the one the channel intro already gates on — and
+`MessageRow` then **removes** the hover toolbar's five quick reactions rather
+than disabling them. The same answer #1984 gave the composer, for the same
+reason: a greyed-out control is still a claim that the action exists, and this
+strip is revealed by CSS alone (`group-hover/message:flex`), so leaving the
+buttons mounted leaves them reachable by pointer, by keyboard focus and by a
+screen reader.
+
+Reactions **already** on such a line still render, disabled, with a tooltip
+saying why. One somebody left is content and this feed is the only record of
+it; hiding it would lose information rather than withdraw an offer. Only the
+ability to add or toggle one goes. The way into a thread stays too — an
+Operator report is still worth reading the replies under, and what may be
+*written* in one is `ThreadPanel`'s question, answered there.
+
+**This one is UX, not enforcement.** A *send* is refused server-side by
+`CompanyRuntime::ensure_desk_writable` (#1757), which is why the composer's
+gate is defence in depth. The reaction route is not: `POST
+{scope}/chat/messages/{seq}/reactions` is addressed by sequence number, never
+resolves the target's channel, and runs no read-only check at all — so a
+reaction on an Operator report is still accepted (`204`) from anyone who can
+issue the request. `reactions_refuse_a_target_that_is_an_admin_only_report` in
+`src/server/operator.rs` asserts exactly that in its admin branch. Closing it
+is a host change and is not part of #1986.
 
 ## Empty, or not answered yet
 
