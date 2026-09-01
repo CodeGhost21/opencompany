@@ -2,9 +2,16 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { VIEWS, type View } from "@/lib/console-routes";
+import { CONNECTION_PAGES } from "@/views/connection-pages";
 import { FINANCE_PAGES } from "@/views/finance/FinanceSection";
 import { SETTINGS_PAGES } from "@/views/settings-pages";
-import { FINANCE_NAMED_BY, NAMED_BY, SETTINGS_NAMED_BY, type Leaf } from "./support/routed-views";
+import {
+  CONNECTIONS_NAMED_BY,
+  FINANCE_NAMED_BY,
+  NAMED_BY,
+  SETTINGS_NAMED_BY,
+  type Leaf,
+} from "./support/routed-views";
 
 /**
  * A routed view's header is the first thing it can render — in every state
@@ -82,6 +89,7 @@ const GUARDED_COMPONENTS: string[] = [
   ),
   ...Object.values(SETTINGS_NAMED_BY),
   ...Object.values(FINANCE_NAMED_BY),
+  ...Object.values(CONNECTIONS_NAMED_BY),
 ].map((file) => file.slice(file.lastIndexOf("/") + 1).replace(/\.tsx$/, ""));
 
 /**
@@ -319,6 +327,7 @@ describe("every state of a routed view renders a heading (#1785)", () => {
       ...VIEWS.flatMap((v) => NAMED_BY[v].map(headerFile)).filter((f): f is string => f !== null),
       ...Object.values(SETTINGS_NAMED_BY),
       ...Object.values(FINANCE_NAMED_BY),
+      ...Object.values(CONNECTIONS_NAMED_BY),
     ];
     const missing = files
       .filter((file) => {
@@ -394,6 +403,31 @@ describe("every state of a routed view renders a heading (#1785)", () => {
       offenders,
       `A finance page has a state that renders no page header. Same fix as the ` +
         `routed views above.\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("has no connections page returning JSX without a heading in it", () => {
+    // The third section like Settings, and the one this sweep was blind to
+    // (codex review on #1977). `#/connections/mcp` is bookmarkable and `mcp` is
+    // not a `View`, so the routed-view sweep above cannot reach `McpServersView`
+    // at all: `NAMED_BY.connections` names `OAuthView.tsx`, because Apps is what
+    // the bare route renders. Apps was therefore covered only incidentally, as
+    // that default leaf, and MCP was covered by nothing — a future unnamed
+    // loading or error state on it would have passed a guard whose whole claim
+    // is that it covers every bookmarkable subpage. Iterating the page table is
+    // what makes both of them covered on purpose.
+    const offenders = CONNECTION_PAGES.flatMap(({ id }) => {
+      const file = CONNECTIONS_NAMED_BY[id];
+      const source = readFileSync(`${VIEWS_DIR}/${file}`, "utf8");
+      return returnsWithoutHeader(source, file).map(
+        (r) => `connections/${id} (${file}:${r.line}) returns with no heading in it: ${r.text}`,
+      );
+    });
+
+    expect(
+      offenders,
+      `A connections page has a state that renders no page header. Same fix as ` +
+        `the routed views above.\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
 

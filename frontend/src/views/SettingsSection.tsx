@@ -7,8 +7,6 @@ import { cn } from "@/lib/utils";
 import { InferenceView } from "@/views/InferenceView";
 import { HostingView } from "@/views/HostingView";
 import { SearchView } from "@/views/SearchView";
-import { McpServersView } from "@/views/McpServersView";
-import { OAuthView } from "@/views/OAuthView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
 import { SettingsView } from "@/views/SettingsView";
@@ -42,9 +40,14 @@ interface Props {
  *
  * Everything that configures the company rather than running it lives here,
  * behind a sub-sidebar: the connection and lifecycle controls, who can sign in,
- * which third-party accounts are linked, and which tool servers are installed.
- * Each is its own route (`#/settings/people`), so a sub-page is linkable and
- * survives a refresh exactly as a top-level view does.
+ * which model teammates think with, where its sites deploy and where it
+ * searches. Each is its own route (`#/settings/people`), so a sub-page is
+ * linkable and survives a refresh exactly as a top-level view does.
+ *
+ * Which third-party accounts are linked and which tool servers are installed
+ * used to be here too. They are the Connections section now — see
+ * `views/connections/ConnectionsSection.tsx` for why, and note that the three
+ * credential forms still on this rail stayed on purpose.
  */
 export function SettingsSection({ client, company, feed, sub, onFlag, onResetCompany }: Props) {
   const page = resolveSettingsPage(sub);
@@ -144,8 +147,12 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
           />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
-        {page === "oauth" && <OAuthView client={client} company={company} />}
-        {page === "mcp" && <McpServersView client={client} company={company} />}
+        {/* OAuth and MCP Servers were here. They are the Connections section
+            now (`#/connections/apps`, `#/connections/mcp`) — what the company
+            can act through is read repeatedly, and a settings rail is where an
+            operator changes configuration once. Both old addresses still
+            resolve, rewritten by `console-route-rewrites.ts`. Inference stayed:
+            a credential form belongs beside the one thing it unlocks. */}
         {page === "inference" && <InferenceView client={client} company={company} />}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
