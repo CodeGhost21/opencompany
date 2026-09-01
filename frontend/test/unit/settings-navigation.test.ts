@@ -9,6 +9,7 @@ import {
   SETTINGS_PAGE_GROUPS,
   SETTINGS_PAGES,
 } from "@/views/settings-pages";
+import { SETTINGS_NAMED_BY } from "./support/routed-views";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
@@ -75,15 +76,15 @@ describe("Settings navigation (issue #1468)", () => {
     // for the Connections section — `connections-navigation.test.ts` holds them
     // to the same rules there. The list tracks the ids settings-pages.ts
     // actually declares.
-    const settingsPages = [
-      "SettingsView.tsx",
-      "PeopleView.tsx",
-      "InferenceView.tsx",
-      "HostingView.tsx",
-      "SearchView.tsx",
-      "SkillsView.tsx",
-      "UsageView.tsx",
-    ].map((page) => read(`views/${page}`));
+    // Derived from `SETTINGS_NAMED_BY`, not restated. A hand-written list is a
+    // list that quietly stops covering the newest page: Observatory joined this
+    // rail and the hard-coded seven still passed, testing six-sevenths of it and
+    // saying nothing. `SETTINGS_NAMED_BY` is a `Record<SettingsPage, …>`, so a
+    // page with no entry is a compile error and this sweep cannot fall behind.
+    const settingsPages = SETTINGS_PAGES.map(({ id }) =>
+      read(`views/${SETTINGS_NAMED_BY[id]}`),
+    );
+    expect(settingsPages.length).toBe(SETTINGS_PAGES.length);
 
     expect(section.match(/href=\{`#\/settings\/\$\{item\.id\}`\}/g)).toHaveLength(2);
     expect(section).toContain("title={item.hint}");
