@@ -773,6 +773,17 @@ export function AppShell({
   // after a walk to Approvals — that must keep using the last channel even
   // while the rail is what's on screen (#1768 codex review).
   const chatPaneVisibleRef = useRef(true);
+  // Which thread panel is open in that channel, or `null` for none (#1890 B).
+  //
+  // A third condition on "is this completion's marker actually on screen",
+  // beside the channel and the pane. Since a card records the thread it was
+  // raised in, a threaded settle's marker is folded into its root's replies by
+  // `buildTimeline` and does **not** render in the channel timeline — so the
+  // channel being open is no longer proof the operator can see it. Without
+  // this the toast is suppressed on the channel match and the marker is
+  // nowhere: the exact "suppressed a toast for a marker the operator cannot
+  // see" defect #1768's review established the rule against.
+  const openThreadRootRef = useRef<string | null>(null);
   const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
     chatPaneVisibleRef.current = visible;
   }, []);
@@ -1227,6 +1238,7 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+    openThreadRootRef.current = null;
     // Another company's transcripts are another namespace too: a channel id
     // is this company's desk id or a `dm:<roster-id>`, and a provisioned
     // company is built from the same manifests, so ids recur across
@@ -2115,6 +2127,9 @@ export function AppShell({
       advanceChannelRead = true,
     ) => {
       activeChatChannelRef.current = channelId;
+      // #1890 B. `ChatView` re-reports on every open/close (its effect lists
+      // `openThreadId`), so this ref tracks the panel rather than lagging it.
+      openThreadRootRef.current = openThreadId ?? null;
       if (mentionFeedRevision === undefined) return;
       // Clear only THIS channel's mentions, and only once its history is
       // actually on screen. A mention is durable and there is no
@@ -3076,8 +3091,17 @@ export function AppShell({
         // completion from that channel must not suppress its toast while the
         // operator cannot actually see the inline marker (#1768 codex review).
         if (!chatPaneVisibleRef.current) return false;
-        const origin = dispatchMarkerPlacement(event, chatChannelByThread)?.channelId;
-        return origin != null && activeChatChannelRef.current === origin;
+        const placement = dispatchMarkerPlacement(event, chatChannelByThread);
+        const origin = placement?.channelId;
+        if (origin == null || activeChatChannelRef.current !== origin) return false;
+        // #1890 B: a card raised in a thread settles into that thread, and
+        // `buildTimeline` folds every parented line into its root's replies —
+        // so the marker is NOT in the channel timeline and the channel being
+        // open proves nothing. It is visible only while that thread's panel is
+        // the one open. An unparented marker still renders inline, so the
+        // channel check alone remains right for it.
+        const root = placement?.message.parentId;
+        return root == null || openThreadRootRef.current === root;
       },
       [view, chatChannelByThread],
     ),

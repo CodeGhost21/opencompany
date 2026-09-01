@@ -886,7 +886,13 @@ pub fn build_agent(
     if toolbelt::composio_capability_admits(composio_toolkits.is_some(), &deps.capabilities)
         && let Some(toolkits) = composio_toolkits.as_deref()
     {
-        persona.push_str(&crate::harness::composio_catalog::composio_brief(toolkits));
+        let native_caps: Vec<&str> = toolbelt::native_capabilities_on_belt(&tools)
+            .into_iter()
+            .collect();
+        persona.push_str(&crate::harness::composio_catalog::composio_brief(
+            toolkits,
+            &native_caps,
+        ));
     }
 
     // Skill read surface (read-only catalogue slice). Only materializes when the
@@ -2123,6 +2129,76 @@ mod tests {
         let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
         names.sort();
         names
+    }
+
+    /// The native capabilities `native_capabilities_on_belt` reads off the SAME
+    /// agent [`built_tool_names_with_search`] builds — proving the brief's native
+    /// set is derived from tools that were actually wired, not from the grants.
+    fn built_native_caps_with_search(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            tools: None,
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+            model: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        toolbelt::native_capabilities_on_belt(agent.tools())
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The brief's native set is read off the wired belt: an explicit `search`
+    /// grant with a credential wires `web_search`, so `search` shows up in the
+    /// belt's native capabilities — and a bare `*` (which never wires the metered
+    /// tool) does not.
+    #[test]
+    fn native_capabilities_on_belt_track_the_wired_search_tool() {
+        let granted = built_native_caps_with_search(&["search"]);
+        assert!(
+            granted.contains(&"search".to_string()),
+            "an explicit search grant wires web_search, so `search` is native on the belt: {granted:?}"
+        );
+        let wildcard = built_native_caps_with_search(&["*"]);
+        assert!(
+            !wildcard.contains(&"search".to_string()),
+            "a bare `*` wires no metered search tool, so `search` is not native on the belt: {wildcard:?}"
+        );
     }
 
     /// Build one agent under `grants` with BOTH a managed search backend and a

@@ -740,7 +740,14 @@ pub fn list_tools_description() -> &'static str {
 /// non-empty names exactly the connected toolkits, and empty is open mode, where
 /// the agent is pointed at `composio_list_connections` to discover them rather
 /// than promised a provider (GitHub, say) that may not be connected.
-pub fn composio_brief(toolkits: &[String]) -> String {
+///
+/// `native_caps` are the native capability namespaces the agent actually holds a
+/// built-in tool for ([`native_capabilities_on_belt`](crate::harness::toolbelt::native_capabilities_on_belt)).
+/// Non-empty adds a precedence line: use the built-in tool for those directly,
+/// reserve Composio for connected third-party accounts with no built-in tool.
+/// Empty renders no such line, leaving the brief byte-identical to a brief that
+/// names only the Composio surface.
+pub fn composio_brief(toolkits: &[String], native_caps: &[&str]) -> String {
     let named: Vec<String> = toolkits
         .iter()
         .map(|toolkit| toolkit.trim().to_ascii_lowercase())
@@ -795,6 +802,16 @@ pub fn composio_brief(toolkits: &[String]) -> String {
             "Connected toolkits for this company: {}. Confirm their live state with \
              `composio_list_connections`.\n",
             named.join(", ")
+        ));
+    }
+
+    if !native_caps.is_empty() {
+        brief.push_str(&format!(
+            "Some of what you might reach for you already hold as built-in tools of your own: {}. \
+             Use those built-in tools directly for these — do not route them through Composio. \
+             Composio is only for the company's connected third-party accounts that have no \
+             built-in tool of your own.\n",
+            native_caps.join(", ")
         ));
     }
 
@@ -1501,7 +1518,7 @@ mod tests {
     /// sandbox brief exists to stop, one surface over.
     #[test]
     fn the_composio_brief_names_the_tools_and_the_two_step() {
-        let brief = composio_brief(&["github".to_string()]);
+        let brief = composio_brief(&["github".to_string()], &[]);
         for tool in [
             "composio_list_toolkits",
             "composio_list_connections",
@@ -1519,7 +1536,7 @@ mod tests {
     /// `http_request` — must be called out by name.
     #[test]
     fn the_composio_brief_routes_provider_apis_through_composio_not_the_web_tools() {
-        let brief = composio_brief(&["github".to_string()]);
+        let brief = composio_brief(&["github".to_string()], &[]);
         for web_tool in ["http_request", "curl", "web_fetch"] {
             assert!(
                 brief.contains(web_tool),
@@ -1534,7 +1551,7 @@ mod tests {
     /// tool for, with the exact browser overreach the issue observed named.
     #[test]
     fn the_composio_brief_forbids_promising_actions_it_has_no_tool_for() {
-        let brief = composio_brief(&["github".to_string()]);
+        let brief = composio_brief(&["github".to_string()], &[]);
         let lower = brief.to_lowercase();
         assert!(lower.contains("no browser"), "{brief}");
         assert!(lower.contains("do not promise"), "{brief}");
@@ -1551,7 +1568,7 @@ mod tests {
     /// (or equivalent), not stated as an absolute.
     #[test]
     fn the_composio_brief_does_not_unconditionally_deny_holding_a_browser_tool() {
-        let brief = composio_brief(&["github".to_string()]);
+        let brief = composio_brief(&["github".to_string()], &[]);
         let lower = brief.to_lowercase();
         assert!(
             lower.contains("unless you were separately granted a browser tool")
@@ -1566,7 +1583,7 @@ mod tests {
     /// list.
     #[test]
     fn the_composio_brief_names_the_connected_toolkits_lowercased() {
-        let brief = composio_brief(&["GitHub".to_string(), " Gmail ".to_string()]);
+        let brief = composio_brief(&["GitHub".to_string(), " Gmail ".to_string()], &[]);
         assert!(
             brief.contains("Connected toolkits for this company: github, gmail"),
             "{brief}"
@@ -1580,7 +1597,7 @@ mod tests {
     /// agent does not hold.
     #[test]
     fn the_composio_brief_does_not_advertise_github_outside_a_restricting_allowlist() {
-        let brief = composio_brief(&["slack".to_string()]);
+        let brief = composio_brief(&["slack".to_string()], &[]);
         assert!(
             !brief.to_lowercase().contains("github"),
             "an allowlist that excludes GitHub must not name it as reachable: {brief}"
@@ -1600,7 +1617,7 @@ mod tests {
     /// a toolkit that is not known-connected.
     #[test]
     fn the_composio_brief_open_mode_points_at_discovery_without_naming_a_provider() {
-        let brief = composio_brief(&[]);
+        let brief = composio_brief(&[], &[]);
         assert!(
             brief.contains("not fixed here"),
             "open mode must defer to discovery: {brief}"
@@ -1625,7 +1642,7 @@ mod tests {
     /// this company:" line.
     #[test]
     fn the_composio_brief_open_mode_does_not_name_github_before_discovery() {
-        let brief = composio_brief(&[]);
+        let brief = composio_brief(&[], &[]);
         assert!(
             !brief.contains("Connected integrations (GitHub and other SaaS)")
                 && !brief.contains("You reach GitHub"),
@@ -1642,6 +1659,52 @@ mod tests {
         // test forbade the substring "github" outright, which took the
         // example down with the claim and broke that guarantee.
         assert!(brief.contains("api.github.com"), "{brief}");
+    }
+
+    /// A native capability the agent already holds a built-in tool for is named
+    /// as such, and told to be used directly rather than routed through Composio.
+    #[test]
+    fn the_composio_brief_names_native_capabilities_as_built_in_not_composio() {
+        let brief = composio_brief(&["github".to_string()], &["search"]);
+        assert!(
+            brief.contains("built-in tools of your own: search"),
+            "the native capability must be named: {brief}"
+        );
+        assert!(
+            brief.contains("do not route them through Composio"),
+            "the precedence must tell the agent to use the built-in tool directly: {brief}"
+        );
+    }
+
+    /// Empty native caps render no precedence line, leaving the brief as it was
+    /// before native-first routing — and the S2 raw-HTTP deflection warning is
+    /// untouched either way.
+    #[test]
+    fn the_composio_brief_with_no_native_caps_is_unchanged_and_keeps_the_deflection_warning() {
+        let brief = composio_brief(&["github".to_string()], &[]);
+        assert!(
+            !brief.contains("built-in tools of your own"),
+            "no native caps must add no precedence line: {brief}"
+        );
+        // The S2 raw-HTTP deflection warning is verbatim regardless.
+        assert!(brief.contains("http_request"), "{brief}");
+        assert!(brief.contains("api.github.com"), "{brief}");
+        assert!(brief.contains("401") || brief.contains("403"), "{brief}");
+    }
+
+    /// The two levers coexist on one brief: a connected toolkit is still routed
+    /// through Composio while a native capability is called out as built-in.
+    #[test]
+    fn the_composio_brief_routes_composio_toolkits_and_native_caps_separately() {
+        let brief = composio_brief(&["gmail".to_string()], &["search"]);
+        assert!(
+            brief.contains("Connected toolkits for this company: gmail"),
+            "the connected toolkit is still routed through Composio: {brief}"
+        );
+        assert!(
+            brief.contains("built-in tools of your own: search"),
+            "the native capability is called out as built-in: {brief}"
+        );
     }
 
     // -----------------------------------------------------------------------

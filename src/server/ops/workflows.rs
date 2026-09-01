@@ -7274,6 +7274,7 @@ mod tests {
                 assignee: "ceo".into(),
                 updated_at_millis: 1,
                 origin_chat_id: None,
+                origin_parent: None,
                 parent_task_id: None,
                 output: None,
                 plan: None,
