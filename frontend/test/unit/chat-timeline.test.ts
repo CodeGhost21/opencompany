@@ -43,7 +43,7 @@ describe("buildTimeline", () => {
     const entries = buildTimeline(
       [
         message({ id: "a", text: "can we ship?" }),
-        message({ id: "b", text: "yes", parentId: "a" }),
+        message({ id: "b", from: "company", text: "yes", parentId: "a" }),
       ],
       CHANNEL,
       [],
@@ -53,6 +53,99 @@ describe("buildTimeline", () => {
     // And it is not ALSO on the parent's chip: a reader seeing the answer must
     // not be told there is one more thing to open.
     expect(entries[0].replies).toEqual([]);
+  });
+
+  /**
+   * The operator replied to their own root before the agent got there.
+   *
+   * `bucket[0]` is merely the earliest reply, so that follow-up was promoted
+   * into the channel and the agent's actual answer stayed folded behind the
+   * root's chip — a thread a person deliberately opened, flattened, showing
+   * them their own words twice and the reply not at all (codex on #1972).
+   */
+  it("keeps a thread folded when the operator replied first, not the agent", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "can we ship?" }),
+        message({ id: "b", text: "…or next week?", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", from: "company", text: "yes", parentId: "a", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a"]);
+    expect(entries[0].replies.map((r) => r.id)).toEqual(["b", "c"]);
+  });
+
+  /**
+   * A colleague is not the runtime.
+   *
+   * `fromHistory` projects `from` off `mine`, so another signed-in person's
+   * reply arrives as `company` and is told apart only by `byPerson`. Without
+   * that term their message was promoted just as the operator's own follow-up
+   * had been — the same defect, for every viewer except the one who wrote it
+   * (codex + coderabbit on #2001).
+   */
+  it("keeps a thread folded when a colleague replied before the runtime did", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "can we ship?" }),
+        message({
+          id: "b",
+          from: "company",
+          byPerson: true,
+          text: "asking the team",
+          parentId: "a",
+          at: T0 + 1,
+        }),
+        message({ id: "c", from: "company", text: "yes", parentId: "a", at: T0 + 2 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a"]);
+    expect(entries[0].replies.map((r) => r.id)).toEqual(["b", "c"]);
+  });
+
+  /**
+   * `undefined` is not `true`, and the difference is what keeps the ordinary
+   * case working: every locally built company line — this console's own POST,
+   * an `AgentReplyEvent` — leaves `byPerson` unset, and only `fromHistory` ever
+   * sets it. Reading "unset" as "might be a person" would fold the live answer
+   * this promotion exists for.
+   */
+  it("still promotes a runtime answer that carries no byPerson at all", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "can we ship?" }),
+        message({ id: "b", from: "company", text: "yes", parentId: "a", at: T0 + 1 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a", "b"]);
+  });
+
+  /**
+   * A settle marker is runtime-generated but it is not an answer, and #1890 B
+   * put markers in the thread that raised the card on purpose. Promoting one
+   * into the channel would undo that from the render side.
+   */
+  it("keeps a thread folded when a system marker is its first line", () => {
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "draft the launch email" }),
+        message({ id: "b", from: "system", text: "finished → In review", parentId: "a", at: T0 + 1 }),
+      ],
+      CHANNEL,
+      [],
+    );
+
+    expect(entries.map((e) => e.message.id)).toEqual(["a"]);
+    expect(entries[0].replies.map((r) => r.id)).toEqual(["b"]);
   });
 
   it("folds the pair instead once another conversation interleaved", () => {
@@ -101,7 +194,7 @@ describe("buildTimeline", () => {
     const entries = buildTimeline(
       [
         message({ id: "a" }),
-        message({ id: "b", parentId: "a", at: T0 + 1 }),
+        message({ id: "b", from: "company", parentId: "a", at: T0 + 1 }),
         message({ id: "c", parentId: "a", at: T0 + 2 }),
       ],
       CHANNEL,
@@ -129,7 +222,7 @@ describe("buildTimeline", () => {
     const entries = buildTimeline(
       [
         message({ id: "a", text: "can we ship?" }),
-        message({ id: "b", text: "yes", parentId: "a", at: T0 + 1 }),
+        message({ id: "b", from: "company", text: "yes", parentId: "a", at: T0 + 1 }),
         message({ id: "c", text: "when?", parentId: "b", at: T0 + 2 }),
       ],
       CHANNEL,
@@ -194,7 +287,7 @@ describe("buildTimeline", () => {
     const entries = buildTimeline(
       [
         message({ id: "a" }),
-        message({ id: "b", parentId: "a", at: T0 + 1 }),
+        message({ id: "b", from: "company", parentId: "a", at: T0 + 1 }),
         message({ id: "c", parentId: "b", at: T0 + 2 }),
       ],
       CHANNEL,

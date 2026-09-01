@@ -53,6 +53,45 @@ interface Props {
    */
   readOnly?: boolean;
   /**
+   * Whether this thread hangs off a settled `in_review` dispatch card's review
+   * surface — its settle pill or the relay bubble that followed it. When set, a
+   * reply here is review feedback that re-runs the card, so the composer says
+   * so instead of reading like an ordinary reply.
+   */
+  reviewing?: boolean;
+  /**
+   * The `reviewing` card's id, so the panel can offer Approve beside its own
+   * notice (CodeRabbit #3905116857) — a card settled inside an already-open
+   * thread folds its settle pill into a plain reply line with no room for
+   * `MessageRow`'s Approve button, so without this the ONLY way to approve
+   * such a card was to close the thread and find the pill in the channel.
+   * Absent exactly when `reviewing` is, since the anchor is what makes it so.
+   */
+  reviewTaskId?: string;
+  /** Approves or revises {@link reviewTaskId}. Mirrors `MessageRow`'s prop of the same name. */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Whether {@link reviewTaskId}'s verdict is already in flight. */
+  reviewInFlight?: boolean;
+  /**
+   * Every OTHER in-review card this thread anchors to, besides
+   * {@link reviewTaskId} — `reviewAnchorsForThread`'s entries after its
+   * newest (CodeRabbit review on #1981). A card dispatched into an
+   * already-open thread before an earlier one settles leaves both live at
+   * once, and the newest already owns the notice + Approve above the
+   * composer; without a control of its own, the older card was only
+   * reachable by first settling the newer one. Each entry here gets its own
+   * notice row with its own Approve button instead.
+   */
+  additionalReviewAnchors?: { taskId: string; anchorId: string }[];
+  /**
+   * Every task id currently mid-verdict — `ChatView`'s own
+   * `reviewingCardIds`. {@link reviewInFlight} already covers
+   * {@link reviewTaskId}; this is the same signal for each entry in
+   * {@link additionalReviewAnchors}, which has no scalar prop of its own to
+   * carry it.
+   */
+  reviewingTaskId?: ReadonlySet<string>;
+  /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
    *
@@ -141,6 +180,12 @@ export function ThreadPanel({
   youAvatar,
   resolveAttachmentUrl,
   onSend,
+  reviewing,
+  reviewTaskId,
+  onReviewCard,
+  reviewInFlight,
+  additionalReviewAnchors,
+  reviewingTaskId,
   onClose,
   typingNames = [],
   onTyping,
@@ -222,9 +267,49 @@ export function ThreadPanel({
       ) : (
         <>
           <TypingLine names={typingNames} />
+          {reviewing && (
+            <div className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5">
+              <p className="text-xs text-muted-foreground">
+                This card is ready for review. A reply sends it back for another pass
+                with your notes.
+              </p>
+              {reviewTaskId !== undefined && onReviewCard !== undefined && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={reviewInFlight}
+                  onClick={() => onReviewCard(reviewTaskId, "approve")}
+                >
+                  {reviewInFlight ? "Approving…" : "Approve"}
+                </Button>
+              )}
+            </div>
+          )}
+          {additionalReviewAnchors?.map((anchor) => (
+            <div
+              key={anchor.taskId}
+              className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5"
+            >
+              <p className="text-xs text-muted-foreground">
+                Another card in this thread is also ready for review.
+              </p>
+              {onReviewCard !== undefined && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={reviewingTaskId?.has(anchor.taskId) ?? false}
+                  onClick={() => onReviewCard(anchor.taskId, "approve")}
+                >
+                  {reviewingTaskId?.has(anchor.taskId) ? "Approving…" : "Approve"}
+                </Button>
+              )}
+            </div>
+          ))}
           <MessageComposer
             compact
-            placeholder="Reply…"
+            placeholder={reviewing ? "Send for another pass…" : "Reply…"}
             disabled={sending}
             mentionables={mentionables}
             channelMemberIds={channelMemberIds}

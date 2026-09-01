@@ -12004,6 +12004,7 @@ name = "Morning"
                     run_id: "wf-run-1".to_string(),
                     scheduled: false,
                     started_by: None,
+                    resume_semantic: None,
                 },
                 at_millis: 1,
             },

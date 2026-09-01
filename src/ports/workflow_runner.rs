@@ -20,6 +20,24 @@ use crate::Result;
 use crate::company::WorkflowFile;
 use crate::ports::types::{CompanyId, StartedBy, WorkflowNodeStatus};
 
+/// How a continuation entered the workflow engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResumeSemantic {
+    /// Continue from the persisted node boundary.
+    NodeRestart,
+    /// Start over from the original trigger input.
+    ReRunFromTrigger,
+}
+
+/// A persisted workflow lineage to continue from its latest boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowCheckpointResume {
+    pub thread_id: String,
+    pub approved: Vec<String>,
+    pub rejected: Vec<String>,
+}
+
 /// The outcome of running one workflow to completion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowRun {
@@ -837,6 +855,10 @@ pub struct WorkflowRunContext {
     /// (issue #1861) precisely so this prerequisite slice does not have to
     /// touch that call site.
     pub started_by: StartedBy,
+    /// The checkpointed lineage and decisions for a node-level continuation.
+    pub checkpoint_resume: Option<WorkflowCheckpointResume>,
+    /// The continuation behavior recorded in run history.
+    pub resume_semantic: Option<ResumeSemantic>,
 }
 
 /// A one-way stop signal for one workflow run (issue #383).
@@ -853,11 +875,13 @@ pub struct WorkflowRunContext {
 ///
 /// # Semantics
 ///
-/// Firing this stops the run at the next **node boundary**: the engine checks
+/// Firing this stops an ordinary run at the next **node boundary**: the engine checks
 /// the token before each node, so a node already executing runs to completion
 /// and is journaled, then the run winds down carrying a real (partial) outcome
 /// with `cancelled` set. "Stopped", not "finished" — but stopped cleanly, not
 /// mid-await.
+/// A checkpoint resume currently takes the hard-abort path immediately because
+/// the public resume entry point accepts no cancellation token.
 ///
 /// The one exception is a node **wedged** mid-await on a stalled external call:
 /// it never reaches the next boundary, so the runner bounds the wait
@@ -980,6 +1004,8 @@ impl WorkflowRunContext {
             // the real triggering agent should override it with
             // `with_started_by` instead of trusting this.
             started_by: StartedBy::from_scheduled(scheduled),
+            checkpoint_resume: None,
+            resume_semantic: None,
         }
     }
 
@@ -989,6 +1015,26 @@ impl WorkflowRunContext {
     /// for [`new`](Self::new)'s `scheduled`-derived default.
     pub fn with_started_by(mut self, started_by: StartedBy) -> Self {
         self.started_by = started_by;
+        self
+    }
+
+    pub fn with_checkpoint_resume(
+        mut self,
+        thread_id: impl Into<String>,
+        approved: Vec<String>,
+        rejected: Vec<String>,
+    ) -> Self {
+        self.checkpoint_resume = Some(WorkflowCheckpointResume {
+            thread_id: thread_id.into(),
+            approved,
+            rejected,
+        });
+        self.resume_semantic = Some(ResumeSemantic::NodeRestart);
+        self
+    }
+
+    pub fn with_resume_semantic(mut self, semantic: ResumeSemantic) -> Self {
+        self.resume_semantic = Some(semantic);
         self
     }
 }

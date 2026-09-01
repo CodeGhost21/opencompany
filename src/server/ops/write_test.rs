@@ -9422,6 +9422,7 @@ async fn the_run_history_carries_a_runs_board_rows() {
             run_id: "run-1".into(),
             scheduled: true,
             started_by: None,
+            resume_semantic: None,
         },
         CompanyEvent::WorkflowRunFinished {
             workflow_id: "digest".into(),

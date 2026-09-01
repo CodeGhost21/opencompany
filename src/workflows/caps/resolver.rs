@@ -938,10 +938,12 @@ to = "run"
 
     // ---- Issue #617: routing the child's gate pass back to the parent -------
 
-    /// A child graph whose one working node is a `web_fetch` — the grantable
+    /// A child graph whose one working node is a `file_write` — the grantable
     /// call the standing-permission tests below exercise (`shell` is
-    /// `Standing::PerCall`, so no grant can ever admit it).
-    fn child_with_web_fetch(id: &str) -> String {
+    /// `Standing::PerCall`, so no grant can ever admit it; a resolvable
+    /// `web_fetch` is `Reach::ExternalRead`, so it never parks in the first
+    /// place and a grant would have nothing to admit).
+    fn child_with_file_write(id: &str) -> String {
         format!(
             r#"
 id = "{id}"
@@ -951,28 +953,29 @@ id = "start"
 kind = "trigger"
 name = "Start"
 [[node]]
-id = "fetch"
+id = "write"
 kind = "tool_call"
-name = "Fetch"
+name = "Write"
 [node.config]
-slug = "web_fetch"
+slug = "file_write"
 [node.config.args]
-url = "https://docs.rs/jaq"
+path = "notes/child.md"
+content = "hello"
 [[edge]]
 from = "start"
-to = "fetch"
+to = "write"
 "#
         )
     }
 
-    /// A live standing permission for `web_fetch` held by one workflow.
-    fn web_fetch_grant(workflow: &str) -> crate::runtime::grants::GrantSet {
+    /// A live standing permission for `file_write` held by one workflow.
+    fn file_write_grant(workflow: &str) -> crate::runtime::grants::GrantSet {
         let grants = crate::runtime::grants::GrantSet::default();
         grants.grant_standing(crate::runtime::grants::StandingGrant {
-            id: crate::runtime::grants::GrantId::new("g-web"),
+            id: crate::runtime::grants::GrantId::new("g-write"),
             agent: String::new(),
             workflow: Some(workflow.to_string()),
-            tool: "web_fetch".to_string(),
+            tool: "file_write".to_string(),
             verdict: crate::ports::types::Verdict::Approve,
             granted_by: crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::User,
@@ -984,7 +987,7 @@ to = "fetch"
             origin_thread: None,
             origin_parent: None,
             origin_task: None,
-            scope: Some("https://docs.rs".to_string()),
+            scope: None,
         });
         grants
     }
@@ -1025,21 +1028,21 @@ to = "fetch"
     #[tokio::test]
     async fn a_standing_grant_for_the_root_workflow_admits_a_child_call() {
         let (resolver, _) = gated_resolver_with_grants(
-            vec![overlay("child", child_with_web_fetch("child"))],
+            vec![overlay("child", child_with_file_write("child"))],
             "supervised",
-            web_fetch_grant("root"),
+            file_write_grant("root"),
         );
 
         let graph = resolver.resolve("child").await.expect("child resolves");
-        let fetch = graph
+        let write = graph
             .nodes
             .iter()
-            .find(|n| n.id == "fetch")
+            .find(|n| n.id == "write")
             .expect("the child's node survives");
         assert!(
-            fetch.config.get("requires_approval").is_none(),
+            write.config.get("requires_approval").is_none(),
             "a grant for the root workflow must admit the child's call: {:?}",
-            fetch.config
+            write.config
         );
     }
 
@@ -1051,21 +1054,21 @@ to = "fetch"
     #[tokio::test]
     async fn a_grant_bound_to_the_child_id_does_not_admit_the_child_call() {
         let (resolver, _) = gated_resolver_with_grants(
-            vec![overlay("child", child_with_web_fetch("child"))],
+            vec![overlay("child", child_with_file_write("child"))],
             "supervised",
-            web_fetch_grant("child"),
+            file_write_grant("child"),
         );
 
         let graph = resolver.resolve("child").await.expect("child resolves");
-        let fetch = graph
+        let write = graph
             .nodes
             .iter()
-            .find(|n| n.id == "fetch")
+            .find(|n| n.id == "write")
             .expect("the child's node survives");
         assert!(
-            fetch.config["requires_approval"].as_bool().unwrap_or(false),
+            write.config["requires_approval"].as_bool().unwrap_or(false),
             "a grant bound to the child's own id must not admit it: {:?}",
-            fetch.config
+            write.config
         );
     }
 

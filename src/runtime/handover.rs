@@ -102,6 +102,9 @@ pub struct RuntimeHandover {
     /// batch with nothing to spawn and tell the operator to re-run a workflow
     /// that is in fact ready to continue.
     pub(crate) blocked_nodes: BlockedNodeQueue,
+    #[cfg(feature = "openhuman")]
+    pub(crate) workflow_checkpoints:
+        Option<Arc<crate::workflows::checkpoint_store::WorkflowCheckpointStore>>,
     pub(crate) serial: Arc<TokioMutex<()>>,
     /// The per-agent lock slots. Inherited across the swap for the same reason
     /// as `serial`: a fresh map would let an agent mid-turn start a second turn
@@ -146,6 +149,8 @@ impl CompanyRuntime {
             continuations: self.continuations.clone(),
             workflow_gates: self.workflow_gates.clone(),
             blocked_nodes: self.blocked_nodes.clone(),
+            #[cfg(feature = "openhuman")]
+            workflow_checkpoints: self.workflow_checkpoints.clone(),
             serial: self.serial.clone(),
             per_agent: self.per_agent.clone(),
             task_writes: self.task_writes.clone(),

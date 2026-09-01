@@ -2570,7 +2570,7 @@ impl RuntimeBuilder {
             Some(h) => h.blocked_nodes.clone(),
             None => {
                 let blocked_nodes = crate::runtime::blocked_nodes::BlockedNodeQueue::default();
-                blocked_nodes.rearm(journal.blocked_stashes());
+                blocked_nodes.rearm_checkpointed(journal.blocked_stashes());
                 // Issue #1816: fold in whichever of those rehydrated stashes
                 // already had an approve banked before the restart — the fact
                 // `ContinuationQueue`'s own rearm cannot carry (see its docs),
@@ -2583,6 +2583,18 @@ impl RuntimeBuilder {
                 blocked_nodes
             }
         };
+
+        #[cfg(feature = "openhuman")]
+        let workflow_checkpoints = handover
+            .as_ref()
+            .and_then(|handover| handover.workflow_checkpoints.clone())
+            .unwrap_or_else(|| {
+                Arc::new(crate::workflows::WorkflowCheckpointStore::new(
+                    Bundle::new(home.clone(), &id)
+                        .dir()
+                        .join("workflow-checkpoints"),
+                ))
+            });
 
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
@@ -3680,7 +3692,8 @@ impl RuntimeBuilder {
                             // agent lands on that lane's engine instead of the
                             // default pool.
                             let runner: Arc<dyn WorkflowRunner> = Arc::new(
-                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone()),
+                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone())
+                                    .with_checkpoint_store(workflow_checkpoints.clone()),
                             );
                             // Issue #67: fill the shared handle on `deps` (a clone
                             // of which the runner holds, and which moves into the
@@ -3984,6 +3997,8 @@ impl RuntimeBuilder {
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
         runtime.adopt_blocked_nodes(blocked_nodes);
+        #[cfg(feature = "openhuman")]
+        runtime.set_workflow_checkpoints(workflow_checkpoints);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see

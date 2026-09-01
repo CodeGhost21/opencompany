@@ -436,6 +436,34 @@ export interface ChatResponse {
    * field.
    */
   outcome?: ResolveOutcome;
+  /**
+   * Set when a thread reply was intercepted as review feedback on an
+   * `in_review` dispatch card and re-dispatched it instead of answering with
+   * `responses` here. The re-run's own reply still arrives later on the event
+   * stream and in `chat/history` — this only tells the console not to read an
+   * empty `responses` as "the turn produced nothing." Absent on every other
+   * answer, and on a host that predates the field.
+   */
+  reviewFeedbackApplied?: boolean;
+}
+
+/**
+ * Where a reviewed card lands: `done` on approve, `in_progress` on revise —
+ * or `in_review`, unchanged, on a revise whose note was blank. The host
+ * treats an empty note as nothing to re-run on and leaves the card where it
+ * was rather than dispatching an identical attempt a second time.
+ */
+export type ChatReviewColumn = "done" | "in_progress" | "in_review";
+
+/**
+ * The card a thread review verdict left behind, so the console can reconcile
+ * its optimistic move. Mirrors `ChatReviewReceipt` in `src/server/operator.rs`.
+ */
+export interface ChatReviewReceipt {
+  /** The reviewed card's id. */
+  taskId: string;
+  /** The column it landed in — see {@link ChatReviewColumn}. */
+  column: ChatReviewColumn;
 }
 
 /**
