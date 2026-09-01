@@ -179,6 +179,19 @@ describe("resolving an address", () => {
     },
   );
 
+  it("sends the Settings rail's Observatory row to the Observatory's own address", async () => {
+    // The row is a doorway, not a page. The Observatory reads four query keys
+    // of its own straight off `window.location`, keyed on the hash's head being
+    // `observatory` (`views/observatory/hash.ts`), so rendering it under
+    // `#/settings/…` would silently take its analytics tab and its agent/turn
+    // selection out of the address bar. A surface with its own address grammar
+    // keeps its own address.
+    rewrite = REWRITE_RETIRED;
+    await visit("#/settings/observatory");
+    expect(seen).toEqual(["observatory", null]);
+    expect(window.location.hash).toBe("#/observatory");
+  });
+
   // The two addresses that rewrite onto the *section* rather than one of its
   // pages, so the replacement hash is bare.
   //

@@ -76,13 +76,22 @@ describe("the sidebar's section table", () => {
   it("is exactly these top-level rows, in this order", () => {
     expect(NAV_SECTIONS.map((section) => section.label)).toEqual([
       "Room",
-      "Overview",
       "Company",
       "Connections",
-      "Approvals",
-      "Workflows",
-      "Observatory",
+      "Flows",
     ]);
+  });
+
+  it("keeps the surfaces that lost their row out of the table entirely", () => {
+    // Overview and Approvals moved up into the window's title row; Observatory
+    // moved down into Settings. A row left behind as a comment is the failure
+    // this codebase has already had once (#1311), so the assertion above is a
+    // whole-table equality — a commented row is not a member of it — and this
+    // one says the same thing from the other side.
+    const views = NAV_SECTIONS.map((section) => section.view as string);
+    expect(views).not.toContain("overview");
+    expect(views).not.toContain("approvals");
+    expect(views).not.toContain("observatory");
   });
 
   it("files the company's five surfaces under Company, in this order", () => {
@@ -94,6 +103,19 @@ describe("the sidebar's section table", () => {
       ["Brain", "brain"],
       ["Finance", "finances"],
     ]);
+  });
+
+  it("calls the workflow surface Flows, over the view id every address uses", () => {
+    // A view id is an address — every `#/workflows/<id>` a run row points at —
+    // and renaming a row is not a reason to break them. "Work" has been the
+    // `ledgers` view since #1284 for the same reason. The `data-tour` anchors
+    // follow the view id, so the tour and the e2e specs do not move when a word
+    // does.
+    const flows = NAV_SECTIONS.find((section) => section.label === "Flows")!;
+    expect(flows.view).toBe("workflows");
+
+    const room = NAV_SECTIONS.find((section) => section.label === "Room")!;
+    expect(room.view).toBe("chat");
   });
 
   it("gives every section a distinct view, so two rows can never light at once", () => {
@@ -125,9 +147,18 @@ describe("which section an address belongs to", () => {
   });
 
   it("claims nothing for the surfaces that are deliberately not in the nav", () => {
-    // Settings and Feedback live in the sidebar's footer; Pages is direct-URL
-    // only (#1171, #1172); `not-found` is nowhere by design.
-    for (const view of ["settings", "feedback", "pages", "not-found"] as View[]) {
+    // Settings and Feedback live in the sidebar's footer; Overview and
+    // Approvals in the window's title row; Observatory under Settings; Pages is
+    // direct-URL only (#1171, #1172); `not-found` is nowhere by design.
+    for (const view of [
+      "settings",
+      "feedback",
+      "pages",
+      "overview",
+      "approvals",
+      "observatory",
+      "not-found",
+    ] as View[]) {
       expect(sectionOwning(view)).toBeUndefined();
     }
   });
@@ -159,7 +190,6 @@ describe("the rendered sidebar", () => {
     render("company");
     expect(renderedRows()).toEqual([
       "Room",
-      "Overview",
       "Company",
       "Agents",
       "Work",
@@ -167,21 +197,11 @@ describe("the rendered sidebar", () => {
       "Brain",
       "Finance",
       "Connections",
-      "Approvals",
-      "Workflows",
-      "Observatory",
+      "Flows",
     ]);
 
     render("chat");
-    expect(renderedRows()).toEqual([
-      "Room",
-      "Overview",
-      "Company",
-      "Connections",
-      "Approvals",
-      "Workflows",
-      "Observatory",
-    ]);
+    expect(renderedRows()).toEqual(["Room", "Company", "Connections", "Flows"]);
   });
 
   it("marks the open child as the current page and leaves the parent unlit", () => {

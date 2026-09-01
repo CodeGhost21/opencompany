@@ -1,15 +1,12 @@
 import { useCallback } from "react";
 import {
-  Activity,
   BookText,
   Brain,
   FolderClosed,
-  LayoutDashboard,
   type LucideIcon,
   MessagesSquare,
   Network,
   Plug,
-  ShieldCheck,
   Wallet,
   Workflow,
 } from "lucide-react";
@@ -105,7 +102,6 @@ export const NAV_SECTIONS: NavSection[] = [
   // Its contents are not a table here: they are the channel list `ChatView`
   // already renders, portalled into the slot below. See `room-rail.tsx`.
   { view: "chat", label: "Room", icon: MessagesSquare, slot: "room" },
-  { view: "overview", label: "Overview", icon: LayoutDashboard },
   // The company itself: who is in it, what they are working on, what it keeps,
   // what it remembers, and what it spends. Five surfaces that were five
   // top-level rows and are one subject.
@@ -146,11 +142,22 @@ export const NAV_SECTIONS: NavSection[] = [
       icon: page.icon,
     })),
   },
-  { view: "approvals", label: "Approvals", icon: ShieldCheck },
-  { view: "workflows", label: "Workflows", icon: Workflow },
-  // What the agents actually did, run by run — the read-only companion to
-  // Workflows' authoring canvas. See docs/spec/runtime/deep-trace.md.
-  { view: "observatory", label: "Observatory", icon: Activity },
+  // Was "Workflows". One word, and the word an operator uses out loud.
+  { view: "workflows", label: "Flows", icon: Workflow },
+  // Overview and Approvals are NOT here, and neither is Observatory. All three
+  // are Rule-6 calls, made explicitly in
+  // `docs/spec/runtime/ledgers-console-ia.md`:
+  //
+  //   - Overview and Approvals moved UP, into the window's title row, where
+  //     they are chrome rather than destinations — a place you jump to from
+  //     anywhere, and a count that has to be visible from every page including
+  //     the collapsed rail (issue #1018). Discoverable elsewhere, in Rule 6's
+  //     first sense.
+  //   - Observatory moved DOWN, into Settings (`settings-pages.ts`). Bare
+  //     `#/observatory` is rewritten onto it; `#/observatory/<runId>` stays a
+  //     top-level route because a run is deep-linked from workflow rows,
+  //     approval cards and chat.
+  //
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md), are deliberately NOT offered here (issues
   // #1171, #1172). Do not "fix" the omission by adding a row. What keeps

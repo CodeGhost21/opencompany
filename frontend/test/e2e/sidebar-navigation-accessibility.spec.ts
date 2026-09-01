@@ -14,7 +14,7 @@ test.beforeEach(async ({ page }) => {
 test("the skip link reaches main content and the sidebar is the primary navigation", async ({
   page,
 }) => {
-  await page.goto("/#/overview");
+  await page.goto("/#/company");
 
   const skip = page.getByRole("link", { name: "Skip to content", exact: true });
   const main = page.getByRole("main");
@@ -37,11 +37,24 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   await page.keyboard.press("Enter");
   await expect(main).toBeFocused();
   await expect(main).toHaveAttribute("id", "main-content");
-  await expect(page).toHaveURL(/#\/overview$/);
+  await expect(page).toHaveURL(/#\/company$/);
 
   const navigation = page.getByRole("navigation", { name: "Main navigation", exact: true });
   await expect(navigation).toBeVisible();
-  await expect(navigation.getByRole("button", { name: "Overview", exact: true })).toBeVisible();
+  // Four sections, and the four are the whole list. Asserted by count as well
+  // as by name: a tenth row creeping back in is the thing this restructure
+  // exists to stop, and four `toBeVisible` calls would not notice it.
+  for (const name of ["Room", "Company", "Connections", "Flows"]) {
+    await expect(navigation.getByRole("button", { name, exact: true })).toBeVisible();
+  }
+  await expect(
+    page.locator("[data-slot=sidebar-content] [data-sidebar=menu-button]"),
+  ).toHaveCount(4);
+  // Overview and Approvals are not among them: they are chrome in the window's
+  // title row now, not destinations in a list of destinations.
+  for (const name of ["Overview", "Approvals", "Observatory"]) {
+    await expect(navigation.getByRole("button", { name, exact: true })).toHaveCount(0);
+  }
 
   // Settings, Feedback and Discord are utilities: things you do to the console
   // rather than the places an operator works out of. They keep a named group of
@@ -72,7 +85,7 @@ test("the skip link reaches main content and the sidebar is the primary navigati
   // you go, rather than three more rows in it. `sidebar-content` is that list;
   // `sidebar-footer` is the group.
   const destinations = page.locator("[data-slot=sidebar-content]");
-  await expect(destinations.getByRole("button", { name: "Overview", exact: true })).toBeVisible();
+  await expect(destinations.getByRole("button", { name: "Room", exact: true })).toBeVisible();
   await expect(destinations.getByRole("button", { name: "Settings", exact: true })).toHaveCount(0);
   await expect(destinations.getByRole("button", { name: "Feedback", exact: true })).toHaveCount(0);
   await expect(

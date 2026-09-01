@@ -55,13 +55,13 @@ const RAIL_WIDTH = 48;
 test.describe("sidebar toggle reachability", () => {
   test("the mobile sheet has an in-viewport way back", async ({ page }) => {
     await page.setViewportSize({ width: 700, height: 800 });
-    await page.goto("/#/overview");
+    await page.goto("/#/company");
     await dismissTour(page);
 
     const trigger = page.getByRole("button", { name: "Toggle sidebar" });
     await expect(trigger).toBeInViewport();
     await trigger.click();
-    await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
+    await expect(page.getByText("Flows", { exact: true })).toBeVisible();
   });
 
   test("the seam control is desktop-only, so the sheet has exactly one way back", async ({
@@ -77,7 +77,7 @@ test.describe("sidebar toggle reachability", () => {
     // with the sheet CLOSED it announced itself "Collapse sidebar" and drew the
     // close icon while pressing it OPENED the sheet.
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/#/overview");
+    await page.goto("/#/company");
     await dismissTour(page);
 
     // `toBeHidden`, not `toHaveCount(0)`: the gate is CSS (`hidden md:block`),
@@ -113,7 +113,7 @@ test.describe("sidebar toggle reachability", () => {
 
   test("the mobile sheet closes after selecting a destination", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/#/overview");
+    await page.goto("/#/company");
     await dismissTour(page);
 
     await page.getByRole("button", { name: "Toggle sidebar" }).click();
@@ -121,6 +121,10 @@ test.describe("sidebar toggle reachability", () => {
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("aria-modal", "true");
 
+    // Work is a child row under Company, so it is on screen because the sheet
+    // opened on a Company-section address. That is the pattern under test as
+    // much as the sheet is: picking a destination inside an expanded section
+    // still closes the sheet behind it.
     await sheet.getByRole("button", { name: "Work", exact: true }).click();
     await expect(page).toHaveURL(/#\/ledgers\/tasks$/);
     await expect(sheet).toBeHidden();
@@ -128,12 +132,12 @@ test.describe("sidebar toggle reachability", () => {
 
   test("Escape closes the mobile sheet after focus moves inside it", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/#/overview");
+    await page.goto("/#/company");
     await dismissTour(page);
 
     await page.getByRole("button", { name: "Toggle sidebar" }).click();
     const sheet = page.getByRole("dialog", { name: "Sidebar" });
-    const destination = sheet.getByRole("button", { name: "Overview", exact: true });
+    const destination = sheet.getByRole("button", { name: "Room", exact: true });
     await destination.focus();
     await expect(destination).toBeFocused();
 
@@ -188,14 +192,14 @@ test.describe("sidebar toggle reachability", () => {
 
     // Still reachable and still functional in its own right.
     await trigger.click();
-    await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
+    await expect(page.getByText("Flows", { exact: true })).toBeVisible();
   });
 
   test("the inline sidebar's collapse control is a named, keyboard-operable control on the seam", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
-    await page.goto("/#/overview");
+    await page.goto("/#/company");
     await dismissTour(page);
 
     const sidebar = page.locator("[data-slot=sidebar]");

@@ -9,6 +9,7 @@
 // that again — a page id that is not here is a type error.
 
 import {
+  Activity,
   BrainCircuit,
   ChartColumnBig,
   Globe,
@@ -67,6 +68,19 @@ export const SETTINGS_PAGES = [
   // gets a chance to correct it. The siblings describe their content; so does
   // this now.
   { id: "skills", label: "Skills", icon: Sparkles, hint: "Playbooks your teammates read", group: "capability" },
+  // The run observatory: what the company's agents actually did, run by run.
+  //
+  // It had a nav row of its own and lost it to the four-section restructure.
+  // Filed here rather than parked, because this is where an operator goes to
+  // ask a question *about* the company rather than to work in it — and beside
+  // Skills, which is the other half of the same pair: what teammates are told
+  // to do, and what they did.
+  //
+  // Only the index lives at `#/settings/observatory`. A single run keeps its
+  // own top-level address, `#/observatory/<runId>`, because workflow rows,
+  // approval cards and chat all link straight to one — burying that behind a
+  // settings rail would break every link that names a run.
+  { id: "observatory", label: "Observatory", icon: Activity, hint: "What your teammates actually did", group: "capability" },
   // Brain is NOT here: it has its own nav row (`#/brain`). It was the one page
   // on this rail an operator came to *read* rather than to change — settings
   // are configuration, and what the company remembers is not configuration.
