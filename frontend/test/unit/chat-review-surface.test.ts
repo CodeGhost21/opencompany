@@ -8,6 +8,7 @@ import type { TaskStatus } from "@/api/tasks";
 import { makeMessage, type ChatMessage } from "@/lib/chat";
 import { isTaskInReview, MessageRow } from "@/views/chat/MessageRow";
 import {
+  canSubmitReview,
   repliesInThread,
   reviewAnchorForThread,
   reviewAnchorsForThread,
@@ -163,6 +164,38 @@ describe("every in-review card a thread anchors to (Codex #3906594069)", () => {
     expect(reviewAnchorsForThread(root, replies, messages, IN_REVIEW)).toEqual([
       { taskId: "t-1", anchorId: newRelay.id },
     ]);
+  });
+});
+
+/**
+ * Codex #3906779123: `reviewAnchorsForThread` (above) gives every distinct
+ * in-review card its own Approve control, but the click handler that used to
+ * back it kept a single global "something is mid-verdict" flag. A click on a
+ * SECOND card while a first card's verdict was still in flight was silently
+ * dropped — no request, no busy state, nothing — because the guard could not
+ * tell the two cards apart.
+ */
+describe("whether a card's review verdict may be submitted (Codex #3906779123)", () => {
+  it("allows a card with no verdict in flight", () => {
+    expect(canSubmitReview(new Set(), "thread-1", "t-1")).toBe(true);
+  });
+
+  it("refuses a second click on the SAME card while its own verdict is in flight", () => {
+    expect(canSubmitReview(new Set(["t-1"]), "thread-1", "t-1")).toBe(false);
+  });
+
+  it("still allows a DIFFERENT card while another card's verdict is in flight", () => {
+    // Pre-fix behaviour, kept here as the regression proof: a single global
+    // flag (`reviewingCardId !== null`) blocked every card, not just the one
+    // already in flight.
+    const globalGuardBlocksEveryCard = (reviewing: string | null) => reviewing === null;
+    expect(globalGuardBlocksEveryCard("t-1")).toBe(false);
+
+    expect(canSubmitReview(new Set(["t-1"]), "thread-1", "t-2")).toBe(true);
+  });
+
+  it("refuses every card once its own thread is not open", () => {
+    expect(canSubmitReview(new Set(), undefined, "t-1")).toBe(false);
   });
 });
 

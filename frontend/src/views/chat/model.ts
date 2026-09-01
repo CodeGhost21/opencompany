@@ -147,6 +147,27 @@ export function reviewAnchorForThread(
 }
 
 /**
+ * Whether `taskId`'s Approve/Revise click should go out right now.
+ *
+ * `reviewingCardIds` is keyed per card, not a single global slot — since
+ * {@link reviewAnchorsForThread} (`a99b39e87`) made every distinct in-review
+ * card in a thread independently actionable, a click on one card's control
+ * must not be silently dropped just because a DIFFERENT card's verdict is
+ * still in flight (Codex #3906779123). Only a click repeated on the SAME
+ * card while its own verdict is outstanding is refused. The host is safe to
+ * take both at once: `runtime.task_writes` (`3ab934918`) serializes review
+ * verdicts per company, so a second card's write simply queues behind the
+ * first instead of racing it.
+ */
+export function canSubmitReview(
+  reviewingCardIds: ReadonlySet<string>,
+  activeThreadId: string | undefined,
+  taskId: string,
+): boolean {
+  return activeThreadId !== undefined && !reviewingCardIds.has(taskId);
+}
+
+/**
  * Every message the open thread panel should show under `parent` — not just
  * its direct children.
  *
