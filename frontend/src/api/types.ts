@@ -438,6 +438,9 @@ export interface ChatResponse {
   outcome?: ResolveOutcome;
 }
 
+/** Where a reviewed card lands: `done` on approve, `in_progress` on revise. */
+export type ChatReviewColumn = "done" | "in_progress";
+
 /**
  * The card a thread review verdict left behind, so the console can reconcile
  * its optimistic move. Mirrors `ChatReviewReceipt` in `src/server/operator.rs`.
@@ -446,7 +449,7 @@ export interface ChatReviewReceipt {
   /** The reviewed card's id. */
   taskId: string;
   /** The column it landed in: `done` on approve, `in_progress` on revise. */
-  column: string;
+  column: ChatReviewColumn;
 }
 
 /**
