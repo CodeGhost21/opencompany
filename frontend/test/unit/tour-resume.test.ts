@@ -54,10 +54,10 @@ function stopIndexFor(view: string | null): number {
 
 describe("the stop-view ⇄ resume-marker contract", () => {
   /** The one stop that hands the browser to a third party, so the only one that arms. */
-  const connections = TOUR.find((s) => s.sub === "oauth");
+  const connections = TOUR.find((s) => s.sub === "apps");
 
   it("still has an accounts stop at all", () => {
-    expect(connections, "the tour should still have an OAuth stop").toBeDefined();
+    expect(connections, "the tour should still have an Apps stop").toBeDefined();
   });
 
   it("pins the view the accounts stop publishes", () => {
@@ -70,14 +70,20 @@ describe("the stop-view ⇄ resume-marker contract", () => {
     //
     // If this fails, the tour was reorganised: update the e2e spec's seed in
     // the same commit.
-    expect(connections!.view).toBe("settings");
+    //
+    // It has now failed once and been updated exactly that way. The accounts
+    // page left the Settings rail for the Connections section, so the stop is
+    // `{ view: "connections", sub: "apps" }` and the marker it publishes is
+    // `"connections"` — which is what `oauth-onboarding-resume.spec.ts` seeds.
+    // The literal below and that seed are the coupling; this test is the fast
+    // half of it.
+    expect(connections!.view).toBe("connections");
   });
 
   it("leaves the lookup unambiguous, so a resume lands on the stop that armed it", () => {
     // The controller resolves a marker with `findIndex` — FIRST match wins.
-    // Views are not unique across the tour (there are two `overview` stops and
-    // two `chat` stops), so this is only safe while the arming stop is the sole
-    // holder of its view. Add a second Settings stop ahead of Connections and
+    // Views are not unique across the tour (three stops are on `chat`), so this
+    // is only safe while the arming stop is the sole holder of its view. Add a second Connections stop ahead of this one and
     // the operator silently resumes on the wrong one; nothing else would catch
     // that, because the tour still runs and still shows *a* stop.
     const sharingItsView = TOUR.filter((s) => s.view === connections!.view);

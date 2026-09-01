@@ -49,9 +49,9 @@ interface Props {
   footer?: ReactNode;
   /**
    * The active thread is the durable Operator system channel (issue #1757):
-   * a read-only feed the server refuses to post to. Disables the composer
-   * the same way `ChatView`'s does, rather than letting the operator type
-   * and submit before the server's read-only guard finally refuses it.
+   * a read-only feed the server refuses to post to. Renders **no composer at
+   * all** — the same way `ChatView` does — rather than a disabled one, which
+   * would contradict the notice directly above it. See the render site.
    */
   readOnly?: boolean;
 }
@@ -151,47 +151,50 @@ export function Transcript({
         </p>
       )}
 
-      <div className="border-t bg-background/80 backdrop-blur">
-        <div className="mx-auto w-full max-w-3xl px-4 py-3">
-          <ComposerPrimitive.Root
-            data-tour="chat-composer"
-            className="relative flex items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring/50"
-          >
-            <ComposerPrimitive.Input
-              placeholder={readOnly ? "This channel is read-only" : `Message ${contact.name}…`}
-              rows={1}
-              disabled={readOnly}
-              className={cn(
-                "max-h-40 min-h-9 flex-1 resize-none border-0 bg-transparent px-2 py-1.5 text-sm shadow-none outline-none",
-                "placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
-              )}
-            />
-            <ComposerPrimitive.Send
-              render={
-                // `disabled` is spread in only when `readOnly` — the Radix Slot
-                // merge this `render` prop goes through lets an explicitly-set
-                // child prop win over the primitive's own computed `disabled`
-                // (empty composer / thread running), so an unconditional
-                // `disabled={readOnly}` would pin the button permanently
-                // enabled on every ordinary thread, where `readOnly` is
-                // `undefined`/`false`. Omitting the key when not read-only
-                // leaves the primitive's own disable logic in charge.
-                <Button
-                  size="icon"
-                  className="size-9 shrink-0 rounded-lg"
-                  aria-label="Send"
-                  {...(readOnly ? { disabled: true } : {})}
-                >
-                  <ArrowUp className="size-4" />
-                </Button>
-              }
-            />
-          </ComposerPrimitive.Root>
-          <p className="mt-1.5 px-1 text-center text-xs text-muted-foreground">
-            Enter to send · Shift+Enter for a new line
-          </p>
+      {/* No composer on a read-only thread, rather than a disabled one. The
+          strip directly above says there is nothing to reply to here; a
+          greyed-out reply box, a Send button and an "Enter to send" hint under
+          it say the opposite in the same breath, and a disabled control is
+          still a claim that the action exists. The notice is what should
+          occupy this space. The server's read-only guard (issue #1757) is
+          unchanged — this removes the affordance, not the belt behind it. */}
+      {!readOnly && (
+        <div className="border-t bg-background/80 backdrop-blur">
+          <div className="mx-auto w-full max-w-3xl px-4 py-3">
+            <ComposerPrimitive.Root
+              data-tour="chat-composer"
+              className="relative flex items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring/50"
+            >
+              <ComposerPrimitive.Input
+                placeholder={`Message ${contact.name}…`}
+                rows={1}
+                className={cn(
+                  "max-h-40 min-h-9 flex-1 resize-none border-0 bg-transparent px-2 py-1.5 text-sm shadow-none outline-none",
+                  "placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+                )}
+              />
+              <ComposerPrimitive.Send
+                render={
+                  // No `disabled` key at all: the primitive's own logic (empty
+                  // composer / thread running) is the only thing that disables
+                  // this button now. It used to be spread in when `readOnly`,
+                  // because the Radix Slot merge lets an explicitly-set child
+                  // prop win over the primitive's computed `disabled` — so an
+                  // unconditional `disabled={readOnly}` would have pinned the
+                  // button permanently *enabled* on every ordinary thread.
+                  // A read-only thread reaches none of this: it has no composer.
+                  <Button size="icon" className="size-9 shrink-0 rounded-lg" aria-label="Send">
+                    <ArrowUp className="size-4" />
+                  </Button>
+                }
+              />
+            </ComposerPrimitive.Root>
+            <p className="mt-1.5 px-1 text-center text-xs text-muted-foreground">
+              Enter to send · Shift+Enter for a new line
+            </p>
+          </div>
         </div>
-      </div>
+      )}
     </ThreadPrimitive.Root>
   );
 }

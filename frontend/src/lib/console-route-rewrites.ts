@@ -1,6 +1,7 @@
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { type View, VIEWS } from "@/lib/console-routes";
 import { taskIdFromSegment } from "@/lib/task-route";
+import { isConnectionPage } from "@/views/connection-pages";
 import { isSettingsPage } from "@/views/settings-pages";
 
 /**
@@ -30,6 +31,15 @@ export const REWRITE_RETIRED = (
   // render a settings rail around a page that is no longer in one.
   if (head === "memory") return ["brain", null];
   if (head === "settings" && sub === "brain") return ["brain", null];
+  // Apps and MCP Servers left the settings rail for the Connections section.
+  // Both of their settings addresses are rewritten onto it, and so is
+  // `#/settings/connections` — the address the pre-split Connections page had,
+  // which named no `SETTINGS_PAGES` id and therefore landed an operator on
+  // General while looking like a link that worked. It was still live in four
+  // places in the setup flow when this section was built.
+  if (head === "settings" && sub === "oauth") return ["connections", "apps"];
+  if (head === "settings" && sub === "mcp") return ["connections", "mcp"];
+  if (head === "settings" && sub === "connections") return ["connections", null];
   // Settings owns a fixed table of sub-pages, unlike the entity ids beneath
   // Team and Workspace. Do not render General under an address that names no
   // page: a bookmark or shared link must say where it actually lands.
@@ -42,12 +52,28 @@ export const REWRITE_RETIRED = (
   // detail sub-page (issue #264), it is what the org chart's rows and the chat
   // pane's chips link to, and it is deliberately a page so it can be linked.
   if (head === "team" && !sub) return ["company", null];
-  // `#/connections` predates the split into OAuth / MCP / Inference; the
-  // accounts it named are the OAuth page.
-  if (head === "connections") return ["settings", "oauth"];
-  if (head === "oauth") return ["settings", "oauth"];
-  if (head === "mcp") return ["settings", "mcp"];
+  // `#/connections` is a real address again. It predates the split into OAuth /
+  // MCP / Inference, then spent that time rewritten onto the OAuth page; it now
+  // names the section those two pages live in, which is closer to what it
+  // always meant. Bare is left alone — the section defaults to Apps the way
+  // `#/finances` defaults to its Overview. A segment that names no sub-page is
+  // repaired rather than swallowed, for the reason the Settings branch above
+  // gives: an address that quietly shows a different page looks like a link
+  // that worked.
+  if (head === "connections" && sub !== null && !isConnectionPage(sub)) {
+    return ["connections", null];
+  }
+  if (head === "oauth") return ["connections", "apps"];
+  if (head === "mcp") return ["connections", "mcp"];
   if (head === "people") return ["settings", "people"];
+  // Observatory has a row on the Settings rail and no row in the sidebar, so
+  // `#/settings/observatory` is an address an operator can now arrive at — and
+  // it must not be where the surface lives. The Observatory reads four query
+  // keys of its own straight off `window.location`, keyed on the hash's head
+  // being `observatory` (`views/observatory/hash.ts`), so under `#/settings/…`
+  // its analytics tab and its agent/turn selection stop being addressable. The
+  // rail row is a doorway; this is the door.
+  if (head === "settings" && sub === "observatory") return ["observatory", null];
   // An empty hash is the normal console entry point and uses the router's
   // Overview fallback. Keep the head as the sub-page for every non-empty
   // unknown address so the explanation can identify what failed without

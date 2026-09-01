@@ -94,6 +94,7 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 import { useAskerNames } from "@/components/approval-card";
 import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
+import { settingsHref } from "@/views/settings-pages";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
 import { workflowSavedToast } from "@/lib/workflow-saved-toast";
@@ -3059,9 +3060,16 @@ export function WorkflowsView({
                   ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Inference, then run again."
                   : runRefusal.message}
               </span>
+              {/* Inference, not the accounts page. The sentence above says "Set
+                  a provider under Settings → Inference" and the button says
+                  "Set up inference", but the href was `#/settings/oauth` — so
+                  following it landed the operator on the third-party accounts
+                  page, which cannot configure a model. Found while moving that
+                  page to `#/connections/apps`; the typed helper is what stops
+                  it recurring. */}
               {runRefusal.code === "inference_required" && (
                 <a
-                  href="#/settings/oauth"
+                  href={settingsHref("inference")}
                   className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
                   data-testid="workflow-run-inference-cta"
                 >

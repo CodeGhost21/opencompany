@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { useHashView } from "@/hooks/use-hash-view";
-import { isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
+import { DEFAULT_VIEW, isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
 import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 
 /**
@@ -55,6 +55,15 @@ describe("sidebar navigation", () => {
 
   it("does not make unrelated destinations active", () => {
     expect(isNavigationActive("approvals", "tasks")).toBe(false);
+    expect(isNavigationActive("company", "workspace")).toBe(false);
+    expect(isNavigationActive("chat", "workflows")).toBe(false);
+  });
+
+  it("keeps a teammate under Agents and a desk transcript under Room", () => {
+    // Both are Rule-6 deep-link destinations with no row of their own. Without
+    // this the whole section collapses the moment one is opened.
+    expect(isNavigationActive("company", "team")).toBe(true);
+    expect(isNavigationActive("chat", "conversation")).toBe(true);
   });
 });
 
@@ -69,7 +78,10 @@ describe("resolving an address", () => {
   // rewritten retired routes, so applying it to every view would make this
   // table assert the opposite of their contracts.
   function Probe() {
-    const [view, sub] = useHashView<View>(VIEWS, "overview", rewrite);
+    // The shell's own fallback, not a literal: this probe is how the default
+    // landing view's contract is asserted, and a copy of it here would be a
+    // second opinion that cannot disagree loudly.
+    const [view, sub] = useHashView<View>(VIEWS, DEFAULT_VIEW, rewrite);
     seen = [view, sub];
     return null;
   }
@@ -133,9 +145,15 @@ describe("resolving an address", () => {
   // has a real replacement; asserting the replacement (and that the address bar
   // follows it) is what keeps a bookmark or habit written before the move alive.
   it.each([
-    ["#/connections", "settings", "oauth"],
-    ["#/oauth", "settings", "oauth"],
-    ["#/mcp", "settings", "mcp"],
+    // Apps and MCP Servers left the settings rail for the Connections section.
+    // Four addresses reach them from before that move: the two bare aliases
+    // that predate the original Connections split, and the two settings
+    // addresses they answered at for as long as they were sub-pages — which are
+    // the ones an operator is most likely to have bookmarked.
+    ["#/oauth", "connections", "apps"],
+    ["#/mcp", "connections", "mcp"],
+    ["#/settings/oauth", "connections", "apps"],
+    ["#/settings/mcp", "connections", "mcp"],
     ["#/people", "settings", "people"],
     ["#/work", "ledgers", "tasks"],
     ["#/settings/not-a-page", "settings", "general"],
@@ -160,6 +178,54 @@ describe("resolving an address", () => {
       expect(window.location.hash).toBe("#/brain");
     },
   );
+
+  it("sends the Settings rail's Observatory row to the Observatory's own address", async () => {
+    // The row is a doorway, not a page. The Observatory reads four query keys
+    // of its own straight off `window.location`, keyed on the hash's head being
+    // `observatory` (`views/observatory/hash.ts`), so rendering it under
+    // `#/settings/…` would silently take its analytics tab and its agent/turn
+    // selection out of the address bar. A surface with its own address grammar
+    // keeps its own address.
+    rewrite = REWRITE_RETIRED;
+    await visit("#/settings/observatory");
+    expect(seen).toEqual(["observatory", null]);
+    expect(window.location.hash).toBe("#/observatory");
+  });
+
+  // The two addresses that rewrite onto the *section* rather than one of its
+  // pages, so the replacement hash is bare.
+  //
+  // `#/settings/connections` is the dead link this section was built over. It
+  // named the pre-split Connections page, matched no `SETTINGS_PAGES` id after
+  // the split, and so was repaired onto **General** by the branch above — an
+  // operator following it landed on a real page that was not the one the link
+  // promised, which is worse than a 404 because it looks like it worked. It was
+  // still live in four places in the setup flow. It answers again now.
+  //
+  // `#/connections/not-a-page` is the same rule one level down: the section
+  // owns a fixed table of sub-pages, so a segment naming none is repaired to
+  // the section rather than silently rendering Apps under an address that says
+  // something else.
+  it.each(["#/settings/connections", "#/connections/not-a-page"])(
+    "rewrites %s onto the Connections section itself",
+    async (hash) => {
+      rewrite = REWRITE_RETIRED;
+      await visit(hash);
+      expect(seen).toEqual(["connections", null]);
+      expect(window.location.hash).toBe("#/connections");
+    },
+  );
+
+  // `#/connections` is a real address rather than a rewrite now, which is the
+  // load-bearing half of this move: it used to be sent to `#/settings/oauth`.
+  // Named on its own so a regression reads as "the section stopped answering"
+  // rather than as one row of the `VIEWS` loop above.
+  it("answers #/connections as the section itself, not as a rewrite", async () => {
+    rewrite = REWRITE_RETIRED;
+    await visit("#/connections");
+    expect(seen).toEqual(["connections", null]);
+    expect(window.location.hash).toBe("#/connections");
+  });
 
   // #1867 review: `#/work` is a bare-only alias onto the ledgers board — the
   // Work surface's real sub-pages are addressed under `#/ledgers/...` (for
@@ -188,11 +254,21 @@ describe("resolving an address", () => {
     expect(window.location.hash).toBe("#/ledgers/tasks");
   });
 
-  it("sends an empty address to the operator overview (#1321)", async () => {
+  it("opens the console in the Room (#1321, four-row sidebar)", async () => {
+    // An empty address is the ordinary console entry point, and where it lands
+    // is a product decision rather than an accident of the union's order — so
+    // it is asserted against the constant the shell actually passes.
     rewrite = undefined;
     await visit("/");
 
-    expect(seen).toEqual(["overview", null]);
-    expect(window.location.hash).toBe("#/overview");
+    expect(DEFAULT_VIEW).toBe("chat");
+    expect(seen).toEqual([DEFAULT_VIEW, null]);
+    expect(window.location.hash).toBe(`#/${DEFAULT_VIEW}`);
+  });
+
+  it("keeps the default landing view routable and reachable by its own address", async () => {
+    // A fallback that is not itself a routable view would canonicalize into an
+    // address the allow-list rejects, and the console would bounce on boot.
+    expect(VIEWS).toContain(DEFAULT_VIEW);
   });
 });
