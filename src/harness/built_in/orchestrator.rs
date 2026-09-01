@@ -91,8 +91,8 @@ use crate::ports::facts::FactStore;
 use crate::ports::notifications::NotificationStore;
 use crate::ports::runs::{RunFilter, RunRecord, RunStore};
 use crate::ports::tasks::{
-    BOARD_COLUMNS, COLUMN_DONE, TaskOutputAction, TaskOutputWorkflow, TaskRecord, TaskStore,
-    column_label, is_board_column,
+    BOARD_COLUMNS, COLUMN_DONE, TaskOutput, TaskOutputAction, TaskOutputWorkflow, TaskRecord,
+    TaskStore, column_label, is_board_column,
 };
 use crate::ports::types::{
     CompanyEvent, CompanyId, EventSeq, OnboardingStep, OverlayAgent, WorkflowNodeStatus,
@@ -1724,6 +1724,42 @@ fn latest_attempt_label(runs: &[RunRecord]) -> Option<String> {
     Some(format!("attempt {} {}", run.attempt, run.status.as_str()))
 }
 
+/// Renders the `## Output` section's fallback line for a card with no
+/// published artifact to show — either because no [`ArtifactStore`] is
+/// wired at all (`store_wired = false`) or because one is wired but has
+/// nothing for this task (`store_wired = true`, an empty list). Falls back to
+/// the card's own recorded output stamp ([`TaskRecord::output`]) so a card
+/// whose only trace is a `TaskOutput` (an operator reply, not a published
+/// file) is not reported identically to a card that produced nothing.
+fn output_stamp_markdown(output: Option<&TaskOutput>, store_wired: bool) -> String {
+    let banner = if store_wired {
+        "No artifacts published"
+    } else {
+        "No artifact store wired"
+    };
+    match output {
+        Some(output) => match output.source.run_id() {
+            Some(run_id) => {
+                let attempt = output
+                    .source
+                    .attempt()
+                    .map(|a| format!(" (attempt {a})"))
+                    .unwrap_or_default();
+                format!(
+                    "_{banner}; this card's last successful attempt was run `{run_id}`{attempt}. \
+                     Use `read_run` for that attempt's outcome._\n"
+                )
+            }
+            None => format!(
+                "_{banner}; this card's output came from an operator chat turn, not an \
+                 attempt._\n"
+            ),
+        },
+        None if store_wired => "_Nothing published yet._\n".to_string(),
+        None => "_Nothing produced yet._\n".to_string(),
+    }
+}
+
 /// A read-only surface over the company's task board (issue #1859): every
 /// open card, grouped by column, with its assignee and latest attempt status
 /// — the surface an agent queries directly to answer "what are you working
@@ -2045,7 +2081,7 @@ impl Tool for ReadTaskTool {
                     .await
                     .unwrap_or_default();
                 if published.is_empty() {
-                    md.push_str("_Nothing published yet._\n");
+                    md.push_str(&output_stamp_markdown(card.output.as_ref(), true));
                 } else {
                     for artifact in &published {
                         let preview = artifact
@@ -2061,24 +2097,7 @@ impl Tool for ReadTaskTool {
                     }
                 }
             }
-            None => match &card.output {
-                Some(output) => match output.source.run_id() {
-                    Some(run_id) => md.push_str(&format!(
-                        "_No artifact store wired; this card's last successful attempt was run \
-                         `{run_id}`{}. Use `read_run` for that attempt's outcome._\n",
-                        output
-                            .source
-                            .attempt()
-                            .map(|a| format!(" (attempt {a})"))
-                            .unwrap_or_default()
-                    )),
-                    None => md.push_str(
-                        "_No artifact store wired; this card's output came from an operator \
-                         chat turn, not an attempt._\n",
-                    ),
-                },
-                None => md.push_str("_Nothing produced yet._\n"),
-            },
+            None => md.push_str(&output_stamp_markdown(card.output.as_ref(), false)),
         }
 
         Ok(ToolResult::success_with_markdown(
@@ -12092,6 +12111,50 @@ name = "Morning"
             payload["board_open"], 0,
             "board_open must stay at zero on a read failure, not report a fabricated count: \
              {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_task_falls_back_to_the_output_stamp_when_the_artifact_store_is_wired_but_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(crate::store::FsOps::new(dir.path()));
+        let tasks: Arc<dyn TaskStore> = fs.clone();
+        let artifacts: Arc<dyn ArtifactStore> = fs;
+        let company = CompanyId::new("acme");
+
+        let mut card = task_card(
+            "t-1",
+            "Reply to the customer",
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "engineer",
+        );
+        card.output = Some(TaskOutput {
+            source: crate::ports::tasks::TaskOutputSource::Run {
+                run_id: "r-9".to_string(),
+                attempt: Some(3),
+            },
+            at_millis: 5,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        });
+        tasks.upsert(&company, &card).await.unwrap();
+
+        let tool = ReadTaskTool::new(company, Some(tasks), None, Some(artifacts));
+        let out = tool
+            .execute(json!({ "task_id": "t-1" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+
+        assert!(
+            out.contains("run `r-9`"),
+            "an artifact store wired but empty must still surface the card's own output \
+             stamp instead of claiming nothing published: {out}"
+        );
+        assert!(out.contains("attempt 3)"), "{out}");
+        assert!(
+            !out.contains("Nothing published yet"),
+            "must not claim nothing happened when the card recorded an attempt: {out}"
         );
     }
 }
