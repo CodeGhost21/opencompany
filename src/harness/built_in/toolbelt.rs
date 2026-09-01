@@ -616,6 +616,19 @@ impl std::fmt::Debug for MediaBackend {
     }
 }
 
+impl MediaBackend {
+    /// Whether [`backend_url`](Self::backend_url) is exactly `https` — the
+    /// gate [`media_tools`] enforces before it will spend the managed
+    /// credential. Evidence-gathering reuses this so a company can never be
+    /// told `media` is natively wired when the wiring path would refuse the
+    /// backend.
+    pub fn is_https(&self) -> bool {
+        url::Url::parse(&self.backend_url)
+            .map(|parsed| parsed.scheme() == "https")
+            .unwrap_or(false)
+    }
+}
+
 /// The `media` namespace tools (issue #109): image + video generation plus the
 /// model catalog, built over the MANAGED platform credential in `backend` with
 /// generated artifacts pinned to the agent's `workspace` (the tools' persistence
@@ -645,10 +658,7 @@ pub fn media_tools(backend: &MediaBackend, workspace: &Path) -> Vec<Box<dyn Tool
     // so an `http://` override would ship the credential over the wire. The
     // default (`https://api.tinyhumans.ai`) passes; a misconfigured host gets
     // no media tools at all, loudly, rather than a client that leaks.
-    if url::Url::parse(&backend.backend_url)
-        .map(|parsed| parsed.scheme() != "https")
-        .unwrap_or(true)
-    {
+    if !backend.is_https() {
         tracing::warn!(
             backend_url = %backend.backend_url,
             "[toolbelt] refusing to wire the media tools: the backend URL must be https"
