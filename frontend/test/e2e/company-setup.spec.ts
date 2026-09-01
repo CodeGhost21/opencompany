@@ -169,7 +169,13 @@ test("first-run setup builds a real team from three answers", async ({ page, req
     }
   });
 
-  await page.goto("/#/overview");
+  // `/` rather than a named view: `deepLinked` is `view !== DEFAULT_VIEW`, so
+  // naming any view hard-codes today's default and silently stops testing the
+  // automatic offer the day that default moves. It moved — `DEFAULT_VIEW` went
+  // from `overview` to `chat` — and this spec went red for a console that was
+  // working. An empty hash *is* "just opened the console", which is the
+  // condition the offer keys on.
+  await page.goto("/");
 
   // 1. It opens by itself — nobody clicked anything.
   const dialog = page.getByTestId("setup-dialog");
@@ -235,7 +241,11 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   // 7. A reload does not re-offer setup: the roster is no longer empty, which is
   // the whole reason emptiness is the signal rather than a stored flag.
   await page.reload();
-  await page.goto("/#/overview");
+  // Also `/`, and this one is load-bearing: reopening at a named view would
+  // leave the dialog hidden because the arrival was a deep link, which is true
+  // whether or not the roster is staffed. The assertion would pass for the
+  // wrong reason and stop testing what the comment above claims.
+  await page.goto("/");
   await expect(dialog).toBeHidden();
 });
 
@@ -248,7 +258,7 @@ test("skipping setup leaves a way back in", async ({ page, request }) => {
     }
   });
 
-  await page.goto("/#/overview");
+  await page.goto("/");
   await expect(page.getByTestId("setup-dialog")).toBeVisible({ timeout: 20_000 });
 
   await page.getByTestId("setup-skip").click();
