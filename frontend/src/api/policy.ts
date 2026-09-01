@@ -103,6 +103,55 @@ export interface SetPolicyInput {
   approvalTtlHours?: number | null;
 }
 
+/**
+ * What a *renderable* policy is, as distinct from what the host sent.
+ *
+ * ## The crash this fences
+ *
+ * A 200 whose body is not a policy used to reach the render untouched, and the
+ * first `status.tiers.find(...)` threw. `AutonomyPill` is mounted for the entire
+ * life of the console on every view (`window-title-bar.tsx`), there is no error
+ * boundary anywhere in `src/`, and React unmounts the whole tree on a throw
+ * during render — so one malformed `/policy` response blanked the ENTIRE
+ * console, on every page, with no way back but a reload. The console E2E lane
+ * met it as `TypeError: Cannot read properties of undefined (reading 'find')`
+ * against an empty document, and thirty-plus specs sat on their timeouts.
+ *
+ * ## Why it is a predicate here and not a check on the fetch
+ *
+ * Because "usable" depends on the reader. `useApprovalDeadline` wants
+ * `approvalTtlHours` and documents that an older host omits it; making the
+ * transport insist on the tier list would break a hook that is deliberately
+ * lenient. So the three functions below stay plain typed requests and each
+ * consumer that puts a policy ON SCREEN gates on this instead — `useAutonomy`
+ * for the title row, `apply`/`load` for the settings page.
+ *
+ * ## Why these three fields and no more
+ *
+ * They are exactly what the render paths dereference without a guard —
+ * `tiers.find`, `tiers.map`, `alwaysApprove.join` — plus the `mode` they
+ * compare against. Every optional field stays optional: this is a crash fence,
+ * not a schema, and a host that grows or drops a field must keep working. See
+ * `knownTools` above.
+ */
+export function isPolicyStatus(body: unknown): body is PolicyStatus {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+  const candidate = body as Partial<PolicyStatus>;
+  return (
+    typeof candidate.mode === "string" &&
+    Array.isArray(candidate.tiers) &&
+    Array.isArray(candidate.alwaysApprove)
+  );
+}
+
+/**
+ * What a reader says when it is handed something that is not a policy.
+ *
+ * One sentence, shared, so the settings page's `loadError` and the title row's
+ * failed write read as the same fact rather than as two unrelated faults.
+ */
+export const NOT_A_POLICY = "The host did not answer with an autonomy policy.";
+
 /** The company's effective policy. */
 export function getPolicy(
   client: OpenCompanyClient,

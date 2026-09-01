@@ -52,7 +52,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { setPolicy, type PolicyStatus } from "@/api/policy";
+import { isPolicyStatus, NOT_A_POLICY, setPolicy, type PolicyStatus } from "@/api/policy";
 import {
   AUTONOMY_CONFIRM_ACTION,
   AUTONOMY_CONFIRM_CANCEL,
@@ -250,6 +250,12 @@ export function AutonomyPill({
       // spend cap or the deadline — the same contract the settings page relies
       // on (`policy-settings.tsx` `saveTier`).
       const next = await setPolicy(client, company, { mode });
+      // A PUT that answers 200 with something that is not a policy is a failed
+      // write, not a successful one: the sentence below would read "Takes
+      // effect undefined", and the value would go on to be rendered. Throwing
+      // hands it to the `catch` below, which is where a failed write already
+      // goes.
+      if (!isPolicyStatus(next)) throw new Error(NOT_A_POLICY);
       applyAutonomy(client, company, next);
       // The host's own timing sentence, not a paraphrase: a tier change lands
       // on the NEXT turn, and an operator changing the tier because something

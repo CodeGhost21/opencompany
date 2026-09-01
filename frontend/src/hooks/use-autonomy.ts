@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { getPolicy, type PolicyStatus } from "@/api/policy";
+import { getPolicy, isPolicyStatus, type PolicyStatus } from "@/api/policy";
 import { startVisiblePolling } from "@/lib/visible-poll";
 
 /**
@@ -114,7 +114,12 @@ export function useAutonomy(
       const issued = generation;
       void getPolicy(client, company)
         .then((next) => {
-          if (live && issued === generation) setPolicy(next);
+          // `isPolicyStatus`, not a cast. A body that is not a policy is
+          // treated exactly as an unreachable host is — the pill keeps what it
+          // had and states nothing new — because the alternative is putting it
+          // on screen, where the first `tiers.find` throws and takes the whole
+          // console down with it. See the note on the predicate.
+          if (live && issued === generation && isPolicyStatus(next)) setPolicy(next);
         })
         .catch(() => {
           // Silent, like the deadline read. A host that cannot answer leaves
@@ -134,7 +139,10 @@ export function useAutonomy(
       client,
       company,
       accept: (next) => {
-        if (!live) return;
+        // Same fence on the write path. `applyAutonomy` is handed whatever the
+        // host returned from a PUT, and a PUT can answer with rubbish exactly
+        // as a GET can.
+        if (!live || !isPolicyStatus(next)) return;
         generation += 1;
         setPolicy(next);
       },

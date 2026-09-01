@@ -5,6 +5,8 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getPolicy,
+  isPolicyStatus,
+  NOT_A_POLICY,
   type PolicyStatus,
   resetPolicy,
   setPolicy,
@@ -372,6 +374,11 @@ export function PolicySettings({ client, company }: Props) {
       setDraftDeadline("");
       try {
         const next = await getPolicy(client, company);
+        // A body that is not a policy is a load FAILURE, not a policy. Left
+        // unchecked it reaches `next.alwaysApprove.join(...)` two lines down,
+        // and a throw there unmounts the console — there is no error boundary.
+        // The `catch` below already knows how to say so.
+        if (!isPolicyStatus(next)) throw new Error(NOT_A_POLICY);
         // A response for a company this `load` no longer describes must not
         // overwrite the current company's state: when the scope changes mid-
         // flight, the effect's cleanup flips `live` for the stale request, so
@@ -464,6 +471,14 @@ export function PolicySettings({ client, company }: Props) {
     resync: { alwaysAsk?: boolean; spendCap?: boolean; deadline?: boolean } = {},
     takesEffect?: string,
   ) => {
+    // Every write path funnels through here, so this is the one place the
+    // settings page has to fence: a PUT or DELETE that answers 200 with
+    // something that is not a policy must not be put on screen. Reported the
+    // way a failed save is, and the previously loaded policy stands.
+    if (!isPolicyStatus(next)) {
+      toast.error(NOT_A_POLICY);
+      return;
+    }
     setStatus(next);
     const { alwaysAsk = true, spendCap = true, deadline = true } = resync;
     if (alwaysAsk) {
