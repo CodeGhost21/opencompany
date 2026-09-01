@@ -1489,8 +1489,9 @@ type WorkflowNode {
 	single words, so no camelCase mirror is needed.
 	"""
 	postcondition: JSON
-
-	"""Opt-in semantic sufficiency verification for an agent node (issue #1866)."""
+	"""
+	Optional semantic sufficiency policy, exposed as JSON like postcondition.
+	"""
 	verify: JSON
 }
 
