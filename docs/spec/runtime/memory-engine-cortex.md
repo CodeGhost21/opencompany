@@ -12,7 +12,7 @@ proposal and the measurements behind it.** Nothing here is implemented.
 ## Findings first
 
 A CortexDB instance was deployed and exercised to answer this from evidence
-rather than from the product page. Four results change the shape of the
+rather than from the product page. Five results change the shape of the
 question, and the recommendation follows from them.
 
 1. **`tinyhumansai/tinycortex` is not the deployable artifact.** It is a Rust
@@ -31,6 +31,9 @@ question, and the recommendation follows from them.
    routers enabled and reporting healthy. Only Events and Episodes hold data.
 4. **Retrieval quality is real, and comes from embeddings alone.** Ranked recall
    over the Events layer is good and needs no LLM lanes at all.
+5. **A conformant driver cannot be written against v0.9.8 at all.** The contract's
+   `(namespace, key)` upsert has no expressible mapping onto an append-only event
+   log whose keys are immutable. This blocks Phase 1 outright.
 
 ## The isolation choice collapses
 
@@ -96,6 +99,44 @@ Two upstream defects behind this are filed:
 (concept reflection cannot resolve the router two other lanes use) and
 [#2](https://github.com/cortexdbai/cortexdb-releases/issues/2) (facts never
 extract, so beliefs can never build).
+
+## A conformant driver cannot be written against v0.9.8
+
+This is the finding that decides the phasing, and it is not about capability
+breadth — it is that the two data models disagree.
+
+`Memory::store` is an **idempotent upsert keyed by `(namespace, key)`**: storing
+twice at one key replaces the previous content "rather than erroring or creating
+a duplicate". The conformance suite asserts it directly
+(`assert_upsert_replaces_rather_than_duplicates`) — write `first`, write
+`second`, expect one row holding `second`. `memory-engine.md` makes that suite
+the thing that retired the unproven-remote flag, so passing it is not optional.
+
+CortexDB is an append-only event log. Measured against the deployment:
+
+| Attempt | Result |
+|---|---|
+| Same key, different content | `409 IDEMPOTENCY_CONFLICT` — "idempotency key reused with a different body" |
+| Same key, identical content | `202`, `replayed_from_idempotency: true` |
+| Update route | none — `/v1/events` and `/v1/events/{id}` are GET-only, `/v1/experience` POST-only |
+| Forget, then rewrite the key | forget succeeds, rewrite still `409` — **and the scope is left holding nothing** |
+| Carry our own key in the envelope | `422` — closed schema, and `/v1/events` has no metadata filter regardless |
+
+The idempotency ledger is independent of the event store and survives
+`/v1/forget`, so delete-then-rewrite loses the original *and* refuses the
+replacement. It is strictly worse than not attempting it.
+
+The only technically viable adapter keeps an **external index** of
+`(namespace, key) → event_id`, writes with fresh idempotency keys, and forgets
+the prior event on overwrite. That makes the driver stateful — it carries a
+database of its own — across two non-atomic calls, resting on a `forget` that
+reported `deleted.events: 2` for a selector naming one event id. That is a lot
+of correctness risk to absorb for something an upstream `on_conflict: replace`
+would remove entirely.
+
+Filed upstream as
+[cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3).
+**Phase 1 is blocked on that, not on our effort.**
 
 ## Belief revision is not reachable
 
@@ -194,9 +235,13 @@ committed, because the answer may decide between self-hosting and Cortex Cloud.
 instance-per-tenant, or accept the weak tier explicitly and write down why. Both
 are decisions, not engineering, and both gate everything below.
 
-**Phase 1 — a driver scoped to what returns data.** A `cortex` driver over
-`tinymemory-api` advertising only the families Cortex actually serves —
-`MemoryStore` and `ContextStore` shaped. Acceptance:
+**Phase 1 — a driver scoped to what returns data. Currently blocked upstream.**
+A `cortex` driver over `tinymemory-api` advertising only the families Cortex
+actually serves — `MemoryStore` and `ContextStore` shaped. This cannot start
+until CortexDB offers a way to replace a value at a key
+([cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3));
+without it the driver fails a mandatory conformance assertion no amount of
+adapter work can satisfy. Acceptance, once unblocked:
 
 - the full driver conformance suite (tinymemory#18 §E1);
 - failure-path tests for error mapping and malformed responses, as the existing
@@ -227,6 +272,8 @@ not.
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
   so a self-hosted deployment's support path is itself unproven.
 - Is there an undocumented prerequisite for fact extraction that we missed?
+- Will Cortex add an upsert path? Without one, the only route is a stateful
+  driver carrying its own key index — is that acceptable, or disqualifying?
 - If Facts and Beliefs stay unreachable, does Cortex still beat `supermemory` /
   `mem0` / `cognee` on retrieval alone — and is that enough to justify running
   one instance per tenant?
