@@ -6462,6 +6462,7 @@ mod tests {
             assignee: origin.to_string(),
             updated_at_millis: 0,
             origin_chat_id: Some(origin.to_string()),
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,
