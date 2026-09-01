@@ -243,6 +243,13 @@ pub const PAYLOAD_INPUT: &str = "input";
 pub const PAYLOAD_STARTED_BY: &str = "started_by";
 /// The durable tinyflows lineage used for a node-level continuation.
 pub const PAYLOAD_THREAD_ID: &str = "thread_id";
+/// The workflow graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+/// at the moment this gate parked — compared against a freshly loaded copy of
+/// the graph before a continuation trusts `PAYLOAD_THREAD_ID`'s checkpoint, so
+/// an edit made to the workflow while an approval sat pending falls back to
+/// [`ResumeSemantic::ReRunFromTrigger`](crate::ports::ResumeSemantic::ReRunFromTrigger)
+/// instead of resuming a stale checkpoint into a graph it no longer matches.
+pub const PAYLOAD_WORKFLOW_FINGERPRINT: &str = "workflow_fingerprint";
 /// The payload key holding this lineage's delivery ledger (issue #438) — the
 /// reports a continuation must NOT send again.
 pub const PAYLOAD_DELIVERED: &str = "delivered";
@@ -1061,7 +1068,8 @@ async fn spawn_continuation(
         .payload
         .get(PAYLOAD_THREAD_ID)
         .and_then(Value::as_str);
-    let node_restart = checkpoint_resume_available(runtime, checkpoint_thread_id).await;
+    let node_restart = checkpoint_resume_available(runtime, checkpoint_thread_id).await
+        && graph_unchanged_since_park(effect, &workflow);
     let ws = WorkflowSpawn::new(runtime, runner);
     let (ctx, guard) = runtime.run_supervisor().begin(&workflow.id, false)?;
     let ctx = ctx.with_started_by(started_by);
@@ -1251,6 +1259,33 @@ pub async fn spawn_blocked_node_continuation(
         "workflow: an approved agent-node call started a continuation run"
     );
     Ok(())
+}
+
+/// Whether `effect`'s parked workflow fingerprint (if it stashed one) still
+/// matches `workflow`'s current [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint).
+///
+/// `true` when the parked effect carries no `PAYLOAD_WORKFLOW_FINGERPRINT` —
+/// a card parked before this check existed — so it behaves exactly as it did
+/// before. `false` only when a fingerprint WAS stashed and no longer matches:
+/// the workflow was edited while this approval sat pending, so its checkpoint
+/// no longer describes the graph the continuation would run against.
+fn graph_unchanged_since_park(effect: &Effect, workflow: &crate::company::WorkflowFile) -> bool {
+    let Some(parked) = effect
+        .payload
+        .get(PAYLOAD_WORKFLOW_FINGERPRINT)
+        .and_then(Value::as_str)
+    else {
+        return true;
+    };
+    if parked == workflow.content_fingerprint() {
+        return true;
+    }
+    tracing::info!(
+        workflow = %workflow.id,
+        "workflow: the graph changed while this run was paused for approval; falling back to a \
+         trigger re-run instead of resuming a stale checkpoint into the edited graph"
+    );
+    false
 }
 
 /// Prunes `effect`'s stashed checkpoint lineage, when it has one and this
@@ -2261,6 +2296,90 @@ mod tests {
         // loader as an empty filename.
         e.payload = serde_json::json!({ PAYLOAD_WORKFLOW_ID: "   " });
         assert!(required_str(&e, PAYLOAD_WORKFLOW_ID).is_err());
+    }
+
+    const FINGERPRINT_V1: &str = r#"
+id = "editable"
+name = "Editable"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate"
+kind = "output"
+name = "Gate"
+requires_approval = true
+[[edge]]
+from = "start"
+to = "gate"
+"#;
+
+    /// Same graph, one node renamed — the shape of an in-place edit an author
+    /// makes to a workflow while one of its runs sits parked on an approval.
+    const FINGERPRINT_V2: &str = r#"
+id = "editable"
+name = "Editable"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate"
+kind = "output"
+name = "Gate — renamed"
+requires_approval = true
+[[edge]]
+from = "start"
+to = "gate"
+"#;
+
+    /// A card parked before this check existed carries no
+    /// `PAYLOAD_WORKFLOW_FINGERPRINT` at all — must not be treated as a
+    /// mismatch, or every pre-existing parked card would spuriously fall back
+    /// to a trigger re-run the moment this check shipped.
+    #[test]
+    fn a_card_with_no_stashed_fingerprint_is_treated_as_unchanged() {
+        let workflow = crate::company::parse_workflow(FINGERPRINT_V1).expect("parses");
+        let e = effect("editable", "gate", Value::Null);
+        assert!(
+            !e.payload
+                .as_object()
+                .unwrap()
+                .contains_key(PAYLOAD_WORKFLOW_FINGERPRINT)
+        );
+        assert!(graph_unchanged_since_park(&e, &workflow));
+    }
+
+    /// The headline: a graph edited while its run sat parked no longer matches
+    /// the fingerprint that run's card stashed at park time (PR #1991 review,
+    /// `3903797615`).
+    #[test]
+    fn an_edited_graph_no_longer_matches_its_parked_fingerprint() {
+        let parked_against = crate::company::parse_workflow(FINGERPRINT_V1).expect("parses");
+        let edited = crate::company::parse_workflow(FINGERPRINT_V2).expect("parses");
+        assert_ne!(
+            parked_against.content_fingerprint(),
+            edited.content_fingerprint(),
+            "the two graphs differ, so their fingerprints must too, or this whole check is inert"
+        );
+
+        let mut e = effect("editable", "gate", Value::Null);
+        if let Value::Object(ref mut payload) = e.payload {
+            payload.insert(
+                PAYLOAD_WORKFLOW_FINGERPRINT.to_string(),
+                json!(parked_against.content_fingerprint()),
+            );
+        }
+
+        assert!(
+            !graph_unchanged_since_park(&e, &edited),
+            "an edit made while the approval was pending must be detected"
+        );
+        assert!(
+            graph_unchanged_since_park(&e, &parked_against),
+            "the unedited graph must still read as unchanged against its own stashed fingerprint"
+        );
     }
 }
 

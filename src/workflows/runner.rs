@@ -1295,6 +1295,7 @@ async fn run_workflow_inner(
             child_gates: &child_gates,
             started_by: &ctx.started_by,
             checkpoint_thread_id: &checkpoint_thread_id,
+            workflow,
         },
     )
     .await;
@@ -1862,6 +1863,11 @@ struct PausedGates<'a> {
     /// continuation instead of resetting to `Operator`.
     started_by: &'a crate::ports::types::StartedBy,
     checkpoint_thread_id: &'a str,
+    /// The paused graph itself, fingerprinted and stamped on every card this
+    /// pass parks so `spawn_continuation` can refuse to resume a stale
+    /// checkpoint into a graph an editor changed while the approval sat
+    /// pending — see `PAYLOAD_WORKFLOW_FINGERPRINT`.
+    workflow: &'a crate::company::WorkflowFile,
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -2112,10 +2118,14 @@ async fn park_pending_gates(
         child_gates,
         started_by,
         checkpoint_thread_id,
+        workflow,
     } = paused;
     if pending.is_empty() {
         return;
     }
+    // Issue #1991 review: computed once per park pass (not per run) — hashed
+    // only once this run is actually known to be pausing on a gate.
+    let workflow_fingerprint = workflow.content_fingerprint();
     let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
         // Fails closed and loud, the same stance `deliver_outputs` takes for an
         // unwired destination: the run genuinely paused, and on this build
@@ -2266,6 +2276,10 @@ async fn park_pending_gates(
             payload.insert(
                 crate::runtime::workflow_resume::PAYLOAD_THREAD_ID.to_string(),
                 serde_json::json!(checkpoint_thread_id),
+            );
+            payload.insert(
+                crate::runtime::workflow_resume::PAYLOAD_WORKFLOW_FINGERPRINT.to_string(),
+                serde_json::json!(workflow_fingerprint),
             );
         }
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
