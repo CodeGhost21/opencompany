@@ -99,6 +99,7 @@ impl TaskSeed {
             assignee: self.assignee.clone().unwrap_or_default(),
             updated_at_millis: at_millis,
             origin_chat_id: None,
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,

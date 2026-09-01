@@ -3154,6 +3154,11 @@ impl<'a> CycleHostImpl<'a> {
             assignee: parsed.assignee.unwrap_or_default(),
             updated_at_millis: now_millis(),
             origin_chat_id: None,
+            // And therefore no thread inside one either (#1890 B): this tool
+            // surface never recorded the channel, so there is nothing to
+            // narrow. The pair stays absent together, which is what a reader
+            // must be able to rely on.
+            origin_parent: None,
             // No parent (#185), for the same reason as the harness path: this
             // is a chat-turn delegation, so no task is in scope to be the
             // parent. Lineage is set through the task API's `parentTaskId`.
@@ -3272,6 +3277,11 @@ impl<'a> CycleHostImpl<'a> {
             assignee: desk_id.clone(),
             updated_at_millis: now_millis(),
             origin_chat_id: None,
+            // And therefore no thread inside one either (#1890 B): this tool
+            // surface never recorded the channel, so there is nothing to
+            // narrow. The pair stays absent together, which is what a reader
+            // must be able to rely on.
+            origin_parent: None,
             // No parent (#185), for the same reason as the harness path: this
             // is a chat-turn delegation, so no task is in scope to be the
             // parent. Lineage is set through the task API's `parentTaskId`.
@@ -4397,6 +4407,7 @@ members = ["writer"]
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
                     origin_chat_id: None,
+                    origin_parent: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -4484,6 +4495,7 @@ members = ["writer"]
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
                     origin_chat_id: None,
+                    origin_parent: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -7959,6 +7971,7 @@ members = ["writer"]
                         artifact_ids: Vec::new(),
                         output: String::new(),
                         origin_chat_id: None,
+                        origin_parent: None,
                     },
                 ],
                 approval_task,
@@ -8215,6 +8228,7 @@ members = ["writer"]
                 artifact_ids: Vec::new(),
                 output: String::new(),
                 origin_chat_id: None,
+                origin_parent: None,
             },
             CompanyEvent::AgentReply {
                 mentions: Vec::new(),
@@ -8820,6 +8834,7 @@ members = ["writer"]
                     assignee: "eng".into(),
                     updated_at_millis: 0,
                     origin_chat_id: None,
+                    origin_parent: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -8900,6 +8915,7 @@ members = ["writer"]
                     assignee: "eng".into(),
                     updated_at_millis: 0,
                     origin_chat_id: None,
+                    origin_parent: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.

@@ -32,9 +32,22 @@ import { toneFor } from "@/lib/team";
 export function ProfileRow({
   client,
   company,
+  variant = "sidebar",
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Which chrome this is drawn in.
+   *
+   * `titlebar` is the home: the far right of the window's title row, opposite
+   * the company switcher. `sidebar` is the footer row it used to be, kept for
+   * any chrome that still gives it a column to sit at the bottom of.
+   *
+   * The two differ in shape and in nothing else. A sidebar footer row is a
+   * full-width menu item; a title-row control sizes to its own content and
+   * stops. Both open the same dialog.
+   */
+  variant?: "sidebar" | "titlebar";
 }) {
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
@@ -67,6 +80,68 @@ export function ProfileRow({
   if (!me || typeof me !== "object" || !("email" in me) || !("id" in me)) return null;
   const name = personName(me);
 
+  // 20px, not the 16px a sidebar icon slot would take: 16 is below the size a
+  // face can be read at (see `MessageRow`'s facepile note), and this is the one
+  // control on screen whose whole job is to show you yours. A row's icon slot
+  // sizes to its content, so the extra four pixels cost the label nothing.
+  const face = (
+    <TeammateAvatar
+      name={name}
+      tone={toneFor(me.id || me.email)}
+      avatar={personAvatar(me)}
+      // Round, not the sidebar's `rounded-[4px]`: in the title row this sits
+      // inside a circular button, and a squircle inside a circle reads as a
+      // mistake at 20px — the corners clip against the border on every side.
+      className="size-7 rounded-full text-2xs"
+    />
+  );
+
+  const dialog = (
+    <ProfileDialog
+      client={client}
+      company={company}
+      me={me}
+      open={open}
+      onOpenChange={setOpen}
+      onSaved={setMe}
+    />
+  );
+
+  if (variant === "titlebar") {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          data-testid="profile-row"
+          // Native `title` rather than the sidebar's tooltip component, which
+          // only renders while the rail is collapsed and needs the sidebar
+          // context to know it. This control is not in the rail any more.
+          title={name}
+          // Capped so a long display name cannot push the switcher off the
+          // other end of a narrow window; it truncates instead, exactly as it
+          // did in the column.
+          aria-label={name}
+            // The avatar alone. A title row is chrome, and the operator's own
+            // name is the one label they never need read back to them — it cost
+            // horizontal space at every window width to say something they
+            // already know. `title` and `aria-label` keep it reachable by
+            // pointer and by screen reader, so only the pixels are lost.
+            // A ring at rest, not only on hover. Stripped to the avatar alone
+            // the control had no edge of its own, so it read as a decorative
+            // mark sitting on the chrome rather than something clickable — the
+            // page's own rule is that what is interactive should look
+            // interactive. The border is the quietest thing that says so, and
+            // it firms up on hover rather than appearing from nothing.
+            className="flex items-center rounded-full border border-sidebar-border bg-sidebar/60 p-0.5 transition hover:border-sidebar-accent-foreground/30 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          {face}
+        </button>
+        {dialog}
+      </>
+    );
+  }
+
   return (
     <SidebarMenu>
       <SidebarMenuItem>
@@ -75,28 +150,11 @@ export function ProfileRow({
           onClick={() => setOpen(true)}
           data-testid="profile-row"
         >
-          {/* 20px, not the 16px a sidebar icon slot would take: 16 is below the
-              size a face can be read at (see `MessageRow`'s facepile note), and
-              this is the one row on screen whose whole job is to show you yours.
-              A row's icon slot sizes to its content, so the extra four pixels
-              cost the label nothing. */}
-          <TeammateAvatar
-            name={name}
-            tone={toneFor(me.id || me.email)}
-            avatar={personAvatar(me)}
-            className="size-5 rounded-[4px] text-3xs"
-          />
+          {face}
           <span className="truncate">{name}</span>
         </SidebarMenuButton>
       </SidebarMenuItem>
-      <ProfileDialog
-        client={client}
-        company={company}
-        me={me}
-        open={open}
-        onOpenChange={setOpen}
-        onSaved={setMe}
-      />
+      {dialog}
     </SidebarMenu>
   );
 }

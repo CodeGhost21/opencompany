@@ -6,17 +6,19 @@ import { expect, test } from "@playwright/test";
  * Two shapes, because the sidebar has two. On mobile it is a sheet that closes
  * entirely, taking its own controls with it, so the way back is a button
  * docked in its own chrome bar below the page. On desktop it collapses to a
- * 3rem icon rail that keeps its header, so the way back is the same control
- * that put it there.
+ * 3rem icon rail, and the way back is a control that never belonged to the
+ * column in the first place.
  *
- * The desktop half also pins WHERE that control lives (issue #1177). It used to
- * be a full-width row directly above Overview — the nav row shape exactly, for
- * something that is not a destination — and the fix is a header button. The
- * assertion that it is inside `sidebar-header` and absent from `sidebar-content`
- * is what stops it drifting back into the list, and it is deliberately paired
- * with the reachability claims rather than filed on its own: a control that is
- * in the right place but unreachable, or reachable but nameless, is the same
- * bug in a different coat.
+ * The desktop half also pins WHERE that control lives. It used to be a
+ * full-width row directly above Overview — the nav row shape exactly, for
+ * something that is not a destination (issue #1177) — then a button in the
+ * sidebar's header, which put the control that *hides* a panel inside the panel
+ * it hides. It now sits on the leading seam of the content card, outside the
+ * sidebar entirely, and the assertions that it is absent from `sidebar` and
+ * from `sidebar-content` and centred on that seam are what stop it drifting
+ * back into either. They are deliberately paired with the reachability claims
+ * rather than filed on their own: a control that is in the right place but
+ * unreachable, or reachable but nameless, is the same bug in a different coat.
  *
  * The mobile half used to be `position: fixed`, floating over whatever content
  * happened to scroll into the same bottom-left corner and winning every
@@ -60,6 +62,53 @@ test.describe("sidebar toggle reachability", () => {
     await expect(trigger).toBeInViewport();
     await trigger.click();
     await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
+  });
+
+  test("the seam control is desktop-only, so the sheet has exactly one way back", async ({
+    page,
+  }) => {
+    // 700px is below `md` (768), which is also exactly where `useIsMobile`
+    // flips — the CSS gate and the hook agree by construction rather than by
+    // coincidence.
+    //
+    // The seam button used to render here too, which was two controls for one
+    // job on one viewport and the second one was wrong in both halves:
+    // `SidebarCollapseButton` treats mobile as not-collapsed on purpose, so
+    // with the sheet CLOSED it announced itself "Collapse sidebar" and drew the
+    // close icon while pressing it OPENED the sheet.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/overview");
+    await dismissTour(page);
+
+    // `toBeHidden`, not `toHaveCount(0)`: the gate is CSS (`hidden md:block`),
+    // matching the `md:hidden` on the mobile trigger it defers to, so the node
+    // stays in the DOM with `display: none`. That is the whole claim, because
+    // `display: none` also takes an element out of the accessibility tree and
+    // out of the tab order — which the role query on the next line is what
+    // actually proves.
+    await expect(
+      page.getByTestId("sidebar-collapse"),
+      "the seam control is not shown below md",
+    ).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Collapse sidebar", exact: true }),
+      "…so nothing here claims it collapses a column that is a sheet",
+    ).toHaveCount(0);
+
+    // One control, and it is the one that means what it says.
+    const trigger = page.getByRole("button", { name: "Toggle sidebar" });
+    await expect(trigger).toHaveCount(1);
+    await expect(trigger).toBeInViewport();
+    await trigger.click();
+    await expect(page.getByRole("dialog", { name: "Sidebar" })).toBeVisible();
+
+    // And it comes back at `md`, which is what stops this being satisfied by a
+    // control that was deleted, or hidden at every width, rather than gated.
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await expect(page.getByTestId("sidebar-collapse")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Collapse sidebar", exact: true }),
+    ).toHaveCount(1);
   });
 
   test("the mobile sheet closes after selecting a destination", async ({ page }) => {
@@ -142,7 +191,7 @@ test.describe("sidebar toggle reachability", () => {
     await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
   });
 
-  test("the inline sidebar's collapse control is a named, keyboard-operable header button", async ({
+  test("the inline sidebar's collapse control is a named, keyboard-operable control on the seam", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
@@ -157,37 +206,48 @@ test.describe("sidebar toggle reachability", () => {
     // leaves a button a screen reader announces as "button".
     await expect(toggle).toBeInViewport();
 
-    // Chrome, not a destination. It lives in the header with the host switcher
-    // and is nowhere in the nav list.
+    // Not in the panel it hides — which is the whole of the move. It used to
+    // live in the sidebar's own header, so collapsing the column took the
+    // control with it and the rail had to keep a copy standing. It now renders
+    // from `app-shell.tsx` inside `SidebarInset`, on the content card's leading
+    // seam, and there is exactly one of it in either state.
     await expect(
-      page.locator("[data-slot=sidebar-header]").getByTestId("sidebar-collapse"),
-      "the collapse control belongs to the sidebar's header",
+      sidebar.getByTestId("sidebar-collapse"),
+      "the collapse control is not inside the panel it collapses",
+    ).toHaveCount(0);
+    await expect(
+      page.locator("[data-slot=sidebar-inset]").getByTestId("sidebar-collapse"),
+      "…it belongs to the content side of the seam",
     ).toHaveCount(1);
     await expect(
       page.locator("[data-slot=sidebar-content]").getByTestId("sidebar-collapse"),
       "…and never among the nav rows, which is what issue #1177 was",
     ).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-collapse")).toHaveCount(1);
 
-    // Below the switcher, not on top of it and not a second half of it. It sat
-    // to the switcher's RIGHT until the four utility controls — Settings,
-    // Feedback, Discord and this one — were gathered onto their own bar under
-    // the nameplate; the claim that survives the move is the one that mattered
-    // then too, which is that the two boxes do not overlap and the reader can
-    // tell them apart.
-    const switcherBox = await page.getByTestId("host-switcher").boundingBox();
-    const toggleBox = await toggle.boundingBox();
-    expect(switcherBox, "the host switcher should have a box").not.toBeNull();
-    expect(toggleBox, "the collapse control should have a box").not.toBeNull();
-    expect(
-      toggleBox!.y,
-      "the collapse button stands clear of the host switcher's lower edge",
-    ).toBeGreaterThanOrEqual(switcherBox!.y + switcherBox!.height);
-
-    // And it is on the utility bar rather than loose in the header, which is
-    // what keeps it beside the three controls of its own kind.
+    // It also left the utility bar it was gathered onto, which now holds the
+    // three controls that ARE destinations (Settings, Feedback, Discord) and
+    // nothing that only changes the chrome.
     await expect(
       page.getByTestId("sidebar-utilities").getByTestId("sidebar-collapse"),
-    ).toHaveCount(1);
+    ).toHaveCount(0);
+
+    // Centred ON the card's leading border rather than sitting inside the card
+    // or inside the rail: `left-(--frame-inset)` puts it at that edge and
+    // `-translate-x-1/2` straddles it. This is the assertion that stops it
+    // drifting back into the page, where it read as part of the content.
+    const seam = async () => {
+      const card = await page.getByTestId("content-surface").boundingBox();
+      const box = await page.getByTestId("sidebar-collapse").boundingBox();
+      expect(card, "the content card should have a box").not.toBeNull();
+      expect(box, "the collapse control should have a box").not.toBeNull();
+      return { centre: box!.x + box!.width / 2, edge: card!.x };
+    };
+    const expanded = await seam();
+    expect(
+      Math.abs(expanded.centre - expanded.edge),
+      "the control straddles the content card's leading border",
+    ).toBeLessThanOrEqual(1);
 
     // Operable from the keyboard, not just under a pointer. An icon-only
     // button is exactly the kind that gets rebuilt as a `div` with an
@@ -196,8 +256,8 @@ test.describe("sidebar toggle reachability", () => {
     await expect(toggle).toBeFocused();
     await page.keyboard.press("Enter");
 
-    // It survives the state it just produced. This is the case most likely to
-    // be got wrong: the control is now inside a 3rem column.
+    // It survives the state it just produced — the case most likely to be got
+    // wrong, and the one the old placement got wrong by construction.
     await expect(sidebar).toHaveAttribute("data-state", "collapsed");
     const expand = page.getByRole("button", { name: "Expand sidebar", exact: true });
     await expect(expand).toBeVisible();
@@ -205,7 +265,7 @@ test.describe("sidebar toggle reachability", () => {
 
     // `data-state` flips on the click; the column takes `duration-200` to get
     // there. Poll rather than sample, or this measures a sidebar caught half
-    // way and reports a button that fits as one that does not.
+    // way and reports a control positioned against a seam still in motion.
     await expect
       .poll(
         async () => (await page.locator("[data-slot=sidebar-container]").boundingBox())?.width,
@@ -213,13 +273,22 @@ test.describe("sidebar toggle reachability", () => {
       )
       .toBe(RAIL_WIDTH);
 
+    // The seam moved left with the column; the control moved with the seam and
+    // is still on it, still whole, and still on screen.
+    const collapsed = await seam();
+    expect(
+      Math.abs(collapsed.centre - collapsed.edge),
+      "…and it is still on that border once the column is a rail",
+    ).toBeLessThanOrEqual(1);
+    expect(
+      collapsed.edge,
+      "the seam it rides tracks the rail rather than staying where the column was",
+    ).toBeLessThan(expanded.edge);
     const railBox = await expand.boundingBox();
     expect(railBox, "the collapsed control should have a box").not.toBeNull();
-    expect(railBox!.x, "…inside the rail, not hanging off its left edge").toBeGreaterThanOrEqual(0);
-    expect(
-      railBox!.x + railBox!.width,
-      "…and inside the rail, not overflowing its right edge",
-    ).toBeLessThanOrEqual(RAIL_WIDTH);
+    expect(railBox!.x, "…and no part of it hangs off the left of the window").toBeGreaterThanOrEqual(
+      0,
+    );
 
     // And back, from the keyboard, to where it started.
     await expand.focus();
