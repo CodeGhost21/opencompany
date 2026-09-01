@@ -64,6 +64,44 @@ test.describe("sidebar toggle reachability", () => {
     await expect(page.getByText("Workflows", { exact: true })).toBeVisible();
   });
 
+  test("the seam control is desktop-only, so the sheet has exactly one way back", async ({
+    page,
+  }) => {
+    // 700px is below `md` (768), which is also exactly where `useIsMobile`
+    // flips — the CSS gate and the hook agree by construction rather than by
+    // coincidence.
+    //
+    // The seam button used to render here too, which was two controls for one
+    // job on one viewport and the second one was wrong in both halves:
+    // `SidebarCollapseButton` treats mobile as not-collapsed on purpose, so
+    // with the sheet CLOSED it announced itself "Collapse sidebar" and drew the
+    // close icon while pressing it OPENED the sheet.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/overview");
+    await dismissTour(page);
+
+    await expect(
+      page.getByTestId("sidebar-collapse"),
+      "the seam control does not render below md",
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Collapse sidebar", exact: true }),
+      "…so nothing here claims it collapses a column that is a sheet",
+    ).toHaveCount(0);
+
+    // One control, and it is the one that means what it says.
+    const trigger = page.getByRole("button", { name: "Toggle sidebar" });
+    await expect(trigger).toHaveCount(1);
+    await expect(trigger).toBeInViewport();
+    await trigger.click();
+    await expect(page.getByRole("dialog", { name: "Sidebar" })).toBeVisible();
+
+    // And it comes back at `md`, which is what stops this being satisfied by a
+    // control that was deleted rather than gated.
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await expect(page.getByTestId("sidebar-collapse")).toHaveCount(1);
+  });
+
   test("the mobile sheet closes after selecting a destination", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/#/overview");

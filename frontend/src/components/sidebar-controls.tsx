@@ -180,6 +180,15 @@ export function SidebarCollapseButton() {
   // desktop state happens to be collapsed — which, since issue #1176 stopped
   // the sidebar auto-collapsing, is now a state an operator can leave behind
   // and come back to on a phone.
+  //
+  // Defence in depth rather than the live path: `app-shell.tsx` gates this
+  // control at `md`, which is exactly where `useIsMobile` flips, because
+  // treating mobile as not-collapsed also meant a CLOSED sheet got "Collapse
+  // sidebar" and the close icon while pressing it opened the sheet. Below `md`
+  // the way back is the shell's own `md:hidden` "Toggle sidebar" bar, which
+  // reserves its own row instead of floating over the content (issue #1265).
+  // The guard stays so a future caller that does mount this on a phone gets the
+  // less wrong of the two labels rather than a confident one.
   const collapsed = !isMobile && state === "collapsed";
   const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
   const Icon = collapsed ? PanelLeftOpen : PanelLeftClose;

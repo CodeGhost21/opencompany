@@ -3504,8 +3504,27 @@ export function AppShell({
               straddles it. Inside the card it sat over the page's own heading
               and read as part of the content; on the seam it reads as chrome
               belonging to the boundary it moves. Absolutely positioned, so it
-              costs the page no layout and no view makes room for it. */}
-          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 -translate-x-1/2">
+              costs the page no layout and no view makes room for it.
+
+              `hidden md:block` — desktop only, and the breakpoint is not an
+              approximation. `useIsMobile` flips at exactly 768px, which is
+              Tailwind's `md`, so this gate is the precise complement of the
+              `!isMobile` that `SidebarCollapseButton` already reasons about:
+              the two agree by construction rather than by coincidence.
+
+              Below it the sidebar is a sheet, not a column, and it already has
+              a control — the `md:hidden` "Toggle sidebar" bar at the foot of
+              this inset. Leaving this one on made that two controls for one
+              job on one viewport, and the second one was wrong in both of its
+              halves: `SidebarCollapseButton` deliberately treats mobile as
+              not-collapsed, so with the sheet closed it read "Collapse
+              sidebar" and showed the close icon while pressing it OPENED the
+              sheet. Teaching it `openMobile` and retiring the bar was the
+              other way out and is the worse one — this button is absolutely
+              positioned over the content, and issue #1265 moved the mobile
+              trigger into a reserved row precisely to stop a floating control
+              winning the hit-test in that corner. */}
+          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 hidden -translate-x-1/2 md:block">
             <div className="pointer-events-auto">
               <SidebarCollapseButton />
             </div>
