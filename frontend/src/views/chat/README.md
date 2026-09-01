@@ -165,6 +165,43 @@ counter-minted `member-N` teammate ids stays orphaned — there is no honest
 mapping from `member-3` to a person, and inventing one would be worse than the
 loss.
 
+### A read-only channel offers no new reaction (#1986)
+
+Issue #1986 was opened as a product question — is reacting to a read-only feed
+of workflow reports legitimate acknowledgement, or the same defect #1757 and
+#1984 fixed for the members pane and the composer? The operator's ruling is
+**no**. Reacting writes into the company's transcript exactly as sending does,
+and the host authorizes it through the very same gate (`chat_actor`,
+`src/server/operator.rs`, whose own doc says reacting "can be neither easier nor
+harder than saying something"), so a surface that states *there is nothing to
+reply to here* must not offer it either.
+
+`MessageTimeline` reads `channel.system` — the flag `ChatView` derives its own
+`readOnly` from, and the one the channel intro already gates on — and
+`MessageRow` then **removes** the hover toolbar's five quick reactions rather
+than disabling them. The same answer #1984 gave the composer, for the same
+reason: a greyed-out control is still a claim that the action exists, and this
+strip is revealed by CSS alone (`group-hover/message:flex`), so leaving the
+buttons mounted leaves them reachable by pointer, by keyboard focus and by a
+screen reader.
+
+Reactions **already** on such a line still render, disabled, with a tooltip
+saying why. One somebody left is content and this feed is the only record of
+it; hiding it would lose information rather than withdraw an offer. Only the
+ability to add or toggle one goes. The way into a thread stays too — an
+Operator report is still worth reading the replies under, and what may be
+*written* in one is `ThreadPanel`'s question, answered there.
+
+**This one is UX, not enforcement.** A *send* is refused server-side by
+`CompanyRuntime::ensure_desk_writable` (#1757), which is why the composer's
+gate is defence in depth. The reaction route is not: `POST
+{scope}/chat/messages/{seq}/reactions` is addressed by sequence number, never
+resolves the target's channel, and runs no read-only check at all — so a
+reaction on an Operator report is still accepted (`204`) from anyone who can
+issue the request. `reactions_refuse_a_target_that_is_an_admin_only_report` in
+`src/server/operator.rs` asserts exactly that in its admin branch. Closing it
+is a host change and is not part of #1986.
+
 ## Empty, or not answered yet
 
 `Transcripts` is `Record<string, ChatMessage[]>`, and the timeline reads it as
