@@ -210,6 +210,41 @@ fn contains_bounded(haystack: &str, leaf: &str) -> bool {
     })
 }
 
+/// The connection a stop is about, when the reason names one — the key that
+/// folds ten cards stalled on one broken integration into a single question
+/// (issue #1862).
+///
+/// Only the recognised connection shapes carry a groupable identity: the phrase
+/// that identified the stop as an integration failure sits beside a backticked
+/// name (`could not connect to mcp server \`slack\``), and that name is the
+/// connection. Everything else returns `None` and groups with nothing — the
+/// same conservative default the classifier itself keeps, for the same reason:
+/// a wrong group merges two unrelated questions into one card, which is worse
+/// than two honest cards.
+///
+/// Deliberately not a general backtick scan: an auth or model-id reason also
+/// carries a backticked token (the rejected model, a key label), and grouping
+/// those would collapse distinct provider stops. The gate is that the reason
+/// matched an integration-connection shape in the first place.
+pub fn connection_group_key(reason: &str) -> Option<String> {
+    let lower = reason.to_ascii_lowercase();
+    const CONNECTION_MARKERS: &[&str] = &[
+        "could not connect to mcp server",
+        "mcp server is not connected",
+        "connection is not authorised",
+        "reconnect the app",
+    ];
+    if !CONNECTION_MARKERS.iter().any(|m| lower.contains(m)) {
+        return None;
+    }
+    let name = reason
+        .split('`')
+        .nth(1)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    Some(format!("connection:{name}"))
+}
+
 /// The class a planning pass's missing prerequisite parks as.
 ///
 /// Not message-matched: `settle_blocked` already *knows* the card cannot
@@ -399,6 +434,37 @@ mod test {
         assert!(PREREQ_BLOCKER.kind.parks());
         assert!(AGENT_QUESTION_BLOCKER.kind.parks());
     }
+
+    /// Two cards stalled on the same integration carry the same group key, so
+    /// the console folds them into one question instead of two.
+    #[test]
+    fn a_named_connection_groups_by_its_name() {
+        let a = connection_group_key("could not connect to mcp server `slack`")
+            .expect("a named connection groups");
+        let b = connection_group_key("dispatch failed: could not connect to mcp server `slack`")
+            .expect("the same connection, a different reason");
+        assert_eq!(a, b);
+        assert_eq!(a, "connection:slack");
+        assert_ne!(
+            connection_group_key("could not connect to mcp server `notion`"),
+            Some(a),
+            "a different server is a different question"
+        );
+    }
+
+    /// The gate is that the reason matched a connection shape — a backticked
+    /// token in an auth or model-id reason is not a connection and must not
+    /// group those distinct stops together.
+    #[test]
+    fn a_backtick_outside_a_connection_shape_does_not_group() {
+        assert_eq!(connection_group_key("unknown model `gpt-nope`"), None);
+        assert_eq!(connection_group_key("invalid api key `sk-123`"), None);
+        assert_eq!(
+            connection_group_key("could not connect to mcp server"),
+            None,
+            "a connection shape with no name has nothing to group by"
+        );
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -528,6 +594,9 @@ impl openhuman_core::openhuman::tools::traits::Tool for EscalateToHumanTool {
             step: None,
             reason: reason.clone(),
             needed: AGENT_QUESTION_BLOCKER.needed.to_string(),
+            // A question is particular to its own card; nothing else shares its
+            // answer, so it groups with nothing.
+            group_key: None,
         };
         let effect = crate::ports::types::Effect {
             kind: payload.effect_kind(),

@@ -1621,6 +1621,9 @@ impl HarnessAgentRunner {
             }),
             reason: message.to_string(),
             needed: needed.to_string(),
+            // Nodes across runs stalled on one broken integration read as one
+            // question — populated only when the reason names a connection.
+            group_key: crate::harness::built_in::blockers::connection_group_key(message),
         };
         let effect = crate::ports::types::Effect {
             kind: payload.effect_kind(),

@@ -270,6 +270,19 @@ pub struct BlockerPayload {
     /// What would unblock it — the question being asked, or the action being
     /// requested.
     pub needed: String,
+    /// The root cause many parks share — a connection id, an integration name —
+    /// so that ten cards stalled on one broken OAuth grant read as one question,
+    /// not ten. `None` when the stop is particular to this step and groups with
+    /// nothing.
+    ///
+    /// Provenance, not routing: it is the id the classify site already knows
+    /// (which connection, which Composio account, which MCP server), copied
+    /// verbatim. Nothing branches on it — the console folds parks that carry the
+    /// same key into a single card, and a resolve fans its verdict to every park
+    /// in the group. Additive with a serde default, so a park written before
+    /// this field existed reads back as ungrouped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
 }
 
 impl BlockerPayload {
@@ -426,8 +439,33 @@ mod test {
             }),
             reason: "the model id `gpt-nonexistent` was rejected".to_string(),
             needed: "a model id this provider serves".to_string(),
+            group_key: None,
         };
         assert_eq!(payload.effect_kind(), "blocker.infrastructure");
+    }
+
+    /// `group_key` is additive: a payload serialized before it existed — with no
+    /// such key — reads back as ungrouped rather than failing to parse, and a
+    /// present key round-trips.
+    #[test]
+    fn group_key_is_additive_and_round_trips() {
+        let legacy = serde_json::json!({
+            "kind": "infrastructure",
+            "source": "tool",
+            "reason": "could not connect to mcp server `slack`",
+            "needed": "the integration reconnected from Apps"
+        });
+        let parsed: BlockerPayload =
+            serde_json::from_value(legacy).expect("a pre-field payload still parses");
+        assert_eq!(parsed.group_key, None);
+
+        let grouped = BlockerPayload {
+            group_key: Some("connection:slack".to_string()),
+            ..parsed
+        };
+        let json = serde_json::to_value(&grouped).expect("serializes");
+        let back: BlockerPayload = serde_json::from_value(json).expect("parses");
+        assert_eq!(back.group_key.as_deref(), Some("connection:slack"));
     }
 
     /// The step survives a round trip through JSON, because that is how it
