@@ -167,6 +167,16 @@ describe("a read-only channel renders no composer", () => {
 
     expect(container.textContent).toContain("There is nothing to reply to here");
   });
+
+  it("offers neither empty-state card, since neither action exists here", async () => {
+    await mount("operator");
+
+    // "Give the team a brief" prefills a composer this channel does not
+    // render; "Add people" opens a members pane `ChatView` gates off on the
+    // same flag. Both were dead controls under the notice.
+    expect(container.textContent).not.toContain("Give the team a brief");
+    expect(container.textContent).not.toContain("Add people");
+  });
 });
 
 describe("a writable channel still renders the whole composer", () => {
@@ -181,6 +191,13 @@ describe("a writable channel still renders the whole composer", () => {
     }
     expect(container.textContent).toContain("to send");
     expect(container.textContent).not.toContain("There is nothing to reply to here");
+  });
+
+  it("still offers the empty-state cards", async () => {
+    await mount("main");
+
+    expect(container.textContent).toContain("Give the team a brief");
+    expect(container.textContent).toContain("Add people");
   });
 });
 
