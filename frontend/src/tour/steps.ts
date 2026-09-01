@@ -6,12 +6,34 @@ import type { View } from "@/components/app-shell";
  * One stop on the guided tour: a spotlight target plus the console view it
  * belongs to, so the controller can switch panes before highlighting.
  *
- * Anchoring strategy: most stops target an always-mounted **sidebar nav**
- * element (`[data-tour="nav-<view>"]`), which sidesteps the lazy/Suspense race
- * entirely — navigating still swaps the main pane so the operator sees the
- * view, but the spotlight never waits on a code-split chunk. Only the two
- * richest moments (the operator overview, the chat composer) anchor to content on
- * non-lazy views.
+ * Anchoring strategy: most stops target a **sidebar nav** element
+ * (`[data-tour="nav-<view>"]`), which sidesteps the lazy/Suspense race entirely
+ * — navigating still swaps the main pane so the operator sees the view, but the
+ * spotlight never waits on a code-split chunk. Only the chat composer anchors to
+ * content, and Chat is not lazy.
+ *
+ * Each nav stop therefore has to name a row that EXISTS. The anchor is
+ * `nav-<view>`, not `nav-<label>`, because the two are deliberately allowed to
+ * differ — the `chat` view's row says "Room", the `workflows` view's says
+ * "Flows" — and an anchor should not move when a word does. What it must track
+ * is the nav table (`components/sidebar-navigation.tsx`).
+ *
+ * ## Rebuilt, not patched, for the four-section sidebar
+ *
+ * Four of the eight stops this file used to hold pointed at rows that stopped
+ * existing: `nav-approvals` and the two Overview stops (Approvals and Overview
+ * are chrome in the window's title row now), and `nav-workflows`' stop was
+ * titled "Workflows". A missing anchor degrades to a **skipped step** rather
+ * than an error — `waitForTarget` below resolves `false` and the tour moves on
+ * — so a stale tour does not break, it quietly teaches half the product and
+ * nothing reports it. That is why this was rewritten rather than repaired, and
+ * why `tour-anchors.test.ts` now asserts every stop's anchor against the nav
+ * table instead of trusting the browser to complain.
+ *
+ * Seven stops, not eight. The Overview stop is gone rather than re-anchored:
+ * Overview is not a place you navigate to from the sidebar any more, and a tour
+ * that teaches a destination an operator cannot then find is worse than one
+ * that leaves it for them to discover where it now lives.
  */
 export interface TourStop {
   view: View;
@@ -25,18 +47,11 @@ export interface TourStop {
 
 export const TOUR: TourStop[] = [
   {
-    view: "overview",
+    view: "chat",
     target: '[data-tour="sidebar"]',
     placement: "right",
     title: "Welcome to your company",
-    body: "Everything your company can do lives in this sidebar. Let's take a quick look around.",
-  },
-  {
-    view: "overview",
-    target: '[data-tour="overview-graph"]',
-    placement: "top",
-    title: "Start here each day",
-    body: "Your company at a glance: its departments, the work in flight, who's doing it, and what it remembers. Pull the graph around to explore it.",
+    body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Flows it repeats. Open one and what's inside it appears underneath.",
   },
   {
     view: "chat",
@@ -50,33 +65,25 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-chat"]',
     placement: "right",
     title: "Your AI staff",
-    body: "The teammates that actually do the work each have a channel and a direct message here. Open the team pane to see the whole roster.",
+    body: "Every channel and direct message is listed here while you're in the Room. The teammates that do the work each have one.",
+  },
+  {
+    view: "company",
+    target: '[data-tour="nav-company"]',
+    placement: "right",
+    title: "Your company",
+    body: "Who's on it, what they're working on, the files they keep, what they remember, and what it all costs — five pages under one row.",
   },
   {
     view: "workflows",
     target: '[data-tour="nav-workflows"]',
     placement: "right",
-    title: "Workflows",
-    body: "Turn recurring work into a repeatable workflow — a graph of steps your teammates run end to end.",
+    title: "Flows",
+    body: "Turn recurring work into a repeatable flow — a graph of steps your teammates run end to end.",
   },
   {
-    view: "approvals",
-    target: '[data-tour="nav-approvals"]',
-    placement: "right",
-    title: "Approvals",
-    body: "Anything that needs your sign-off before it happens waits here. Nothing risky runs without you.",
-  },
-  {
-    // The accounts page is `#/connections/apps` since it left the settings rail
-    // for its own section, so the stop navigates there and spotlights the
-    // Connections nav row that leads to it.
-    //
-    // That row is the point of the change. This stop is titled "Connect your
-    // tools" and used to spotlight **Settings**, because the accounts page was
-    // a settings sub-page and the utility bar's `nav-settings` anchor was the
-    // nearest always-mounted thing to point at. An operator following the tour
-    // was shown a gear and told it was where tools get connected. The stop now
-    // names the same surface the sidebar does.
+    // The accounts page is `#/connections/apps` since it left the settings
+    // rail, so the stop navigates there and spotlights the row that leads to it.
     view: "connections",
     sub: "apps",
     target: '[data-tour="nav-connections"]',
