@@ -2838,6 +2838,66 @@ mod tests {
         assert!(!verdict.parks_under_auto(), "{args}");
     }
 
+    /// A `GET` with a `body` is not a read: [`to_tool_args`] forwards the body
+    /// verbatim and `HttpRequestTool::execute_request` attaches it to the
+    /// outgoing request regardless of method, so this is an outbound data
+    /// transmission wearing a read-shaped method (PR #1989 review 3905098660).
+    /// Proven red pre-fix: before this change `http_request_consequence`
+    /// looked at `method` alone, so this call classified `ExternalRead` /
+    /// `ScopedGrantable` and ran unattended under `supervised`/`auto`.
+    #[test]
+    fn a_get_carrying_a_body_stays_gated() {
+        let args = json!({
+            "method": "GET",
+            "url": "https://api.example.com/items",
+            "body": "exfiltrated-secret",
+        });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::Consequence, "{args}");
+        assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        assert!(verdict.reach.parks_under_supervision(), "{args}");
+        assert!(verdict.parks_under_auto(), "{args}");
+    }
+
+    /// A `GET` carrying an `X-HTTP-Method-Override` header is not a read
+    /// either: many server frameworks treat that header as the real verb, so
+    /// a "free" GET can trigger a server-side mutation the operator never saw
+    /// a card for (PR #1989 review 3905098660). Proven red pre-fix for the
+    /// same reason as the body case above — the pre-fix classifier never
+    /// looked at `headers`.
+    #[test]
+    fn a_get_carrying_a_method_override_header_stays_gated() {
+        let args = json!({
+            "method": "GET",
+            "url": "https://api.example.com/items/1",
+            "headers": { "X-HTTP-Method-Override": "DELETE" },
+        });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::Consequence, "{args}");
+        assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        assert!(verdict.reach.parks_under_supervision(), "{args}");
+        assert!(verdict.parks_under_auto(), "{args}");
+    }
+
+    /// A read-shaped call with only allowlisted headers must stay free —
+    /// otherwise the fix would over-correct into gating every authenticated
+    /// read.
+    #[test]
+    fn a_get_with_only_safe_headers_stays_free() {
+        let args = json!({
+            "method": "GET",
+            "url": "https://api.example.com/items",
+            "headers": {
+                "Accept": "application/json",
+                "Authorization": "Bearer token",
+                "If-None-Match": "\"abc123\"",
+            },
+        });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::ExternalRead, "{args}");
+        assert_eq!(verdict.standing, Standing::ScopedGrantable, "{args}");
+    }
+
     #[test]
     fn web_fetch_is_an_external_read() {
         let args = fetching("https://docs.rs/serde");
