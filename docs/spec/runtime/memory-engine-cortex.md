@@ -220,23 +220,43 @@ Other operational notes:
   across ~50 events and several hours of scheduler ticks totalled **$0.000022**.
   Capability, not cost, is the constraint.
 
-## Licensing — decide before building
+## Licensing permits this
 
-The binaries ship under **CortexDB Community License v1.0**
-(`LicenseRef-CortexDB-Community-1.0`): free for personal, internal-business,
-evaluation and development use, and the release README states the one thing not
-permitted is "reselling CortexDB as a hosted service to third parties".
+Checked against the licence text rather than the release README's one-line
+summary, which is lossy in a way that matters. **CortexDB Community License
+v1.0 clause 2** explicitly allows what this design does:
 
-Hosting Cortex for OpenCompany tenants is approximately that shape. Evaluation is
-clearly fine; productionising this design is a licensing conversation with
-CortexDB, and it should happen **before** driver and infrastructure work is
-committed, because the answer may decide between self-hosting and Cortex Cloud.
+> The Software may be used to power internal or commercial applications,
+> including those sold to third parties, provided that: (a) the third party
+> does not access the Software directly as a general-purpose memory database
+> (i.e., you may build products on top of CortexDB and sell those products; you
+> may not resell CortexDB itself as a service); and (b) attribution to
+> "CortexDB" appears in product documentation where reasonable.
+
+Selling OpenCompany with Cortex behind the memory seam is building a product on
+top of CortexDB, not reselling CortexDB. Condition (a) is satisfied **by
+construction**: tenants reach memory only through the `MemoryProvider` seam, and
+the credential and endpoint "never appear in logs, `/healthz`, `/spec`, status
+output, or an export" (`memory-engine.md`). A tenant cannot address the engine
+directly.
+
+Two obligations follow, neither of them a gate:
+
+- **Never hand a tenant its own Cortex endpoint or credential.** Under
+  instance-per-tenant that would be easy to do casually — a BYO-engine feature,
+  or exposing the URL in a console — and it is precisely what (a) forbids. The
+  seam's existing redaction already prevents it; keep it that way.
+- **Attribute CortexDB in product documentation** where reasonable (clause 2b).
+
+Clause 3 permits mirroring the binary on an internal artifact store for our own
+use, which instance-per-tenant provisioning needs. Clause 5 points source access
+and cloud-hosted offerings at sales@cortexdb.ai — neither is required here.
 
 ## Phased plan
 
-**Phase 0 — decide (blocking).** Resolve licensing. Then ratify
-instance-per-tenant, or accept the weak tier explicitly and write down why. Both
-are decisions, not engineering, and both gate everything below.
+**Phase 0 — decide.** Ratify instance-per-tenant, or accept the weak tier
+explicitly and write down why. Licensing is settled (clause 2 permits it); what
+remains is the topology decision, which gates everything below.
 
 **Phase 1 — a driver scoped to what returns data. Currently blocked upstream.**
 A `cortex` driver over `tinymemory-api` advertising only the families Cortex
@@ -269,7 +289,8 @@ not.
 
 ## Open questions
 
-- Licensing: does tenant hosting require an enterprise agreement?
+- Does CortexDB agree with our reading of clause 2? Worth confirming in writing
+  when we contact them, though the text is not ambiguous.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
