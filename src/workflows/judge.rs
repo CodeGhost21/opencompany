@@ -195,6 +195,64 @@ pub struct RecoveryResult {
     pub log: String,
 }
 
+const MAX_FOCUS_TERMS: usize = 6;
+const MIN_FOCUS_TERM_LEN: usize = 4;
+
+/// Candidate single-word `FactStore` queries pulled out of a natural-language
+/// question (issue #1990 review, #3903591432): `FactStore::list`'s query is a
+/// case-insensitive substring match over a fact's title + body, so the whole
+/// question almost never appears verbatim even when a fact IS the answer — a
+/// fact titled "Renewal date" never matches the sentence "The answer must
+/// include the renewal date". Lowercased, deduplicated, common short/filler
+/// words dropped, capped so the bounded recovery ladder stays bounded.
+fn focus_terms(question: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "the",
+        "and",
+        "that",
+        "this",
+        "with",
+        "from",
+        "must",
+        "have",
+        "will",
+        "shall",
+        "should",
+        "answer",
+        "include",
+        "includes",
+        "criteria",
+        "success",
+        "about",
+        "into",
+        "onto",
+        "than",
+        "then",
+        "when",
+        "what",
+        "which",
+        "specifically",
+        "please",
+        "need",
+        "needs",
+    ];
+    let mut terms = Vec::new();
+    for word in question.split(|c: char| !c.is_alphanumeric()) {
+        let lower = word.to_lowercase();
+        if lower.chars().count() < MIN_FOCUS_TERM_LEN {
+            continue;
+        }
+        if STOPWORDS.contains(&lower.as_str()) || terms.contains(&lower) {
+            continue;
+        }
+        terms.push(lower);
+        if terms.len() >= MAX_FOCUS_TERMS {
+            break;
+        }
+    }
+    terms
+}
+
 /// Bounded fact → workspace → one-peer recovery. The peer rung is explicitly
 /// unavailable until #1859 lands; it is skipped, never broadcast to the roster.
 pub async fn ask_around(deps: &HarnessDeps, company: &CompanyId, question: &str) -> RecoveryResult {
@@ -203,14 +261,29 @@ pub async fn ask_around(deps: &HarnessDeps, company: &CompanyId, question: &str)
     let mut log = Vec::new();
 
     if let Some(facts) = deps.facts.as_ref() {
-        match facts.list(company, Some(&query), None).await {
-            Ok(rows) => {
-                for row in rows.into_iter().take(MAX_RECOVERY_ITEMS) {
-                    evidence.push(format!("fact: {} — {}", row.title, row.body));
+        let mut queries = vec![query.clone()];
+        queries.extend(focus_terms(&query));
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut query_errors = Vec::new();
+        'queries: for q in &queries {
+            match facts.list(company, Some(q), None).await {
+                Ok(rows) => {
+                    for row in rows {
+                        if evidence.len() >= MAX_RECOVERY_ITEMS {
+                            break 'queries;
+                        }
+                        if seen_ids.insert(row.id.clone()) {
+                            evidence.push(format!("fact: {} — {}", row.title, row.body));
+                        }
+                    }
                 }
-                log.push(format!("facts: {} match(es)", evidence.len()));
+                Err(err) => query_errors.push(err.to_string()),
             }
-            Err(err) => log.push(format!("facts: unavailable ({err})")),
+        }
+        if evidence.is_empty() && !query_errors.is_empty() {
+            log.push(format!("facts: unavailable ({})", query_errors.join("; ")));
+        } else {
+            log.push(format!("facts: {} match(es)", evidence.len()));
         }
     } else {
         log.push("facts: unavailable".to_string());
@@ -348,5 +421,112 @@ mod tests {
         let capped = cap(&text, MAX_RECOVERY_CHARS);
         assert_eq!(capped.chars().count(), MAX_RECOVERY_CHARS + 1);
         assert!(capped.ends_with('…'));
+    }
+
+    /// Codex review on #1990 (#3903591432): a whole success-criteria sentence
+    /// pulls out its content words as focused single-term queries, dropping
+    /// short/filler words, so a fact titled on ONE of those words is
+    /// reachable even though it never contained the sentence verbatim.
+    #[test]
+    fn focus_terms_extracts_content_words_from_a_criteria_sentence() {
+        let terms = focus_terms("The answer must include the renewal date");
+        assert!(
+            terms.contains(&"renewal".to_string()),
+            "expected \"renewal\" among {terms:?}"
+        );
+        assert!(
+            terms.contains(&"date".to_string()),
+            "expected \"date\" among {terms:?}"
+        );
+        assert!(
+            !terms.contains(&"the".to_string()) && !terms.contains(&"must".to_string()),
+            "filler words must be dropped: {terms:?}"
+        );
+    }
+
+    #[test]
+    fn focus_terms_is_capped_and_deduplicated() {
+        let terms =
+            focus_terms("alpha alpha bravo charlie delta echo foxtrot golf hotel india juliet");
+        assert!(terms.len() <= MAX_FOCUS_TERMS, "{terms:?}");
+        let unique: std::collections::HashSet<_> = terms.iter().collect();
+        assert_eq!(unique.len(), terms.len(), "no duplicate terms: {terms:?}");
+    }
+
+    /// A [`crate::ports::FactStore`] whose `list` only matches an EXACT query
+    /// string — standing in for the real substring-match store closely enough
+    /// to prove whether a whole-sentence query alone can ever reach a fact
+    /// keyed on one of its content words.
+    struct ExactMatchFactStore {
+        matches: &'static str,
+        fact: crate::ports::FactRecord,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::FactStore for ExactMatchFactStore {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            query: Option<&str>,
+            _kind: Option<crate::ports::FactKind>,
+        ) -> crate::Result<Vec<crate::ports::FactRecord>> {
+            Ok(match query {
+                Some(q) if q == self.matches => vec![self.fact.clone()],
+                _ => Vec::new(),
+            })
+        }
+
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _fact: &crate::ports::FactRecord,
+        ) -> crate::Result<()> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    /// Codex review on #1990 (#3903591432): the whole-sentence query used to
+    /// be the ONLY query `ask_around` ever sent to the fact store. A fact
+    /// titled "Renewal date" — reachable by the focused term "renewal" — was
+    /// unreachable by the full sentence "The answer must include the renewal
+    /// date" against a case-insensitive substring match.
+    #[tokio::test]
+    async fn ask_around_finds_a_fact_reachable_only_by_a_focused_term() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-focused-query-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        deps.facts = Some(std::sync::Arc::new(ExactMatchFactStore {
+            matches: "renewal",
+            fact: crate::ports::FactRecord {
+                id: "f1".to_string(),
+                kind: crate::ports::FactKind::Fact,
+                title: "Renewal date".to_string(),
+                body: "The contract renews on March 1st.".to_string(),
+                source: "test".to_string(),
+                updated_at_millis: 0,
+            },
+        }));
+
+        let result = ask_around(
+            &deps,
+            &CompanyId::new("acme"),
+            "The answer must include the renewal date",
+        )
+        .await;
+
+        let evidence = result
+            .evidence
+            .expect("a fact reachable only by a focused term must still be found");
+        assert!(
+            evidence.contains("Renewal date"),
+            "expected the matched fact in the evidence: {evidence}"
+        );
     }
 }
