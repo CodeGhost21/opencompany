@@ -2594,7 +2594,7 @@ mod tests {
     /// found no scoped-grantable verdict at all would pass while asserting
     /// nothing.
     #[test]
-    fn every_scoped_grantable_tool_in_the_table_parks_under_auto() {
+    fn every_scoped_grantable_tool_in_the_table_follows_its_reach() {
         let probe = json!({
             WEB_FETCH_URL_KEY: "https://docs.rs/serde",
             COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
@@ -2604,9 +2604,10 @@ mod tests {
             let verdict = consequence_of(tool, &probe);
             if verdict.standing == Standing::ScopedGrantable {
                 seen += 1;
-                assert!(
+                assert_eq!(
                     verdict.parks_under_auto(),
-                    "`{tool}` is scoped-grantable and must still park under auto"
+                    verdict.reach.parks_under_supervision(),
+                    "`{tool}` is scoped-grantable, so its reach alone decides whether it parks"
                 );
             }
         }
@@ -2653,6 +2654,54 @@ mod tests {
                 None,
                 "{unreadable}"
             );
+        }
+    }
+
+    #[test]
+    fn read_shaped_http_is_free_but_readonly_and_spend_stay_closed() {
+        for method in ["GET", "get", "HEAD", "OPTIONS"] {
+            let verdict = consequence_of(
+                "http_request",
+                &json!({ "method": method, "url": "https://api.github.com/repos/o/r" }),
+            );
+            assert_eq!(verdict.reach, Reach::ExternalRead, "{method}");
+            assert_eq!(verdict.standing, Standing::ScopedGrantable, "{method}");
+            assert!(!verdict.reach.parks_under_supervision(), "{method}");
+            assert!(!verdict.parks_under_auto(), "{method}");
+            assert!(verdict.reach.denied_under_readonly(), "{method}");
+            assert!(!verdict.reach.costs_money(), "{method}");
+        }
+    }
+
+    #[test]
+    fn mutating_and_unknown_http_methods_stay_per_call() {
+        for args in [
+            json!({ "method": "POST", "url": "https://api.example.com/items" }),
+            json!({ "method": "DELETE", "url": "https://api.example.com/items/1" }),
+            json!({ "method": "BREW", "url": "https://api.example.com/coffee" }),
+            json!({ "method": 7, "url": "https://api.example.com/items" }),
+            json!({ "url": "https://api.example.com/items" }),
+        ] {
+            let verdict = consequence_of("http_request", &args);
+            assert_eq!(verdict.reach, Reach::Consequence, "{args}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+            assert!(verdict.reach.parks_under_supervision(), "{args}");
+            assert!(verdict.parks_under_auto(), "{args}");
+            assert!(!verdict.reach.costs_money(), "{args}");
+        }
+    }
+
+    #[test]
+    fn curl_and_web_fetch_are_external_reads() {
+        let args = fetching("https://docs.rs/serde");
+        for tool in ["curl", WEB_FETCH] {
+            let verdict = consequence_of(tool, &args);
+            assert_eq!(verdict.reach, Reach::ExternalRead, "{tool}");
+            assert_eq!(verdict.standing, Standing::ScopedGrantable, "{tool}");
+            assert!(!verdict.reach.parks_under_supervision(), "{tool}");
+            assert!(!verdict.parks_under_auto(), "{tool}");
+            assert!(verdict.reach.denied_under_readonly(), "{tool}");
+            assert!(!verdict.reach.costs_money(), "{tool}");
         }
     }
 
@@ -3670,22 +3719,24 @@ mod tests {
         }
     }
 
-    /// `ExternalRead` must not leak into the spend cap from any other tool.
-    ///
-    /// `web_search_is_still_a_priced_call` pins the `Money`→`Spend` direction;
-    /// this pins that no *declared* tool picked up the new variant by accident,
-    /// so the only thing carrying it is the Composio read branch.
+    /// `ExternalRead` must not leak into the spend cap.
     #[test]
-    fn no_declared_tool_claims_the_external_read_bucket() {
-        let args = json!({});
+    fn external_reads_never_claim_the_spend_bucket() {
+        let args = json!({
+            "url": "https://api.github.com/repos/o/r",
+            "method": "GET",
+            COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+        });
+        let mut seen = 0;
         for tool in declared_tools() {
-            assert_ne!(
-                consequence_of(tool, &args).reach,
-                Reach::ExternalRead,
-                "`{tool}` is a declared tool; `ExternalRead` is for the Composio \
-                 read branch, which is classified from its arguments"
-            );
+            let verdict = consequence_of(tool, &args);
+            if verdict.reach == Reach::ExternalRead {
+                seen += 1;
+                assert!(!verdict.reach.costs_money(), "`{tool}` is not spend");
+                assert_ne!(verdict.group, EffectGroup::Spend, "`{tool}` is not spend");
+            }
         }
+        assert!(seen > 0, "the walk reached no external read");
     }
 
     #[test]
