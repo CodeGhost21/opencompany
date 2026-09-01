@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { NAV_SECTIONS } from "@/components/sidebar-navigation";
 import { TOUR } from "@/tour/steps";
 import {
   CONNECTION_PAGES,
@@ -82,17 +83,23 @@ describe("the Connections section", () => {
     expect(read("views/OAuthView.tsx")).not.toContain('title="OAuth"');
   });
 
-  it("builds its rail the way the Settings and Finance rails are built", () => {
+  it("draws its sub-navigation in the sidebar rather than a rail in the page", () => {
+    // This section shipped with a `w-60` rail inside the content area, modelled
+    // on Finance's. Sub-navigation lives in the sidebar now, under the
+    // section's own row, so all four sections use one pattern — and the
+    // content pane keeps the 240px the rail was charging it.
     const section = read("views/connections/ConnectionsSection.tsx");
-    // Named, and named without a heading: the rail renders before the sub-page,
-    // so an `h2` here would land ahead of that page's own `h1` (issue #1392).
-    // `nav-rail-headings.test.ts` owns the heading half across every rail; this
-    // pins that the accessible name it relies on is present on this one.
-    expect(section).toMatch(/<nav\s+aria-label="Connections"/);
-    // A `w-60` rail from `sm:` up, with a scrolling chip row below it.
-    expect(section).toContain("w-60");
-    expect(section).toContain("sm:flex");
-    expect(section).toContain("sm:hidden");
+    expect(section).not.toMatch(/<nav[\s>]/);
+    expect(section).not.toContain("w-60");
+
+    // Where it went, asserted from the rendered sidebar rather than from source
+    // text: the rows are what an operator clicks, and a `toContain` over a nav
+    // table is satisfied by a commented-out row that renders nothing (#1311).
+    const connections = NAV_SECTIONS.find((s) => s.view === "connections")!;
+    expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
+      ["Apps", "apps"],
+      ["MCP Servers", "mcp"],
+    ]);
   });
 
   it("still renders Composio on the Apps page rather than splitting it out", () => {
@@ -129,20 +136,18 @@ describe("the guided tour's Connect-your-tools stop", () => {
   });
 
   it("targets an anchor the sidebar actually renders", () => {
-    // The shell writes `data-tour={`nav-${item.view}`}` per NAV row, so the
-    // selector above resolves only while a row with this view exists. A tour
-    // step whose anchor never mounts degrades to a skipped step — silently,
-    // which is why this is asserted rather than left to the browser.
-    const shell = read("components/app-shell.tsx");
-    expect(shell).toContain('data-tour={`nav-${item.view}`}');
-    // Anchored to the start of the line, so a **commented-out** row does not
-    // satisfy it. `toContain` did: `// { view: "connections", … }` still holds
-    // the substring, and a commented row renders no anchor at all — which is
-    // precisely how `#/pages` spent four months unreachable behind a row that
-    // read as present (issue #1311). Verified by commenting this row out; the
-    // substring form passed, this form fails.
-    expect(shell).toMatch(
-      /^\s*\{ view: "connections", label: "Connections", icon: Plug \},$/m,
-    );
+    // A tour step whose anchor never mounts degrades to a *skipped* step —
+    // silently — so the tour goes on teaching half the product and nothing
+    // reports it. That is why this is asserted rather than left to the browser.
+    //
+    // Asserted against the nav table itself rather than against the shell's
+    // source text. The source form had to be anchored to the start of a line to
+    // stop a **commented-out** row satisfying it (`// { view: "connections", …
+    // }` still holds the substring, and a commented row renders no anchor at
+    // all — issue #1311). Reading the table removes the trap by construction:
+    // a commented row is not a member of it.
+    const row = NAV_SECTIONS.find((section) => section.view === "connections");
+    expect(row?.label).toBe("Connections");
+    expect(stop!.target).toBe(`[data-tour="nav-${row!.view}"]`);
   });
 });

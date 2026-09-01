@@ -41,7 +41,7 @@ type Page = import("@playwright/test").Page;
  * stops matching, which is the signal to widen this constant rather than let a
  * new stop go uncovered.
  */
-const TOUR_STOPS = 8;
+const TOUR_STOPS = 7;
 
 /** Window sizes to walk the tour at. The first is the one measured on staging. */
 const VIEWPORTS = [

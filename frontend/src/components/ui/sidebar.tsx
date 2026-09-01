@@ -34,6 +34,28 @@ const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
 
+/**
+ * The persisted open/closed state, or `undefined` if nothing has been stored.
+ *
+ * `setOpen` below has always written this cookie. Upstream shadcn reads it on
+ * the server and hands it back as `defaultOpen`; this console has no server
+ * render, so nothing ever read it and the write was dead — collapsing the
+ * sidebar survived until the next reload and no further.
+ *
+ * That turned load-bearing when the channel list became a section of this
+ * sidebar: the rail used to persist its own collapsed flag in `localStorage`
+ * (`lib/chat-rail.ts`), and the sidebar's cookie was meant to replace it. A
+ * write-only cookie replaces nothing, so the operator's density choice silently
+ * became session-only (codex P2 review on #1987).
+ */
+function readSidebarCookie(): boolean | undefined {
+  if (typeof document === "undefined") return undefined
+  const match = document.cookie.match(
+    new RegExp(`(?:^|;\\s*)${SIDEBAR_COOKIE_NAME}=(true|false)(?:;|$)`),
+  )
+  return match ? match[1] === "true" : undefined
+}
+
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
   open: boolean
@@ -73,7 +95,9 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(defaultOpen)
+  // Seeded from the cookie `setOpen` writes, so the choice survives a reload.
+  // See `readSidebarCookie`. `defaultOpen` still decides on a first visit.
+  const [_open, _setOpen] = React.useState(() => readSidebarCookie() ?? defaultOpen)
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
