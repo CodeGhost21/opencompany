@@ -332,6 +332,31 @@ describe("the rendered sidebar", () => {
     expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(0);
   });
 
+  it("draws no empty contents block on the one Room route ChatView does not render", () => {
+    // `#/conversation` is claimed by Room (`isNavigationActive`) so that opening
+    // a desk transcript does not black out the sidebar. But Room's contents are
+    // live data portalled in by `ChatView`, and `ChatView` is not mounted on
+    // that view — so the slot would be on screen with nothing in it. Seen in a
+    // browser before this test existed: a 566px blank region under the Room
+    // row, while the conversation view drew a desk rail of its own beside it —
+    // the two-rail band of issue #1383, re-created by the one section whose
+    // contents are live data rather than a fixed list.
+    render("conversation");
+
+    // The row still lights. That part is deliberate and must not regress.
+    const row = [...container.querySelectorAll("[data-sidebar='menu-button']")].find(
+      (el) => el.textContent?.trim() === "Room",
+    )!;
+    expect(row.hasAttribute("data-active")).toBe(true);
+
+    // And nothing is drawn under it. The group count is the assertion that
+    // matters: an empty `flex-1` group IS the blank region, whether or not the
+    // slot node is inside it, so asserting only on the slot would pass while
+    // the gap remained.
+    expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(0);
+    expect(container.querySelectorAll("[data-sidebar='group']")).toHaveLength(1);
+  });
+
   it("puts no heading in the sidebar, at runtime and not only in source", () => {
     // The complement of `nav-rail-headings.test.ts`, which is a source guard and
     // cannot see what a portal or a child component contributes (issue #1392).

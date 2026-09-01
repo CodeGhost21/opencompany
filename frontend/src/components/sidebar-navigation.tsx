@@ -282,6 +282,16 @@ export function SidebarNavigation({
   );
 
   const active = sectionOwning(view);
+  // Room's contents are not a table here, they are whatever `ChatView` portals
+  // in — so they exist only on the view `ChatView` renders on. Room is
+  // deliberately still the lit row on `#/conversation` (`isNavigationActive`
+  // claims it, so opening a desk transcript does not black out the sidebar),
+  // but `ChatView` is unmounted there and nothing fills the slot. Drawing it
+  // anyway left a 566px blank region under the Room row, with the conversation
+  // view drawing a desk rail of its own beside it — the two-rail band of issue
+  // #1383, re-created by the one route whose section contents are live data.
+  const roomContents = active?.slot === "room" && view === "chat";
+  const hasContents = Boolean(active && (active.children || roomContents));
 
   return (
     <>
@@ -305,7 +315,7 @@ export function SidebarNavigation({
         </SidebarMenu>
       </SidebarGroup>
 
-      {active && (active.children || active.slot) && (
+      {active && hasContents && (
         <>
           {/* Space, not a rule.
               
@@ -330,7 +340,7 @@ export function SidebarNavigation({
           <SidebarGroup
             className={cn(
               "min-h-0 flex-1 pt-5",
-              !active.slot && "group-data-[collapsible=icon]:hidden",
+              !roomContents && "group-data-[collapsible=icon]:hidden",
             )}
           >
             {active.children && (
@@ -381,7 +391,7 @@ export function SidebarNavigation({
                 "show all": a channel list is scanned for a name you already
                 know, and hiding its tail behind a control makes the one thing
                 you came for the one thing you cannot see. */}
-            {active.slot === "room" && (
+            {roomContents && (
               <div
                 ref={setElement}
                 data-testid="room-rail-slot"
