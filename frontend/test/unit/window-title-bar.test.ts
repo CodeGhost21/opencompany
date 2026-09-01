@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { WINDOW_TITLE_BAR_HEIGHT, WINDOW_CONTROLS_WIDTH } from "@/components/window-chrome";
-import { WindowTitleBar } from "@/components/window-title-bar";
+import { TITLE_BAR_LADDER, WindowTitleBar } from "@/components/window-title-bar";
 
 /**
  * Where macOS actually draws the traffic lights, read from the Tauri config
@@ -60,12 +60,28 @@ function render(node: Parameters<Root["render"]>[0]) {
 }
 
 /** The row, with identifiable stand-ins for the controls it carries. */
-function bar(autonomy?: ReactNode) {
+function bar(
+  autonomy?: ReactNode,
+  { profile = true, jumps = true }: { profile?: boolean; jumps?: boolean } = {},
+) {
   return createElement(WindowTitleBar, {
     switcher: createElement("button", { type: "button", "data-testid": "stub-switcher" }, "Co"),
+    overview: jumps
+      ? createElement("button", { type: "button", "data-testid": "stub-overview" }, "Home")
+      : undefined,
+    approvals: jumps
+      ? createElement("button", { type: "button", "data-testid": "stub-approvals" }, "2")
+      : undefined,
     autonomy,
-    profile: createElement("button", { type: "button", "data-testid": "stub-profile" }, "Me"),
+    profile: profile
+      ? createElement("button", { type: "button", "data-testid": "stub-profile" }, "Me")
+      : null,
   });
+}
+
+/** One of the row's three right-hand groups, by its test id. */
+function group(name: "go" | "state" | "you") {
+  return host.querySelector(`[data-testid=title-bar-group-${name}]`) as HTMLElement;
 }
 
 /**
@@ -186,19 +202,96 @@ describe("the window title row", () => {
     ).toBeTruthy();
   });
 
-  it("closes up completely when there is no autonomy to show", () => {
-    // The pill returns null when the tier is unknown. Nothing may survive it:
-    // an empty wrapper would still hold one `gap-2` of dead space open, which
-    // reads as a missing control rather than as an absent fact.
-    render(bar(null));
 
-    const row = host.querySelector("[data-testid=window-title-bar]") as HTMLElement;
-    const spacer = row.querySelector(
-      ":scope > [data-tauri-drag-region][aria-hidden=true]",
+  it("groups the right-hand end into go, state and you, in that order", () => {
+    render(bar(stubAutonomy()));
+
+    // Three groups, and the two jumps inside the first of them. The row reads
+    // as three objects rather than five loose controls, which is the whole
+    // reason the hairlines exist.
+    expect(group("go").querySelector("[data-testid=stub-overview]")).not.toBeNull();
+    expect(group("go").querySelector("[data-testid=stub-approvals]")).not.toBeNull();
+    expect(group("state").querySelector("[data-testid=stub-autonomy]")).not.toBeNull();
+    expect(group("you").querySelector("[data-testid=stub-profile]")).not.toBeNull();
+
+    const order = (a: HTMLElement, b: HTMLElement) =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const spacer = host.querySelector(
+      "[data-testid=window-title-bar] > [data-tauri-drag-region][aria-hidden=true]",
     ) as HTMLElement;
-    // The spacer's next sibling is the profile control's own wrapper — there is
-    // no element between them.
-    expect(spacer.nextElementSibling?.querySelector("[data-testid=stub-profile]")).not.toBeNull();
+    // All three fall on the far side of the elastic spacer, or they sit beside
+    // the switcher at the left-hand end of the row instead of at the right.
+    expect(order(spacer, group("go"))).toBe(true);
+    expect(order(group("go"), group("state"))).toBe(true);
+    expect(order(group("state"), group("you"))).toBe(true);
+  });
+
+  it("draws a hairline before the second and third groups and none before the first", () => {
+    render(bar(stubAutonomy()));
+
+    // The first group needs no rule: the elastic spacer already separates it
+    // from the switcher, and a hairline against that gap would read as an edge
+    // rather than as a join.
+    expect(group("go").className).not.toContain("before:w-px");
+    for (const name of ["state", "you"] as const) {
+      const cls = group(name).className;
+      expect(cls).toContain("before:w-px");
+      // A token, never a hex: `--chrome-border` is the border for the layer
+      // this row stands on. `assert-design-tokens.sh` fails a raw colour here.
+      expect(cls).toContain("before:bg-chrome-border");
+    }
+  });
+
+  it("takes the hairline away with the group it introduces", () => {
+    // The autonomy pill renders null when the tier is unknown, and the profile
+    // control renders null on a host with no sign-in — but the ELEMENT handed
+    // to this row is truthy either way, so the layout cannot ask. `empty:hidden`
+    // is what answers it: a pseudo-element does not make its host non-empty, so
+    // the rule dies with the group instead of standing beside nothing.
+    render(bar(null, { profile: false }));
+
+    for (const name of ["state", "you"] as const) {
+      expect(group(name).children.length).toBe(0);
+      expect(group(name).className).toContain("empty:hidden");
+    }
+  });
+
+  it("hides the Overview slot below md and never the approvals one", () => {
+    render(bar(stubAutonomy()));
+
+    // The ladder's third rung, and the one asymmetry in the row: Overview is a
+    // destination you choose, a pending count is one that chooses you.
+    const slot = host.querySelector("[data-testid=title-bar-overview-slot]") as HTMLElement;
+    expect(slot.className).toContain("hidden");
+    expect(slot.className).toContain("md:inline-flex");
+    // Approvals sits in the group directly, with no responsive wrapper at all —
+    // there is no width at which it goes.
+    const approvals = group("go").querySelector("[data-testid=stub-approvals]") as HTMLElement;
+    expect(approvals.parentElement).toBe(group("go"));
+  });
+
+  it("decides the whole ladder in one place", () => {
+    // The point of `TITLE_BAR_LADDER` is that reading it is reading the ladder.
+    // Three rungs, in order, at 1280 / 1024 / 768 — and each consumed by the
+    // component that owns the item rather than restated there.
+    expect(TITLE_BAR_LADDER.autonomySentence).toContain("xl:");
+    expect(TITLE_BAR_LADDER.companyName).toContain("lg:");
+    expect(TITLE_BAR_LADDER.overview).toContain("md:");
+    for (const rung of Object.values(TITLE_BAR_LADDER)) {
+      // Every rung hides by default and reveals at its breakpoint, so the
+      // narrow window is the one that needs no class to be correct.
+      expect(rung.startsWith("hidden ")).toBe(true);
+    }
+
+    const read = (rel: string) =>
+      readFileSync(resolve(process.cwd(), "src/components", rel), "utf8");
+    // The two rungs consumed elsewhere are IMPORTED, not re-typed. A literal
+    // breakpoint in either file is the scattering this constant exists to stop.
+    for (const file of ["autonomy-pill.tsx", "host-switcher.tsx"]) {
+      const source = read(file);
+      expect(source).toContain("TITLE_BAR_LADDER");
+      expect(source).not.toMatch(/className="hidden [a-z]{2}:/);
+    }
   });
 
   it("puts the switcher before the profile control in the DOM", () => {
