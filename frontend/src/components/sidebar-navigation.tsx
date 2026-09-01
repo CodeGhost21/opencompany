@@ -150,9 +150,15 @@ export const NAV_SECTIONS: NavSection[] = [
   //     anywhere, and a count that has to be visible from every page including
   //     the collapsed rail (issue #1018). Discoverable elsewhere, in Rule 6's
   //     first sense.
-  //   - Observatory moved DOWN, into Settings (`settings-pages.ts`). Bare
-  //     `#/observatory` is rewritten onto it; `#/observatory/<runId>` stays a
-  //     top-level route because a run is deep-linked from workflow rows,
+  //   - Observatory moved DOWN, into Settings (`settings-pages.ts`), as a rail
+  //     row. The rewrite runs the other way from the one you would guess:
+  //     `#/settings/observatory` is rewritten onto `#/observatory`, NOT the
+  //     reverse. The Observatory reads four query keys straight off the hash
+  //     and keys them on its head being `observatory` (`views/observatory/
+  //     hash.ts`), so under `#/settings/…` its analytics tab and its
+  //     agent/turn selection stop being addressable. The rail row is the
+  //     doorway; the surface keeps its own top-level address, and
+  //     `#/observatory/<runId>` stays deep-linkable from workflow rows,
   //     approval cards and chat.
   //
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
@@ -201,6 +207,20 @@ export function childActive(
   if (child.sub === undefined) return true;
   if (sub === null) return section.children?.[0] === child;
   return child.sub === sub;
+}
+
+/**
+ * A child row's `data-tour` name, or `undefined` where it would collide.
+ *
+ * Anchors follow the address, not the label (see `NAV_SECTIONS`), so the child
+ * that lands on its section's own address — Agents on `#/company` — would name
+ * itself exactly what the section row is already called. Two nodes answering
+ * one selector is worse than none: a spec that clicked `nav-company` stops
+ * clicking anything and fails as a strict-mode violation.
+ */
+export function childAnchor(section: NavSection, child: NavChild): string | undefined {
+  const anchor = `nav-${child.sub ?? child.view}`;
+  return anchor === `nav-${section.view}` ? undefined : anchor;
 }
 
 /**
@@ -328,9 +348,16 @@ export function SidebarNavigation({
                     // written as `[data-tour="nav-x"] >> role=button` works for
                     // both. Putting it on the button made a child row the one
                     // exception, and `list-switcher.spec.ts` found it.
+                    //
+                    // `childAnchor` is `undefined` for the child that shares its
+                    // section's address — Agents *is* `#/company`, so an anchor
+                    // here would put two `nav-company` nodes on screen whenever
+                    // the section is open, and every selector written against it
+                    // becomes a strict-mode violation rather than a click. The
+                    // section row keeps the name; nothing targets the child.
                     <SidebarMenuItem
                       key={`${child.view}/${child.sub ?? ""}`}
-                      data-tour={`nav-${child.sub ?? child.view}`}
+                      data-tour={childAnchor(active, child)}
                     >
                       <SidebarMenuButton
                         isActive={open}

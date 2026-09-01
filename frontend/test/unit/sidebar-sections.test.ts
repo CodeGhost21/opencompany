@@ -12,6 +12,7 @@ import {
   NAV_SECTIONS,
   SidebarNavigation,
   childActive,
+  childAnchor,
   sectionOwning,
   type NavSection,
 } from "@/components/sidebar-navigation";
@@ -142,6 +143,37 @@ describe("the sidebar's section table", () => {
     );
     expect(source).toContain('title="Agents"');
     expect(source).not.toContain('title="Company"');
+  });
+
+  it("never puts two rows under one tour anchor", () => {
+    // Anchors follow the address, so the child that lands on its section's own
+    // address — Agents on `#/company` — would name itself what the section row
+    // is already called. Two nodes answering one selector is worse than none:
+    // a spec that clicked `nav-company` stops clicking anything and fails as a
+    // strict-mode violation, which is how the Console E2E lane found this.
+    const anchors: string[] = [];
+    for (const section of NAV_SECTIONS) {
+      anchors.push(`nav-${section.view}`);
+      for (const child of section.children ?? []) {
+        const a = childAnchor(section, child);
+        if (a) anchors.push(a);
+      }
+    }
+    expect(new Set(anchors).size, anchors.join(", ")).toBe(anchors.length);
+
+    const company = NAV_SECTIONS.find((s) => s.view === "company")!;
+    expect(childAnchor(company, company.children![0])).toBeUndefined();
+    expect(childAnchor(company, company.children![1])).toBe("nav-ledgers");
+  });
+
+  it("renders one node per tour anchor, whichever section is open", () => {
+    for (const view of ["chat", "company", "connections", "workflows"] as View[]) {
+      render(view);
+      const seen = [...container.querySelectorAll("[data-tour]")].map((el) =>
+        el.getAttribute("data-tour"),
+      );
+      expect(new Set(seen).size, `${view}: ${seen.join(", ")}`).toBe(seen.length);
+    }
   });
 
   it("gives every section a distinct view, so two rows can never light at once", () => {
