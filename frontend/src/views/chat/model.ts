@@ -32,6 +32,23 @@ import type { TaskStatus } from "@/api/tasks";
  * whole company (issue #369).
  */
 /**
+ * The id of the most recent system settle pill carrying each `taskId`, last
+ * occurrence wins.
+ *
+ * Shared by {@link buildTimeline} (which stamps `isLatestSettlePill` on every
+ * row) and {@link reviewCardIdForThread} (which must apply the identical
+ * latest-pill gate to a reply anchor, not just to the row's Approve button) —
+ * one definition of "latest" for both surfaces.
+ */
+function latestSettlePillIdByTaskId(messages: readonly ChatMessage[]): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const m of messages) {
+    if (m.from === "system" && m.taskId !== undefined) latest.set(m.taskId, m.id);
+  }
+  return latest;
+}
+
+/**
  * The in-review dispatch card a chat thread is reviewing, or `undefined` when
  * `parent` is not a review surface.
  *
@@ -42,6 +59,13 @@ import type { TaskStatus } from "@/api/tasks";
  * surface even though it has the same shape. Either way the card must still
  * be in `in_review`; one already approved or re-running is no longer open
  * for review.
+ *
+ * A card that finished, was revised, and is `in_review` again mints a NEW
+ * settle pill while the old one stays in history under the same `taskId`.
+ * Only the newest pill (or its relay) is a live review surface — the same
+ * {@link latestSettlePillIdByTaskId} gate {@link buildTimeline} uses for the
+ * Approve control — so opening an old pill's thread and replying there does
+ * not silently apply feedback to, and re-dispatch, the latest attempt.
  */
 export function reviewCardIdForThread(
   parent: ChatMessage,
@@ -50,8 +74,11 @@ export function reviewCardIdForThread(
 ): string | undefined {
   const inReview = (taskId: string | undefined): taskId is string =>
     taskId !== undefined && statusByTaskId[taskId]?.column === "in_review";
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
+  const isLatestPill = (pill: ChatMessage): boolean =>
+    pill.taskId !== undefined && latestPillIdByTaskId.get(pill.taskId) === pill.id;
   if (parent.from === "system") {
-    return inReview(parent.taskId) ? parent.taskId : undefined;
+    return inReview(parent.taskId) && isLatestPill(parent) ? parent.taskId : undefined;
   }
   if (parent.from !== "company" || parent.taskId) return undefined;
   const index = messages.findIndex((m) => m.id === parent.id);
@@ -60,7 +87,7 @@ export function reviewCardIdForThread(
     const prior = messages[i];
     if (prior.from === "company" && !prior.taskId) return undefined;
     if (prior.from !== "system" || !prior.taskId) continue;
-    return inReview(prior.taskId) ? prior.taskId : undefined;
+    return inReview(prior.taskId) && isLatestPill(prior) ? prior.taskId : undefined;
   }
   return undefined;
 }
@@ -1201,10 +1228,7 @@ export function buildTimeline(
   }
   const inline = inlineFirstReplies(messages, replies);
 
-  const latestPillIdByTaskId = new Map<string, string>();
-  for (const m of messages) {
-    if (m.from === "system" && m.taskId !== undefined) latestPillIdByTaskId.set(m.taskId, m.id);
-  }
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
 
   const entries: TimelineEntry[] = [];
   let prev: TimelineEntry | undefined;

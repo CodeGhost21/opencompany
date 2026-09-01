@@ -37,6 +37,26 @@ describe("the in-review card a chat thread reviews", () => {
     expect(reviewCardIdForThread(chatter, [chatter], IN_REVIEW)).toBeUndefined();
   });
 
+  // Codex #3905031257: a card that finished, was revised, and is in_review
+  // again mints a new settle pill for the same taskId while the old one stays
+  // in history. Only the newest pill (or its relay) is a live review surface —
+  // the same gate `buildTimeline` applies to the Approve control.
+  it("declines a reply anchored on a stale settle pill from an earlier revise pass", () => {
+    const oldPill = makeMessage("system", "finished → In review", { taskId: "t-1" });
+    const newPill = makeMessage("system", "finished → In review", { taskId: "t-1" });
+    const messages = [oldPill, newPill];
+    expect(reviewCardIdForThread(oldPill, messages, IN_REVIEW)).toBeUndefined();
+    expect(reviewCardIdForThread(newPill, messages, IN_REVIEW)).toBe("t-1");
+  });
+
+  it("declines a reply anchored on the relay bubble of a stale settle pill", () => {
+    const oldPill = makeMessage("system", "finished → In review", { taskId: "t-1" });
+    const oldRelay = makeMessage("company", "Here is the first draft.", {});
+    const newPill = makeMessage("system", "finished → In review", { taskId: "t-1" });
+    const messages = [oldPill, oldRelay, newPill];
+    expect(reviewCardIdForThread(oldRelay, messages, IN_REVIEW)).toBeUndefined();
+  });
+
   it("gates the Approve control on the linked card still being in review", () => {
     expect(isTaskInReview({ column: "in_review" })).toBe(true);
     expect(isTaskInReview({ column: "done" })).toBe(false);
