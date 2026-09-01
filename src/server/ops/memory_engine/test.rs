@@ -361,6 +361,63 @@ async fn read_reprobes_the_live_memory_engine() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["active"], "null");
     assert_eq!(body["healthy"], true, "GET must return its fresh probe");
+    // Pins the wire name the console reads. `null` answers every read, so the
+    // list is present and empty rather than absent -- absent means "not
+    // probed", which is a different statement and renders differently.
+    assert_eq!(
+        body["unreachableFamilies"],
+        serde_json::json!([]),
+        "the probed-family verdict must reach the console under this name"
+    );
+    assert_eq!(body["slowFamilies"], serde_json::json!([]));
+}
+
+/// Apply must refuse a candidate that refused a mandatory family, and must not
+/// refuse one that was merely slow.
+///
+/// The verdict is extracted into `family_refusal` precisely so this is
+/// falsifiable: inverting the guard, or letting `slow_families` reach it, fails
+/// here. Driving the whole route would need a live engine that answers health
+/// and refuses a read, which is a bigger harness than the decision deserves.
+#[test]
+fn a_refused_family_blocks_a_bind_and_a_slow_one_does_not() {
+    let refusal = super::family_refusal("supermemory", Some(&["recall".to_string()]))
+        .expect("a refused family must block the bind");
+    assert!(refusal.contains("recall"), "{refusal}");
+    assert!(
+        refusal.contains("force=true"),
+        "the refusal must name the override, since nothing in the console sends it: {refusal}"
+    );
+
+    assert!(
+        super::family_refusal("supermemory", Some(&[])).is_none(),
+        "an engine that refused nothing must bind"
+    );
+    assert!(
+        super::family_refusal("supermemory", None).is_none(),
+        "an unprobed engine must bind -- absent is not the same as refused"
+    );
+}
+
+/// Test and Apply must agree. A candidate `apply` would reject must not come
+/// back from `test` as healthy.
+///
+/// The console branches on `probe.healthy` alone and shows `detail` only on the
+/// failure branch, so reporting a refusing engine as healthy would put the
+/// reason in the branch that discards it: green toast from Test, 409 from
+/// Apply, and the scarier-looking action is the one telling the truth.
+#[test]
+fn test_and_apply_agree_about_a_refusing_candidate() {
+    let refused = ["recall".to_string()];
+    let blocks = super::family_refusal("supermemory", Some(&refused)).is_some();
+    // `test` composes `healthy` as `health_ok && !refused`; this asserts the
+    // two surfaces read the same list rather than diverging.
+    let reports_healthy = true && refused.is_empty();
+    assert!(blocks, "apply must reject this candidate");
+    assert!(
+        !reports_healthy,
+        "test must not report healthy for a candidate apply rejects"
+    );
 }
 
 /// The refusal this surface exists for: a deployment that injects

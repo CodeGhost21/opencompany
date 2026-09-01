@@ -283,6 +283,7 @@ impl MemoryOverlay {
                 capabilities: Vec::new(),
                 healthy: None,
                 unreachable_families: None,
+                slow_families: None,
             },
             #[cfg(feature = "tinymemory")]
             probe: None,
@@ -306,31 +307,41 @@ impl MemoryOverlay {
         let Some(probe) = &self.probe else {
             return;
         };
-        let answer = tokio::time::timeout(timeout, probe.health()).await.ok();
-        let healthy = probe_answer_is_healthy(&answer);
-        if !healthy {
+        // Health and both family reads go out together under one deadline. Run
+        // in sequence they would cost three timeouts before the listener binds,
+        // and `/healthz` has to answer before the wake proxy gives up.
+        let outcome = probe_engine(probe.as_ref(), timeout).await;
+
+        if !outcome.healthy {
             tracing::warn!(
                 driver_id = %self.descriptor.driver_id,
-                status = ?answer,
                 timeout_secs = timeout.as_secs(),
                 "memory engine bound but its health probe did not answer Ready or Degraded; \
                  cycles that need memory will fail until the endpoint or credential is fixed"
             );
         }
-        self.descriptor.healthy = Some(healthy);
-
-        let unreachable = probe_families(probe.as_ref(), timeout).await;
-        if !unreachable.is_empty() {
+        if !outcome.unreachable.is_empty() {
             tracing::warn!(
                 driver_id = %self.descriptor.driver_id,
-                families = ?unreachable,
-                "memory engine advertises families its live surface did not answer; the \
-                 bind-time audit cannot catch this because `provides()` reports Core, Recall \
-                 and Portability unconditionally. Reads against these will fail inside a \
-                 tenant when the memory is needed"
+                families = ?outcome.unreachable,
+                "memory engine advertises families its live surface refused; the bind-time \
+                 audit cannot catch this because `provides()` reports Core, Recall and \
+                 Portability unconditionally. Reads against these will fail inside a tenant \
+                 when the memory is needed"
             );
         }
-        self.descriptor.unreachable_families = Some(unreachable);
+        if !outcome.slow.is_empty() {
+            tracing::warn!(
+                driver_id = %self.descriptor.driver_id,
+                families = ?outcome.slow,
+                timeout_secs = timeout.as_secs(),
+                "memory engine did not answer these families inside the probe budget. Slow is \
+                 not the same verdict as refused -- the engine may be fine and merely loaded"
+            );
+        }
+        self.descriptor.healthy = Some(outcome.healthy);
+        self.descriptor.unreachable_families = Some(outcome.unreachable);
+        self.descriptor.slow_families = Some(outcome.slow);
     }
 
     /// Without the provider seam there is nothing to probe; `healthy` stays
@@ -339,8 +350,25 @@ impl MemoryOverlay {
     pub async fn refresh_health(&mut self, _timeout: std::time::Duration) {}
 }
 
-/// Reads once against the mandatory families that can be probed in a single
-/// round trip, to see whether the live engine answers them.
+/// What one round of engine probing found.
+///
+/// The two lists are different verdicts and are kept apart deliberately.
+/// `unreachable` is the engine answering *no*; `slow` is it not answering
+/// inside the budget. Only the first justifies refusing a bind — "loaded right
+/// now" and "does not serve this" are not the same thing, and collapsing them
+/// turns a busy afternoon into a refusal an operator cannot argue with.
+#[cfg(feature = "tinymemory")]
+#[derive(Debug, Default)]
+pub struct EngineProbeOutcome {
+    /// `Ready` or `Degraded` — reachable and serving, possibly reduced.
+    pub healthy: bool,
+    /// Families whose read returned an error.
+    pub unreachable: Vec<String>,
+    /// Families whose read did not return inside the budget.
+    pub slow: Vec<String>,
+}
+
+/// Probes health and the mandatory families that answer in a single round trip.
 ///
 /// Only mandatory families are probed. `MemoryProvider::provides` reports Core,
 /// Recall and Portability `true` unconditionally, so the bind-time audit can
@@ -350,29 +378,35 @@ impl MemoryOverlay {
 /// same structural check — but each needs its own call shape, so probing them
 /// is separate work rather than a line here.
 ///
-/// **Portability is deliberately not probed.** Its only read is `export_page`,
-/// which calls `namespace_summaries()` and then an unbounded `list()`; `limit`
-/// slices the returned records, not the walk. On a hosted engine that is one
-/// container-tag listing plus a paged walk per tag — tens of sequential round
-/// trips on a real account, growing with everything the company remembers. It
-/// would time out and report a working engine broken, and a false alarm that
-/// worsens with use is worse than no signal.
+/// **Portability is deliberately not probed.** `MemoryPortability` offers only
+/// `export_page` and `import_records`, and `export_page` calls
+/// `namespace_summaries()` then an unbounded `list()`; `limit` slices the
+/// returned records, not the walk. On a hosted engine that is a container-tag
+/// listing plus a paged walk per tag — round trips that grow with everything
+/// the company remembers. It would time out and report a working engine broken.
+/// There is no cheap read on that family to substitute, so it is left unprobed
+/// rather than probed badly.
 ///
-/// Every call is **read-only** and uses a namespace no company can produce, so
-/// probing writes nothing and cannot collide with tenant data.
+/// The `get` leg is keyed and bounded: it uses a namespace no company can
+/// produce, so it writes nothing and cannot collide with tenant data. The
+/// `recall` leg is **not** namespace-scoped — it passes
+/// `OwnedRecallOpts::default()`, so it is an unscoped search. That is
+/// deliberate: scoping it would make some dialects short-circuit before the
+/// network and re-break the leg. Results are discarded either way, but the read
+/// is account-wide, not contained.
 ///
 /// An empty answer is success. A freshly provisioned engine holds nothing, and
 /// treating "no rows" as "broken" would refuse every family on day one. Only an
-/// error or a timeout counts.
+/// error or a timeout counts, and those are reported separately.
 ///
 /// This does not catch an engine that answers `Ok(empty)` forever while storing
 /// nothing; separating that from a new instance needs an engine-specific signal,
 /// which belongs in the adapter and its conformance suite.
 #[cfg(feature = "tinymemory")]
-async fn probe_families(
+pub async fn probe_engine(
     probe: &dyn tinymemory_api::provider::MemoryProvider,
     timeout: std::time::Duration,
-) -> Vec<String> {
+) -> EngineProbeOutcome {
     use tinymemory_api::capabilities::Capability;
     use tinymemory_api::types::OwnedRecallOpts;
 
@@ -383,26 +417,33 @@ async fn probe_families(
     // Non-empty on purpose. `RemoteMemory::recall` returns `Ok(vec![])` without
     // reaching the network when the query trims to empty, so an empty probe
     // query would report a revoked credential as healthy — the failure this
-    // whole probe exists to catch.
+    // probe exists to catch.
     const PROBE_QUERY: &str = "__host_probe__";
 
     let opts = OwnedRecallOpts::default();
-    // Concurrently, so the pre-listener budget grows by one timeout rather than
-    // by one per family. `/healthz` has to answer before the wake proxy gives
-    // up, and this runs before the listener binds.
-    let (core, recall) = tokio::join!(
+    // Concurrently, under one deadline each: the pre-listener budget is one
+    // timeout, not one per leg.
+    let (health, core, recall) = tokio::join!(
+        tokio::time::timeout(timeout, probe.health()),
         tokio::time::timeout(timeout, probe.get(PROBE_NS, PROBE_KEY)),
         tokio::time::timeout(timeout, probe.recall(PROBE_QUERY, 1, &opts, None)),
     );
 
-    let mut unreachable = Vec::new();
-    if !matches!(core, Ok(Ok(_))) {
-        unreachable.push(Capability::Core.as_str().to_string());
+    let mut outcome = EngineProbeOutcome {
+        healthy: probe_answer_is_healthy(&health.ok()),
+        ..EngineProbeOutcome::default()
+    };
+    for (family, result) in [
+        (Capability::Core, core.map(|r| r.is_ok())),
+        (Capability::Recall, recall.map(|r| r.is_ok())),
+    ] {
+        match result {
+            Ok(true) => {}
+            Ok(false) => outcome.unreachable.push(family.as_str().to_string()),
+            Err(_elapsed) => outcome.slow.push(family.as_str().to_string()),
+        }
     }
-    if !matches!(recall, Ok(Ok(_))) {
-        unreachable.push(Capability::Recall.as_str().to_string());
-    }
-    unreachable
+    outcome
 }
 
 /// Maps a probe outcome (`None` = timed out) onto the `healthy` bit.
@@ -466,6 +507,13 @@ pub struct MemoryDescriptor {
     /// nothing, so "returned no rows" must not be read as "does not work";
     /// only an error is a failure.
     pub unreachable_families: Option<Vec<String>>,
+    /// Families whose read did not return inside the probe budget.
+    ///
+    /// Separate from [`Self::unreachable_families`] on purpose: an engine that
+    /// is merely loaded has not told us it cannot serve a family, and refusing
+    /// a bind over a slow afternoon is a worse failure than binding a slow
+    /// engine. Only the other list justifies a refusal.
+    pub slow_families: Option<Vec<String>>,
 }
 
 /// Durable company → tenant ownership, for shared-database platform mode.
@@ -1001,6 +1049,7 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
             // the caller's boot-time step (`refresh_health`).
             healthy: None,
             unreachable_families: None,
+            slow_families: None,
         },
         probe: Some(probe),
     }))
@@ -1216,11 +1265,11 @@ mod test {
     #[tokio::test]
     async fn an_empty_engine_probes_clean() {
         let provider = tinymemory_api::null::NullMemoryProvider::new();
-        let unreachable = probe_families(&provider, std::time::Duration::from_secs(5)).await;
+        let outcome = probe_engine(&provider, std::time::Duration::from_secs(5)).await;
         assert!(
-            unreachable.is_empty(),
+            outcome.unreachable.is_empty() && outcome.slow.is_empty(),
             "an engine that answers every read but holds nothing must not be reported \
-             unreachable; got {unreachable:?}"
+             unreachable or slow; got {outcome:?}"
         );
     }
 
@@ -1231,8 +1280,12 @@ mod test {
     #[tokio::test]
     async fn a_dead_engine_reports_every_family() {
         let provider = failing(true, true);
-        let unreachable = probe_families(&provider, std::time::Duration::from_secs(5)).await;
-        assert_eq!(unreachable, vec!["core".to_string(), "recall".to_string()]);
+        let outcome = probe_engine(&provider, std::time::Duration::from_secs(5)).await;
+        assert_eq!(
+            outcome.unreachable,
+            vec!["core".to_string(), "recall".to_string()]
+        );
+        assert!(outcome.slow.is_empty(), "an error is not a timeout");
     }
 
     /// Attribution: one broken family must not condemn the others, and — the
@@ -1242,13 +1295,89 @@ mod test {
     #[cfg(feature = "tinymemory")]
     #[tokio::test]
     async fn one_broken_family_is_named_alone() {
-        let unreachable =
-            probe_families(&failing(false, true), std::time::Duration::from_secs(5)).await;
-        assert_eq!(unreachable, vec!["recall".to_string()]);
+        let outcome = probe_engine(&failing(false, true), std::time::Duration::from_secs(5)).await;
+        assert_eq!(outcome.unreachable, vec!["recall".to_string()]);
 
-        let unreachable =
-            probe_families(&failing(true, false), std::time::Duration::from_secs(5)).await;
-        assert_eq!(unreachable, vec!["core".to_string()]);
+        let outcome = probe_engine(&failing(true, false), std::time::Duration::from_secs(5)).await;
+        assert_eq!(outcome.unreachable, vec!["core".to_string()]);
+    }
+
+    /// A blackholed endpoint must surface as *slow*, not as clean.
+    ///
+    /// This is the branch `refresh_health`'s own doc names — packets going
+    /// nowhere — and it is the one a weakened guard would silently pass.
+    /// Relaxing `Ok(Ok(_))` to `!matches!(.., Ok(Err(_)))` makes a timeout look
+    /// healthy; this fails if that happens.
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn a_blackholed_engine_reports_slow_not_clean() {
+        #[derive(Debug, Default)]
+        struct Sleeper;
+
+        #[async_trait]
+        impl tinymemory_api::traits::Memory for Sleeper {
+            fn name(&self) -> &str {
+                "sleeper"
+            }
+            async fn store(
+                &self,
+                _n: &str,
+                _k: &str,
+                _c: &str,
+                _cat: tinymemory_api::types::MemoryCategory,
+                _s: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn get(
+                &self,
+                _n: &str,
+                _k: &str,
+            ) -> anyhow::Result<Option<tinymemory_api::types::MemoryEntry>> {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(None)
+            }
+            async fn forget(&self, _n: &str, _k: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            async fn list(
+                &self,
+                _n: Option<&str>,
+                _c: Option<&tinymemory_api::types::MemoryCategory>,
+                _s: Option<&str>,
+            ) -> anyhow::Result<Vec<tinymemory_api::types::MemoryEntry>> {
+                Ok(Vec::new())
+            }
+            async fn namespace_summaries(
+                &self,
+            ) -> anyhow::Result<Vec<tinymemory_api::types::NamespaceSummary>> {
+                Ok(Vec::new())
+            }
+            async fn count(&self) -> anyhow::Result<usize> {
+                Ok(0)
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            async fn recall(
+                &self,
+                _q: &str,
+                _l: usize,
+                _o: tinymemory_api::types::RecallOpts<'_>,
+            ) -> anyhow::Result<Vec<tinymemory_api::types::MemoryEntry>> {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(Vec::new())
+            }
+        }
+
+        let provider =
+            tinymemory_api::mandatory::MemoryTraitProvider::new(Arc::new(Sleeper), "sleeper");
+        let outcome = probe_engine(&provider, std::time::Duration::from_millis(50)).await;
+        assert_eq!(outcome.slow, vec!["core".to_string(), "recall".to_string()]);
+        assert!(
+            outcome.unreachable.is_empty(),
+            "a timeout is not a refusal: the engine never said no, it just did not answer"
+        );
     }
 
     /// The probe must send a **non-empty** recall query.
@@ -1327,7 +1456,7 @@ mod test {
             Arc::clone(&recorder) as Arc<dyn tinymemory_api::traits::Memory>,
             "recorder",
         );
-        let _ = probe_families(&provider, std::time::Duration::from_secs(5)).await;
+        let _ = probe_engine(&provider, std::time::Duration::from_secs(5)).await;
 
         let seen = recorder.0.lock().expect("probe query lock").clone();
         let seen = seen.expect("the probe never called recall at all");
@@ -1361,6 +1490,7 @@ mod test {
                 capabilities: Vec::new(),
                 healthy: None,
                 unreachable_families: None,
+                slow_families: None,
             },
             probe: Some(Arc::new(failing(true, true))),
         };

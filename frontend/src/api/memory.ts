@@ -225,6 +225,11 @@ export interface MemoryEngineState {
    * for the mandatory families.
    */
   unreachableFamilies?: string[];
+  /**
+   * Families that did not answer inside the probe budget. Not the same verdict
+   * as refused — the engine may simply be loaded.
+   */
+  slowFamilies?: string[];
   /** The engine the saved selection names. */
   selected: string;
   url?: string;
@@ -250,8 +255,17 @@ export interface EngineApplied {
 
 /** A probe of a candidate engine, saving nothing. */
 export interface EngineProbe {
+  /**
+   * Whether the candidate can actually be bound. False when it did not answer
+   * a health check *or* refused a mandatory family — apply rejects both, so
+   * this has to agree with apply rather than only reporting reachability.
+   */
   healthy: boolean;
   capabilities: string[];
+  /** Mandatory families the candidate refused. Apply will reject these. */
+  unreachableFamilies?: string[];
+  /** Families that were merely slow. Reported, but does not block a bind. */
+  slowFamilies?: string[];
   detail?: string;
 }
 

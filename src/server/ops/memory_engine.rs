@@ -129,6 +129,10 @@ struct EngineDto {
     /// mandatory families. This is what the engine actually answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     unreachable_families: Option<Vec<String>>,
+    /// Families the engine did not answer inside the probe budget. Slow is not
+    /// the same verdict as refused, so it is reported separately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slow_families: Option<Vec<String>>,
     /// The engine id the saved selection names (the file, or the environment
     /// when it owns the choice).
     selected: String,
@@ -208,6 +212,10 @@ struct ProbeDto {
     /// here, because health hits a different endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     unreachable_families: Option<Vec<String>>,
+    /// Families that did not answer inside the budget. Reported, but not a
+    /// failure: the console must not turn a loaded engine into a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slow_families: Option<Vec<String>>,
     /// Why it failed, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
@@ -356,7 +364,7 @@ fn snapshot(
     let (selection, layer) = saved_selection(state)?;
     // The live overlay is the honest answer to "what is bound"; its absence
     // means the base store serves memory, which is exactly `store`.
-    let (active, capabilities, healthy, unreachable_families) = match &live {
+    let (active, capabilities, healthy, unreachable_families, slow_families) = match &live {
         Some(overlay) => (
             engine_id(&MemorySelection {
                 backend: overlay.descriptor.backend,
@@ -367,14 +375,16 @@ fn snapshot(
             overlay.descriptor.capabilities.clone(),
             overlay.descriptor.healthy,
             overlay.descriptor.unreachable_families.clone(),
+            overlay.descriptor.slow_families.clone(),
         ),
-        None => ("store".to_string(), Vec::new(), None, None),
+        None => ("store".to_string(), Vec::new(), None, None, None),
     };
     Ok(EngineDto {
         active,
         capabilities,
         healthy,
         unreachable_families,
+        slow_families,
         selected: engine_id(&selection),
         url: selection.url.clone(),
         api_key_set: selection.api_key.is_some(),
@@ -537,29 +547,49 @@ async fn test_engine(
             healthy: true,
             capabilities: Vec::new(),
             unreachable_families: None,
+            slow_families: None,
             detail: None,
         })),
         Ok(Some(overlay)) => {
             let unreachable = overlay.descriptor.unreachable_families.clone();
-            // Two distinct verdicts, reported distinctly: a candidate that did
-            // not answer at all, and one that answered but does not serve the
-            // families this host's ports are built on.
+            let slow = overlay.descriptor.slow_families.clone();
+            let refused = unreachable.as_ref().is_some_and(|f| !f.is_empty());
+            // `healthy` is what the console branches on, and it must mean "you
+            // can bind this". An engine that answers `/health` but refuses the
+            // families the knowledge ports are built on is not bindable — apply
+            // will reject it — so reporting it healthy would have Test say yes
+            // exactly where Apply says no, with the reason attached to the
+            // branch the console throws away.
+            //
+            // `None` means there was no provider seam to ask (the in-pod
+            // engine overlay). It opened, so it is usable.
+            let healthy = overlay.descriptor.healthy.unwrap_or(true) && !refused;
             let detail = if overlay.descriptor.healthy == Some(false) {
                 Some("the engine did not answer a health check".to_string())
-            } else {
-                unreachable.as_ref().filter(|f| !f.is_empty()).map(|f| {
+            } else if refused {
+                unreachable.as_ref().map(|f| {
                     format!(
-                        "the engine answered a health check but did not serve {}",
+                        "the engine answered a health check but refused {}; reads against those \
+                         families would fail once a company needed them",
+                        f.join(", ")
+                    )
+                })
+            } else {
+                // Slow is reported but is not a failure, so it rides the
+                // success branch as a caveat rather than a verdict.
+                slow.as_ref().filter(|f| !f.is_empty()).map(|f| {
+                    format!(
+                        "answered, but {} did not return inside the probe budget — the engine \
+                         may simply be loaded",
                         f.join(", ")
                     )
                 })
             };
             Ok(Json(ProbeDto {
-                // `None` means there was no provider seam to ask (the in-pod
-                // engine overlay). It opened, so it is usable.
-                healthy: overlay.descriptor.healthy.unwrap_or(true),
+                healthy,
                 capabilities: overlay.descriptor.capabilities.clone(),
                 unreachable_families: unreachable,
+                slow_families: slow,
                 detail,
             }))
         }
@@ -567,9 +597,28 @@ async fn test_engine(
             healthy: false,
             capabilities: Vec::new(),
             unreachable_families: None,
+            slow_families: None,
             detail: Some(error.to_string()),
         })),
     }
+}
+
+/// The apply route's family verdict, extracted so it is testable without a
+/// live engine that answers health and refuses a read.
+///
+/// Returns the refusal message, or `None` to bind. Only *refused* families
+/// reach here: a family that merely timed out lands in `slow_families` and is
+/// reported rather than blocking, because the route budget is tighter than
+/// boot's and nothing in the console sends `?force=true`.
+fn family_refusal(engine: &str, unreachable: Option<&[String]>) -> Option<String> {
+    let families = unreachable.filter(|f| !f.is_empty())?;
+    Some(format!(
+        "`{engine}` answered a health check but refused {}, so it was not bound and your \
+         current engine is untouched. Reads against those families would fail once a company \
+         needed them. Retry with `?force=true` if you know the engine is fine and want it \
+         bound anyway.",
+        families.join(", ")
+    ))
 }
 
 /// `PUT …/memory/engine` — save it, bind it, and put it in force.
@@ -613,18 +662,20 @@ async fn apply(
     // unlike boot, which binds-and-warns so a transient outage cannot
     // crash-loop a tenant. An operator applying a change is present, and the
     // previous engine is still in force.
+    //
+    // Only `unreachable_families` gates. A family that merely did not answer in
+    // time is in `slow_families` and is reported, not refused: the route budget
+    // is tighter than boot's, so a loaded engine would otherwise be
+    // unbindable through the console with no way to say "I know, do it
+    // anyway" — `?force=true` exists but nothing in the console sends it.
     if !query.force
         && let Some(overlay) = &overlay
-        && let Some(unreachable) = &overlay.descriptor.unreachable_families
-        && !unreachable.is_empty()
-    {
-        return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "`{}` answered a health check but did not serve {}, so it was not bound and your \
-             current engine is untouched. Reads against those families would fail once a \
-             company needed them.",
+        && let Some(refusal) = family_refusal(
             request.engine.trim(),
-            unreachable.join(", ")
-        ))));
+            overlay.descriptor.unreachable_families.as_deref(),
+        )
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(refusal)));
     }
 
     // Persist next, for the reason `server::setup` persists before mutating:

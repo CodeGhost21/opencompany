@@ -119,11 +119,18 @@ export function EngineSection({ client, company, onApplied }: Props) {
     try {
       const probe = await testMemoryEngine(client, company, choice());
       if (probe.healthy) {
-        toast.success(
-          probe.capabilities.length
-            ? `${option?.label ?? chosen} answered · ${probe.capabilities.join(", ")}`
-            : `${option?.label ?? chosen} answered`,
-        );
+        // A healthy candidate can still carry a caveat — a family that was slow
+        // rather than refused. `healthy` already means "apply will accept
+        // this", so the caveat is a warning, not a failure.
+        if (probe.detail) {
+          toast.warning(`${option?.label ?? chosen}: ${probe.detail}`);
+        } else {
+          toast.success(
+            probe.capabilities.length
+              ? `${option?.label ?? chosen} answered · ${probe.capabilities.join(", ")}`
+              : `${option?.label ?? chosen} answered`,
+          );
+        }
       } else {
         toast.error(probe.detail ?? "the engine did not answer");
       }
