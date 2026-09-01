@@ -3650,6 +3650,16 @@ impl CompanyRuntime {
     /// earlier pill is not enough, since an ordinary chat turn in the same
     /// desk carries the same `task_id: None` shape.
     ///
+    /// Either way the anchoring pill must also be [`is_latest_settle_pill`]
+    /// for that card: a card that settled, was revised, and is `in_review`
+    /// again mints a fresh pill while the old one stays in history under the
+    /// same `task_id`, so a stale client, a replayed request, or a direct API
+    /// call replying to the earlier pill (or its relay) must not re-dispatch
+    /// the card's latest attempt. The console applies the identical gate
+    /// client-side (`isLatestSettlePill`,
+    /// `frontend/src/views/chat/model.ts`); this is its server-side twin, per
+    /// card rather than per thread.
+    ///
     /// `Err` when the event log itself failed to answer — kept distinct from
     /// `Ok(None)` so a transient read failure surfaces to the caller instead
     /// of being read as "not a review anchor" and running the operator's note
@@ -3664,7 +3674,10 @@ impl CompanyRuntime {
             return Ok(None);
         }
         match stored.event {
-            CompanyEvent::DeskTaskCompleted { task_id, .. } => Ok(Some(task_id)),
+            CompanyEvent::DeskTaskCompleted { task_id, .. } => {
+                let is_latest = self.is_latest_settle_pill(desk, &task_id, parent).await?;
+                Ok(is_latest.then_some(task_id))
+            }
             CompanyEvent::AgentReply {
                 task_id: None,
                 chat_id,
@@ -3674,7 +3687,11 @@ impl CompanyRuntime {
                     return Ok(None);
                 };
                 let is_relay = self.is_relay_bubble_for(desk, pill_seq, parent).await?;
-                Ok(is_relay.then_some(task_id))
+                if !is_relay {
+                    return Ok(None);
+                }
+                let is_latest = self.is_latest_settle_pill(desk, &task_id, pill_seq).await?;
+                Ok(is_latest.then_some(task_id))
             }
             _ => Ok(None),
         }
@@ -3801,6 +3818,64 @@ impl CompanyRuntime {
                 Some(last) => EventSeq::new(last.seq.value().saturating_add(1)),
                 None => return Ok(false),
             };
+        }
+        Ok(false)
+    }
+
+    /// Whether `pill` is the most recent settle pill for `task_id` in `desk`'s
+    /// conversation — "most recent" in the same last-occurrence-wins sense the
+    /// console's `latestSettlePillIdByTaskId`
+    /// (`frontend/src/views/chat/model.ts`) uses to decide which pill's
+    /// Approve control is live, computed here from the log's tail rather than
+    /// an already-loaded message list.
+    ///
+    /// A card that finished, was revised, and returned to `in_review` mints a
+    /// fresh `DeskTaskCompleted` for the same `task_id` while the old one
+    /// stays in the log; this is `false` for that old pill so a reply
+    /// anchored to it is rejected rather than re-dispatching the latest
+    /// attempt. Scoped to `task_id` rather than "any settle for `desk`" so two
+    /// different cards in the same desk each keep their own valid anchor.
+    ///
+    /// Pages backward from the tail, bounded by [`RELAY_SCAN_MAX_PAGES`] for
+    /// the same company-wide-log reason as [`settle_pill_before`]. Unable to
+    /// find any settle pill for `task_id` within that bound reads as `false`
+    /// — the same fail-closed direction as every other outcome here, since
+    /// `pill` came from a real event and its absence from the scan means the
+    /// scan, not the anchor, is what gave out.
+    #[cfg(feature = "openhuman")]
+    async fn is_latest_settle_pill(
+        &self,
+        desk: &str,
+        task_id: &str,
+        pill: EventSeq,
+    ) -> Result<bool> {
+        let mut cursor = None;
+        for _ in 0..RELAY_SCAN_MAX_PAGES {
+            let page = self
+                .events
+                .read_before(&self.id, cursor, RELAY_SCAN_PAGE)
+                .await?;
+            if page.is_empty() {
+                return Ok(false);
+            }
+            cursor = page.last().map(|stored| stored.seq);
+            let found = page.iter().find_map(|stored| match &stored.event {
+                CompanyEvent::DeskTaskCompleted {
+                    task_id: found_id,
+                    origin_chat_id,
+                    ..
+                } if found_id == task_id
+                    && origin_chat_id.as_deref().is_some_and(|origin| {
+                        crate::server::chat_history::same_conversation(Some(origin), Some(desk))
+                    }) =>
+                {
+                    Some(stored.seq)
+                }
+                _ => None,
+            });
+            if let Some(found_seq) = found {
+                return Ok(found_seq == pill);
+            }
         }
         Ok(false)
     }
@@ -8039,6 +8114,96 @@ mod tests {
                 Some("t-1".to_string()),
                 "300 unrelated marketing-desk events between the pill (seq {pill}) and its \
                  own relay must not hide either end of the scan behind one page"
+            );
+        }
+
+        /// Codex #3906873605: a card that settles, is revised, and returns to
+        /// `in_review` mints a fresh settle pill for the same `task_id` while
+        /// the old one stays in the log. A reply anchored to that old pill —
+        /// a stale client, a replayed request, or a direct API call — must be
+        /// refused rather than re-dispatching the card's latest attempt.
+        #[tokio::test]
+        async fn the_resolver_declines_a_superseded_settle_pill() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            let stale_pill = append(&rt, settle_pill("t-1", "strategy")).await;
+            let fresh_pill = append(&rt, settle_pill("t-1", "strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("strategy", stale_pill)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a reply anchored to the superseded settle pill must not \
+                 re-dispatch the card's latest attempt"
+            );
+            assert_eq!(
+                rt.review_feedback_target("strategy", fresh_pill)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "the current settle marker still resolves the card"
+            );
+        }
+
+        /// Same gate, reached through a settle pill's relay bubble rather than
+        /// the pill itself — the relay off a superseded pill must not anchor
+        /// either.
+        #[tokio::test]
+        async fn the_resolver_declines_a_relay_off_a_superseded_settle_pill() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            let stale_relay = append(&rt, relay_bubble("strategy")).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            let fresh_relay = append(&rt, relay_bubble("strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("strategy", stale_relay)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a relay bubble off the superseded pill must not re-dispatch \
+                 the card's latest attempt"
+            );
+            assert_eq!(
+                rt.review_feedback_target("strategy", fresh_relay)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "the relay off the current settle pill still resolves the card"
+            );
+        }
+
+        /// The latest-pill gate is per card, not per desk: one card settling
+        /// again must not invalidate a different card's still-current anchor
+        /// in the same desk (guards the interaction with the earlier
+        /// per-card-actionable fix).
+        #[tokio::test]
+        async fn a_superseded_pill_on_one_card_does_not_invalidate_a_sibling_cards_anchor() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            seed(&rt, &card("t-2", "strategy", COLUMN_IN_REVIEW)).await;
+            let t1_pill = append(&rt, settle_pill("t-1", "strategy")).await;
+            let t2_pill = append(&rt, settle_pill("t-2", "strategy")).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("strategy", t1_pill)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "t-1's original pill is superseded by its own revision"
+            );
+            assert_eq!(
+                rt.review_feedback_target("strategy", t2_pill)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-2".to_string()),
+                "t-2's pill is untouched by t-1 settling again — the gate is per card"
             );
         }
 
