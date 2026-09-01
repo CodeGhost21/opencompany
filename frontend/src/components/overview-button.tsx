@@ -1,6 +1,7 @@
 // Overview, as a glyph in the window's title row.
 //
-// It was a labelled sidebar row. It is chrome here, and that is the whole
+// The sidebar still carries this destination as a labelled row, and will until
+// the sidebar restructure lands. Here it is chrome, and that is the whole
 // argument for dropping the word: a title row is a band of chrome, and a
 // *labelled* button in it reads as content — the same trade in reverse to the
 // one the sidebar's utility bar makes, where an unlabelled glyph in a list of
