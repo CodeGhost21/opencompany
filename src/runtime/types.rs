@@ -354,6 +354,21 @@ pub struct ApprovalSummary {
     /// ones, which is less information than an admin gets and still the truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<String>,
+    /// The root cause a blocker shares with its siblings (issue #1862) — a
+    /// connection id, an integration name — so the console folds every card
+    /// stalled on one broken integration into a single question, and one
+    /// verdict fans back to them all.
+    ///
+    /// Distinct from [`batch`](Self::batch): a batch is "asked in the same
+    /// turn", a group is "blocked by the same cause", and two runs that never
+    /// shared a turn can still share a broken OAuth grant. Read off the blocker
+    /// payload's own `group_key`, so a console never guesses the grouping the
+    /// classifier already recorded.
+    ///
+    /// `None` — and omitted from the wire — for an ordinary approval and for a
+    /// blocker particular to its own step. A console groups those alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
 }
 
 #[cfg(test)]
