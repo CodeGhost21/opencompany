@@ -2875,7 +2875,7 @@ async fn chat_and_emit(
     #[cfg(feature = "openhuman")]
     if let Some(parent) = parent {
         let _serialized = runtime.task_writes.lock().await;
-        if let Some(card) = runtime.review_feedback_target(&desk, parent).await {
+        if let Some(card) = runtime.review_feedback_target(&desk, parent).await? {
             let accepted =
                 accept_chat_turn(&runtime, id, &message, by.as_ref(), Some(parent), &desk).await?;
             let message_id = accepted.message_seq.value().to_string();
@@ -3953,6 +3953,7 @@ async fn review_card(
         .runtime
         .review_card_in_review(&body.task_id, &body.chat_id)
         .await
+        .map_err(ApiError)?
         .ok_or_else(|| {
             ApiError(crate::error::OpenCompanyError::NotFound(
                 "no card is awaiting review in this conversation".to_string(),
@@ -13937,6 +13938,7 @@ mode = "full"
         let card = runtime
             .review_card_in_review("t-1", "strategy")
             .await
+            .expect("task store lookup")
             .expect("card is still in_review before the lock is released");
         runtime
             .apply_review_decision(

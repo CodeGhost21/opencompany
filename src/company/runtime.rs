@@ -101,6 +101,20 @@ fn task_leaves_todo(prev_column: Option<&str>, next_column: &str) -> bool {
     prev_column == Some(TODO) && next_column != TODO
 }
 
+/// Page size for the paged company-event scans in `settle_pill_before` and
+/// `is_relay_bubble_for`, matching [`history_for_desk`](crate::server::chat_history::history_for_desk)'s
+/// `EVENT_PAGE`.
+#[cfg(feature = "openhuman")]
+const RELAY_SCAN_PAGE: usize = 256;
+
+/// The most pages either scan pages through before giving up — 2048 events
+/// company-wide. Generous rather than tuned: a real reply-to-relay is at most
+/// a handful of events away even in a busy company, so this is a safety cap
+/// against a runaway scan (a desk that dispatched once and never again, or
+/// never at all), not a bound expected to bite in practice.
+#[cfg(feature = "openhuman")]
+const RELAY_SCAN_MAX_PAGES: usize = 8;
+
 /// Whether `card` is the review surface for `desk`: an `in_review`
 /// dispatch-origin card whose origin conversation is `desk`. A board-created
 /// card (no `origin_chat_id`) is excluded — it was never dispatched from a
@@ -3550,16 +3564,21 @@ impl CompanyRuntime {
     /// pill ([`CompanyEvent::DeskTaskCompleted`]) or the relay bubble that
     /// followed it.
     ///
-    /// `None` when `parent` names neither, when no such card is on the board, or
-    /// when the card has already left `in_review` — each of which routes the
-    /// message back to an ordinary chat turn rather than a review pass.
+    /// `Ok(None)` when `parent` names neither, when no such card is on the
+    /// board, or when the card has already left `in_review` — each of which
+    /// routes the message back to an ordinary chat turn rather than a review
+    /// pass. `Err` when the task store failed to answer, so a storage hiccup
+    /// surfaces as a server error rather than silently falling through to an
+    /// ordinary chat turn with the operator's review note as its text.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn review_feedback_target(
         self: &Arc<Self>,
         desk: &str,
         parent: EventSeq,
-    ) -> Option<TaskRecord> {
-        let task_id = self.review_anchor_card(desk, parent).await?;
+    ) -> Result<Option<TaskRecord>> {
+        let Some(task_id) = self.review_anchor_card(desk, parent).await else {
+            return Ok(None);
+        };
         self.review_card_in_review(&task_id, desk).await
     }
 
@@ -3596,15 +3615,29 @@ impl CompanyRuntime {
     /// whose origin conversation is `desk` — a *candidate* anchor for a relay
     /// bubble the operator replied to, still to be confirmed by
     /// [`is_relay_bubble_for`].
+    ///
+    /// The event log is company-wide, so the pill can sit arbitrarily far
+    /// behind `before` once other desks are busy — a single fixed-size read
+    /// used to cut this off at the first page and silently miss it. Pages
+    /// backward instead, the same shape [`history_for_desk`](crate::server::chat_history::history_for_desk)
+    /// uses to find a desk's messages amid a company-wide log, bounded by
+    /// [`RELAY_SCAN_MAX_PAGES`] rather than one page — generous enough that a
+    /// real reply-to-relay never hits it, but not the unbounded walk to
+    /// genesis a desk that never dispatched anything would otherwise force.
     #[cfg(feature = "openhuman")]
     async fn settle_pill_before(&self, desk: &str, before: EventSeq) -> Option<(EventSeq, String)> {
-        const WINDOW: usize = 24;
-        self.events
-            .read_before(&self.id, Some(before), WINDOW)
-            .await
-            .ok()?
-            .into_iter()
-            .find_map(|stored| {
+        let mut cursor = Some(before);
+        for _ in 0..RELAY_SCAN_MAX_PAGES {
+            let page = self
+                .events
+                .read_before(&self.id, cursor, RELAY_SCAN_PAGE)
+                .await
+                .ok()?;
+            if page.is_empty() {
+                return None;
+            }
+            cursor = page.last().map(|stored| stored.seq);
+            let found = page.into_iter().find_map(|stored| {
                 let seq = stored.seq;
                 match stored.event {
                     CompanyEvent::DeskTaskCompleted {
@@ -3619,7 +3652,12 @@ impl CompanyRuntime {
                     }
                     _ => None,
                 }
-            })
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
     }
 
     /// Whether `parent` is the relay bubble `pill` actually produced: the
@@ -3631,52 +3669,81 @@ impl CompanyRuntime {
     /// targets the relay bubble" test just by being the nearest one before
     /// whatever the operator replied to, silently turning a normal reply into
     /// review feedback on a card the operator never looked at.
+    ///
+    /// Pages forward past [`RELAY_SCAN_PAGE`] rather than giving up at one
+    /// page, for the same company-wide-log reason as [`settle_pill_before`].
+    /// Unlike that scan this one has a real same-desk boundary to stop at —
+    /// the next `DeskTaskCompleted` for `desk` always ends it — so
+    /// [`RELAY_SCAN_MAX_PAGES`] is a safety cap against a desk that never
+    /// settles again, not the wall this search actually relies on.
     #[cfg(feature = "openhuman")]
     async fn is_relay_bubble_for(&self, desk: &str, pill: EventSeq, parent: EventSeq) -> bool {
-        const WINDOW: usize = 24;
-        let Ok(forward) = self.events.read_from(&self.id, pill, WINDOW).await else {
-            return false;
-        };
-        for stored in forward.into_iter().skip(1) {
-            let seq = stored.seq;
-            match stored.event {
-                CompanyEvent::AgentReply {
-                    task_id: None,
-                    chat_id,
-                    ..
-                } if crate::server::chat_history::same_conversation(Some(&chat_id), Some(desk)) => {
-                    return seq == parent;
-                }
-                CompanyEvent::DeskTaskCompleted { origin_chat_id, .. }
-                    if origin_chat_id.as_deref().is_some_and(|origin| {
-                        crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-                    }) =>
-                {
-                    return false;
-                }
-                _ => {}
+        let mut cursor = pill;
+        for page_index in 0..RELAY_SCAN_MAX_PAGES {
+            let Ok(forward) = self
+                .events
+                .read_from(&self.id, cursor, RELAY_SCAN_PAGE)
+                .await
+            else {
+                return false;
+            };
+            if forward.is_empty() {
+                return false;
             }
+            let skip = if page_index == 0 { 1 } else { 0 };
+            for stored in forward.iter().skip(skip) {
+                let seq = stored.seq;
+                match &stored.event {
+                    CompanyEvent::AgentReply {
+                        task_id: None,
+                        chat_id,
+                        ..
+                    } if crate::server::chat_history::same_conversation(
+                        Some(chat_id.as_str()),
+                        Some(desk),
+                    ) =>
+                    {
+                        return seq == parent;
+                    }
+                    CompanyEvent::DeskTaskCompleted { origin_chat_id, .. }
+                        if origin_chat_id.as_deref().is_some_and(|origin| {
+                            crate::server::chat_history::same_conversation(Some(origin), Some(desk))
+                        }) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            cursor = match forward.last() {
+                Some(last) => EventSeq::new(last.seq.value().saturating_add(1)),
+                None => return false,
+            };
         }
         false
     }
 
     /// The card with id `task_id`, but only when it is an `in_review`
     /// dispatch-origin card whose origin conversation is `desk`.
+    ///
+    /// `Err` when the task store itself failed to answer — kept distinct from
+    /// `Ok(None)` (no such card, or one that is not a review target) so a
+    /// transient storage error surfaces to the caller rather than being read
+    /// as "not a review".
     #[cfg(feature = "openhuman")]
     pub(crate) async fn review_card_in_review(
         &self,
         task_id: &str,
         desk: &str,
-    ) -> Option<TaskRecord> {
+    ) -> Result<Option<TaskRecord>> {
         let card = self
             .ops
             .tasks
             .list(&self.id)
-            .await
-            .ok()?
+            .await?
             .into_iter()
-            .find(|t| t.id == task_id)?;
-        is_review_target(&card, desk).then_some(card)
+            .find(|t| t.id == task_id);
+        Ok(card.filter(|c| is_review_target(c, desk)))
     }
 
     /// Appends the operator's review feedback to `card`'s note as a
@@ -7575,7 +7642,7 @@ mod tests {
     #[cfg(feature = "openhuman")]
     mod review {
         use crate::ports::TaskRecord;
-        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW};
+        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore};
         use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
         use std::sync::Arc;
         use tempfile::TempDir;
@@ -7583,6 +7650,30 @@ mod tests {
         type Runtime = crate::company::runtime::CompanyRuntime;
 
         async fn runtime() -> (Arc<Runtime>, TempDir) {
+            runtime_with_tasks(None).await
+        }
+
+        /// A [`TaskStore`] whose `list` always fails, so a review lookup can be
+        /// driven through the task-store-error arm rather than the "no such
+        /// card" one.
+        struct FailingTasks;
+
+        #[async_trait::async_trait]
+        impl TaskStore for FailingTasks {
+            async fn list(&self, _company: &CompanyId) -> crate::Result<Vec<TaskRecord>> {
+                Err(crate::error::OpenCompanyError::Harness(
+                    "the board is unavailable".to_string(),
+                ))
+            }
+            async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        async fn runtime_with_tasks(tasks: Option<Arc<dyn TaskStore>>) -> (Arc<Runtime>, TempDir) {
             let home = tempfile::Builder::new()
                 .prefix("opencompany-review-")
                 .tempdir()
@@ -7593,13 +7684,13 @@ mod tests {
                  [[group_chat]]\nid = \"strategy\"\nname = \"Strategy\"\nmembers = [\"ceo\"]\n",
             )
             .expect("manifest");
-            let runtime = Arc::new(
+            let mut builder =
                 crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-                    .with_id(CompanyId::new("acme"))
-                    .build()
-                    .await
-                    .expect("runtime"),
-            );
+                    .with_id(CompanyId::new("acme"));
+            if let Some(tasks) = tasks {
+                builder = builder.with_tasks(tasks);
+            }
+            let runtime = Arc::new(builder.build().await.expect("runtime"));
             (runtime, home)
         }
 
@@ -7680,7 +7771,7 @@ mod tests {
             seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
             let pill = append(&rt, settle_pill("t-1", "strategy")).await;
 
-            let target = rt.review_feedback_target("strategy", pill).await;
+            let target = rt.review_feedback_target("strategy", pill).await.unwrap();
             assert_eq!(target.map(|c| c.id), Some("t-1".to_string()));
         }
 
@@ -7691,7 +7782,7 @@ mod tests {
             append(&rt, settle_pill("t-1", "strategy")).await;
             let bubble = append(&rt, relay_bubble("strategy")).await;
 
-            let target = rt.review_feedback_target("strategy", bubble).await;
+            let target = rt.review_feedback_target("strategy", bubble).await.unwrap();
             assert_eq!(
                 target.map(|c| c.id),
                 Some("t-1".to_string()),
@@ -7707,7 +7798,10 @@ mod tests {
             let pill = append(&rt, settle_pill("t-1", "strategy")).await;
 
             assert!(
-                rt.review_feedback_target("strategy", pill).await.is_none(),
+                rt.review_feedback_target("strategy", pill)
+                    .await
+                    .unwrap()
+                    .is_none(),
                 "a card already approved is not open for review"
             );
         }
@@ -7719,7 +7813,10 @@ mod tests {
             let pill = append(&rt, settle_pill("t-1", "strategy")).await;
 
             assert!(
-                rt.review_feedback_target("marketing", pill).await.is_none(),
+                rt.review_feedback_target("marketing", pill)
+                    .await
+                    .unwrap()
+                    .is_none(),
                 "a reply in another desk must not review this desk's card"
             );
         }
@@ -7741,6 +7838,7 @@ mod tests {
             assert_eq!(
                 rt.review_feedback_target("strategy", true_relay)
                     .await
+                    .unwrap()
                     .map(|c| c.id),
                 Some("t-1".to_string()),
                 "the pill's own relay bubble still anchors to its card"
@@ -7748,10 +7846,38 @@ mod tests {
             assert!(
                 rt.review_feedback_target("strategy", later_ordinary_turn)
                     .await
+                    .unwrap()
                     .is_none(),
                 "replying to a later ordinary turn must run a normal turn, not \
                  re-open the earlier card just because the pill is still the \
                  nearest one before it"
+            );
+        }
+
+        /// Codex #3905031260: the event log is company-wide, so unrelated
+        /// activity on another desk can put more events between a pill and its
+        /// relay than a single scan page holds. Both `settle_pill_before`
+        /// (backward, from the reply to the pill) and `is_relay_bubble_for`
+        /// (forward, from the pill to the reply) must page past that, not give
+        /// up at the first page and silently fall through to an ordinary turn.
+        #[tokio::test]
+        async fn the_relay_resolves_past_a_flood_of_another_desks_events() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            let pill = append(&rt, settle_pill("t-1", "strategy")).await;
+            for _ in 0..300 {
+                append(&rt, relay_bubble("marketing")).await;
+            }
+            let true_relay = append(&rt, relay_bubble("strategy")).await;
+
+            assert_eq!(
+                rt.review_feedback_target("strategy", true_relay)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "300 unrelated marketing-desk events between the pill (seq {pill}) and its \
+                 own relay must not hide either end of the scan behind one page"
             );
         }
 
@@ -7776,8 +7902,32 @@ mod tests {
             assert!(
                 rt.review_feedback_target("strategy", chatter)
                     .await
+                    .unwrap()
                     .is_none(),
                 "a top-level message names no review surface and starts a normal turn"
+            );
+        }
+
+        /// Codex #3905031268: a task-store read failure must surface as an
+        /// error, not collapse into "no review target". Otherwise the explicit
+        /// review endpoint answers a transient storage error with a misleading
+        /// 404, and the threaded-feedback path falls through and runs the
+        /// operator's review note as an ordinary chat turn.
+        #[tokio::test]
+        async fn a_task_store_failure_surfaces_as_an_error_not_a_missing_card() {
+            let (rt, _home) = runtime_with_tasks(Some(Arc::new(FailingTasks))).await;
+            let pill = append(&rt, settle_pill("t-1", "strategy")).await;
+
+            let err = rt
+                .review_feedback_target("strategy", pill)
+                .await
+                .expect_err(
+                    "a storage failure must not be read as 'no review target' and fall \
+                     through to an ordinary chat turn",
+                );
+            assert!(
+                matches!(err, crate::error::OpenCompanyError::Harness(_)),
+                "unexpected error: {err:?}"
             );
         }
 
