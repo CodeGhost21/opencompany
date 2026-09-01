@@ -82,6 +82,7 @@ import {
   buildTimeline,
   buildTimelineItems,
   budgetPauseRedeemId,
+  canSubmitReview,
   channelIdFromSegment,
   channelMembers,
   channelTitle,
@@ -102,7 +103,9 @@ import {
   mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
   operatorSection,
+  repliesInThread,
   resolveDmChannelId,
+  reviewAnchorsForThread,
   toggleReaction,
   type DecidedApproval,
   type HistoryHydration,
@@ -468,6 +471,13 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  /** Every card whose review verdict is currently in flight — one entry per
+   * task, not a single global slot, so a click on one card's Approve/Revise
+   * control never gets silently dropped by a DIFFERENT card's in-flight
+   * verdict (Codex #3906779123). See {@link canSubmitReview}. */
+  const [reviewingCardIds, setReviewingCardIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
    * so only that notice's button shows a busy state. */
   const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
@@ -1669,7 +1679,9 @@ export function ChatView({
               mentions: r.mentions,
             }),
           )
-        : [makeMessage("system", "(no reply)", { parentId })];
+        : reply.reviewFeedbackApplied
+          ? []
+          : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
       // The synchronous response predates mention metadata on some hosts. A
       // reply is already journaled by the time this response arrives, so fetch
@@ -1845,6 +1857,40 @@ export function ChatView({
   /** Drop the card from every channel — see {@link clearTaskCardEverywhere}. */
   function clearCardEverywhere(taskId: string) {
     setTranscripts((t) => clearTaskCardEverywhere(t, taskId));
+  }
+
+  /**
+   * Settle the in-review dispatch card a finished card's settle pill links to.
+   * Approve finishes it; Revise re-runs it with a note — though the console
+   * reaches Revise through a thread reply, not this button.
+   *
+   * The board move is left to the host's own `task_card_changed` over the SSE
+   * feed — the same path a drag settles through — so the Approve control drops
+   * off the pill the moment the card leaves `in_review`. This only carries the
+   * verdict and its busy state; `taskId` is the pill's card, sent so the host
+   * settles that specific card rather than whichever one it would otherwise
+   * pick for the thread.
+   */
+  async function reviewCard(taskId: string, decision: "approve" | "revise") {
+    if (activeThreadId === undefined || !canSubmitReview(reviewingCardIds, activeThreadId, taskId))
+      return;
+    setReviewingCardIds((prev) => new Set(prev).add(taskId));
+    try {
+      await client.reviewCard(activeThreadId, taskId, decision, undefined, company);
+      toast.success(decision === "approve" ? "Card approved." : "Sent for another pass.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : "Couldn't record that review.",
+      );
+    } finally {
+      setReviewingCardIds((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
   }
 
   /**
@@ -2069,7 +2115,22 @@ export function ChatView({
   }
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
-  const threadReplies = parent ? messages.filter((m) => m.parentId === parent.id) : [];
+  const threadReplies = parent ? repliesInThread(parent, messages) : [];
+  // Every review surface this thread hangs off, newest first — the thread
+  // root itself when opened directly on the pill/relay, or one of its
+  // replies when the card that produced them was sent inside an
+  // already-open thread. Usually zero or one entry; two when a second card
+  // was dispatched into this thread before the first was settled (Codex
+  // #3906594069) — the newest still drives the composer's own target and
+  // "ready for review" notice below, but every other entry gets its own
+  // Approve control so it does not have to wait on the newest one settling.
+  const threadReviewAnchors =
+    parent !== undefined && taskStatusByTaskId !== undefined
+      ? reviewAnchorsForThread(parent, threadReplies, messages, taskStatusByTaskId)
+      : [];
+  const threadReviewAnchor = threadReviewAnchors[0];
+  const threadReviewing = threadReviewAnchor !== undefined;
+  const additionalThreadReviewAnchors = threadReviewAnchors.slice(1);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -2150,6 +2211,8 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+              reviewingCardIds={reviewingCardIds}
               resolveAttachmentUrl={resolveAttachmentUrl}
               taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
@@ -2398,6 +2461,15 @@ export function ChatView({
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
               readOnly={readOnly}
+              reviewing={threadReviewing}
+              reviewTaskId={threadReviewAnchor?.taskId}
+              onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+              reviewInFlight={
+                threadReviewAnchor !== undefined &&
+                reviewingCardIds.has(threadReviewAnchor.taskId)
+              }
+              additionalReviewAnchors={additionalThreadReviewAnchors}
+              reviewingTaskId={reviewingCardIds}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) => {
@@ -2405,7 +2477,7 @@ export function ChatView({
                 // state or call `client.chat` for a channel the server's
                 // read-only guard will refuse anyway (issue #1757).
                 if (readOnly) return;
-                void send(text, undefined, parent.id, undefined, mentions);
+                void send(text, undefined, threadReviewAnchor?.anchorId ?? parent.id, undefined, mentions);
               }}
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}

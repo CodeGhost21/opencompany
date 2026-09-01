@@ -17,6 +17,7 @@ import {
   type Desk,
 } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
+import type { TaskStatus } from "@/api/tasks";
 
 /**
  * A host desk (`GET .../desks`), shaped into the console's `Desk`. The host
@@ -30,6 +31,176 @@ import { initials as nameInitials, type TeamMember } from "@/lib/team";
  * company declared. Dropping them here is what made every channel show the
  * whole company (issue #369).
  */
+/**
+ * The id of the most recent system settle pill carrying each `taskId`, last
+ * occurrence wins.
+ *
+ * Shared by {@link buildTimeline} (which stamps `isLatestSettlePill` on every
+ * row) and {@link reviewCardIdForThread} (which must apply the identical
+ * latest-pill gate to a reply anchor, not just to the row's Approve button) —
+ * one definition of "latest" for both surfaces.
+ */
+function latestSettlePillIdByTaskId(messages: readonly ChatMessage[]): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const m of messages) {
+    if (m.from === "system" && m.taskId !== undefined) latest.set(m.taskId, m.id);
+  }
+  return latest;
+}
+
+/**
+ * The in-review dispatch card a chat thread is reviewing, or `undefined` when
+ * `parent` is not a review surface.
+ *
+ * A parent is a review surface when it is the card's settle pill — a system
+ * marker carrying its `taskId` — or the relay bubble that followed it: the
+ * pill's *first* company line with no `taskId`, mirroring the backend's
+ * `is_relay_bubble_for`. A later, ordinary company reply is not a review
+ * surface even though it has the same shape. Either way the card must still
+ * be in `in_review`; one already approved or re-running is no longer open
+ * for review.
+ *
+ * A card that finished, was revised, and is `in_review` again mints a NEW
+ * settle pill while the old one stays in history under the same `taskId`.
+ * Only the newest pill (or its relay) is a live review surface — the same
+ * {@link latestSettlePillIdByTaskId} gate {@link buildTimeline} uses for the
+ * Approve control — so opening an old pill's thread and replying there does
+ * not silently apply feedback to, and re-dispatch, the latest attempt.
+ */
+export function reviewCardIdForThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): string | undefined {
+  const inReview = (taskId: string | undefined): taskId is string =>
+    taskId !== undefined && statusByTaskId[taskId]?.column === "in_review";
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
+  const isLatestPill = (pill: ChatMessage): boolean =>
+    pill.taskId !== undefined && latestPillIdByTaskId.get(pill.taskId) === pill.id;
+  if (parent.from === "system") {
+    return inReview(parent.taskId) && isLatestPill(parent) ? parent.taskId : undefined;
+  }
+  if (parent.from !== "company" || parent.taskId) return undefined;
+  const index = messages.findIndex((m) => m.id === parent.id);
+  if (index < 0) return undefined;
+  for (let i = index - 1; i >= 0; i--) {
+    const prior = messages[i];
+    if (prior.from === "company" && !prior.taskId) return undefined;
+    if (prior.from !== "system" || !prior.taskId) continue;
+    return inReview(prior.taskId) && isLatestPill(prior) ? prior.taskId : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Every distinct in-review card a thread anchors to, as `{taskId, anchorId}`
+ * pairs — one entry per card, newest-checked-first: `parent` itself, then
+ * `replies` from most to least recent.
+ *
+ * A thread usually anchors at most one card, but a second can be dispatched
+ * from inside it before the first is settled (Codex #3906594069), leaving
+ * both live in the same thread at once. Each stays its own entry here —
+ * {@link reviewCardIdForThread}'s stale-pill gate already keeps a superseded
+ * pass of the SAME card out of this list, so only genuinely distinct cards
+ * collect, never two anchors for one taskId.
+ */
+export function reviewAnchorsForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string }[] {
+  const seen = new Set<string>();
+  const anchors: { taskId: string; anchorId: string }[] = [];
+  const candidates: readonly ChatMessage[] = [parent, ...[...replies].reverse()];
+  for (const candidate of candidates) {
+    const taskId = reviewCardIdForThread(candidate, messages, statusByTaskId);
+    if (taskId === undefined || seen.has(taskId)) continue;
+    seen.add(taskId);
+    anchors.push({ taskId, anchorId: candidate.id });
+  }
+  return anchors;
+}
+
+/**
+ * Where a thread's review feedback should be anchored, or `undefined` when
+ * the thread is not reviewing anything.
+ *
+ * The newest of {@link reviewAnchorsForThread}'s cards — the thread's one
+ * composer can only ever target a single card with a typed reply, so when
+ * more than one is live this is the one it targets. `parent` itself is the
+ * review surface for a thread opened directly on a settle pill or its relay.
+ * But when the card that produced the pill was itself sent inside an
+ * existing thread, the pill and its relay land as replies under that
+ * thread's own root — `parent` is neither of them, so
+ * {@link reviewCardIdForThread} on `parent` alone finds nothing. Falls back
+ * to scanning `replies` (newest first) for the review surface among them,
+ * and anchors there instead.
+ */
+export function reviewAnchorForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string } | undefined {
+  return reviewAnchorsForThread(parent, replies, messages, statusByTaskId)[0];
+}
+
+/**
+ * Whether `taskId`'s Approve/Revise click should go out right now.
+ *
+ * `reviewingCardIds` is keyed per card, not a single global slot — since
+ * {@link reviewAnchorsForThread} (`a99b39e87`) made every distinct in-review
+ * card in a thread independently actionable, a click on one card's control
+ * must not be silently dropped just because a DIFFERENT card's verdict is
+ * still in flight (Codex #3906779123). Only a click repeated on the SAME
+ * card while its own verdict is outstanding is refused. The host is safe to
+ * take both at once: `runtime.task_writes` (`3ab934918`) serializes review
+ * verdicts per company, so a second card's write simply queues behind the
+ * first instead of racing it.
+ */
+export function canSubmitReview(
+  reviewingCardIds: ReadonlySet<string>,
+  activeThreadId: string | undefined,
+  taskId: string,
+): boolean {
+  return activeThreadId !== undefined && !reviewingCardIds.has(taskId);
+}
+
+/**
+ * Every message the open thread panel should show under `parent` — not just
+ * its direct children.
+ *
+ * Review feedback sent from inside a thread is anchored on whichever reply
+ * {@link reviewAnchorForThread} found (the card's settle pill or relay, when
+ * that card was dispatched from inside this very thread) rather than on
+ * `parent` itself, because that is what the backend needs to find the card
+ * (`review_anchor_card` on the host walks a message's *direct* parent, not
+ * its thread). That reply becomes the operator's own message's parent, so a
+ * same-level filter (`m.parentId === parent.id`) never finds it — the
+ * message the operator just typed disappears from the panel the moment it
+ * sends, in both the optimistic bubble and the persisted echo. Walk each
+ * message's parent chain back to `parent` instead, so a reply-to-a-reply
+ * still renders.
+ */
+export function repliesInThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  const descendsFromParent = (message: ChatMessage): boolean => {
+    const seen = new Set<string>();
+    let ancestorId = message.parentId;
+    while (ancestorId !== undefined && !seen.has(ancestorId)) {
+      if (ancestorId === parent.id) return true;
+      seen.add(ancestorId);
+      ancestorId = byId.get(ancestorId)?.parentId;
+    }
+    return false;
+  };
+  return messages.filter(descendsFromParent);
+}
+
 export function deskFromDto(d: DeskDto): Desk {
   const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return {
@@ -959,6 +1130,13 @@ export interface TimelineEntry {
    * replied four times is still one face.
    */
   replySenders: Sender[];
+  /**
+   * For a system settle pill, whether it is the most recent one carrying its
+   * `taskId`. A card that has re-run since parks an older pill in history
+   * with the same id; only the latest should offer Approve. Meaningless (and
+   * left `undefined`) for any other row.
+   */
+  isLatestSettlePill?: boolean;
 }
 
 /**
@@ -1159,6 +1337,8 @@ export function buildTimeline(
   }
   const inline = inlineFirstReplies(messages, replies);
 
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
+
   const entries: TimelineEntry[] = [];
   let prev: TimelineEntry | undefined;
 
@@ -1211,6 +1391,10 @@ export function buildTimeline(
       dayLabel: newDay ? formatDay(m.at) : undefined,
       replies: own,
       replySenders: distinctSenders(own, channel, members, youAvatar),
+      isLatestSettlePill:
+        m.from === "system" && m.taskId !== undefined
+          ? latestPillIdByTaskId.get(m.taskId) === m.id
+          : undefined,
     };
     entries.push(entry);
     prev = entry;

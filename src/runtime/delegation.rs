@@ -3403,7 +3403,7 @@ card is still with {delegator}."
 /// Appends a responder-attributed result block to a card's note, preserving any
 /// prior note above it (issue #186). Mirrors `harness::brain::append_result`,
 /// kept local to the seam so the lifecycle arms never reach back into the brain.
-fn append_note(prev: Option<&str>, responder: &str, body: &str) -> String {
+pub(crate) fn append_note(prev: Option<&str>, responder: &str, body: &str) -> String {
     let block = format!("[{responder}] {body}");
     match prev.filter(|p| !p.is_empty()) {
         Some(p) => format!("{p}\n\n{block}"),
