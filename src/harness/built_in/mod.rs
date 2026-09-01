@@ -2443,7 +2443,12 @@ impl HarnessPool {
         // The company's own search provider is set from that same settings
         // surface and goes stale the same way, so it rides the same axis: a key
         // pasted in the console must reach the next turn, not the next restart.
-        let tenant_search_config = self.resolve_tenant_search(company, deps).await;
+        // Gated on the same effective grant `grants_fp` above hashes over — the
+        // live override folded onto `company`'s base — so a console grant this
+        // pass has not hot-rebuilt into `company` still unlocks the backend.
+        let tenant_search_config = self
+            .resolve_tenant_search(company, deps, overlay.tool_grants.as_ref())
+            .await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
@@ -2924,6 +2929,13 @@ impl HarnessPool {
     /// wearing a different credential. A company that never opted into web
     /// search does not get a store read per turn for a setting it cannot use.
     ///
+    /// The grant check reads the effective allow-list — `company`'s base folded
+    /// with `overlay_tool_grants` — not `company.manifest.tools.allow` alone.
+    /// `company` can be a stale snapshot the live override has not yet been
+    /// folded into; checking only its raw field would resolve no backend for a
+    /// grant the roster's own effective-allow-list read already honours,
+    /// leaving native evidence claim `search` while no tool gets wired.
+    ///
     /// A transient read error keeps the last known connection with a warning,
     /// like `hosting`: degrading to `None` would silently move the company's
     /// searches back onto the platform's metered account — a bill moving between
@@ -2932,8 +2944,13 @@ impl HarnessPool {
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
+        overlay_tool_grants: Option<&crate::ports::types::ToolGrantsOverride>,
     ) -> Option<search_byo::TenantSearch> {
-        if !crate::company::grants_search_explicit(&company.manifest.tools.allow) {
+        let effective_allow = crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay_tool_grants,
+        );
+        if !crate::company::grants_search_explicit(&effective_allow) {
             return None;
         }
         let Some(secrets) = &deps.secrets else {
@@ -10218,6 +10235,64 @@ description = "Builds the product."
             pool.grants_fingerprint_of(&rec.id).await,
             Some(before),
             "withdrawing the grant must move the fingerprint back"
+        );
+    }
+
+    /// **The search-backend counterpart of the proof above.** `grants_fp`
+    /// (and the roster's own effective-allow-list read) already tolerate a
+    /// stale `company` snapshot, because both fold the live override onto
+    /// `company`'s base. `resolve_tenant_search` must do the same: a company
+    /// snapshot that predates a console `search` grant must still resolve the
+    /// backend once the live override is passed in, or the roster ends up
+    /// crediting a capability no tool was ever wired for.
+    #[tokio::test]
+    async fn resolve_tenant_search_honours_a_console_grant_a_stale_company_misses() {
+        use crate::ports::types::{Actor, ActorKind, ToolGrantsOverride};
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+
+        // The stale snapshot: no explicit `search` grant in its own
+        // `[tools].allow`, exactly what a caller holding a boot-time
+        // `CompanyRecord` still has after an admin grants `search` from the
+        // console without a hot rebuild. `*` covers files/shell/code/web but
+        // deliberately not `search` — the same base the grant-fingerprint
+        // test above uses.
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["*".to_string()];
+        assert!(
+            !crate::company::grants_search_explicit(&rec.manifest.tools.allow),
+            "the fixture must start without an explicit search grant"
+        );
+
+        let mut deps = deps_with_plan(dir.path(), context.clone(), None, None);
+        // No secret store wired: the fallback path returns the last known
+        // connection, standing in for a company whose provider is already on
+        // file.
+        deps.secrets = None;
+        deps.tenant_search = Some(search_byo::TenantSearch::for_test(
+            "brave",
+            Some("test-key"),
+            None,
+        ));
+
+        let overlay_tool_grants = ToolGrantsOverride {
+            added: vec!["search".to_string()],
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-admin".to_string(),
+            },
+            at_millis: crate::ports::now_millis(),
+        };
+
+        let pool = HarnessPool::new();
+        let resolved = pool
+            .resolve_tenant_search(&rec, &deps, Some(&overlay_tool_grants))
+            .await;
+        assert!(
+            resolved.is_some(),
+            "a console grant the live overlay carries must resolve the search \
+             backend even when the `company` snapshot passed in predates it"
         );
     }
 
