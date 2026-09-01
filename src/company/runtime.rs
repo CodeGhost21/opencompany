@@ -6270,7 +6270,7 @@ mod tests {
         use crate::ports::brain::CycleHost;
         use crate::ports::tasks::COLUMN_IN_PROGRESS;
         use crate::ports::types::{
-            CycleRequest, CycleResult, EventSeq, OutboundMessage, ReplyTo, TokenUsage,
+            CycleRequest, CycleResult, OutboundMessage, ReplyTo, TokenUsage,
         };
 
         /// Answers a `TaskDispatched { task_id: "t-1" }` with a
@@ -6461,8 +6461,10 @@ mod tests {
             steps: Vec::new(),
         };
 
-        let mut report = crate::runtime::types::CycleReport::default();
-        report.responses = vec![relay(Some("t-relay"))];
+        let report = crate::runtime::types::CycleReport {
+            responses: vec![relay(Some("t-relay"))],
+            ..Default::default()
+        };
         rt.journal_dispatch_replies(&report).await;
 
         let logged = rt
@@ -6485,7 +6487,10 @@ mod tests {
         card.id = "t-flat".to_string();
         card.origin_parent = None;
         rt.tasks().upsert(&id, &card).await.unwrap();
-        report.responses = vec![relay(Some("t-flat"))];
+        let report = crate::runtime::types::CycleReport {
+            responses: vec![relay(Some("t-flat"))],
+            ..Default::default()
+        };
         rt.journal_dispatch_replies(&report).await;
 
         let logged = rt
