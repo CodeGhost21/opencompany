@@ -6462,6 +6462,10 @@ mod tests {
             assignee: origin.to_string(),
             updated_at_millis: 0,
             origin_chat_id: Some(origin.to_string()),
+            // #1890 added this beside `origin_chat_id`: the thread a card was
+            // raised in, not just the channel. These cards are built for the
+            // relay-attribution assertions below, which do not read it.
+            origin_parent: None,
             parent_task_id: None,
             output: None,
             plan: None,
