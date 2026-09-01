@@ -1515,8 +1515,12 @@ fn http_request_consequence(args: &serde_json::Value) -> Consequence {
         reach: Reach::Consequence,
         standing: Standing::PerCall,
     };
-    let Some(method) = args.get("method").and_then(|value| value.as_str()) else {
-        return gated;
+    let method = match args.get("method") {
+        None => "GET",
+        Some(value) => match value.as_str() {
+            Some(method) => method,
+            None => return gated,
+        },
     };
     if matches!(
         method.to_ascii_uppercase().as_str(),
@@ -2731,7 +2735,6 @@ mod tests {
             json!({ "method": "DELETE", "url": "https://api.example.com/items/1" }),
             json!({ "method": "BREW", "url": "https://api.example.com/coffee" }),
             json!({ "method": 7, "url": "https://api.example.com/items" }),
-            json!({ "url": "https://api.example.com/items" }),
         ] {
             let verdict = consequence_of("http_request", &args);
             assert_eq!(verdict.reach, Reach::Consequence, "{args}");
@@ -2740,6 +2743,23 @@ mod tests {
             assert!(verdict.parks_under_auto(), "{args}");
             assert!(!verdict.reach.costs_money(), "{args}");
         }
+    }
+
+    /// An authored `http_request` node with only a `url` omits `method`
+    /// entirely, and both the execution path
+    /// ([`crate::workflows::caps::http::to_tool_args`] forwards the omission,
+    /// then `HttpRequestTool` defaults it to GET) and the approvals-card path
+    /// ([`crate::workflows::gate::http_target`]) treat that omission as GET.
+    /// The classifier must agree, or a plain "fetch this URL" node parks under
+    /// `supervised`/`auto` while it actually runs a free read.
+    #[test]
+    fn an_omitted_http_method_defaults_to_get_and_is_free() {
+        let args = json!({ "url": "https://api.example.com/items" });
+        let verdict = consequence_of("http_request", &args);
+        assert_eq!(verdict.reach, Reach::ExternalRead, "{args}");
+        assert_eq!(verdict.standing, Standing::ScopedGrantable, "{args}");
+        assert!(!verdict.reach.parks_under_supervision(), "{args}");
+        assert!(!verdict.parks_under_auto(), "{args}");
     }
 
     #[test]
