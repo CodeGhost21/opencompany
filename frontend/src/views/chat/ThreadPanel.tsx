@@ -84,13 +84,13 @@ interface Props {
    */
   additionalReviewAnchors?: { taskId: string; anchorId: string }[];
   /**
-   * The task id currently mid-verdict, company-wide — `ChatView`'s own
-   * `reviewingCardId`. {@link reviewInFlight} already covers
+   * Every task id currently mid-verdict — `ChatView`'s own
+   * `reviewingCardIds`. {@link reviewInFlight} already covers
    * {@link reviewTaskId}; this is the same signal for each entry in
    * {@link additionalReviewAnchors}, which has no scalar prop of its own to
    * carry it.
    */
-  reviewingTaskId?: string | null;
+  reviewingTaskId?: ReadonlySet<string>;
   /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
@@ -299,10 +299,10 @@ export function ThreadPanel({
                   size="sm"
                   variant="outline"
                   className="h-6 shrink-0 px-2 text-xs"
-                  disabled={reviewingTaskId === anchor.taskId}
+                  disabled={reviewingTaskId?.has(anchor.taskId) ?? false}
                   onClick={() => onReviewCard(anchor.taskId, "approve")}
                 >
-                  {reviewingTaskId === anchor.taskId ? "Approving…" : "Approve"}
+                  {reviewingTaskId?.has(anchor.taskId) ? "Approving…" : "Approve"}
                 </Button>
               )}
             </div>

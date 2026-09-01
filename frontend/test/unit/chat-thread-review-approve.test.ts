@@ -142,7 +142,7 @@ describe("other in-review cards in the same thread (Codex #3906594069)", () => {
       reviewTaskId: "t-2",
       onReviewCard: vi.fn(),
       additionalReviewAnchors: [{ taskId: "t-1", anchorId: "relay-1" }],
-      reviewingTaskId: "t-1",
+      reviewingTaskId: new Set(["t-1"]),
     });
 
     const buttons = approveButtons();
