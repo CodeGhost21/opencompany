@@ -73,6 +73,25 @@ interface Props {
   /** Whether {@link reviewTaskId}'s verdict is already in flight. */
   reviewInFlight?: boolean;
   /**
+   * Every OTHER in-review card this thread anchors to, besides
+   * {@link reviewTaskId} — `reviewAnchorsForThread`'s entries after its
+   * newest (CodeRabbit review on #1981). A card dispatched into an
+   * already-open thread before an earlier one settles leaves both live at
+   * once, and the newest already owns the notice + Approve above the
+   * composer; without a control of its own, the older card was only
+   * reachable by first settling the newer one. Each entry here gets its own
+   * notice row with its own Approve button instead.
+   */
+  additionalReviewAnchors?: { taskId: string; anchorId: string }[];
+  /**
+   * The task id currently mid-verdict, company-wide — `ChatView`'s own
+   * `reviewingCardId`. {@link reviewInFlight} already covers
+   * {@link reviewTaskId}; this is the same signal for each entry in
+   * {@link additionalReviewAnchors}, which has no scalar prop of its own to
+   * carry it.
+   */
+  reviewingTaskId?: string | null;
+  /**
    * Your own avatar reference, so your lines in this thread wear your face
    * (issue #1729).
    *
@@ -165,6 +184,8 @@ export function ThreadPanel({
   reviewTaskId,
   onReviewCard,
   reviewInFlight,
+  additionalReviewAnchors,
+  reviewingTaskId,
   onClose,
   typingNames = [],
   onTyping,
@@ -265,6 +286,27 @@ export function ThreadPanel({
               )}
             </div>
           )}
+          {additionalReviewAnchors?.map((anchor) => (
+            <div
+              key={anchor.taskId}
+              className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5"
+            >
+              <p className="text-xs text-muted-foreground">
+                Another card in this thread is also ready for review.
+              </p>
+              {onReviewCard !== undefined && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={reviewingTaskId === anchor.taskId}
+                  onClick={() => onReviewCard(anchor.taskId, "approve")}
+                >
+                  {reviewingTaskId === anchor.taskId ? "Approving…" : "Approve"}
+                </Button>
+              )}
+            </div>
+          ))}
           <MessageComposer
             compact
             placeholder={reviewing ? "Send for another pass…" : "Reply…"}

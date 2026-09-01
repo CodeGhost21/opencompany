@@ -7,7 +7,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TaskStatus } from "@/api/tasks";
 import { makeMessage, type ChatMessage } from "@/lib/chat";
 import { isTaskInReview, MessageRow } from "@/views/chat/MessageRow";
-import { repliesInThread, reviewAnchorForThread, reviewCardIdForThread } from "@/views/chat/model";
+import {
+  repliesInThread,
+  reviewAnchorForThread,
+  reviewAnchorsForThread,
+  reviewCardIdForThread,
+} from "@/views/chat/model";
 import type { Sender, TimelineEntry } from "@/views/chat/model";
 
 const IN_REVIEW: Readonly<Record<string, TaskStatus>> = {
@@ -95,6 +100,69 @@ describe("the anchor a thread's review composer submits", () => {
     const root = makeMessage("you", "just chatting", {});
     const reply = makeMessage("company", "sure thing", { parentId: root.id });
     expect(reviewAnchorForThread(root, [reply], [root, reply], IN_REVIEW)).toBeUndefined();
+  });
+});
+
+describe("every in-review card a thread anchors to (Codex #3906594069)", () => {
+  const TWO_IN_REVIEW: Readonly<Record<string, TaskStatus>> = {
+    "t-1": { column: "in_review" },
+    "t-2": { column: "in_review" },
+  };
+
+  // Pre-fix behaviour, kept here as the regression proof: `reviewAnchorForThread`
+  // only ever surfaces the newest card, so the older one had no anchor and no
+  // Approve control of its own — the operator had to settle t-2 before they
+  // could act on t-1 at all.
+  it("a single-card anchor drops the older of two distinct in-review cards in the same thread", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const pill1 = makeMessage("system", "finished → In review", { taskId: "t-1", parentId: root.id });
+    const relay1 = makeMessage("company", "Here is the first draft.", { parentId: root.id });
+    const pill2 = makeMessage("system", "finished → In review", { taskId: "t-2", parentId: root.id });
+    const relay2 = makeMessage("company", "Here is the second draft.", { parentId: root.id });
+    const messages = [root, pill1, relay1, pill2, relay2];
+    const replies = [pill1, relay1, pill2, relay2];
+
+    expect(reviewAnchorForThread(root, replies, messages, TWO_IN_REVIEW)).toEqual({
+      taskId: "t-2",
+      anchorId: relay2.id,
+    });
+  });
+
+  it("keeps both distinct in-review cards actionable, each anchored to its own pill", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const pill1 = makeMessage("system", "finished → In review", { taskId: "t-1", parentId: root.id });
+    const relay1 = makeMessage("company", "Here is the first draft.", { parentId: root.id });
+    const pill2 = makeMessage("system", "finished → In review", { taskId: "t-2", parentId: root.id });
+    const relay2 = makeMessage("company", "Here is the second draft.", { parentId: root.id });
+    const messages = [root, pill1, relay1, pill2, relay2];
+    const replies = [pill1, relay1, pill2, relay2];
+
+    expect(reviewAnchorsForThread(root, replies, messages, TWO_IN_REVIEW)).toEqual([
+      { taskId: "t-2", anchorId: relay2.id },
+      { taskId: "t-1", anchorId: relay1.id },
+    ]);
+  });
+
+  it("does not duplicate an anchor for a card whose pill and relay both qualify as review surfaces", () => {
+    const pill = makeMessage("system", "finished → In review", { taskId: "t-1" });
+    const reply = makeMessage("you", "looks good", { parentId: pill.id });
+    expect(reviewAnchorsForThread(pill, [reply], [pill, reply], IN_REVIEW)).toEqual([
+      { taskId: "t-1", anchorId: pill.id },
+    ]);
+  });
+
+  it("still excludes a stale pill from an earlier revise pass of the SAME card", () => {
+    const root = makeMessage("you", "kick off the writeup", {});
+    const oldPill = makeMessage("system", "finished → In review", { taskId: "t-1", parentId: root.id });
+    const oldRelay = makeMessage("company", "Here is the first draft.", { parentId: root.id });
+    const newPill = makeMessage("system", "finished → In review", { taskId: "t-1", parentId: root.id });
+    const newRelay = makeMessage("company", "Here is the revised draft.", { parentId: root.id });
+    const messages = [root, oldPill, oldRelay, newPill, newRelay];
+    const replies = [oldPill, oldRelay, newPill, newRelay];
+
+    expect(reviewAnchorsForThread(root, replies, messages, IN_REVIEW)).toEqual([
+      { taskId: "t-1", anchorId: newRelay.id },
+    ]);
   });
 });
 

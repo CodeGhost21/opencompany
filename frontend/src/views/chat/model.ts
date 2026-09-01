@@ -93,13 +93,46 @@ export function reviewCardIdForThread(
 }
 
 /**
+ * Every distinct in-review card a thread anchors to, as `{taskId, anchorId}`
+ * pairs — one entry per card, newest-checked-first: `parent` itself, then
+ * `replies` from most to least recent.
+ *
+ * A thread usually anchors at most one card, but a second can be dispatched
+ * from inside it before the first is settled (Codex #3906594069), leaving
+ * both live in the same thread at once. Each stays its own entry here —
+ * {@link reviewCardIdForThread}'s stale-pill gate already keeps a superseded
+ * pass of the SAME card out of this list, so only genuinely distinct cards
+ * collect, never two anchors for one taskId.
+ */
+export function reviewAnchorsForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string }[] {
+  const seen = new Set<string>();
+  const anchors: { taskId: string; anchorId: string }[] = [];
+  const candidates: readonly ChatMessage[] = [parent, ...[...replies].reverse()];
+  for (const candidate of candidates) {
+    const taskId = reviewCardIdForThread(candidate, messages, statusByTaskId);
+    if (taskId === undefined || seen.has(taskId)) continue;
+    seen.add(taskId);
+    anchors.push({ taskId, anchorId: candidate.id });
+  }
+  return anchors;
+}
+
+/**
  * Where a thread's review feedback should be anchored, or `undefined` when
  * the thread is not reviewing anything.
  *
- * `parent` itself is the review surface for a thread opened directly on a
- * settle pill or its relay. But when the card that produced the pill was
- * itself sent inside an existing thread, the pill and its relay land as
- * replies under that thread's own root — `parent` is neither of them, so
+ * The newest of {@link reviewAnchorsForThread}'s cards — the thread's one
+ * composer can only ever target a single card with a typed reply, so when
+ * more than one is live this is the one it targets. `parent` itself is the
+ * review surface for a thread opened directly on a settle pill or its relay.
+ * But when the card that produced the pill was itself sent inside an
+ * existing thread, the pill and its relay land as replies under that
+ * thread's own root — `parent` is neither of them, so
  * {@link reviewCardIdForThread} on `parent` alone finds nothing. Falls back
  * to scanning `replies` (newest first) for the review surface among them,
  * and anchors there instead.
@@ -110,13 +143,7 @@ export function reviewAnchorForThread(
   messages: readonly ChatMessage[],
   statusByTaskId: Readonly<Record<string, TaskStatus>>,
 ): { taskId: string; anchorId: string } | undefined {
-  const parentTaskId = reviewCardIdForThread(parent, messages, statusByTaskId);
-  if (parentTaskId !== undefined) return { taskId: parentTaskId, anchorId: parent.id };
-  for (let i = replies.length - 1; i >= 0; i--) {
-    const taskId = reviewCardIdForThread(replies[i], messages, statusByTaskId);
-    if (taskId !== undefined) return { taskId, anchorId: replies[i].id };
-  }
-  return undefined;
+  return reviewAnchorsForThread(parent, replies, messages, statusByTaskId)[0];
 }
 
 /**

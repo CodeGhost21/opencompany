@@ -104,7 +104,7 @@ import {
   operatorSection,
   repliesInThread,
   resolveDmChannelId,
-  reviewAnchorForThread,
+  reviewAnchorsForThread,
   toggleReaction,
   type DecidedApproval,
   type HistoryHydration,
@@ -2104,14 +2104,21 @@ export function ChatView({
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
   const threadReplies = parent ? repliesInThread(parent, messages) : [];
-  // The review surface this thread hangs off, if any — the thread root itself
-  // when opened directly on the pill/relay, or one of its replies when the
-  // card that produced them was sent inside an already-open thread.
-  const threadReviewAnchor =
+  // Every review surface this thread hangs off, newest first — the thread
+  // root itself when opened directly on the pill/relay, or one of its
+  // replies when the card that produced them was sent inside an
+  // already-open thread. Usually zero or one entry; two when a second card
+  // was dispatched into this thread before the first was settled (Codex
+  // #3906594069) — the newest still drives the composer's own target and
+  // "ready for review" notice below, but every other entry gets its own
+  // Approve control so it does not have to wait on the newest one settling.
+  const threadReviewAnchors =
     parent !== undefined && taskStatusByTaskId !== undefined
-      ? reviewAnchorForThread(parent, threadReplies, messages, taskStatusByTaskId)
-      : undefined;
+      ? reviewAnchorsForThread(parent, threadReplies, messages, taskStatusByTaskId)
+      : [];
+  const threadReviewAnchor = threadReviewAnchors[0];
   const threadReviewing = threadReviewAnchor !== undefined;
+  const additionalThreadReviewAnchors = threadReviewAnchors.slice(1);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -2446,6 +2453,8 @@ export function ChatView({
               reviewTaskId={threadReviewAnchor?.taskId}
               onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
               reviewInFlight={reviewingCardId === threadReviewAnchor?.taskId}
+              additionalReviewAnchors={additionalThreadReviewAnchors}
+              reviewingTaskId={reviewingCardId}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) => {

@@ -103,3 +103,57 @@ describe("the reviewing notice's Approve control (CodeRabbit #3905116857)", () =
     expect(approveButton()).toBeUndefined();
   });
 });
+
+function approveButtons() {
+  return [...container.querySelectorAll("button")].filter((b) =>
+    (b.textContent ?? "").includes("Approv"),
+  ) as HTMLButtonElement[];
+}
+
+/**
+ * Codex #3906594069: a second card can be dispatched into an already-open
+ * thread before the first one settles, leaving two distinct in-review cards
+ * live in the same thread. Before this, only the newest ({@link reviewTaskId})
+ * had an Approve control at all — the older card's pill rendered by `Line`
+ * had none, so the operator had to settle the newer card first. Each entry in
+ * `additionalReviewAnchors` now gets its own notice + Approve button.
+ */
+describe("other in-review cards in the same thread (Codex #3906594069)", () => {
+  it("gives the older card its own Approve control alongside the newest one", async () => {
+    const onReviewCard = vi.fn();
+    await render({
+      reviewTaskId: "t-2",
+      onReviewCard,
+      additionalReviewAnchors: [{ taskId: "t-1", anchorId: "relay-1" }],
+    });
+
+    const buttons = approveButtons();
+    expect(buttons).toHaveLength(2);
+
+    await act(async () => buttons[1]?.click());
+    expect(onReviewCard).toHaveBeenCalledWith("t-1", "approve");
+
+    await act(async () => buttons[0]?.click());
+    expect(onReviewCard).toHaveBeenCalledWith("t-2", "approve");
+  });
+
+  it("disables only the additional card's own control while its verdict is in flight, not the newest's", async () => {
+    await render({
+      reviewTaskId: "t-2",
+      onReviewCard: vi.fn(),
+      additionalReviewAnchors: [{ taskId: "t-1", anchorId: "relay-1" }],
+      reviewingTaskId: "t-1",
+    });
+
+    const buttons = approveButtons();
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0]?.disabled).toBe(false);
+    expect(buttons[1]?.disabled).toBe(true);
+    expect(buttons[1]?.textContent).toContain("Approving");
+  });
+
+  it("renders nothing extra when there is only the one card", async () => {
+    await render({ reviewTaskId: "t-1", onReviewCard: vi.fn() });
+    expect(approveButtons()).toHaveLength(1);
+  });
+});
