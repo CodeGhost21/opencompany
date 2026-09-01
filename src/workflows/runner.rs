@@ -396,6 +396,7 @@ async fn run_workflow_inner(
     // `Failed` for this, and the run-level row must be told to agree before the
     // capability bundle (and the fact it is carrying) drops.
     let capped = super::caps::RunCappedNodes::default();
+    let halted = super::caps::RunHaltedNodes::default();
     let approvals = super::caps::RunApprovals::default();
     // Card-less files written by agent nodes. Kept outside the capability
     // bundle so a failed/blocked engine future cannot drop the capture before
@@ -431,6 +432,7 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             capped: capped.clone(),
+            halted: halted.clone(),
             approvals: approvals.clone(),
             artifacts: run_artifacts.clone(),
             // A dry run records nothing: it makes no effects, so an attempt row
@@ -501,6 +503,7 @@ async fn run_workflow_inner(
         // below so the durable event records the same status the settle-time
         // `reclassify_capped_nodes` will put on the in-memory row.
         let collector_capped = capped.clone();
+        let collector_halted = halted.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
             // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
@@ -563,7 +566,9 @@ async fn run_workflow_inner(
                         // `Finished` — so the durable event can simply be right
                         // the first time instead of being corrected by every
                         // reader forever.
-                        let journaled_status = if collector_capped.contains(&node_id) {
+                        let journaled_status = if collector_halted.contains(&node_id) {
+                            crate::ports::WorkflowNodeStatus::Declined
+                        } else if collector_capped.contains(&node_id) {
                             crate::ports::WorkflowNodeStatus::Error
                         } else {
                             status
@@ -774,7 +779,7 @@ async fn run_workflow_inner(
     // grace window and its future was dropped, so there is no outcome to read —
     // `cancelled_run()` reports the stop with an empty body, and the trail is the
     // journal, not this return.
-    let outcome = match outcome_opt {
+    let mut outcome = match outcome_opt {
         Some(Ok(outcome)) => outcome,
         // Issue #881: the engine failed the run. Before deciding that is what
         // happened, ask whether every node that errored was one the host
@@ -786,6 +791,7 @@ async fn run_workflow_inner(
         // reports the error, and the block survives on the approval receipts.
         Some(Err(err)) => {
             let blocked = blocks.take();
+            let halted_nodes = halted.take();
             // Issue #1008: the engine returns no `outcome.output` on this arm, so
             // the run's per-node output lives ONLY in the map the progress
             // observer accumulated. Persist that, flagged `partial`, on BOTH the
@@ -796,14 +802,13 @@ async fn run_workflow_inner(
                 merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
                 &captured_artifacts,
             );
-            // `only_blocked_nodes_errored` reads `nodes[].status == Error` to
+            // `only_expected_nodes_errored` reads `nodes[].status == Error` to
             // decide whether every errored row belongs to a blocked node, so it
             // MUST run before the capped-node reclassification below: a capped
             // node's row is still `Ok` at this point, and reclassifying first
             // would add its fresh `Error` row to this check and misread an
             // otherwise-clean block as a genuine failure.
-            let is_genuine_failure =
-                blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked);
+            let is_genuine_failure = !only_expected_nodes_errored(&nodes, &blocked, &halted_nodes);
             // Issue #1865 (PR #1883 review): the sibling reclassification the
             // clean-finish arm applies near the bottom of this function, reached
             // here too — both branches below are early returns that used to skip
@@ -815,6 +820,7 @@ async fn run_workflow_inner(
             // unit tests around `reclassify_capped_nodes` already covered.
             let mut nodes = nodes;
             reclassify_capped_nodes(&mut nodes, &capped.take());
+            reclassify_halted_nodes(&mut nodes, &halted_nodes);
             if is_genuine_failure {
                 // A genuine failure. Persist the partial capture so the inspector
                 // shows what the nodes that ran produced.
@@ -863,6 +869,37 @@ async fn run_workflow_inner(
                         blocked_nodes: blocked,
                         approvals: approvals.take(),
                     }),
+                });
+            }
+            if blocked.is_empty() {
+                let partial_output = without_node_ids(partial_output, &halted_nodes);
+                if !persist_run_output(
+                    run_output_store.as_deref(),
+                    &record.id,
+                    &workflow.id,
+                    &run_id,
+                    &partial_output,
+                    true,
+                )
+                .await
+                {
+                    notices.push(run_output_persist_failed_notice());
+                }
+                for node_id in &halted_nodes {
+                    notices.push(format!(
+                        "The step \"{node_id}\" concluded that no further work was needed."
+                    ));
+                }
+                return Ok(WorkflowRun {
+                    output: serde_json::json!({ "nodes": partial_output }),
+                    pending_approvals: Vec::new(),
+                    deliveries: Vec::new(),
+                    cancelled: false,
+                    nodes,
+                    notices: notices.take(),
+                    board: board.take(),
+                    blocked_nodes: Vec::new(),
+                    approvals: approvals.take(),
                 });
             }
             tracing::info!(
@@ -942,6 +979,17 @@ async fn run_workflow_inner(
             ));
         }
     };
+
+    let halted_nodes = halted.take();
+    reclassify_halted_nodes(&mut nodes, &halted_nodes);
+    if let Some(raw_nodes) = outcome.output.get_mut("nodes") {
+        *raw_nodes = without_node_ids(std::mem::take(raw_nodes), &halted_nodes);
+    }
+    for node_id in &halted_nodes {
+        notices.push(format!(
+            "The step \"{node_id}\" concluded that no further work was needed."
+        ));
+    }
 
     // Issue #398: the **clean** node-boundary cancel. The engine observed the
     // flipped token and wound down at a boundary, so unlike the hard-abort arm
@@ -1294,6 +1342,7 @@ async fn run_workflow_inner(
 /// would satisfy the check by default and get relabelled as a plain block,
 /// dropping the real failure exactly as the doc comment above says this guard
 /// exists to prevent.
+#[cfg(test)]
 fn only_blocked_nodes_errored(
     nodes: &[crate::ports::WorkflowRunNodeRow],
     blocked: &[crate::ports::WorkflowBlockedNode],
@@ -1303,6 +1352,22 @@ fn only_blocked_nodes_errored(
         .filter(|row| row.status == WorkflowNodeStatus::Error)
         .peekable();
     errored.peek().is_some() && errored.all(|row| blocked.iter().any(|b| b.node_id == row.node_id))
+}
+
+fn only_expected_nodes_errored(
+    nodes: &[crate::ports::WorkflowRunNodeRow],
+    blocked: &[crate::ports::WorkflowBlockedNode],
+    halted: &[String],
+) -> bool {
+    let mut errored = nodes
+        .iter()
+        .filter(|row| row.status == WorkflowNodeStatus::Error)
+        .peekable();
+    errored.peek().is_some()
+        && errored.all(|row| {
+            blocked.iter().any(|b| b.node_id == row.node_id)
+                || halted.iter().any(|id| id == &row.node_id)
+        })
 }
 
 /// Reclassifies a blocked node's row and lists it as something the run is
@@ -1371,10 +1436,19 @@ fn reclassify_capped_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], cappe
         // function's own doc): a node waiting on a person is the more
         // specific fact, and a future caller that somehow did name one in
         // both must not have this flip hide the approval behind a plain
-        // failure — the same direction `only_blocked_nodes_errored`'s guard
+        // failure — the same direction `only_expected_nodes_errored`'s guard
         // already leans in.
         if row.status != WorkflowNodeStatus::Blocked && capped.iter().any(|id| id == &row.node_id) {
             row.status = WorkflowNodeStatus::Error;
+        }
+    }
+}
+
+/// Relabels the engine's capability-error row as an intentional benign stop.
+fn reclassify_halted_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], halted: &[String]) {
+    for row in nodes.iter_mut() {
+        if halted.iter().any(|id| id == &row.node_id) {
+            row.status = WorkflowNodeStatus::Declined;
         }
     }
 }
@@ -1471,6 +1545,15 @@ fn without_nodes(mut output: Value, blocked: &[crate::ports::WorkflowBlockedNode
     if let Value::Object(nodes) = &mut output {
         for b in blocked {
             nodes.remove(&b.node_id);
+        }
+    }
+    output
+}
+
+fn without_node_ids(mut output: Value, ids: &[String]) -> Value {
+    if let Value::Object(nodes) = &mut output {
+        for id in ids {
+            nodes.remove(id);
         }
     }
     output
@@ -2441,6 +2524,30 @@ mod tests {
             WorkflowNodeStatus::Blocked,
             "a blocked node must never be relabelled Error"
         );
+    }
+
+    #[test]
+    fn reclassify_halted_nodes_marks_only_the_benign_stop_declined() {
+        let mut nodes = vec![
+            node_row("prepare", WorkflowNodeStatus::Ok),
+            node_row("verify", WorkflowNodeStatus::Error),
+        ];
+        reclassify_halted_nodes(&mut nodes, &["verify".to_string()]);
+        assert_eq!(nodes[0].status, WorkflowNodeStatus::Ok);
+        assert_eq!(nodes[1].status, WorkflowNodeStatus::Declined);
+    }
+
+    #[test]
+    fn a_halt_does_not_hide_an_unrelated_failure() {
+        let nodes = vec![
+            node_row("optional", WorkflowNodeStatus::Error),
+            node_row("broken", WorkflowNodeStatus::Error),
+        ];
+        assert!(!only_expected_nodes_errored(
+            &nodes,
+            &[],
+            &["optional".to_string()]
+        ));
     }
 
     /// A workflow lane that records which agent it served. Its reply names the
@@ -4414,6 +4521,7 @@ to = "done"
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };

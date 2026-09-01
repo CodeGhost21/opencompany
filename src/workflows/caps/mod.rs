@@ -153,6 +153,8 @@ pub struct RunContext<'a> {
     /// node's row `Error` and agree with the attempt, which already settles
     /// `Failed` for exactly this signal.
     pub capped: RunCappedNodes,
+    /// Where a semantic judge records an intentional no-work conclusion.
+    pub halted: RunHaltedNodes,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
     /// Files agent nodes wrote during this run, keyed by node for durable output.
@@ -227,6 +229,7 @@ pub async fn build_capabilities(
         board,
         blocks,
         capped,
+        halted,
         approvals,
         artifacts,
         runs,
@@ -426,6 +429,7 @@ pub async fn build_capabilities(
                 board_claim,
                 publish_refusal_claim,
             )
+            .with_halted(halted)
             .with_runs(runs, deep, attempts),
         );
         (Arc::new(tools), Arc::new(http), state, Some(agent))
@@ -613,6 +617,8 @@ pub struct HarnessAgentRunner {
     /// Where this node records that its turn truncated at the
     /// `max_tool_iterations` cap (issue #1865).
     capped: RunCappedNodes,
+    /// Nodes the judge concluded were benignly unnecessary.
+    halted: RunHaltedNodes,
     /// Where this node records the approvals its turn parked (issue #880).
     approvals: RunApprovals,
     /// Run-scoped files captured after each node turn, including failed turns.
@@ -837,6 +843,33 @@ impl RunCappedNodes {
     }
 }
 
+/// Node ids whose semantic judge returned a benign halt.
+#[derive(Clone, Default)]
+pub struct RunHaltedNodes {
+    inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RunHaltedNodes {
+    pub fn push(&self, node_id: String) {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .push(node_id);
+    }
+
+    pub fn contains(&self, node_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .iter()
+            .any(|id| id == node_id)
+    }
+
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.lock().expect("run halted-nodes poisoned"))
+    }
+}
+
 /// Which attempt each `agent` node ran as.
 ///
 /// The fourth channel in the [`RunNotices`] / [`RunBoard`] / [`RunBlocks`]
@@ -1002,6 +1035,7 @@ impl HarnessAgentRunner {
             board,
             blocks,
             capped,
+            halted: RunHaltedNodes::default(),
             approvals,
             artifacts,
             board_claim,
@@ -1056,6 +1090,12 @@ impl HarnessAgentRunner {
         self.runs = runs;
         self.deep = deep;
         self.attempts = attempts;
+        self
+    }
+
+    #[must_use]
+    pub fn with_halted(mut self, halted: RunHaltedNodes) -> Self {
+        self.halted = halted;
         self
     }
 
@@ -1486,7 +1526,25 @@ impl HarnessAgentRunner {
     /// retry succeed.
     async fn park_node_blocker(&self, resolved_node_id: &str, message: &str) -> Option<String> {
         let class = crate::harness::built_in::blockers::classify_blocker_message(message)?;
-        if !class.kind.parks() {
+        self.park_node_blocker_as(
+            resolved_node_id,
+            message,
+            class.kind,
+            class.source,
+            class.needed,
+        )
+        .await
+    }
+
+    async fn park_node_blocker_as(
+        &self,
+        resolved_node_id: &str,
+        message: &str,
+        kind: crate::ports::blockers::BlockerKind,
+        source: crate::ports::blockers::BlockerSource,
+        needed: &str,
+    ) -> Option<String> {
+        if !kind.parks() {
             return None;
         }
         let parking = self
@@ -1495,8 +1553,8 @@ impl HarnessAgentRunner {
             .as_ref()
             .and_then(|delivery| delivery.parking.as_ref())?;
         let payload = crate::ports::blockers::BlockerPayload {
-            kind: class.kind,
-            source: class.source,
+            kind,
+            source,
             // The one case an approval's own task link cannot express — see
             // `BlockerPayload::step`. #1864's node-level restart needs to know
             // which node inside which run stopped, and a workflow run has no
@@ -1508,7 +1566,7 @@ impl HarnessAgentRunner {
                 node_id: resolved_node_id.to_string(),
             }),
             reason: message.to_string(),
-            needed: class.needed.to_string(),
+            needed: needed.to_string(),
         };
         let effect = crate::ports::types::Effect {
             kind: payload.effect_kind(),
@@ -1539,7 +1597,7 @@ impl HarnessAgentRunner {
                     run_id = %self.run_id,
                     node = resolved_node_id,
                     approval_id = %approval_id,
-                    kind = class.kind.as_str(),
+                    kind = kind.as_str(),
                     "workflow agent node: parked a blocker for the operator instead of failing"
                 );
                 Some(approval_id.to_string())
@@ -2239,7 +2297,7 @@ impl HarnessAgentRunner {
         // button. Rewrite that one class into what is actually too big and what
         // to do about it, keeping the provider's words at the end. Every other
         // failure passes through exactly as before.
-        let outcome = match outcome {
+        let mut outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
                 let raw = e.to_string();
@@ -2430,6 +2488,138 @@ impl HarnessAgentRunner {
                 )
                 .await;
                 return Err(EngineError::Capability(message));
+            }
+        }
+
+        if let Some(verify) = request.get("verify") {
+            let criteria = verify
+                .get("criteria")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty());
+            let verdict = crate::workflows::judge::judge_sufficiency(
+                &self.deps,
+                &self.company,
+                crate::workflows::judge::JudgeInput {
+                    instruction: &instruction,
+                    output: &outcome.reply,
+                    criteria,
+                    execution_failed: false,
+                },
+            )
+            .await;
+            match verdict {
+                crate::workflows::judge::SufficiencyVerdict::Continue => {}
+                crate::workflows::judge::SufficiencyVerdict::Retry => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` did not produce a semantically sufficient output"
+                    );
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+                crate::workflows::judge::SufficiencyVerdict::Recover => {
+                    let question = criteria.unwrap_or(&instruction);
+                    let recovered =
+                        crate::workflows::judge::ask_around(&self.deps, &self.company, question)
+                            .await;
+                    if let Some(evidence) = recovered.evidence {
+                        outcome.reply.push_str("\n\nRecovered company context:\n");
+                        outcome.reply.push_str(&evidence);
+                    } else {
+                        let message = format!(
+                            "workflow node `{lineage_node}` needs missing information; recovery tried {}",
+                            recovered.log
+                        );
+                        if let Some(approval_id) = self
+                            .park_node_blocker_as(
+                                &lineage_node,
+                                &message,
+                                crate::ports::blockers::BlockerKind::Information,
+                                crate::ports::blockers::BlockerSource::AgentQuestion,
+                                "Provide the missing information the workflow node needs.",
+                            )
+                            .await
+                        {
+                            self.blocks.push(crate::ports::WorkflowBlockedNode {
+                                node_id: lineage_node.clone(),
+                                tools: Vec::new(),
+                                approval_ids: vec![approval_id],
+                                unparkable: 0,
+                                stranded: 0,
+                            });
+                            self.settle_attempt(
+                                run_sink.as_ref(),
+                                crate::ports::RunStatus::Blocked,
+                                Some(message.clone()),
+                            )
+                            .await;
+                            return Err(EngineError::Capability(message));
+                        }
+                        self.settle_attempt(
+                            run_sink.as_ref(),
+                            crate::ports::RunStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        return Err(EngineError::Capability(message));
+                    }
+                }
+                crate::workflows::judge::SufficiencyVerdict::Escalate { gap } => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` needs {} intervention after semantic verification",
+                        gap.as_str()
+                    );
+                    if gap.parks()
+                        && let Some(approval_id) = self
+                            .park_node_blocker_as(
+                                &lineage_node,
+                                &message,
+                                gap,
+                                crate::ports::blockers::BlockerSource::AgentQuestion,
+                                "Resolve the gap identified by the workflow sufficiency judge.",
+                            )
+                            .await
+                    {
+                        self.blocks.push(crate::ports::WorkflowBlockedNode {
+                            node_id: lineage_node.clone(),
+                            tools: Vec::new(),
+                            approval_ids: vec![approval_id],
+                            unparkable: 0,
+                            stranded: 0,
+                        });
+                        self.settle_attempt(
+                            run_sink.as_ref(),
+                            crate::ports::RunStatus::Blocked,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        return Err(EngineError::Capability(message));
+                    }
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+                crate::workflows::judge::SufficiencyVerdict::HaltBenign => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` concluded that no further work was needed"
+                    );
+                    self.halted.push(lineage_node.clone());
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Declined,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
             }
         }
 
@@ -4382,6 +4572,7 @@ mod tests {
                     require: "field_present".to_string(),
                     field: Some("=item.missing".to_string()),
                 }),
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -5907,6 +6098,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -5961,6 +6153,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6132,6 +6325,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6193,6 +6387,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,

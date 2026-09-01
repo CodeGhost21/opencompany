@@ -70,6 +70,10 @@ pub enum SampleKind {
     /// company plan indefinitely after its tier budget was exhausted, which is
     /// exactly the leak the tier exists to close.
     PlanningCall,
+    /// One tool-less sufficiency judgment after a workflow node's deterministic
+    /// postcondition passes (issue #1866). The company owns this call; it is not
+    /// part of the agent turn and has no run-row attribution.
+    JudgeCall,
     /// One completed triage escalation — the tool-less model call an operator
     /// message makes when the lexical classifier abstained (issue #678).
     ///
