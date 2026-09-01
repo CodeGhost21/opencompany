@@ -72,7 +72,7 @@ async function openConnections(page: Page): Promise<void> {
   });
   expect(set.ok(), `setting the composio token failed: ${set.status()}`).toBeTruthy();
 
-  await page.goto("/#/settings/oauth");
+  await page.goto("/#/connections/apps");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
