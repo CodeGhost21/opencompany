@@ -889,10 +889,12 @@ type Grader = fn(&serde_json::Value) -> Consequence;
 ///
 /// * `composio_execute` — #441, keyed on the action slug.
 /// * `web_fetch` — keyed on the URL's host.
-/// * `http_request` — keyed on its method and URL host. `curl` is deliberately
-///   NOT here: unlike `web_fetch`/`http_request`, it always writes the
-///   response to the workspace `downloads/` dir, so it stays on the
-///   [`DECLARED`] row's `Reach::Consequence`.
+/// * `http_request` — keyed on its method, URL host, and the rest of the
+///   request shape: a body or a non-allowlisted header gates it even when the
+///   method reads GET/HEAD/OPTIONS (see [`http_request_consequence`]). `curl`
+///   is deliberately NOT here: unlike `web_fetch`/`http_request`, it always
+///   writes the response to the workspace `downloads/` dir, so it stays on
+///   the [`DECLARED`] row's `Reach::Consequence`.
 /// * `shell` — #875, keyed on the command line.
 /// * `git_operations` — #877, keyed on the `operation`.
 /// * `mcp_call_tool` / `mcp_registry_tool_call` — #1124, keyed on the
@@ -1509,6 +1511,77 @@ fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
     }
 }
 
+/// Header names an `http_request` classified [`Reach::ExternalRead`] is
+/// allowed to carry (PR #1989 review 3905098660).
+///
+/// An **allowlist**, not a denylist of override-style names such as
+/// `X-HTTP-Method-Override` — a blocklist only catches spellings someone
+/// thought to list (`X-Method-Override`, `X-HTTP-Method`, `X-Original-Method`,
+/// …), which is the reactive pattern this codebase keeps getting burned by.
+/// Every name below only shapes how the response is negotiated, cached, or
+/// authenticated; none of them is a channel a server-side routing layer reads
+/// as an instruction to treat the request as something other than the method
+/// actually sent.
+const HTTP_READ_SAFE_HEADERS: &[&str] = &[
+    "accept",
+    "accept-charset",
+    "accept-encoding",
+    "accept-language",
+    "authorization",
+    "cache-control",
+    "if-match",
+    "if-modified-since",
+    "if-none-match",
+    "if-unmodified-since",
+    "range",
+    "user-agent",
+];
+
+/// Whether every header key on an `http_request` call is in
+/// [`HTTP_READ_SAFE_HEADERS`]. No `headers` key, or an explicit `null`,
+/// passes trivially. A `headers` value that is not a JSON object cannot be
+/// enumerated, so it fails closed rather than being read as empty.
+fn http_request_headers_are_read_safe(args: &serde_json::Value) -> bool {
+    match args.get("headers") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(map)) => map
+            .keys()
+            .all(|key| HTTP_READ_SAFE_HEADERS.contains(&key.to_ascii_lowercase().as_str())),
+        Some(_) => false,
+    }
+}
+
+/// Whether an `http_request` call carries no `body`. Any present, non-null
+/// value — including an empty string — disqualifies the call: `to_tool_args`
+/// forwards it verbatim and `HttpRequestTool::execute_request` attaches
+/// whatever is forwarded to the outgoing request regardless of method, so a
+/// body is a payload the request actually carries.
+fn http_request_body_is_absent(args: &serde_json::Value) -> bool {
+    matches!(args.get("body"), None | Some(serde_json::Value::Null))
+}
+
+/// The consequence of one `http_request` call, keyed on its method, URL host,
+/// **and** the rest of the request shape (PR #1989 review 3905098660).
+///
+/// The method alone is not "read-only": [`crate::workflows::caps::http::to_tool_args`]
+/// forwards `body` and `headers` unconditionally, and the wired
+/// `HttpRequestTool::execute_request` attaches both to the outgoing request
+/// without consulting the method — reqwest does not refuse a body on GET, and
+/// a header such as `X-HTTP-Method-Override` is read by many server frameworks
+/// as the *real* verb regardless of what was actually sent. Grading a `GET`
+/// carrying either as [`Reach::ExternalRead`] would let `supervised`/`auto`
+/// wave through an outbound data transmission (a GET body) or a server-side
+/// mutation (a method-override header) with no approval card, defeating the
+/// point of gating writes at all.
+///
+/// So `ExternalRead` requires the **whole** shape to be read-only: a
+/// GET/HEAD/OPTIONS method, no `body`
+/// ([`http_request_body_is_absent`]), and headers drawn only from
+/// [`HTTP_READ_SAFE_HEADERS`] ([`http_request_headers_are_read_safe`]).
+/// Anything else — a mutating method, an unrecognized method, or a read-shaped
+/// method with a body or a non-allowlisted header — stays
+/// `Reach::Consequence`/`Standing::PerCall`, the same fail-closed shape
+/// [`DECLARED`] gives the tool by default.
 fn http_request_consequence(args: &serde_json::Value) -> Consequence {
     let gated = Consequence {
         group: EffectGroup::Other,
@@ -1522,13 +1595,16 @@ fn http_request_consequence(args: &serde_json::Value) -> Consequence {
             None => return gated,
         },
     };
-    if matches!(
+    if !matches!(
         method.to_ascii_uppercase().as_str(),
         "GET" | "HEAD" | "OPTIONS"
     ) {
-        return web_fetch_consequence(args);
+        return gated;
     }
-    gated
+    if !http_request_body_is_absent(args) || !http_request_headers_are_read_safe(args) {
+        return gated;
+    }
+    web_fetch_consequence(args)
 }
 
 /// The consequence of running one shell command (issue #875).
