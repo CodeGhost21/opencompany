@@ -1017,6 +1017,12 @@ pub fn build_agent(
             company.clone(),
             deps.facts.clone(),
             deps.events.clone(),
+            // Issue #1859: the board + run-history read surface `list_tasks` /
+            // `read_task` / `read_run` need, and `query_company`'s `## Board`
+            // section reads `tasks` too.
+            deps.tasks.clone(),
+            deps.workflow_runs.clone(),
+            deps.artifacts.clone(),
             &deps.delegations,
             // The company source dir (`companies/<name>`) also houses `workflows/`,
             // which the `run_workflow` tool loads graphs from.
