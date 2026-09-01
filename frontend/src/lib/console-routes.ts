@@ -198,6 +198,14 @@ export const VIEWS: View[] = Object.keys(ROUTABLE) as View[];
  * view against this one. First-run setup only offers itself when the answer is
  * "just opened" — so a default view changed in one place and not the other is
  * not a cosmetic drift, it is a company that can never be set up.
+ *
+ * There is a third place, and it is the one that actually broke (#1999): a test
+ * that opens the console at a *named* view is asserting against whatever this
+ * constant said the day it was written. When this moved from `overview` to
+ * `chat`, `company-setup.spec.ts` started arriving deep-linked and the
+ * first-run specs went red against a console that was working correctly. Tests
+ * that mean "just opened the console" must navigate to `/` — an empty hash
+ * resolves here by definition and cannot drift.
  */
 export const DEFAULT_VIEW: View = "chat";
 
