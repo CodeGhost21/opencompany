@@ -439,6 +439,17 @@ export interface ChatResponse {
 }
 
 /**
+ * The card a thread review verdict left behind, so the console can reconcile
+ * its optimistic move. Mirrors `ChatReviewReceipt` in `src/server/operator.rs`.
+ */
+export interface ChatReviewReceipt {
+  /** The reviewed card's id. */
+  taskId: string;
+  /** The column it landed in: `done` on approve, `in_progress` on revise. */
+  column: string;
+}
+
+/**
  * The answer to a **detached** chat post (issue #983): the turn has been
  * accepted, journaled and given an id, and that is all it claims. The reply
  * arrives afterwards on the event stream's `agent_reply` frame, and durably in
