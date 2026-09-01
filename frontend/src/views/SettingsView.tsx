@@ -538,6 +538,31 @@ function MemoryEngineCard({
                 : "not probed"}
           </span>
         </InfoRow>
+        {/*
+          Distinct from "Not served" above, which is derived client-side from
+          what the driver *claims*. This is what the engine actually answered
+          when read at boot: a family can be advertised, pass the bind-time
+          audit, and still return nothing.
+        */}
+        <InfoRow label="Refused at probe">
+          <span className="text-sm">
+            {engine.unreachableFamilies === undefined
+              ? "not probed"
+              : engine.unreachableFamilies.length === 0
+                ? // Naming what was probed matters: portability is mandatory and
+                  // deliberately never probed, so a bare "none" would imply more
+                  // coverage than there is.
+                  "none — core and recall both answered (portability is not probed)"
+                : `${engine.unreachableFamilies.join(", ")} — reads against these will fail`}
+          </span>
+        </InfoRow>
+        {engine.slowFamilies !== undefined && engine.slowFamilies.length > 0 && (
+          <InfoRow label="Slow at probe">
+            <span className="text-sm">
+              {`${engine.slowFamilies.join(", ")} — did not answer in time; the engine may just be loaded`}
+            </span>
+          </InfoRow>
+        )}
       </CardContent>
     </Card>
   );
