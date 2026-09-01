@@ -373,10 +373,24 @@ pub const CONTINUATION_DENIED_KEY: &str = "__opencompany_denied";
 /// What approving a workflow gate actually does, in the operator's own terms.
 ///
 /// This rides the card as [`PAYLOAD_NOTE`] rather than living only in a design
-/// doc, because the person deciding is the one who pays the cost: approving is
-/// not "let the run continue from here", it re-runs the graph from the trigger.
-/// Prose, not a code reference — the reader is an operator looking at an
-/// Approvals card.
+/// doc, because the person deciding is the one who pays the cost. Prose, not a
+/// code reference — the reader is an operator looking at an Approvals card.
+///
+/// Gated the same way `checkpoint_resume_available` is: on a build with
+/// checkpoint machinery wired, approving normally resumes from the
+/// checkpoint rather than re-running the whole graph, so the note names both
+/// outcomes instead of unconditionally warning of the costlier one.
+#[cfg(feature = "openhuman")]
+pub const CONTINUATION_NOTE: &str = "Approving this normally resumes the workflow from this step — earlier steps do not run again, \
+     and their token spend is not repeated. If this workflow's graph changed while this was \
+     pending, approving instead starts the whole workflow over from the trigger, and every step \
+     before this gate runs again and spends tokens again. Either way, reports this run already \
+     delivered will not be sent a second time, and a step that already sent or published \
+     something replays what it returned instead of doing it again.";
+
+/// The build with no checkpoint machinery wired: every approval is
+/// unconditionally a full re-run from the trigger.
+#[cfg(not(feature = "openhuman"))]
 pub const CONTINUATION_NOTE: &str = "Approving this re-runs the whole workflow from the start — every step before this gate runs \
      again, and any agent steps spend tokens again. Reports this run already delivered will not be \
      sent a second time, and a step that already sent or published something replays what it \
@@ -2323,8 +2337,25 @@ mod tests {
         );
     }
 
-    /// The card says, in plain words, what approving actually does. The operator
-    /// deciding is the one who pays for the re-run.
+    /// The card says, in plain words, what approving actually does. On a
+    /// build with checkpoint-backed resume wired, that is conditional —
+    /// normally no re-run, a re-run only if the graph changed underneath the
+    /// pending approval.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn the_card_states_what_approving_costs() {
+        let e = effect("digest", "gate", Value::Null);
+        let note = e.payload[PAYLOAD_NOTE].as_str().expect("a note");
+        assert!(note.contains("resumes"), "{note}");
+        assert!(note.contains("graph changed"), "{note}");
+        assert!(note.contains("tokens"), "{note}");
+        assert!(note.contains("not be sent"), "{note}");
+    }
+
+    /// The build with no checkpoint machinery wired at all: every approval
+    /// really is the full re-run, so the operator is told exactly that, with
+    /// no conditional hedging the runtime cannot back up.
+    #[cfg(not(feature = "openhuman"))]
     #[test]
     fn the_card_states_what_approving_costs() {
         let e = effect("digest", "gate", Value::Null);
