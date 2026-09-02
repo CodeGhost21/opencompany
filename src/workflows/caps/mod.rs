@@ -1578,6 +1578,71 @@ impl HarnessAgentRunner {
     /// failure and park the identical question. The gated-call case does not
     /// have that problem — approving there mints the grant that makes the
     /// retry succeed.
+    /// Stashes what re-entering `resolved_node_id` will need once its blocker
+    /// is answered (issue #2005): the workflow, this run's trigger input, its
+    /// attribution, and the checkpoint lineage #1864's node-level restart
+    /// resumes from.
+    ///
+    /// A blocker park cannot borrow the gated-call path's stash. That one is
+    /// armed in [`park_gated_calls`](Self::park_gated_calls) only once there is
+    /// a gated call to park — a turn that parked nothing else returns before
+    /// reaching it — and the runner's settle-time pass deliberately refuses to
+    /// arm a turn that is not already armed, so a blocker-only node reached the
+    /// resume with no run to continue. Written here, at park time and before
+    /// any card is clickable, on exactly the ordering the gated-call arm keeps.
+    ///
+    /// Keyed per (run, node) like its sibling, so a node that parked a gated
+    /// call *and* then blocked shares one stash and one dispatch marker: either
+    /// answer re-enters the node once, and the second finds the continuation
+    /// already dispatched rather than launching a duplicate. Arming is
+    /// first-write-wins, so the two cannot disagree.
+    ///
+    /// No [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)
+    /// arm accompanies it. A blocker parks with no turn key by design — see
+    /// [`park_node_blocker`](Self::park_node_blocker) — and its resume is driven
+    /// by the answer itself, not by a decision batch emptying.
+    ///
+    /// Best-effort on the durable half, matching every other park-time write
+    /// here: a failed journal append leaves the in-memory stash serving the
+    /// no-restart case, and failing the node over it would be the wrong trade.
+    async fn stash_node_blocker_resume(
+        &self,
+        parking: &crate::workflows::delivery::DeliveryParking,
+        resolved_node_id: &str,
+    ) {
+        let turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, resolved_node_id);
+        parking.blocked_nodes.arm_checkpointed(
+            &turn,
+            &self.workflow_id,
+            &self.trigger_input,
+            &self.started_by,
+            Some(&self.checkpoint_thread_id),
+            self.workflow_fingerprint.as_deref(),
+        );
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed_checkpointed(
+                &turn,
+                &self.workflow_id,
+                &self.trigger_input,
+                &self.started_by,
+                Some(&self.checkpoint_thread_id),
+                self.workflow_fingerprint.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                node = resolved_node_id,
+                %error,
+                "workflow agent node: a parked blocker's continuation facts could not be \
+                 durably stashed; the in-memory stash still covers an answer without a restart"
+            );
+        }
+    }
+
     async fn park_node_blocker(&self, resolved_node_id: &str, message: &str) -> Option<String> {
         let class = crate::harness::built_in::blockers::classify_blocker_message(message)?;
         self.park_node_blocker_as(
@@ -1649,6 +1714,8 @@ impl HarnessAgentRunner {
             .await
         {
             Ok(approval_id) => {
+                self.stash_node_blocker_resume(parking, resolved_node_id)
+                    .await;
                 tracing::info!(
                     company = %self.company,
                     run_id = %self.run_id,
@@ -1783,6 +1850,8 @@ impl HarnessAgentRunner {
                 .await
             {
                 Ok(approval_id) => {
+                    self.stash_node_blocker_resume(parking, resolved_node_id)
+                        .await;
                     push_tool(&mut summary.tools, &blocker_request.tool);
                     summary.approval_ids.push(approval_id.to_string());
                     summary.blockers += 1;
