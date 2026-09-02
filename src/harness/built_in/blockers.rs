@@ -234,10 +234,11 @@ pub fn connection_group_key(reason: &str) -> Option<String> {
         "connection is not authorised",
         "reconnect the app",
     ];
-    if !CONNECTION_MARKERS.iter().any(|m| lower.contains(m)) {
-        return None;
-    }
-    let name = reason
+    let marker_end = CONNECTION_MARKERS
+        .iter()
+        .filter_map(|m| lower.find(m).map(|pos| pos + m.len()))
+        .min()?;
+    let name = reason[marker_end..]
         .split('`')
         .nth(1)
         .map(str::trim)
@@ -463,6 +464,17 @@ mod test {
             connection_group_key("could not connect to mcp server"),
             None,
             "a connection shape with no name has nothing to group by"
+        );
+    }
+
+    /// A backticked token before the connection marker — a tool name in the
+    /// prose — is not the connection; the name after the marker is.
+    #[test]
+    fn the_name_is_read_after_the_connection_marker() {
+        assert_eq!(
+            connection_group_key("tool `search` failed: could not connect to mcp server `slack`"),
+            Some("connection:slack".to_string()),
+            "the connection is the server after the marker, not the earlier tool token"
         );
     }
 }
