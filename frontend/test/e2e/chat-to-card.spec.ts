@@ -79,7 +79,28 @@ test("any message on a desk thread can be added to the board", async ({ page }) 
   await expect(page.getByText("Working", { exact: true })).toHaveCount(0);
 
   // …and it knows which conversation opened it.
-  await expect(page.getByRole("button", { name: /Opened from chat/ })).toBeVisible();
+  const origin = page.getByRole("button", { name: /Opened from chat/ });
+  await expect(origin).toBeVisible();
+
+  // The other half of the round trip: the jump lands in Room, on the channel
+  // carrying that conversation. It used to land on `#/conversation` — a
+  // separate surface with its own thread rail down the left — which is the
+  // wireframe issue #2020 was filed against.
+  await origin.click();
+  await expect(page).toHaveURL(/#\/chat\/.+/);
+  // `data-active` is a boolean attribute the sidebar row renders empty when
+  // set and omits when not, so the assertion is on its presence.
+  await expect(
+    page
+      .locator("[data-slot=sidebar-content]")
+      .getByRole("button", { name: "Room", exact: true }),
+  ).toHaveAttribute("data-active", "");
+
+  // And Back returns to the card, because the jump went through the address
+  // rather than through shell state the history knows nothing about.
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/tasks\/.+/);
+  await expect(origin).toBeVisible();
 });
 
 test("a card the orchestrator opens is chipped in chat, and survives a reload", async ({
