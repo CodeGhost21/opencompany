@@ -2530,7 +2530,7 @@ impl HarnessAgentRunner {
         // depending on what the agent happened to reply this run, for a node
         // that never asked for structured output at all.
         let postcondition_declared = request.get("postcondition").is_some();
-        let parsed_reply = if postcondition_declared {
+        let mut parsed_reply = if postcondition_declared {
             serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null)
         } else {
             Value::Null
@@ -2718,6 +2718,14 @@ impl HarnessAgentRunner {
                     return Err(EngineError::Capability(message));
                 }
             }
+        }
+
+        // A recovering verify pass rewrites `outcome.reply`, so the parse the
+        // emitted value merges has to describe the reply this node actually
+        // ships.
+        if postcondition_declared {
+            parsed_reply =
+                serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null);
         }
 
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
@@ -4227,6 +4235,87 @@ mod tests {
             outcome.reply.chars().count() < oversized.chars().count(),
             "the fixture must be large enough that recovery augmentation has to bound it, \
              otherwise this test cannot observe the divergence"
+        );
+    }
+
+    /// A node declaring both a postcondition and a verify criteria emits one
+    /// output with two views of it: `value["text"]` and the JSON fields
+    /// merged into `value`. Recovery rewrites the reply, so both views must
+    /// describe the rewritten reply — a merge carrying the pre-recovery parse
+    /// would let a downstream `=item.json.<field>` binding read fields that
+    /// the shipped text no longer backs.
+    #[tokio::test]
+    async fn a_recovered_reply_does_not_emit_its_pre_recovery_json_parse() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-stale-parse-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"draft\": \"no customer name yet\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990i"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990i"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990i".to_string(),
+            "run-1990i".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, _outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "postcondition": { "require": "field_present", "field": "json.draft" },
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await
+            .expect("a `continue` re-verdict accepts the recovered reply");
+
+        assert!(
+            value["text"]
+                .as_str()
+                .expect("text is a string")
+                .contains("Recovered company context"),
+            "the emitted text must be the recovered reply: {}",
+            value["text"]
+        );
+        assert!(
+            value.get("draft").is_none(),
+            "the pre-recovery parse must not ship alongside a reply that no longer carries it: \
+             {value}"
         );
     }
 
