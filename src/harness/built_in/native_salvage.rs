@@ -323,7 +323,20 @@ fn empty_object() -> Value {
 /// narrative, not part of the call.
 fn marker_start(text: &str, start: usize) -> usize {
     let before = &text[..start];
-    let trimmed = before.trim_end_matches([' ', '\t']);
+    let mut trimmed = before.trim_end_matches([' ', '\t']);
+    // A model that writes the marker on its own line puts a break between it
+    // and the object. That break is part of the call's layout, not narrative,
+    // so allow the gap to carry exactly one line ending — leaving the marker
+    // behind would put `function_call:` in the operator's reply, which is a
+    // smaller version of the symptom this module exists to remove (CodeRabbit
+    // review on #2011). A *blank* line is where it stops: two breaks mean the
+    // marker belongs to the paragraph above rather than to this object.
+    if let Some(head) = trimmed.strip_suffix('\n') {
+        let head = head.strip_suffix('\r').unwrap_or(head);
+        if !head.ends_with(['\n', '\r']) {
+            trimmed = head.trim_end_matches([' ', '\t']);
+        }
+    }
     for marker in CALL_MARKERS {
         let Some(cut) = trimmed.len().checked_sub(marker.len()) else {
             continue;
@@ -679,6 +692,46 @@ mod tests {
             text,
             "Steps:\n  1. Review releases\n      - check the ledger\n\nDone."
         );
+    }
+
+    /// A model that writes the marker on its own line above the object: the
+    /// marker is part of the call's layout, so it must go with it rather than
+    /// be left behind in the operator's reply.
+    #[test]
+    fn a_marker_on_its_own_line_is_removed_with_the_object() {
+        let raw = "Let me look that up.\nfunction_call:\n{\"call\":\"list_desks\"}";
+        let (text, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            text, "Let me look that up.",
+            "the marker must not survive into chat"
+        );
+    }
+
+    /// The same, with CRLF line endings.
+    #[test]
+    fn a_marker_on_its_own_crlf_line_is_removed_with_the_object() {
+        let raw = "Let me look that up.\r\nfunction_call:\r\n{\"call\":\"list_desks\"}";
+        let (text, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1);
+        assert!(
+            !text.contains("function_call"),
+            "the marker must not survive into chat: {text:?}"
+        );
+    }
+
+    /// Where consuming the gap stops. A blank line between the two means the
+    /// word belongs to the paragraph above, so it stays as narrative — the
+    /// object is still recovered, but nothing is eaten out of the prose.
+    #[test]
+    fn a_blank_line_leaves_the_word_above_as_narrative() {
+        let raw = "Here is what I found.\ncall:\n\n{\"call\":\"list_desks\"}";
+        let (text, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(text, "Here is what I found.\ncall:");
     }
 
     /// A marker search that slices by byte offset must not panic when the

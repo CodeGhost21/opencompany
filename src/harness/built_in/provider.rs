@@ -822,17 +822,6 @@ fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<Strin
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Parse an OpenAI-compatible chat-completion payload into a tinyagents
-/// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
-/// billing envelope.
-///
-/// The full wire payload is kept on [`ModelResponse::raw`] (parity with the
-/// crate `OpenAiModel`), and when the managed backend reports a charge the
-/// `openhuman_usage_meta` key is injected so the host cost layer sees the USD
-/// amount. `content` is **optional**: a tool-call-only turn carries `content:
-/// null`. Errors only when the response carries neither text nor a tool call.
-///
-/// Offers no tools, so a caller with no live turn behind it — the connectivity
 /// Refuse a whole batch that pairs `request_approval` with any sibling call.
 ///
 /// `request_approval` is the boundary an effectful call is supposed to stop at,
@@ -858,6 +847,17 @@ fn refuse_approval_siblings(tool_calls: &[ToolCall]) -> TaResult<()> {
     Ok(())
 }
 
+/// Parse an OpenAI-compatible chat-completion payload into a tinyagents
+/// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
+/// billing envelope.
+///
+/// The full wire payload is kept on [`ModelResponse::raw`] (parity with the
+/// crate `OpenAiModel`), and when the managed backend reports a charge the
+/// `openhuman_usage_meta` key is injected so the host cost layer sees the USD
+/// amount. `content` is **optional**: a tool-call-only turn carries `content:
+/// null`. Errors only when the response carries neither text nor a tool call.
+///
+/// Offers no tools, so a caller with no live turn behind it — the connectivity
 /// probe, and every payload-shape test — gets exactly the wire parse and no
 /// text recovery.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
