@@ -108,6 +108,45 @@ accessors. The check runs anyway because that guarantee lives upstream, in a
 submodule this repository pins by gitlink, and a gitlink bump is exactly when it
 would quietly stop holding.
 
+### What the audit cannot catch, and the boot probe that does
+
+Both sides of that comparison are properties of the **adapter**: `provides()` is
+`self.as_x().is_some()`, a Rust-object check. Neither asks whether the engine
+behind the adapter answers. An engine that exposes a family's surface, reports
+itself healthy, and serves nothing passes the bind and then returns empty on
+every read — the same harm the audit exists to prevent, arriving by a route the
+audit cannot see.
+
+The three **mandatory** families are the sharp case: `provides()` returns `true`
+for Core, Recall and Portability unconditionally, so the audit cannot fail them
+by construction — and they are exactly the three this host binds `MemoryStore`,
+`ContextStore` and `FactStore` to.
+
+`MemoryOverlay::refresh_health` therefore reads once against the mandatory
+families that answer in a single round trip — Core and Recall — and records the
+ones that did not answer on the descriptor, surfaced as `unreachableFamilies` on
+the authenticated engine route. At boot it is advisory, like the health probe
+beside it: it warns loudly and does not refuse, because a transient vendor
+outage must not crash-loop a tenant. The console apply route *does* refuse,
+matching what it already does for a failed health probe — an operator applying a
+change is present, and the previous engine stays in force.
+
+Portability is deliberately not probed: its only read is `export_page`, which
+enumerates every namespace and then lists one in full, so on a hosted engine it
+is tens of sequential round trips that grow with the corpus. It would time out
+and report a working engine broken.
+
+The optional families are **not** covered by the audit either — `provides()` is
+the same `self.as_x().is_some()` check for those — but each needs its own call
+shape, so probing them is separate work rather than a line beside these two.
+
+**An empty answer is success.** A freshly provisioned engine holds nothing, so
+reading "no rows" as "not implemented" would refuse every family on day one;
+only an error or a timeout counts. That also bounds what this catches: an engine
+answering `Ok(empty)` forever while storing nothing is indistinguishable from a
+new one without an engine-specific signal, which belongs in the adapter and its
+conformance suite rather than here. Tracked in issue #1968.
+
 ## Which contract this binds
 
 `tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/crates/tinymemory-api`

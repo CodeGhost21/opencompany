@@ -23,6 +23,8 @@ POST   /api/v1/companies/{id}/chat/upload      multipart file → attachment ref
 GET    /api/v1/companies/{id}/chat/history     one desk's transcript (?desk=<thread>)
 POST   /api/v1/companies/{id}/chat/messages/{seq}/reactions
                                                { "emoji": "👍", "on": true } → 204
+POST   /api/v1/companies/{id}/chat/review      { "chatId", "taskId", "decision": "approve"|"revise",
+                                               "note"? } → ChatReviewReceipt (openhuman feature only)
 GET    /api/v1/companies/{id}/desks            the company's desks (group chats)
 POST   /api/v1/companies/{id}/desks            create an operator-overlay desk
 DELETE .../desks/{deskId}                      delete an operator-created desk
@@ -246,6 +248,39 @@ carries it in the journaled event, capped, so a brain that later reads the
 message off the wire has the attachment's actual words rather than only a
 node id it has no tool to resolve. An image or a scan with no text layer
 carries no extracted text; the reference alone still rides the wire.
+
+### Thread review verdicts (issue #1852)
+
+```text
+POST   …/chat/review      { "chatId", "taskId", "decision": "approve"|"revise", "note"? }
+                          → ChatReviewReceipt { "taskId", "column": "done"|"in_progress"|"in_review" }
+```
+
+Settles the `in_review` dispatch card a chat thread is reviewing — the board
+card the thread's settle pill announced, **not** the native-tool approval gate
+`POST …/approvals/{aid}` settles. `chatId` is the origin conversation (the
+desk/channel id); `taskId` is the specific card the operator clicked, because a
+desk can hold more than one card `in_review` at once — the verdict is bound to
+that card rather than resolved by picking the desk's most recently updated one.
+`approve` finishes the card; `revise` re-runs it, carrying `note` back to the
+re-run as the reviewer's instruction, on the same path a thread reply of
+feedback already takes.
+
+`column` on the receipt is `done` on approve, `in_progress` on revise — or
+`in_review`, unchanged, on a revise whose `note` was blank. An empty note is
+nothing to re-run on, so the host leaves the card where it was rather than
+dispatching an identical attempt a second time; the console reconciles its
+optimistic move against whichever of the three comes back.
+
+Gated behind the `openhuman` feature (`with_review_routes`): the harness that
+dispatches cards in the first place is what settles them, so a build without
+it never mounts `/chat/review` at all — the request 404s at the router, not
+through the JSON error envelope below. Errors on a build that does carry the
+route: an unrecognized `decision` string is `400 invalid_request`; a `taskId`
+that names no card `in_review` on that desk — a wrong id, or no card in review
+at all — is `404 not_found`. The verdict itself is serialized against the same
+company-wide task-write lock every other card mutation takes, so two verdicts
+racing the same card cannot both resolve it.
 
 ### Running and stopping a workflow (issue #383)
 

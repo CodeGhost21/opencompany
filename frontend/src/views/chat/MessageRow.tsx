@@ -37,6 +37,14 @@ interface Props {
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
   /**
+   * Settles the in-review dispatch card a settle pill links to: the operator's
+   * Approve control on the finished card's pill. Absent when the shell has not
+   * wired review — the pill still renders.
+   */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Every card whose review verdict is in flight, if any. */
+  reviewingCardIds?: ReadonlySet<string>;
+  /**
    * Resolves an attachment's bytes to an object URL for preview/download
    * (issue #1682). Threaded from the shell, which holds the authenticated
    * client the blob route needs.
@@ -158,6 +166,15 @@ export function isTaskWorking(status: TaskStatus | undefined): boolean {
   return status.startedAt !== undefined || IN_FLIGHT_COLUMNS.includes(status.column);
 }
 
+/**
+ * Whether a settle pill's linked card is still sitting in review — the one
+ * state its Approve control is offered in. A card already approved, re-running
+ * after feedback, or never settled shows no verdict button.
+ */
+export function isTaskInReview(status: TaskStatus | undefined): boolean {
+  return status?.column === "in_review";
+}
+
 /** The requested stable elapsed sentence, or nothing without a run clock. */
 export function taskElapsedLabel(
   startedAt: number | undefined,
@@ -207,6 +224,8 @@ export function MessageRow({
   onReact,
   onDismissCard,
   dismissingCardId,
+  onReviewCard,
+  reviewingCardIds,
   resolveAttachmentUrl,
   taskStatusByTaskId,
   now = Date.now(),
@@ -216,7 +235,7 @@ export function MessageRow({
   latestBudgetPauseMessageIdByAgent,
   readOnly,
 }: Props) {
-  const { message, sender, continuation, replies } = entry;
+  const { message, sender, continuation, replies, isLatestSettlePill } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
   // Issue #1986. Separate from `actionsUnavailable` on purpose: that one speaks
@@ -239,6 +258,10 @@ export function MessageRow({
     return (
       <SystemPill
         message={message}
+        reviewInFlight={message.taskId !== undefined && (reviewingCardIds?.has(message.taskId) ?? false)}
+        onReviewCard={
+          isTaskInReview(taskStatus) && isLatestSettlePill !== false ? onReviewCard : undefined
+        }
         onRedeemBudgetPause={onRedeemBudgetPause}
         redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
         latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
@@ -382,11 +405,21 @@ export function MessageRow({
  */
 function SystemPill({
   message,
+  onReviewCard,
+  reviewInFlight,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
 }: {
   message: ChatMessage;
+  /**
+   * Approves the in-review card this pill links to. Passed only when the linked
+   * card is still in review — so its presence is itself the gate the button
+   * renders behind.
+   */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Whether this card's verdict is already in flight. */
+  reviewInFlight?: boolean;
   // Issue #1846 review (Codex #3868962374): carries `message.id` alongside
   // the agent id, so the caller can bind the redeem to the SPECIFIC marker
   // this card was rendered from — see `ChatView.redeemBudgetPause`'s doc for
@@ -412,17 +445,31 @@ function SystemPill({
     );
   }
 
+  const taskId = message.taskId;
+  const reviewable = taskId !== undefined && onReviewCard !== undefined;
+
   return (
-    <div className="flex justify-center px-4 py-1">
-      {message.taskId ? (
+    <div className="flex flex-wrap items-center justify-center gap-2 px-4 py-1">
+      {taskId ? (
         <a
-          href={`#/tasks/${encodeURIComponent(message.taskId)}`}
+          href={`#/tasks/${encodeURIComponent(taskId)}`}
           className={cn(className, "transition-opacity hover:opacity-80 hover:underline")}
         >
           {message.text}
         </a>
       ) : (
         <p className={className}>{message.text}</p>
+      )}
+      {reviewable && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-xs"
+          disabled={reviewInFlight}
+          onClick={() => onReviewCard(taskId, "approve")}
+        >
+          {reviewInFlight ? "Approving…" : "Approve"}
+        </Button>
       )}
     </div>
   );
