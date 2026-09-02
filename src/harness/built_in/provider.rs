@@ -831,7 +831,25 @@ fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<Strin
 /// `openhuman_usage_meta` key is injected so the host cost layer sees the USD
 /// amount. `content` is **optional**: a tool-call-only turn carries `content:
 /// null`. Errors only when the response carries neither text nor a tool call.
+///
+/// Offers no tools, so a caller with no live turn behind it — the connectivity
+/// probe, and every payload-shape test — gets exactly the wire parse and no
+/// text recovery.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
+    model_response_from_payload_offering(payload, &std::collections::BTreeSet::new())
+}
+
+/// [`model_response_from_payload`], plus the tool names **this turn offered the
+/// model**.
+///
+/// Those names are what let a tool call the model wrote as prose be recovered
+/// instead of shown to the operator as raw JSON: a candidate is dispatched only
+/// if it names a tool this turn actually advertised. An empty set disables the
+/// recovery entirely. See [`native_salvage`](crate::harness::native_salvage).
+fn model_response_from_payload_offering(
+    payload: serde_json::Value,
+    offered: &std::collections::BTreeSet<String>,
+) -> TaResult<ModelResponse> {
     // Content may be a plain string OR an array of `{type:"text",text:…}`
     // parts; tolerate both.
     let raw_content = payload.pointer("/choices/0/message/content");
@@ -976,6 +994,11 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
+    // Whether the branch below resolved this turn to the provider's own safety
+    // response. Read by the text-tool-call recovery further down, which must
+    // not reach into a refusal: a refusal is a completed decision *not* to act,
+    // so recovering an action out of one would invert it.
+    let refused = refusal_text.is_some();
 
     if tool_calls.is_empty() && !raw_tool_call_requested {
         if let Some(refusal) = refusal_text {
@@ -1032,6 +1055,28 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
                     extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
             }
         }
+    }
+
+    // The model wrote a tool call into its message body instead of emitting it
+    // through the channel it was handed. Recover it here or not at all: the
+    // agent loop takes a turn's calls from `ModelResponse::tool_calls` and never
+    // parses model text, so this is the last point at which a text-shaped call
+    // can still become a real one. See [`native_salvage`].
+    //
+    // Gated on the same condition as the fallbacks above — nothing parsed AND
+    // nothing raw requested — so this can neither compete with the native
+    // channel nor paper over a call the model really did make and whose body
+    // failed to parse. That is a diagnosable error, not something to guess at.
+    let mut tool_calls = tool_calls;
+    if tool_calls.is_empty()
+        && !raw_tool_call_requested
+        && !refused
+        && !offered.is_empty()
+        && let Some((cleaned, recovered)) =
+            crate::harness::native_salvage::recover_text_tool_calls(&content, offered)
+    {
+        content = cleaned;
+        tool_calls = recovered;
     }
 
     // Only a genuinely empty turn (no text anywhere, no tool call) is an error.
@@ -1251,6 +1296,10 @@ impl ChatModel<()> for HostedProvider {
             &request.tool_choice,
             self.product_identity,
         );
+        // Captured from the same list that goes on the wire, so what the
+        // response is allowed to name can never drift from what the request
+        // offered.
+        let offered = crate::harness::native_salvage::offered_tool_names(&request.tools);
 
         let base_url = self.config.base_url.trim_end_matches('/');
         let url = format!("{base_url}/chat/completions");
@@ -1315,7 +1364,7 @@ impl ChatModel<()> for HostedProvider {
         let payload: serde_json::Value = response.json().await.map_err(|e| {
             TinyAgentsError::Model(format!("hosted inference response was not JSON: {e}"))
         })?;
-        model_response_from_payload(payload)
+        model_response_from_payload_offering(payload, &offered)
     }
 }
 
@@ -1717,6 +1766,9 @@ impl ChatModel<()> for TenantProvider {
         )
         .await
         .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+        // Captured from the same list the plan puts on the wire — see the
+        // matching line in `HostedProvider::invoke`.
+        let offered = crate::harness::native_salvage::offered_tool_names(&request.tools);
         // Always this harness's real id — `self.scope.id` is meaningful
         // whether or not this is the company's *default* harness (the
         // default's own `[harness.inference]` beats the company mapping the
@@ -1749,7 +1801,7 @@ impl ChatModel<()> for TenantProvider {
         // its own, so keeping the last *successful* model is strictly more
         // accurate than advertising one that never ran.
         *self.model.write().unwrap() = Some(crate::metering::ModelSlug::classify(&plan.model));
-        model_response_from_payload(payload)
+        model_response_from_payload_offering(payload, &offered)
     }
 }
 
