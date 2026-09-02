@@ -84,6 +84,12 @@ pub struct ChatSeedRequest {
     /// journal read on the *non*-switch turns the switch branch exists to keep
     /// free.
     pub thread_root: Option<EventSeq>,
+    /// This turn's own operator message, as its position in the company
+    /// journal — the boundary [`build_chat_seed`] cuts the history at.
+    ///
+    /// `None` for a caller with no cycle context (test builders, chiefly),
+    /// which falls the boundary back to matching [`Self::raw_message`] as text.
+    pub current_message_seq: Option<EventSeq>,
 }
 
 impl ChatSeedRequest {
@@ -92,6 +98,15 @@ impl ChatSeedRequest {
     /// [`build_chat_seed`]) — and strips the current message's own trailing
     /// duplicate, in one call: the two steps
     /// [`super::CompanyAgent::run_with_steer`]'s switch branch needs, together.
+    ///
+    /// The strip runs **only on the text-boundary path**. When
+    /// [`Self::current_message_seq`] identifies the boundary, `build_chat_seed`
+    /// has already left this turn's own message out of the seed, and running
+    /// the strip anyway would re-introduce the very ambiguity the seq removes
+    /// from the other direction: a genuine older line whose text happens to
+    /// prefix this message ("deploy", answering "deploy production") is a
+    /// trailing `("user", _)` that the prefix test cannot tell from a
+    /// duplicate, so it would be dropped as one.
     pub async fn build(&self, company: &CompanyId, chat_id: &str) -> Vec<(String, String)> {
         let (desk_id, desk_name) =
             chat_history::resolve_seed_desk(&self.store, company, Some(chat_id)).await;
@@ -102,10 +117,15 @@ impl ChatSeedRequest {
             &desk_name,
             self.thread_root,
             CHAT_SEED_WINDOW,
-            &self.raw_message,
+            match self.current_message_seq {
+                Some(seq) => SelfBoundary::Seq(seq),
+                None => SelfBoundary::Text(&self.raw_message),
+            },
         )
         .await;
-        strip_current_message(&mut seed, &self.raw_message);
+        if self.current_message_seq.is_none() {
+            strip_current_message(&mut seed, &self.raw_message);
+        }
         seed
     }
 }
@@ -262,6 +282,69 @@ fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
     out
 }
 
+/// How [`build_chat_seed`]'s backward walk recognises the current turn's own
+/// message, which is where it stops treating the log as history.
+///
+/// One argument rather than a text and a seq side by side, because they are
+/// two answers to the same question and only one of them can be right at a
+/// time. Passing both invites a caller to wonder which wins, and a caller that
+/// guesses wrong gets a plausible-looking seed rather than an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfBoundary<'a> {
+    /// The journaled event at this position, and no other.
+    ///
+    /// The only unambiguous answer. Two messages accepted for one desk close
+    /// together are both journaled before either turn's projection runs (the
+    /// route journals on accept, ahead of the per-company cycle lock), so a
+    /// projection routinely sees a sibling it must not mistake for itself. If
+    /// the later one's composed text equals or prefixes this one's — current
+    /// `"deploy production"`, later `"deploy"` — [`Text`](Self::Text) matches
+    /// the *later* event first and cuts the window there; this turn's real
+    /// message is then swept in as ordinary history, `strip_current_message`
+    /// does not catch it (it inspects only the trailing entry), and
+    /// `run_single` appends the current message again, so the model reads the
+    /// operator's request twice.
+    ///
+    /// No tightening of the comparison fixes that. A shared prefix is a
+    /// genuine relationship between two *different* messages, so text is an
+    /// ambiguous key by construction. A seq is not two events.
+    Seq(EventSeq),
+    /// The newest owning `user` entry whose text this message starts with.
+    ///
+    /// The fallback for a caller with no cycle context to draw a seq from —
+    /// test builders, chiefly. A prefix rather than an equality because an
+    /// attachment makes the composed message a superstring of the journaled
+    /// text, the same relationship [`strip_current_message`] matches on.
+    ///
+    /// Ambiguous where two messages overlap, which is the whole reason
+    /// [`Seq`](Self::Seq) exists; kept because a caller that cannot name the
+    /// event is better served by this bound than by no bound at all. Empty
+    /// text means "no boundary", which reads as the unbounded tail.
+    Text(&'a str),
+}
+
+impl SelfBoundary<'_> {
+    /// Is this journal entry the current turn's own message?
+    fn matches(&self, stored: &StoredEvent, role: &str, text: &str) -> bool {
+        match self {
+            Self::Seq(target) => stored.seq == *target,
+            Self::Text(current) => {
+                let current = current.trim();
+                role == "user" && !current.is_empty() && current.starts_with(text.trim())
+            }
+        }
+    }
+
+    /// Does a matched boundary stay in the seed as history?
+    ///
+    /// Only for [`Text`](Self::Text), which has no proof the entry it matched
+    /// is this turn's message and so defers the removal to
+    /// [`strip_current_message`]. A [`Seq`](Self::Seq) match is that proof.
+    fn seeds_its_own_match(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+}
+
 /// Projects the last `window` messages owned by `(desk_id, desk_name)` out of the
 /// company [`EventLog`] into chronological `(role, content)` pairs for
 /// [`Agent::seed_resume_from_messages`](openhuman_core::openhuman::agent::Agent::seed_resume_from_messages).
@@ -279,10 +362,10 @@ fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
 /// `None` is the channel itself (unparented lines only — every message in a
 /// company that has never threaded, so an unthreaded desk projects exactly what
 /// it did before), and `Some(root)` is that root plus its replies. It is
-/// applied **before** the `current_message` boundary below, which matters more
-/// than it looks: the boundary is a text prefix compare, so without the thread
-/// filter a sibling thread carrying the same words would match first and cut
-/// the window at a message this turn never sent.
+/// applied **before** the boundary match below, which matters more than it
+/// looks on the text fallback: that compare is a prefix test, so without the
+/// thread filter a sibling thread carrying the same words would match first and
+/// cut the window at a message this turn never sent.
 ///
 /// An `OperatorMessage` with attachments is composed through the same
 /// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
@@ -294,33 +377,24 @@ fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
 /// `ChatSeedRequest::raw_message`, so [`strip_current_message`] still matches
 /// it exactly.
 ///
-/// `current_message` bounds the scan at THIS turn's own operator message
-/// (codex review finding on #1842): the chat route journals a message the
-/// instant it is accepted, before it queues on the per-company cycle lock, so
-/// two messages for the same desk accepted close together are both already in
-/// the journal by the time either turn actually reads it. Scanning from the
-/// unbounded tail let the earlier turn seed the later message as "prior
-/// history" — and because the later message's text never matches the earlier
-/// turn's `current_message`, [`strip_current_message`] cannot remove it
-/// either, so the model saw a request nobody made it plus its own current one
-/// twice over. The newest-first walk below therefore buffers every owning
-/// turn into `pending` until it matches a `("user", _)` entry whose text is a
-/// prefix-match of `current_message` (the same relationship
-/// [`strip_current_message`] uses, since an attachment makes `current_message`
-/// a superstring of the journaled text) — that match is this turn's own
-/// boundary, so `pending` (everything newer) is discarded and only the log
-/// content strictly at-or-before it is collected as history.
+/// `boundary` cuts the scan at THIS turn's own operator message — see
+/// [`SelfBoundary`] for how the two ways of recognising it differ, and why
+/// text alone cannot. The newest-first walk buffers every owning turn into
+/// `pending` until the boundary matches; that match is this turn's own
+/// message, so `pending` (everything newer, including any concurrently
+/// accepted sibling) is discarded and only the log content at-or-before it is
+/// collected as history.
 ///
-/// A boundary that is never matched — `current_message` empty, or a caller
-/// with no real current turn to bound against (tests, chiefly) — degrades to
-/// the unbounded-tail behaviour from before this bound existed: `pending`
-/// (capped at `window` throughout, so this costs nothing extra) becomes the
-/// answer. The bound is a tightening over that baseline, never a new way for
-/// the seed to come back emptier than it did before. The search itself is
-/// capped at a fixed raw-event budget so a boundary that is
-/// genuinely never found cannot walk the whole company history — in
-/// production the match is expected within the first page, since the message
-/// was just journaled moments before this projection runs.
+/// A boundary that is never matched — an empty
+/// [`Text`](SelfBoundary::Text), or a caller with no real current turn to
+/// bound against (tests, chiefly) — degrades to the unbounded-tail behaviour
+/// from before this bound existed: `pending` (capped at `window` throughout,
+/// so this costs nothing extra) becomes the answer. The bound is a tightening
+/// over that baseline, never a new way for the seed to come back emptier than
+/// it did before. The search itself is capped at a fixed raw-event budget so a
+/// boundary that is genuinely never found cannot walk the whole company
+/// history — in production the match is expected within the first page, since
+/// the message was just journaled moments before this projection runs.
 ///
 /// Best-effort: a read error yields an empty seed (the caller then falls back to
 /// the OpenHuman transcript lookup) rather than failing the turn.
@@ -331,7 +405,7 @@ pub async fn build_chat_seed(
     desk_name: &str,
     thread_root: Option<EventSeq>,
     window: usize,
-    current_message: &str,
+    boundary: SelfBoundary<'_>,
 ) -> Vec<(String, String)> {
     /// Safety valve on the self-boundary search: past this many raw journal
     /// events with no match, give up looking and fall back to the
@@ -342,8 +416,6 @@ pub async fn build_chat_seed(
     if window == 0 {
         return Vec::new();
     }
-
-    let current_message = current_message.trim();
 
     // Newest-first accumulation; reversed to chronological before returning.
     // `pending` holds owning turns seen before the boundary above is matched;
@@ -440,12 +512,17 @@ pub async fn build_chat_seed(
             let is_root = thread_root == Some(stored.seq);
 
             if !found_self {
-                if role == "user"
-                    && !current_message.is_empty()
-                    && current_message.starts_with(text.trim())
-                {
+                if boundary.matches(&stored, role, &text) {
                     found_self = true;
-                    collected.push(SeedEntry { role, text, parent });
+                    // Only the text fallback seeds its own boundary: it has no
+                    // proof the entry it matched is this turn's message, so it
+                    // keeps it and leaves the decision to
+                    // `strip_current_message`. A seq match is that proof, and
+                    // an entry known to be the turn's own request is not
+                    // history for the turn to read back.
+                    if boundary.seeds_its_own_match() {
+                        collected.push(SeedEntry { role, text, parent });
+                    }
                     if is_root {
                         reached_root = true;
                         break;
@@ -738,7 +815,9 @@ mod tests {
             // these cases assert the pre-#1890 behaviour is byte-identical.
             None,
             window,
-            current_message,
+            // The text fallback, which is the boundary every case below is
+            // written against.
+            SelfBoundary::Text(current_message),
         )
         .await
     }
@@ -974,6 +1053,193 @@ mod tests {
         );
     }
 
+    // ── Identity boundary ────────────────────────────────────────────────
+
+    /// A channel-level seed whose boundary is the journal position `seq`,
+    /// rather than any message's text.
+    async fn seed_anchored(log: FixedLog, seq: u64) -> Vec<(String, String)> {
+        let events: Arc<dyn EventLog> = Arc::new(log);
+        build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            "general",
+            "general",
+            None,
+            CHAT_SEED_WINDOW,
+            SelfBoundary::Seq(EventSeq::new(seq)),
+        )
+        .await
+    }
+
+    /// The reported collision. Two messages land on one desk before either
+    /// turn takes the cycle lock, and the LATER one's text is an exact prefix
+    /// of this turn's — `"deploy"` against `"deploy production"`. A prefix
+    /// compare walking newest-first meets the later event first and accepts it
+    /// as this turn's own boundary, which leaves the real message inside the
+    /// history and `strip_current_message` (trailing entry only) unable to see
+    /// it: `run_single` then appends the request a second time.
+    ///
+    /// Anchored on the seq the boundary is this turn's message and no other,
+    /// whatever anyone else's words are.
+    #[tokio::test]
+    async fn a_later_prefix_message_does_not_steal_this_turns_boundary() {
+        let log = FixedLog(vec![
+            operator(1, Some("general"), "hello"),
+            reply(2, "general", "hi"),
+            operator(3, Some("general"), "deploy production"),
+            // Accepted microseconds later, already journaled, and a strict
+            // prefix of the message above.
+            operator(4, Some("general"), "deploy"),
+        ]);
+
+        let seed = seed_anchored(log, 3).await;
+
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "hello".to_string()),
+                ("agent".to_string(), "hi".to_string()),
+            ],
+            "the boundary must land on seq 3 and seed neither it nor the \
+             later prefix message: {seed:?}"
+        );
+        assert!(
+            !seed.iter().any(|(_, text)| text == "deploy production"),
+            "this turn's own request must not be seeded as history — \
+             `run_single` appends it itself: {seed:?}"
+        );
+    }
+
+    /// The same collision with the two messages spelled identically, which is
+    /// the degenerate prefix: nothing in the text can order them at all.
+    #[tokio::test]
+    async fn an_identically_worded_later_message_does_not_steal_the_boundary() {
+        let log = FixedLog(vec![
+            operator(1, Some("general"), "status?"),
+            reply(2, "general", "all green"),
+            operator(3, Some("general"), "deploy"),
+            operator(4, Some("general"), "deploy"),
+        ]);
+
+        let seed = seed_anchored(log, 3).await;
+
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "status?".to_string()),
+                ("agent".to_string(), "all green".to_string()),
+            ],
+            "identical wording orders nothing; the seq does: {seed:?}"
+        );
+    }
+
+    /// The mirror the text compare already got right — the later message is
+    /// LONGER, so it never prefix-matched this turn's shorter one. Pinned so
+    /// the identity boundary is shown to answer it the same way rather than
+    /// only fixing the direction that was broken.
+    #[tokio::test]
+    async fn a_longer_later_message_is_still_excluded() {
+        let log = FixedLog(vec![
+            operator(1, Some("general"), "hello"),
+            operator(2, Some("general"), "deploy"),
+            operator(3, Some("general"), "deploy production"),
+        ]);
+
+        let seed = seed_anchored(log, 2).await;
+
+        assert_eq!(
+            seed,
+            vec![("user".to_string(), "hello".to_string())],
+            "only what precedes this turn's own message: {seed:?}"
+        );
+    }
+
+    /// This turn's message is the only thing the desk has ever held. The seed
+    /// is empty rather than a copy of the request the runner is about to
+    /// append anyway.
+    #[tokio::test]
+    async fn a_first_message_seeds_nothing() {
+        let log = FixedLog(vec![operator(1, Some("general"), "deploy production")]);
+
+        let seed = seed_anchored(log, 1).await;
+
+        assert!(
+            seed.is_empty(),
+            "nothing precedes the first message: {seed:?}"
+        );
+    }
+
+    /// A genuine older line whose text prefixes this turn's message is
+    /// history, not a duplicate — the ambiguity running in the other
+    /// direction. It survives, and `ChatSeedRequest::build` is what keeps it
+    /// there: on the seq path the boundary was never seeded, so there is
+    /// nothing for `strip_current_message` to remove and running it anyway
+    /// would take this line instead.
+    #[tokio::test]
+    async fn an_older_prefix_line_is_history_and_survives() {
+        let log = FixedLog(vec![
+            reply(1, "general", "morning"),
+            operator(2, Some("general"), "deploy"),
+            operator(3, Some("general"), "deploy production"),
+        ]);
+
+        let mut seed = seed_anchored(log, 3).await;
+
+        assert_eq!(
+            seed,
+            vec![
+                ("agent".to_string(), "morning".to_string()),
+                ("user".to_string(), "deploy".to_string()),
+            ],
+            "the older `deploy` is this desk's history: {seed:?}"
+        );
+
+        // What `build` would do if it ran the text strip on this path anyway —
+        // named here so the guard has a failing shape to point at.
+        strip_current_message(&mut seed, "deploy production");
+        assert_eq!(
+            seed,
+            vec![("agent".to_string(), "morning".to_string())],
+            "the trailing prefix line is indistinguishable from a duplicate to \
+             a text compare, which is why the seq path does not run it: {seed:?}"
+        );
+    }
+
+    /// The compatibility path: with no seq to anchor on, the boundary is the
+    /// text compare, unchanged. A caller outside a cycle (a test builder, a
+    /// request built without one) keeps exactly the behaviour it had.
+    #[tokio::test]
+    async fn without_a_seq_the_text_boundary_still_bounds_the_scan() {
+        let log = FixedLog(vec![
+            operator(1, Some("general"), "hello"),
+            reply(2, "general", "hi"),
+            operator(3, Some("general"), "deploy production"),
+        ]);
+        let events: Arc<dyn EventLog> = Arc::new(log);
+
+        let seed = build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            "general",
+            "general",
+            None,
+            CHAT_SEED_WINDOW,
+            SelfBoundary::Text("deploy production"),
+        )
+        .await;
+
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "hello".to_string()),
+                ("agent".to_string(), "hi".to_string()),
+                ("user".to_string(), "deploy production".to_string()),
+            ],
+            "the text path still collects its own boundary and leaves the \
+             removal to `strip_current_message`: {seed:?}"
+        );
+    }
+
     // ── Thread scoping (#1890) ───────────────────────────────────────────
 
     /// An operator message posted inside the thread rooted at `parent`.
@@ -1010,7 +1276,7 @@ mod tests {
             desk,
             thread_root.map(EventSeq::new),
             CHAT_SEED_WINDOW,
-            current_message,
+            SelfBoundary::Text(current_message),
         )
         .await
     }
@@ -1209,7 +1475,7 @@ mod tests {
             "growth",
             Some(EventSeq::new(OLD)),
             CHAT_SEED_WINDOW,
-            "follow-up",
+            SelfBoundary::Text("follow-up"),
         )
         .await;
         assert_eq!(
@@ -1288,7 +1554,7 @@ mod tests {
             "general",
             None,
             CHAT_SEED_WINDOW,
-            "",
+            SelfBoundary::Text(""),
         )
         .await;
         assert!(seed.is_empty());

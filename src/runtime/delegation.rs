@@ -74,6 +74,21 @@ pub struct ChatTarget<'a> {
     /// The root message this turn's thread hangs off; `None` is the channel
     /// itself.
     pub thread_root: Option<EventSeq>,
+    /// The journal sequence of the operator message this turn is answering,
+    /// when the turn is answering one at all.
+    ///
+    /// The identity of the turn's own line in the log, which lets a projection
+    /// over that log tell this turn's message apart from every other by
+    /// `stored.seq` rather than by comparing text. Two different messages can
+    /// legitimately share a prefix, so text can only ever be a guess; a seq
+    /// cannot be two events.
+    ///
+    /// `None` on every turn that is not answering a journaled operator message
+    /// — a relay, a delegate's instruction, a dispatched card, a workflow node
+    /// — because those run on prose the model wrote, which no log line
+    /// corresponds to. A consumer falls back to whatever it did before this
+    /// field existed.
+    pub message_seq: Option<EventSeq>,
 }
 
 impl<'a> ChatTarget<'a> {
@@ -83,6 +98,7 @@ impl<'a> ChatTarget<'a> {
         Self {
             chat_id,
             thread_root: None,
+            message_seq: None,
         }
     }
 
@@ -91,7 +107,18 @@ impl<'a> ChatTarget<'a> {
         Self {
             chat_id,
             thread_root,
+            message_seq: None,
         }
+    }
+
+    /// Binds this target to the journaled operator message the turn answers.
+    ///
+    /// Separate from the constructors because it is true of exactly one turn
+    /// in a delegation drain — the responder's own — while the conversation
+    /// the target names is shared by every turn in it.
+    pub fn answering(mut self, message_seq: Option<EventSeq>) -> Self {
+        self.message_seq = message_seq;
+        self
     }
 }
 
@@ -746,6 +773,14 @@ pub(crate) struct DelegationRunner<'a> {
     /// The channel stays an argument, because every caller has one and it
     /// selects *who answers*. The thread only narrows *what they remember*.
     thread_root: Option<EventSeq>,
+    /// The journal sequence of the operator message this drain is answering.
+    ///
+    /// Reaches only the responder's own turn (see
+    /// [`answering_target`](Self::answering_target)), never the relay or a
+    /// delegate's, because only that one turn is running the very text this seq
+    /// names. `None` on every non-operator path, and on any caller that has not
+    /// been taught to carry it.
+    message_seq: Option<EventSeq>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -805,6 +840,7 @@ impl<'a> DelegationRunner<'a> {
             also_mentioned: Vec::new(),
             reissue_message: None,
             thread_root: None,
+            message_seq: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
@@ -857,6 +893,7 @@ impl<'a> DelegationRunner<'a> {
             also_mentioned: Vec::new(),
             reissue_message: None,
             thread_root: None,
+            message_seq: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
@@ -1079,11 +1116,33 @@ impl<'a> DelegationRunner<'a> {
         ChatTarget::in_thread(chat_id, self.thread_root)
     }
 
+    /// [`target`](Self::target), plus the identity of the journaled message the
+    /// turn is answering.
+    ///
+    /// Only the responder's own turn gets this. The relay turn runs a prompt
+    /// the orchestrator composed and a delegate runs an instruction the model
+    /// wrote — neither is the operator's line, so claiming that seq for them
+    /// would name someone else's message as their own.
+    fn answering_target(&self, chat_id: Option<&'a str>) -> ChatTarget<'a> {
+        self.target(chat_id).answering(self.message_seq)
+    }
+
     /// Binds this turn to the thread rooted at `root` (#1890) — `None` is the
     /// channel-level conversation, which is what every non-threaded path wants
     /// and therefore never has to say.
     pub(crate) fn in_thread(mut self, root: Option<EventSeq>) -> Self {
         self.thread_root = root;
+        self
+    }
+
+    /// Carries the journal sequence of the operator message this drain answers.
+    ///
+    /// A builder for the same reason [`in_thread`](Self::in_thread) is: optional
+    /// context about the turn, absent on every path that is not a journaled
+    /// operator message, and threading it as an argument would make every
+    /// existing call site restate `None` to say nothing.
+    pub(crate) fn answering(mut self, message_seq: Option<EventSeq>) -> Self {
+        self.message_seq = message_seq;
         self
     }
 
@@ -1453,8 +1512,12 @@ impl<'a> DelegationRunner<'a> {
                 || (chatter && is_pure_small_talk(operator_words(message))));
         let outcome = with_chat_only_hint(
             chat_only,
-            self.run_turn
-                .run(self.company, responder, message, self.target(chat_id)),
+            self.run_turn.run(
+                self.company,
+                responder,
+                message,
+                self.answering_target(chat_id),
+            ),
         )
         .await?;
         let parked = self.approvals_queued().saturating_sub(approvals_before);

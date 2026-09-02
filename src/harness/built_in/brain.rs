@@ -3505,7 +3505,12 @@ impl HarnessBrain {
         }
 
         let mut channel_responses = Vec::new();
-        for event in &req.events {
+        for (index, event) in req.events.iter().enumerate() {
+            // The durable log position of this event, which `CycleRequest`
+            // carries positionally alongside the events themselves. Empty for a
+            // caller that built the request without threading seqs, so the
+            // lookup answers `None` rather than assuming an index is a seq.
+            let event_seq = req.event_seqs.get(index).copied();
             match event {
                 CompanyEvent::OperatorMessage {
                     text,
@@ -3704,6 +3709,10 @@ impl HarnessBrain {
                         // unparented message carries `None` and lands on the
                         // channel-level conversation.
                         .in_thread(*parent)
+                        // This message's own line in the journal, so the chat
+                        // seed can tell it apart from a concurrently accepted
+                        // sibling by identity instead of by text.
+                        .answering(event_seq)
                         // Issue #1846 review (Codex #3864988176): the operator's
                         // own words, so a delegate's budget-pause marker re-parks
                         // with what the operator actually asked for rather than
