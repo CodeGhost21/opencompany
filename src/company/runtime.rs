@@ -2266,9 +2266,11 @@ impl CompanyRuntime {
         // the same badge behind.
         let unanswered = self.unanswered_blocker(id);
         let is_blocker = self.is_blocker(id);
+        let waiting_run = self.parked_workflow_run(id);
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
-        self.finish_expiry(id, is_blocker, unanswered).await;
+        self.finish_expiry(id, is_blocker, unanswered, waiting_run)
+            .await;
         Ok(())
     }
 
@@ -4646,8 +4648,12 @@ impl CompanyRuntime {
             // as blockers, not ordinary approvals, even though unanswered
             // returns None for them.
             let is_blocker = self.is_blocker(id);
+            // Issue B-012: and which workflow run was waiting on it, for the
+            // same before-the-retirement reason as the two above.
+            let waiting_run = self.parked_workflow_run(id);
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
-            self.finish_expiry(id, is_blocker, unanswered).await;
+            self.finish_expiry(id, is_blocker, unanswered, waiting_run)
+                .await;
         }
         Ok(expired)
     }
@@ -4679,7 +4685,45 @@ impl CompanyRuntime {
         id: &ApprovalId,
         was_blocker: bool,
         unanswered: Option<(String, String)>,
+        waiting_run: Option<String>,
     ) {
+        // **The run that was waiting stops claiming it still is** (issue B-012).
+        //
+        // A workflow that parks on a gate is recorded `WaitingApproval` — the
+        // run is settled, nothing is executing, and that status is the row's
+        // account of why it stopped. Expiry retired the approval and removed it
+        // from the pending set, but nothing ever revisited the row, so it went
+        // on naming an approval no sweep will see again: the Observatory showed
+        // a run waiting for a decision that had already defaulted, and the
+        // approvals list showed nothing to decide. Two screens, no way to tell
+        // which was lying.
+        //
+        // `Cancelled` — "the attempt was cancelled before it could settle" — is
+        // what a default-deny leaves behind. Not `Declined`, which is reserved
+        // for work refused *by design* by the compiler or a step; here the
+        // decision was made by the clock and nobody chose it. Not `Failed`:
+        // nothing errored.
+        //
+        // Best-effort and last, like everything else here: a row that cannot be
+        // written must not undo a default-deny that already happened.
+        if let Some(run_id) = waiting_run {
+            let outcome =
+                crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
+                    .with_error(
+                        "the approval this run was waiting on expired and defaulted to denied",
+                    );
+            if let Err(err) = self.runs().finish_run(&self.id, &run_id, outcome).await {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    run = %run_id,
+                    %err,
+                    "[approval] expired, but the waiting run's row could not be settled; \
+                     it will keep reporting `waiting_approval`"
+                );
+            }
+        }
+
         let mut card_returned = false;
         if let Some((task_id, question)) = unanswered {
             match crate::runtime::advance::return_expired_blocker_card(
@@ -4745,6 +4789,17 @@ impl CompanyRuntime {
         };
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
         pending.effect.kind.starts_with(&prefix)
+    }
+
+    /// The workflow run this approval parked, read **before** the retirement
+    /// for the reason its two siblings are (issue B-012).
+    ///
+    /// `workflow_run_of` needs the pending entry, and retiring is what removes
+    /// it — so after `retire_approval` there is no way back to which run was
+    /// waiting, exactly as there is no way back to what was being asked.
+    fn parked_workflow_run(&self, id: &ApprovalId) -> Option<String> {
+        let pending = self.journal.pending().into_iter().find(|p| &p.id == id)?;
+        workflow_run_of(&pending)
     }
 
     fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
@@ -8178,6 +8233,88 @@ mod tests {
             .await
             .unwrap();
         approval
+    }
+
+    /// **B-012.** A workflow run parked on a gate stops claiming it is waiting
+    /// once that approval expires.
+    ///
+    /// A parked run is recorded `WaitingApproval` — settled, nothing executing,
+    /// and the status is the row's account of *why* it stopped. Expiry retired
+    /// the approval and dropped it from the pending set, but nothing revisited
+    /// the row, so it went on naming an approval no sweep would see again: the
+    /// Observatory showed a run awaiting a decision while the approvals list
+    /// showed nothing to decide, and neither screen was wrong about its own
+    /// data.
+    #[tokio::test]
+    async fn an_expired_approval_settles_the_workflow_run_that_was_waiting_on_it() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::{ApprovalId, EventSeq};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        // A run parked on a gate: begun, then settled as `WaitingApproval` —
+        // exactly the shape `finish_run` leaves behind for a workflow park.
+        rt.runs()
+            .create_run(
+                rt.id(),
+                crate::ports::runs::NewRun::for_task("run-parked", "t-parked", "ceo"),
+            )
+            .await
+            .unwrap();
+        rt.runs()
+            .begin_run(rt.id(), "run-parked", EventSeq::new(1))
+            .await
+            .unwrap();
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                "run-parked",
+                crate::ports::runs::RunOutcome::new(RunStatus::WaitingApproval),
+            )
+            .await
+            .unwrap();
+
+        // The approval that run is waiting on. `Unlinked` + a `run_id` is what
+        // `workflow_run_of` requires to call this a workflow park rather than a
+        // task attempt — the two share an id space, so both terms are needed.
+        let approval = ApprovalId::new("appr-b012");
+        let mut effect = extend_test_effect();
+        effect.run_id = Some("run-parked".to_string());
+        rt.approval_gate
+            .rehydrate(approval.clone(), effect.clone(), 0);
+        rt.journal
+            .record_parked(
+                &approval,
+                &effect,
+                0,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Parked at epoch 0 — unambiguously past any TTL.
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&approval),
+            "the sweep must find the epoch-0 park: {expired:?}"
+        );
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), "run-parked")
+            .await
+            .unwrap()
+            .expect("the run row survives the sweep");
+        assert_eq!(
+            row.status,
+            RunStatus::Cancelled,
+            "a default-denied gate leaves the run cancelled, not still waiting"
+        );
     }
 
     /// Issue #1865 (Codex review on PR #1883): a late resolve that discovers
