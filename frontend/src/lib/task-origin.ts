@@ -9,6 +9,7 @@
 // rather than at the button keeps "is there somewhere to go" and "go there"
 // from drifting apart.
 
+import { hostMessageId } from "@/lib/chat";
 import { channelForThread } from "@/views/chat/model";
 
 export type OriginConversation =
@@ -42,6 +43,10 @@ export function originConversation(
   return {
     kind: "channel",
     channelId,
-    threadId: originParent != null ? String(originParent) : undefined,
+    // `Room`'s transcript keys every host-journaled message as `h<seq>`
+    // (`hostMessageId`) to keep it apart from a locally-minted optimistic id;
+    // a bare seq here would never match a loaded message's `id`, and the
+    // thread panel would silently fail to open.
+    threadId: originParent != null ? hostMessageId(String(originParent)) : undefined,
   };
 }

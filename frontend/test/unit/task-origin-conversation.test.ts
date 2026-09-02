@@ -56,10 +56,13 @@ describe("where a card's origin conversation lives", () => {
   });
 
   it("carries the origin thread's own id, when the card was raised inside one", () => {
+    // `h`-prefixed: `Room`'s transcript keys every host-journaled message as
+    // `h<seq>` (`hostMessageId`) to tell it apart from a locally-minted
+    // optimistic id, so a bare seq here would never match a loaded message.
     expect(originConversation("t1", { t1: "desk-eng" }, 41)).toEqual({
       kind: "channel",
       channelId: "desk-eng",
-      threadId: "41",
+      threadId: "h41",
     });
   });
 
