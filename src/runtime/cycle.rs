@@ -3680,6 +3680,14 @@ const THREAD_INDEX_MAX: usize = 5;
 /// company's history.
 const THREAD_INDEX_PAGE: usize = 256;
 
+/// Characters of a root kept as an index row's opening words.
+///
+/// One constant because two places must agree on it: the opening is cut to
+/// this, and the self-exclusion below re-cuts the current message to compare
+/// against that cut. A literal in each is two values that must match with
+/// nothing making them — which is the defect this whole change removes.
+const THREAD_OPENING_CHARS: usize = 120;
+
 /// One line of the index — a thread the turn may decide to ask about.
 struct ThreadLine {
     /// The root's sequence, which is the **handle** `read_thread` takes
@@ -3779,7 +3787,7 @@ fn thread_index(
             CompanyEvent::OperatorMessage {
                 text, parent: None, ..
             } => {
-                let opening = first_line(text, 120);
+                let opening = first_line(text, THREAD_OPENING_CHARS);
                 if opening.is_empty() {
                     continue;
                 }
@@ -3811,9 +3819,14 @@ fn thread_index(
     let mut lines: Vec<ThreadLine> = roots
         .into_iter()
         .filter(|(seq, line)| {
-            Some(*seq) != current
-                && !(!line.opening.is_empty()
-                    && current_message.trim().starts_with(line.opening.as_str()))
+            // Compared through `first_line` on both sides, not raw. `opening`
+            // is already truncated, and truncation appends `…`, so a message
+            // whose first line runs past THREAD_OPENING_CHARS never
+            // `starts_with` its own opening — and the turn was then listed in
+            // its own index as somebody else's conversation
+            // (coderabbit on #1982).
+            let mine = first_line(current_message, THREAD_OPENING_CHARS);
+            Some(*seq) != current && !(!line.opening.is_empty() && mine == line.opening)
         })
         .map(|(seq, mut line)| {
             line.replies = replies.get(&seq).copied().unwrap_or(0);

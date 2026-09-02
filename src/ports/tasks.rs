@@ -943,8 +943,16 @@ pub struct TaskWorkflowProposal {
 ///
 /// One value because the two halves must agree. See
 /// [`TaskRecord::origin`] for the drift that made this a type rather than a
-/// pair of fields, and `docs/specs/thread-scoped-conversations.md` for where
-/// the same shape lives in `tinyhivemind`.
+/// pair of fields.
+///
+/// A **stand-in for the stored half** of `tinyhivemind`'s `Conversation`, not
+/// the same record: that one carries `desk_id` *and* `desk_name`, because a
+/// message can be journaled under either spelling and a reader matching only
+/// one loses the rest — the defect #1972's review found in the settled-work
+/// briefing. A card stores the single spelling it was addressed by, and a
+/// reader resolves both through `chat_history`. If the vendored crate ever
+/// lands (`docs/specs/thread-scoped-conversations.md`), this is the field that
+/// should hold its `Conversation` rather than a second definition of one.
 ///
 /// Field names are the wire names the two fields already used, and this is
 /// `#[serde(flatten)]`ed into its holder, so adopting it costs no migration.
