@@ -5146,7 +5146,7 @@ impl CompanyRuntime {
     /// blocker anchor is an `ApprovalParked` event, so neither steals the
     /// other's replies.
     #[cfg(feature = "openhuman")]
-    async fn parked_blocker_at(&self, parent: EventSeq) -> Result<Option<ApprovalId>> {
+    async fn parked_blocker_at(&self, desk: &str, parent: EventSeq) -> Result<Option<ApprovalId>> {
         let stored = self.events.read_from(&self.id, parent, 1).await?;
         let Some(stored) = stored.into_iter().next() else {
             return Ok(None);
@@ -5159,8 +5159,15 @@ impl CompanyRuntime {
             CompanyEvent::ApprovalParked {
                 approval_id,
                 effect_kind,
+                thread,
                 ..
-            } if effect_kind.starts_with(&prefix) && self.is_blocker(&approval_id) => {
+            } if effect_kind.starts_with(&prefix)
+                && crate::server::chat_history::same_conversation(
+                    thread.as_deref(),
+                    Some(desk),
+                )
+                && self.is_blocker(&approval_id) =>
+            {
                 Ok(Some(approval_id))
             }
             _ => Ok(None),
@@ -5189,7 +5196,7 @@ impl CompanyRuntime {
 
         let explicit = match parent {
             Some(parent) => self
-                .parked_blocker_at(parent)
+                .parked_blocker_at(desk, parent)
                 .await?
                 .map(|id| self.blocker_group_of(&id)),
             None => None,
@@ -9082,6 +9089,58 @@ mod tests {
                 }
                 _ => panic!("naming the connection resolves only its group"),
             }
+        }
+
+        /// An explicit reply settles only a blocker parked in the same
+        /// conversation: a verdict threaded to another DM's blocker card, sent
+        /// from a desk with no blocker of its own, runs as an ordinary turn.
+        #[tokio::test]
+        async fn an_explicit_reply_stays_within_its_conversation() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(
+                    &blocker("t-1", Some("connection:slack")),
+                    "t-1",
+                    assignee("eng"),
+                )
+                .await
+                .expect("parks");
+            let parent = runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read")
+                .into_iter()
+                .find(|stored| {
+                    matches!(
+                        stored.event,
+                        crate::ports::types::CompanyEvent::ApprovalParked { .. }
+                    )
+                })
+                .expect("the park is on the log")
+                .seq;
+
+            let same = runtime
+                .plan_blocker_reply("dm:eng", Some(parent), "retry")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(same, BlockerReplyPlan::Resolve { .. }),
+                "a reply in the blocker's own DM resolves it"
+            );
+
+            let cross = runtime
+                .plan_blocker_reply("dm:ops", Some(parent), "retry")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(cross, BlockerReplyPlan::NotBlocker),
+                "the same verdict from another conversation settles nothing"
+            );
         }
     }
 }
