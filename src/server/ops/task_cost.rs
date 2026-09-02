@@ -208,6 +208,7 @@ mod tests {
             attempt: 1,
             status,
             trigger_event_seq: None,
+            thread_root: None,
             created_at_millis: 3,
             started_at_millis: Some(3),
             finished_at_millis: Some(4),

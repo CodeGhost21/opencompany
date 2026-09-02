@@ -290,6 +290,15 @@ pub struct RunRecord {
     /// append.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event_seq: Option<EventSeq>,
+    /// The conversation **thread** this attempt belongs to, within `chat_id`.
+    ///
+    /// See [`NewRun::thread_root`] for why `chat_id` alone is not enough.
+    /// Additive in the same shape `task_id`/`chat_id`/`workflow_run` took: a
+    /// row written before this field existed loads with `None` and
+    /// re-serializes byte-identically, so there is no backfill to write and an
+    /// older row simply reads as "rooted at the channel".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_root: Option<EventSeq>,
     /// Epoch-millis the row was minted.
     /// The workflow run whose node spawned this attempt, when one did.
     ///
@@ -400,6 +409,20 @@ pub struct NewRun {
     /// Falls back to the agent ref on a graph compiled before nodes carried a
     /// first-class id — the same honest fallback the blocked-node rows use.
     pub node_id: Option<String>,
+    /// The conversation **thread** this attempt belongs to, within `chat_id`.
+    ///
+    /// A channel holds many threads since #1890, and `chat_id` names only the
+    /// channel — so it cannot say which of them a running turn is in. Without
+    /// this the console has no way to tell, and gives up: it suppresses the
+    /// working indicator for the whole channel whenever any thread is open,
+    /// which hides a turn the host is actively running.
+    ///
+    /// The root is the event seq of the message that started the thread —
+    /// the operator message's own seq for a channel-level message, and the
+    /// parent it replied under for a threaded one. `None` for a card dispatch
+    /// and a workflow node, which belong to no conversation, and for a turn
+    /// whose root is the channel itself.
+    pub thread_root: Option<EventSeq>,
 }
 
 impl NewRun {
@@ -416,6 +439,7 @@ impl NewRun {
             chat_id: None,
             workflow_run_id: None,
             node_id: None,
+            thread_root: None,
         }
     }
 
@@ -432,7 +456,20 @@ impl NewRun {
             chat_id: Some(chat_id.into()),
             workflow_run_id: None,
             node_id: None,
+            thread_root: None,
         }
+    }
+
+    /// Names the thread this chat turn is in. See [`NewRun::thread_root`].
+    ///
+    /// Separate from [`for_chat`](Self::for_chat) rather than a fourth argument
+    /// to it: every existing call site means "the channel itself", which is what
+    /// `None` says, and a required argument would have made each of them assert
+    /// a root it had not actually resolved.
+    #[must_use]
+    pub fn in_thread(mut self, root: impl Into<Option<EventSeq>>) -> Self {
+        self.thread_root = root.into();
+        self
     }
 
     /// A run spawned by an `agent` node of a workflow run.
@@ -454,6 +491,7 @@ impl NewRun {
             chat_id: None,
             workflow_run_id: Some(workflow_run_id.into()),
             node_id: Some(node_id.into()),
+            thread_root: None,
         }
     }
 }
@@ -1092,6 +1130,7 @@ mod test {
             attempt,
             status: RunStatus::Pending,
             trigger_event_seq: None,
+            thread_root: None,
             created_at_millis: created,
             started_at_millis: None,
             finished_at_millis: None,

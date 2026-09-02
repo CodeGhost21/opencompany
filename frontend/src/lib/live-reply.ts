@@ -247,7 +247,30 @@ export type OpenTurnRow = OpenTurn;
 export interface OpenRunRow {
   id: string;
   chatId?: string;
+  /** The thread within `chatId`, when the host resolved one. */
+  threadRoot?: number;
   status: string;
+}
+
+/**
+ * The key the shell's live-turn maps — open turns, live steps, receipts — are
+ * held under.
+ *
+ * The **thread**, not the channel. All three used to key on the chat id, which
+ * names only the channel; a channel has held many threads since #1890, so two
+ * concurrent turns in one channel shared a slot. The visible cost was not a
+ * mixed-up list but a silent one: unable to tell whose turn was running,
+ * `ChatView` suppressed the working indicator for the whole channel whenever
+ * any thread was open, and a turn the host was actively running showed nowhere
+ * at all.
+ *
+ * Falls back to the chat id when the host resolved no root — a card dispatch, a
+ * workflow node, or a row written before the host carried it. That is also
+ * exactly the identity the maps had before, so an un-upgraded host keeps the
+ * previous behaviour rather than losing its indicator.
+ */
+export function turnStateKey(chatId: string, threadRoot?: number): string {
+  return threadRoot === undefined ? chatId : `${chatId}#${threadRoot}`;
 }
 
 /**
@@ -280,9 +303,10 @@ export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, O
     if (!run.chatId || seen.has(run.id)) continue;
     seen.add(run.id);
     const queued = run.status === "pending";
-    const list = byThread.get(run.chatId);
+    const key = turnStateKey(run.chatId, run.threadRoot);
+    const list = byThread.get(key);
     if (list) list.push({ turnId: run.id, queued });
-    else byThread.set(run.chatId, [{ turnId: run.id, queued }]);
+    else byThread.set(key, [{ turnId: run.id, queued }]);
   }
   const open: Record<string, OpenTurnRow[]> = {};
   for (const [chatId, rows] of byThread) {

@@ -12,6 +12,7 @@ import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { MessageAttachments } from "./MessageAttachments";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, formatTime, senderOf, type Channel } from "./model";
 import { type Mention, type Mentionable } from "./mentions";
 
@@ -132,6 +133,16 @@ interface Props {
    * this component filtered by it or rendered a line for it.
    */
   typingNames?: string[];
+  /**
+   * A turn open in **this thread**, when one is (issue #1934's other half).
+   *
+   * The panel used to carry no live-turn state at all, and the channel behind
+   * it blanked its own the moment a thread opened — so a turn running in the
+   * thread you were reading was visible nowhere. It could only be wired once
+   * the shell keyed its open turns per thread rather than per channel; before
+   * that there was no way to ask "is *this* thread working".
+   */
+  openTurn?: { queued: boolean };
   /** This console is typing here. Distinct from the main composer's callback
    * so the ping this thread sends carries the thread's own `parentId`. */
   onTyping?: () => void;
@@ -188,6 +199,7 @@ export function ThreadPanel({
   reviewingTaskId,
   onClose,
   typingNames = [],
+  openTurn,
   onTyping,
   cognition,
   onRedeemBudgetPause,
@@ -266,6 +278,14 @@ export function ThreadPanel({
         </p>
       ) : (
         <>
+          {openTurn && (
+            <div className="px-4 py-2">
+              <WorkingIndicator
+                srLabel={openTurn.queued ? "Queued…" : "Replying…"}
+                queued={openTurn.queued}
+              />
+            </div>
+          )}
           <TypingLine names={typingNames} />
           {reviewing && (
             <div className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-1.5">
