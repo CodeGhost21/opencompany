@@ -22,7 +22,8 @@ describe("a card's origin row opens Room, not the legacy Conversation view", () 
   const shell = read("components/app-shell.tsx");
 
   it("routes the origin channel through the address", () => {
-    expect(shell).toContain('onOpenChannel={(channelId) => navigate("chat", channelId)}');
+    expect(shell).toContain("onOpenChannel={(channelId, threadId) =>");
+    expect(shell).toContain('navigate("chat", channelId, { thread: threadId ?? null })');
   });
 
   it("hands the detail route the map that places the origin thread", () => {

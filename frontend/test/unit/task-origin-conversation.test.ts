@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import { originConversation } from "@/lib/task-origin";
@@ -49,5 +53,42 @@ describe("where a card's origin conversation lives", () => {
       kind: "channel",
       channelId: "general",
     });
+  });
+
+  it("carries the origin thread's own id, when the card was raised inside one", () => {
+    expect(originConversation("t1", { t1: "desk-eng" }, 41)).toEqual({
+      kind: "channel",
+      channelId: "desk-eng",
+      threadId: "41",
+    });
+  });
+
+  it("carries no thread id for a card raised straight into the channel", () => {
+    expect(originConversation("t1", { t1: "desk-eng" })).toEqual({
+      kind: "channel",
+      channelId: "desk-eng",
+      threadId: undefined,
+    });
+  });
+});
+
+/**
+ * The resolved thread id has to actually ride the jump, not just come back
+ * from `originConversation` — pinned by source-text, the idiom
+ * `chat-general-channel.test.ts` already uses for wiring a full `AppShell` /
+ * `ChatView` render is too heavy to stand up.
+ */
+describe("the origin thread rides the card → Room jump, not just the channel", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const shell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
+  const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+
+  it("the shell carries the resolved thread id into the chat navigation's query", () => {
+    expect(shell).toContain('navigate("chat", channelId, { thread: threadId ?? null })');
+  });
+
+  it("Room reads the thread the query names and opens it", () => {
+    expect(chatView).toContain('params.get("thread")');
+    expect(chatView).toContain("setOpenThreadId(threadId)");
   });
 });
