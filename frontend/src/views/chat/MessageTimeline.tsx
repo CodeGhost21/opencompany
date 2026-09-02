@@ -434,15 +434,18 @@ export function MessageTimeline({
             />
           ),
         )}
-        {receipt && !queued ? (
+        {receipt ? (
           // The receipt for our own in-flight send (issue #1934) supersedes the
-          // typing dots and carries the live steps itself. A queued turn keeps
-          // its honest "Queued…" row instead — the receipt is a `!queued` state.
+          // typing dots and carries the live steps itself. It now rides a
+          // detached turn past its 202 into the queued/working window too (issue
+          // #2021), so `queued` words its base line and stills its pulse rather
+          // than dropping it back to the bare "Queued…"/step row.
           <ChatLiveReceipt
             channel={channel}
             receipt={receipt}
             agentNames={agentNames}
             steps={liveSteps ?? []}
+            queued={queued}
           />
         ) : liveStepCount > 0 && !queued ? (
           <LiveTurnRow channel={channel} steps={liveSteps ?? []} />

@@ -20,6 +20,8 @@ import type { ChatMessage } from "@/lib/chat";
 import type { OpenTurn } from "@/lib/live-reply";
 import type { ThreadContact } from "@/lib/threads";
 import { cn } from "@/lib/utils";
+import { ChatLiveReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
+import type { Channel } from "@/views/chat/model";
 import { lineOf, type ConversationLine } from "./model";
 import {
   AddToBoardAction,
@@ -45,6 +47,15 @@ interface Props {
   openTurn?: OpenTurn;
   /** The live in-flight tool timeline, built from transient SSE frames. */
   liveSteps?: TurnStep[];
+  /**
+   * The live receipt for a turn this view just sent (issue #1934), when one is
+   * armed. Present it in place of the bare typing/queued row so a detached turn
+   * keeps its elapsed / picked-up-by / 30s-stall affordances here too (issue
+   * #2021), the same way `ChatView` does.
+   */
+  receipt?: ChatReceipt;
+  /** Roster agent id → display name, so the receipt names the teammate, not an id. */
+  agentNames?: Record<string, string>;
   /** The in-flight steer strip, rendered between transcript and composer. */
   footer?: ReactNode;
   /**
@@ -56,6 +67,25 @@ interface Props {
   readOnly?: boolean;
 }
 
+/**
+ * The minimal {@link Channel} the receipt row needs, projected from this
+ * surface's {@link ThreadContact}. `ChatLiveReceipt` reads only the avatar
+ * fields (voice/name/tone) and the company-mark flag (`kind === "channel" &&
+ * id === "main"`); a company contact wears the company mark, an agent contact
+ * is a plain `dm` so it does not.
+ */
+function contactChannel(contact: ThreadContact): Channel {
+  const company = contact.kind === "company";
+  return {
+    id: company ? "main" : `contact:${contact.name}`,
+    name: contact.name,
+    voice: contact.name,
+    kind: company ? "channel" : "dm",
+    purpose: "",
+    tone: contact.tone,
+  };
+}
+
 export function Transcript({
   contact,
   onAddToBoard,
@@ -65,6 +95,8 @@ export function Transcript({
   sending,
   openTurn,
   liveSteps,
+  receipt,
+  agentNames,
   footer,
   readOnly,
 }: Props) {
@@ -108,15 +140,28 @@ export function Transcript({
             <EmptyConversation contact={contact} />
           </AuiIf>
           <ThreadPrimitive.Messages>{renderMessage}</ThreadPrimitive.Messages>
-          {working && (
-            <>
-              {/* Live tool timeline — the running/done rows stream in over SSE as
-                  the turn works, before the final reply lands (issue: tool calls
-                  weren't visible until the turn finished). */}
-              {liveSteps && liveSteps.length > 0 && <StepTimeline steps={liveSteps} />}
-              <TypingIndicator contact={contact} queued={openTurn?.queued} />
-            </>
-          )}
+          {working &&
+            (receipt ? (
+              // Our own in-flight send (issue #1934), ridden past the 202 into
+              // the queued/working window (issue #2021): the receipt carries its
+              // own step timeline, elapsed clock and 30s-stall notice, so it
+              // supersedes the bare typing/queued row rather than sitting beside it.
+              <ChatLiveReceipt
+                channel={contactChannel(contact)}
+                receipt={receipt}
+                agentNames={agentNames}
+                steps={liveSteps ?? []}
+                queued={openTurn?.queued}
+              />
+            ) : (
+              <>
+                {/* Live tool timeline — the running/done rows stream in over SSE
+                    as the turn works, before the final reply lands (issue: tool
+                    calls weren't visible until the turn finished). */}
+                {liveSteps && liveSteps.length > 0 && <StepTimeline steps={liveSteps} />}
+                <TypingIndicator contact={contact} queued={openTurn?.queued} />
+              </>
+            ))}
         </div>
         {/* Only drawn once the operator has scrolled away from the bottom, so
             a transcript being read from the top is not covered by a control

@@ -30,6 +30,7 @@ import { ContactAvatar } from "@/views/conversation/parts";
 import { ThreadList } from "@/views/conversation/ThreadList";
 import { Transcript } from "@/views/conversation/Transcript";
 import { useConversationRuntime } from "@/views/conversation/runtime";
+import type { ChatReceipt } from "@/views/chat/ChatLiveReceipt";
 
 interface Props {
   client: OpenCompanyClient;
@@ -61,6 +62,16 @@ interface Props {
    * typing indicator and cleared by the parent when the final reply lands.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
+  /**
+   * The live receipt per thread for a chat turn this console just sent (issue
+   * #1934), keyed by host thread id. Ridden past the 202 into the queued/working
+   * window (issue #2021), so this surface keeps the same elapsed / picked-up-by /
+   * 30s-stall affordances across the detach handoff that `ChatView` does, rather
+   * than dropping to the bare typing/queued row.
+   */
+  receiptByThread?: Record<string, ChatReceipt>;
+  /** Roster agent id → display name, so the receipt names the teammate, not an id. */
+  agentNames?: Record<string, string>;
   /**
    * Marks a thread's chat POST as in flight (parent suppresses the SSE echo).
    * Returns the generation the shell stamped this send's receipt with (issue
@@ -100,6 +111,8 @@ export function Conversation({
   onReply,
   taskEventTick,
   liveStepsByThread,
+  receiptByThread,
+  agentNames,
   onSendStart,
   onSendEnd,
   onSendDetached,
@@ -151,6 +164,8 @@ export function Conversation({
         onReply={onReply}
         taskEventTick={taskEventTick}
         liveSteps={liveStepsByThread?.[active.id] ?? []}
+        receipt={receiptByThread?.[active.id]}
+        agentNames={agentNames}
         onSendStart={onSendStart}
         onSendEnd={onSendEnd}
         onSendDetached={onSendDetached}
@@ -171,6 +186,8 @@ function ChatPane({
   onReply,
   taskEventTick,
   liveSteps,
+  receipt,
+  agentNames,
   onSendStart,
   onSendEnd,
   onSendDetached,
@@ -186,6 +203,8 @@ function ChatPane({
   onReply?: () => void;
   taskEventTick?: number;
   liveSteps?: TurnStep[];
+  receipt?: ChatReceipt;
+  agentNames?: Record<string, string>;
   onSendStart?: (threadId: string) => number | undefined;
   onSendEnd?: (threadId: string, gen?: number) => void;
   onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
@@ -243,6 +262,8 @@ function ChatPane({
           sending={sending}
           openTurn={openTurn}
           liveSteps={liveSteps}
+          receipt={receipt}
+          agentNames={agentNames}
           footer={
             <InflightStrip client={client} company={company} taskEventTick={taskEventTick} />
           }

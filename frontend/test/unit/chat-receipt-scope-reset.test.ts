@@ -81,13 +81,30 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     expect(appShell).toMatch(/if \(!shouldClearReceipt\(prev\[threadId\], gen\)\) return prev;/);
   });
 
-  it("every terminal send callback accepts and forwards a generation", () => {
+  it("every terminal send callback that clears the receipt accepts and forwards a generation", () => {
+    // The three callbacks that still clear the receipt keep the #1935 guard:
+    // they take the generation their own `onSendStart` returned and hand it to
+    // `clearReceipt`, so a stale cross-company clear is a no-op.
     expect(appShell).toMatch(/const onSendEnd = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
     expect(appShell).toMatch(/const onSendStale = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
-    expect(appShell).toMatch(
-      /const onSendDetached = useCallback\(\s*\n\s*\(threadId: string, turnId\?: string, gen\?: number\) =>/,
-    );
     expect(appShell).toMatch(/const onSendFailed = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
+  });
+
+  it("onSendDetached no longer clears the receipt — it rides the turn into the open-turn window (issue #2021)", () => {
+    // The 202 handoff used to `clearReceipt` and hand the turn to a bare
+    // open-turn row, dropping every #1934 affordance (elapsed, picked-up-by,
+    // 30s stall). It now keeps the receipt alive; the poll's terminal settle
+    // clears it (see `reReadSettledThread`). So the generation it once forwarded
+    // to `clearReceipt` is now unused — the param is present but underscored,
+    // and no `clearReceipt` call survives inside the callback body.
+    expect(appShell).toMatch(
+      /const onSendDetached = useCallback\(\s*\n\s*\(threadId: string, turnId\?: string, _gen\?: number\) =>/,
+    );
+    const start = appShell.indexOf("const onSendDetached = useCallback(");
+    expect(start, "onSendDetached must be present").toBeGreaterThan(-1);
+    const end = appShell.indexOf("[renderAgentReply],", start);
+    expect(end, "onSendDetached's dependency array").toBeGreaterThan(start);
+    expect(appShell.slice(start, end)).not.toContain("clearReceipt(");
   });
 
   it("onSendStart mints and returns a fresh generation per armed receipt", () => {
