@@ -45,6 +45,8 @@ mod gated_tool_call_test;
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #1866: one tool-less semantic sufficiency pass after deterministic checks.
+pub mod judge;
 /// Issue #978: a run that fans out to N gated nodes is cleared by approving,
 /// not multiplied by it — the composition of #395, #243 and #469 that each of
 /// their own suites is blind to.

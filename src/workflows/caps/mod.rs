@@ -164,6 +164,8 @@ pub struct RunContext<'a> {
     /// node's row `Error` and agree with the attempt, which already settles
     /// `Failed` for exactly this signal.
     pub capped: RunCappedNodes,
+    /// Where a semantic judge records an intentional no-work conclusion.
+    pub halted: RunHaltedNodes,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
     /// Files agent nodes wrote during this run, keyed by node for durable output.
@@ -240,6 +242,7 @@ pub async fn build_capabilities(
         board,
         blocks,
         capped,
+        halted,
         approvals,
         artifacts,
         runs,
@@ -439,6 +442,7 @@ pub async fn build_capabilities(
                 board_claim,
                 publish_refusal_claim,
             )
+            .with_halted(halted)
             .with_checkpoint_thread_id(checkpoint_thread_id)
             .with_workflow_fingerprint(workflow_fingerprint)
             .with_runs(runs, deep, attempts),
@@ -638,6 +642,8 @@ pub struct HarnessAgentRunner {
     /// Where this node records that its turn truncated at the
     /// `max_tool_iterations` cap (issue #1865).
     capped: RunCappedNodes,
+    /// Nodes the judge concluded were benignly unnecessary.
+    halted: RunHaltedNodes,
     /// Where this node records the approvals its turn parked (issue #880).
     approvals: RunApprovals,
     /// Run-scoped files captured after each node turn, including failed turns.
@@ -862,6 +868,49 @@ impl RunCappedNodes {
     }
 }
 
+/// Node ids whose semantic judge returned a benign halt.
+#[derive(Clone, Default)]
+pub struct RunHaltedNodes {
+    inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RunHaltedNodes {
+    pub fn push(&self, node_id: String) {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .push(node_id);
+    }
+
+    pub fn contains(&self, node_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .iter()
+            .any(|id| id == node_id)
+    }
+
+    /// Drops any earlier record of `node_id`.
+    ///
+    /// Codex review on #1990: when `retry.max_attempts > 1`, tinyflows re-runs
+    /// this node's whole turn on the same [`HarnessAgentRunner`] — the same
+    /// `self.halted` an earlier attempt may have already pushed into if that
+    /// attempt's judge answered `halt_benign`. Called at the start of every
+    /// fresh attempt for a node, so a later attempt that actually succeeds is
+    /// never shadowed by a stale benign-halt marker a prior, retried attempt
+    /// left behind.
+    pub fn retract(&self, node_id: &str) {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .retain(|id| id != node_id);
+    }
+
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.lock().expect("run halted-nodes poisoned"))
+    }
+}
+
 /// Which attempt each `agent` node ran as.
 ///
 /// The fourth channel in the [`RunNotices`] / [`RunBoard`] / [`RunBlocks`]
@@ -1030,6 +1079,7 @@ impl HarnessAgentRunner {
             board,
             blocks,
             capped,
+            halted: RunHaltedNodes::default(),
             approvals,
             artifacts,
             board_claim,
@@ -1094,6 +1144,12 @@ impl HarnessAgentRunner {
         self.runs = runs;
         self.deep = deep;
         self.attempts = attempts;
+        self
+    }
+
+    #[must_use]
+    pub fn with_halted(mut self, halted: RunHaltedNodes) -> Self {
+        self.halted = halted;
         self
     }
 
@@ -1524,7 +1580,25 @@ impl HarnessAgentRunner {
     /// retry succeed.
     async fn park_node_blocker(&self, resolved_node_id: &str, message: &str) -> Option<String> {
         let class = crate::harness::built_in::blockers::classify_blocker_message(message)?;
-        if !class.kind.parks() {
+        self.park_node_blocker_as(
+            resolved_node_id,
+            message,
+            class.kind,
+            class.source,
+            class.needed,
+        )
+        .await
+    }
+
+    async fn park_node_blocker_as(
+        &self,
+        resolved_node_id: &str,
+        message: &str,
+        kind: crate::ports::blockers::BlockerKind,
+        source: crate::ports::blockers::BlockerSource,
+        needed: &str,
+    ) -> Option<String> {
+        if !kind.parks() {
             return None;
         }
         let parking = self
@@ -1533,8 +1607,8 @@ impl HarnessAgentRunner {
             .as_ref()
             .and_then(|delivery| delivery.parking.as_ref())?;
         let payload = crate::ports::blockers::BlockerPayload {
-            kind: class.kind,
-            source: class.source,
+            kind,
+            source,
             // The one case an approval's own task link cannot express — see
             // `BlockerPayload::step`. #1864's node-level restart needs to know
             // which node inside which run stopped, and a workflow run has no
@@ -1546,7 +1620,7 @@ impl HarnessAgentRunner {
                 node_id: resolved_node_id.to_string(),
             }),
             reason: message.to_string(),
-            needed: class.needed.to_string(),
+            needed: needed.to_string(),
         };
         let effect = crate::ports::types::Effect {
             kind: payload.effect_kind(),
@@ -1577,7 +1651,7 @@ impl HarnessAgentRunner {
                     run_id = %self.run_id,
                     node = resolved_node_id,
                     approval_id = %approval_id,
-                    kind = class.kind.as_str(),
+                    kind = kind.as_str(),
                     "workflow agent node: parked a blocker for the operator instead of failing"
                 );
                 Some(approval_id.to_string())
@@ -2125,6 +2199,14 @@ impl HarnessAgentRunner {
         // `park_and_journal`; the runner arms the sibling stash that carries the
         // workflow id and trigger input the release needs.
         let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
+        // Codex review on #1990: a fresh attempt at this node — whether this is
+        // the node's first attempt ever, or `retry.max_attempts > 1` re-running
+        // it after an earlier attempt's judge answered `halt_benign` — must not
+        // inherit that earlier attempt's benign-halt marker. Left in place, a
+        // later attempt that genuinely succeeds would still have its row
+        // relabeled Declined by `reclassify_halted_nodes` reading the stale
+        // entry. Re-added below only if THIS attempt halts too.
+        self.halted.retract(&lineage_node);
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
         // The node runs in its roster agent's sandbox, not the workflow tool
@@ -2281,7 +2363,7 @@ impl HarnessAgentRunner {
         // button. Rewrite that one class into what is actually too big and what
         // to do about it, keeping the provider's words at the end. Every other
         // failure passes through exactly as before.
-        let outcome = match outcome {
+        let mut outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
                 let raw = e.to_string();
@@ -2448,7 +2530,7 @@ impl HarnessAgentRunner {
         // depending on what the agent happened to reply this run, for a node
         // that never asked for structured output at all.
         let postcondition_declared = request.get("postcondition").is_some();
-        let parsed_reply = if postcondition_declared {
+        let mut parsed_reply = if postcondition_declared {
             serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null)
         } else {
             Value::Null
@@ -2473,6 +2555,193 @@ impl HarnessAgentRunner {
                 .await;
                 return Err(EngineError::Capability(message));
             }
+        }
+
+        if outcome.budget_paused.is_none()
+            && outcome.halted_for_spend.is_none()
+            && let Some(verify) = request.get("verify")
+        {
+            let criteria = verify
+                .get("criteria")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty());
+            let verdict = crate::workflows::judge::judge_sufficiency(
+                &self.deps,
+                &self.company,
+                crate::workflows::judge::JudgeInput {
+                    instruction: &message,
+                    output: &outcome.reply,
+                    criteria,
+                    execution_failed: outcome.hit_iteration_cap || outcome.budget_paused.is_some(),
+                },
+            )
+            .await;
+            match verdict {
+                crate::workflows::judge::SufficiencyVerdict::Continue => {}
+                crate::workflows::judge::SufficiencyVerdict::Retry => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` did not produce a semantically sufficient output"
+                    );
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+                crate::workflows::judge::SufficiencyVerdict::Recover => {
+                    let question = criteria.unwrap_or(&instruction);
+                    let recovered =
+                        crate::workflows::judge::ask_around(&self.deps, &self.company, question)
+                            .await;
+                    let recovered_and_sufficient = match &recovered.evidence {
+                        Some(evidence) => {
+                            let verified = crate::workflows::judge::augment_with_recovery(
+                                &outcome.reply,
+                                evidence,
+                            );
+                            let reverdict = crate::workflows::judge::judge_sufficiency(
+                                &self.deps,
+                                &self.company,
+                                crate::workflows::judge::JudgeInput {
+                                    instruction: &message,
+                                    output: &verified,
+                                    criteria,
+                                    execution_failed: false,
+                                },
+                            )
+                            .await;
+                            (reverdict == crate::workflows::judge::SufficiencyVerdict::Continue)
+                                .then_some(verified)
+                        }
+                        None => None,
+                    };
+                    if let Some(verified) = recovered_and_sufficient {
+                        if let Some(spec) = request.get("postcondition") {
+                            let recovered_parsed = serde_json::from_str::<Value>(verified.trim())
+                                .unwrap_or(Value::Null);
+                            let envelope = json!({
+                                "text": &verified,
+                                "agent_ref": agent_ref,
+                                "json": recovered_parsed,
+                            });
+                            if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope)
+                            {
+                                let message = format!(
+                                    "workflow node `{}` recovered a reply that still fails its postcondition: {gap}",
+                                    node_id.as_deref().unwrap_or(agent_ref)
+                                );
+                                self.settle_attempt(
+                                    run_sink.as_ref(),
+                                    crate::ports::RunStatus::Failed,
+                                    Some(message.clone()),
+                                )
+                                .await;
+                                return Err(EngineError::Capability(message));
+                            }
+                        }
+                        outcome.reply = verified;
+                    } else {
+                        let message = format!(
+                            "workflow node `{lineage_node}` needs missing information; recovery tried {}",
+                            recovered.log
+                        );
+                        if let Some(approval_id) = self
+                            .park_node_blocker_as(
+                                &lineage_node,
+                                &message,
+                                crate::ports::blockers::BlockerKind::Information,
+                                crate::ports::blockers::BlockerSource::AgentQuestion,
+                                "Provide the missing information the workflow node needs.",
+                            )
+                            .await
+                        {
+                            self.blocks.push(crate::ports::WorkflowBlockedNode {
+                                node_id: lineage_node.clone(),
+                                tools: Vec::new(),
+                                approval_ids: vec![approval_id],
+                                unparkable: 0,
+                                stranded: 0,
+                            });
+                            self.settle_attempt(
+                                run_sink.as_ref(),
+                                crate::ports::RunStatus::Blocked,
+                                Some(message.clone()),
+                            )
+                            .await;
+                            return Err(EngineError::Capability(message));
+                        }
+                        self.settle_attempt(
+                            run_sink.as_ref(),
+                            crate::ports::RunStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        return Err(EngineError::Capability(message));
+                    }
+                }
+                crate::workflows::judge::SufficiencyVerdict::Escalate { gap } => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` needs {} intervention after semantic verification",
+                        gap.as_str()
+                    );
+                    if gap.parks()
+                        && let Some(approval_id) = self
+                            .park_node_blocker_as(
+                                &lineage_node,
+                                &message,
+                                gap,
+                                crate::ports::blockers::BlockerSource::AgentQuestion,
+                                "Resolve the gap identified by the workflow sufficiency judge.",
+                            )
+                            .await
+                    {
+                        self.blocks.push(crate::ports::WorkflowBlockedNode {
+                            node_id: lineage_node.clone(),
+                            tools: Vec::new(),
+                            approval_ids: vec![approval_id],
+                            unparkable: 0,
+                            stranded: 0,
+                        });
+                        self.settle_attempt(
+                            run_sink.as_ref(),
+                            crate::ports::RunStatus::Blocked,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        return Err(EngineError::Capability(message));
+                    }
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+                crate::workflows::judge::SufficiencyVerdict::HaltBenign => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` concluded that no further work was needed"
+                    );
+                    self.halted.push(lineage_node.clone());
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Declined,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+            }
+        }
+
+        // A recovering verify pass rewrites `outcome.reply`, so the parse the
+        // emitted value merges has to describe the reply this node actually
+        // ships.
+        if postcondition_declared {
+            parsed_reply =
+                serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null);
         }
 
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
@@ -2531,6 +2800,12 @@ impl HarnessAgentRunner {
                     "agent paused for lack of inference budget/credits: {}",
                     pause.summary
                 )),
+            )
+        } else if let Some(halt) = &outcome.halted_for_spend {
+            self.capped.push(lineage_node.clone());
+            (
+                crate::ports::RunStatus::Failed,
+                Some(crate::harness::built_in::brain::spend_halt_notice(halt)),
             )
         } else {
             (crate::ports::RunStatus::Succeeded, None)
@@ -2668,6 +2943,10 @@ impl AgentRunner for HarnessAgentRunner {
         } else if outcome.budget_paused.is_some() {
             StopReason::LimitStop {
                 limit: "budget_exhausted".to_string(),
+            }
+        } else if outcome.halted_for_spend.is_some() {
+            StopReason::LimitStop {
+                limit: "spend_halt".to_string(),
             }
         } else {
             StopReason::Finished
@@ -3458,6 +3737,910 @@ mod tests {
         );
     }
 
+    /// A turn double that reports truncation at the iteration cap, the same
+    /// shape as [`CappedWorkflowTurn`], for a node that also declares `verify`.
+    struct CappedVerifiedWorkflowTurn;
+
+    #[async_trait]
+    impl RunTurn for CappedVerifiedWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "partial answer, still going".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: true,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    /// Codex review on #1990 (issue #1866): a node whose turn truncated at the
+    /// iteration cap is still handed to the semantic judge when `verify` is
+    /// declared — and the judge is told `execution_failed: false` regardless,
+    /// so a judge that answers `halt_benign` for the truncated partial reply
+    /// was never caught by `enforce_anti_suppression`'s blank/failed guard.
+    /// Before the fix, a capped turn could be recorded as an intentional
+    /// benign stop instead of the truncated failure it actually is.
+    #[tokio::test]
+    async fn a_capped_turn_with_verify_is_never_recorded_as_a_benign_halt() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-capped-verify-")
+            .tempdir()
+            .expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedVerifiedWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990v"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990v"));
+        let halted = RunHaltedNodes::default();
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990v".to_string(),
+            "run-1990v".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_halted(halted.clone());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "loop_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "must finish the report" }
+                }),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a truncated turn must never be accepted as semantically sufficient"
+        );
+        assert!(
+            halted.take().is_empty(),
+            "a capped/truncated turn must never be recorded as an intentional benign halt, \
+             regardless of what the judge answers"
+        );
+    }
+
+    /// Codex review on #1990 (issue #1866): `RunHaltedNodes` is shared across
+    /// every attempt `HarnessAgentRunner` makes for a run, and tinyflows
+    /// re-runs a node's whole turn when `retry.max_attempts > 1`. This drives
+    /// the exact sequence: attempt 1's judge answers `halt_benign` (pushing the
+    /// node id), attempt 2 (the retry) succeeds outright. Without retracting
+    /// the stale entry, `reclassify_halted_nodes` would relabel attempt 2's
+    /// genuinely successful row `Declined` using a marker left over from the
+    /// attempt that failed.
+    #[tokio::test]
+    async fn a_later_successful_attempt_is_not_shadowed_by_an_earlier_benign_halt() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-retry-halt-")
+            .tempdir()
+            .expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990h"));
+        let halted = RunHaltedNodes::default();
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990h".to_string(),
+            "run-1990h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_halted(halted.clone());
+        let node = json!({
+            "node_id": "flaky",
+            "prompt": "go",
+            "verify": { "criteria": "must finish" }
+        });
+
+        let first = runner.run_turn("researcher", node.clone()).await;
+        assert!(
+            first.is_err(),
+            "attempt 1's halt_benign verdict must gate the node"
+        );
+        assert!(
+            halted.contains("flaky"),
+            "attempt 1 must record the benign halt while it is the node's only outcome"
+        );
+
+        let second = runner.run_turn("researcher", node).await;
+        assert!(
+            second.is_ok(),
+            "attempt 2's continue verdict must let the node through"
+        );
+        assert!(
+            !halted.contains("flaky"),
+            "attempt 2 succeeded outright; attempt 1's stale benign-halt marker must not survive \
+             to shadow it"
+        );
+    }
+
+    /// Codex review on #1990 (issue #1866): the agent's turn is composed from
+    /// the node's static instruction AND the operator's run-specific request
+    /// (`compose_turn_message`, issue #154) — but the judge was handed only the
+    /// static instruction. A reusable node's `verify.criteria` can only be
+    /// checked against what was actually asked this run; passing the judge the
+    /// pre-compose instruction meant it evaluated a different, narrower prompt
+    /// than the one the agent answered.
+    #[tokio::test]
+    async fn the_judge_sees_the_operators_run_request_not_just_the_static_instruction() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-run-request-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990r"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990r"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990r".to_string(),
+            "run-1990r".to_string(),
+            Some("check tuesday's numbers".to_string()),
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "reusable",
+                    "prompt": "Summarize the report.",
+                    "verify": { "criteria": "must call out tuesday's numbers specifically" }
+                }),
+            )
+            .await
+            .expect("a `continue` verdict must not gate the node");
+
+        let seen = script.seen.lock().expect("seen");
+        assert_eq!(
+            seen.len(),
+            1,
+            "only the judge calls the scripted model here"
+        );
+        let sent = seen[0].to_string();
+        assert!(
+            sent.contains("check tuesday's numbers"),
+            "the judge's prompt must carry the operator's run-specific request, not just the \
+             node's static instruction: {sent}"
+        );
+        assert!(
+            sent.contains("Request for this run:"),
+            "the judge's prompt must use the same composed shape the agent's own turn ran on: {sent}"
+        );
+    }
+
+    /// A turn double that always answers with a fixed refusal reply — a node
+    /// whose agent could not complete the ask, the shape a `recover` verdict is
+    /// meant to rescue.
+    struct RefusalWorkflowTurn;
+
+    #[async_trait]
+    impl RunTurn for RefusalWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "I cannot draft the email without the customer's name.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    /// A [`FactStore`] that always answers `list` with one fixed fact,
+    /// regardless of the query — standing in for a real match so `ask_around`
+    /// always has evidence to offer.
+    struct OneFactStore;
+
+    #[async_trait]
+    impl crate::ports::FactStore for OneFactStore {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            _query: Option<&str>,
+            _kind: Option<crate::ports::FactKind>,
+        ) -> crate::Result<Vec<crate::ports::FactRecord>> {
+            Ok(vec![crate::ports::FactRecord {
+                id: "f1".to_string(),
+                kind: crate::ports::FactKind::Fact,
+                title: "Company context".to_string(),
+                body: "irrelevant background, not the customer's name".to_string(),
+                source: "test".to_string(),
+                updated_at_millis: 0,
+            }])
+        }
+
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _fact: &crate::ports::FactRecord,
+        ) -> crate::Result<()> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    /// Codex review on #1990 (issue #1866, #3903874673): found evidence is not
+    /// itself proof the gap closed. Before the fix, ANY evidence — however
+    /// unrelated — was appended to a refusal's own reply and the node settled
+    /// `Succeeded` without ever re-checking whether the augmented text now
+    /// actually answers the ask. Here the "recovered" fact is deliberately
+    /// irrelevant to the missing customer name, so a correct re-verify must
+    /// still refuse to accept the node.
+    #[tokio::test]
+    async fn recovered_evidence_that_does_not_close_the_gap_is_not_accepted() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-reverify-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RefusalWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990g".to_string(),
+            "run-1990g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "irrelevant recovered evidence must not turn a refusal into a success"
+        );
+        let seen = script.seen.lock().expect("seen");
+        assert_eq!(
+            seen.len(),
+            2,
+            "the judge must be asked again about the augmented output, not just once up front"
+        );
+        let reverify_prompt = seen[1].to_string();
+        assert!(
+            reverify_prompt.contains("Recovered company context"),
+            "the second judge call must see the augmented output, not the original refusal alone: \
+             {reverify_prompt}"
+        );
+    }
+
+    /// The text a node ships after a successful recovery must be the exact
+    /// text the re-verification judge was shown. `augment_with_recovery`
+    /// bounds the reply so the evidence survives the judge's output window;
+    /// a separately composed, unbounded string would let an oversized reply
+    /// ship content the judge never read.
+    #[tokio::test]
+    async fn a_recovered_reply_ships_the_exact_text_the_judge_certified() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-certified-text-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let oversized = "R".repeat(25_000);
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: oversized.clone(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990h"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990h".to_string(),
+            "run-1990h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (_value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await
+            .expect("a `continue` re-verdict accepts the recovered reply");
+
+        let judged = script.seen.lock().expect("seen")[1].to_string();
+        let escaped = serde_json::to_string(&outcome.reply).expect("reply serializes");
+        assert!(
+            judged.contains(escaped.trim_matches('"')),
+            "the reply stored on the outcome must be the same text the re-verification judge \
+             read, but the judge never saw it ({} stored chars)",
+            outcome.reply.chars().count()
+        );
+        assert!(
+            outcome.reply.chars().count() < oversized.chars().count(),
+            "the fixture must be large enough that recovery augmentation has to bound it, \
+             otherwise this test cannot observe the divergence"
+        );
+    }
+
+    /// A node declaring both a postcondition and a verify criteria emits one
+    /// output with two views of it: `value["text"]` and the JSON fields
+    /// merged into `value`. Recovery rewrites the reply, so both views must
+    /// describe the rewritten reply — a merge carrying the pre-recovery parse
+    /// would let a downstream `=item.json.<field>` binding read fields that
+    /// the shipped text no longer backs.
+    #[tokio::test]
+    async fn a_recovered_reply_does_not_emit_its_pre_recovery_json_parse() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-stale-parse-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"draft\": \"no customer name yet\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990i"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990i"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990i".to_string(),
+            "run-1990i".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, _outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "postcondition": { "require": "non_empty" },
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await
+            .expect("a `continue` re-verdict accepts the recovered reply");
+
+        assert!(
+            value["text"]
+                .as_str()
+                .expect("text is a string")
+                .contains("Recovered company context"),
+            "the emitted text must be the recovered reply: {}",
+            value["text"]
+        );
+        assert!(
+            value.get("draft").is_none(),
+            "the pre-recovery parse must not ship alongside a reply that no longer carries it: \
+             {value}"
+        );
+    }
+
+    /// `augment_with_recovery` always appends a `Recovered company context:`
+    /// prose block to the reply, so a reply that satisfied a declared
+    /// `field_present` postcondition before recovery (its JSON parsed and
+    /// carried the field) stops satisfying it after (the augmented text no
+    /// longer parses as JSON at all). A node must not settle `Succeeded`
+    /// carrying an output that no longer satisfies the postcondition its own
+    /// gate certified — the recovered reply is re-checked against the same
+    /// postcondition, and a node whose recovery breaks it fails instead of
+    /// silently shipping the field as absent.
+    #[tokio::test]
+    async fn a_recovered_reply_that_fails_its_postcondition_does_not_settle_succeeded() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"draft\": \"no customer name yet\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990j"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990j"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990j".to_string(),
+            "run-1990j".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "postcondition": { "require": "field_present", "field": "json.draft" },
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a recovered reply that no longer satisfies its declared postcondition must not \
+             settle Succeeded"
+        );
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1990j".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        let statuses: Vec<_> = attempts.iter().map(|a| a.status).collect();
+        assert_eq!(
+            statuses,
+            vec![crate::ports::RunStatus::Failed],
+            "the recovered-but-noncompliant node must settle Failed, not Succeeded: {statuses:?}"
+        );
+    }
+
+    /// A provider that always returns the `recover` verdict, driving the
+    /// judge's recovery-then-park branch.
+    #[derive(Default)]
+    struct RecoverJudgeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for RecoverJudgeProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(tinyagents::harness::model::ModelResponse::assistant(
+                "{\"verdict\":\"recover\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for RecoverJudgeProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "recover-judge".to_string()
+        }
+    }
+
+    /// tinysweeper on #1990 (#3905096415) read the recover branch as settling
+    /// `Blocked` and then having an outer handler overwrite it with `Failed`.
+    /// `run_turn` has no such handler — every settle is followed by an
+    /// immediate `return Err`, and the trailing settle is the fall-through
+    /// success path — so the parked row stays `Blocked`. Pinned here so a
+    /// future outer error handler cannot silently introduce the overwrite.
+    #[tokio::test]
+    async fn a_recovery_park_leaves_the_attempt_row_blocked() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-park-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        deps.provider = Arc::new(RecoverJudgeProvider::default());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "I cannot draft this without the customer's renewal date".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-recover"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-recover"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-recover".to_string(),
+            "run-recover".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft_step",
+                    "prompt": "draft the renewal email",
+                    "verify": { "criteria": "the email must name the renewal date" },
+                }),
+            )
+            .await;
+        assert!(result.is_err(), "a parked node halts its branch");
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-recover".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        let statuses: Vec<_> = attempts.iter().map(|a| a.status).collect();
+        assert_eq!(
+            statuses,
+            vec![crate::ports::RunStatus::Blocked],
+            "the parked node must be recorded Blocked, not overwritten with Failed"
+        );
+    }
+
+    /// A provider that counts every `invoke` and always escalates, so a judge
+    /// call is both detectable and destructive to the caller's diagnosis.
+    #[derive(Default)]
+    struct EscalatingJudgeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for EscalatingJudgeProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(tinyagents::harness::model::ModelResponse::assistant(
+                "{\"verdict\":\"escalate\",\"gap\":\"information\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for EscalatingJudgeProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "escalating-judge".to_string()
+        }
+    }
+
+    /// Codex review on #1990 (#3905537805): a turn refused by its per-agent
+    /// spend cap is rejected by the `LimitStop` path regardless, so paying for
+    /// a judge on the pause notice buys nothing — and an `escalate` verdict
+    /// returns early with a generic blocker, replacing the budget-pause
+    /// diagnosis the operator needs with "needs information intervention".
+    #[tokio::test]
+    async fn a_budget_paused_turn_skips_the_sufficiency_judge() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-budget-paused-judge-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = Arc::new(EscalatingJudgeProvider::default());
+        deps.provider = provider.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "paused — out of budget".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: "researcher".to_string(),
+                summary: "acme is out of inference credits".to_string(),
+            }),
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990".to_string(),
+            "run-1990".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "spend_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "the report must be sent" },
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a budget-paused turn must not pay for a sufficiency judge"
+        );
+        let (_, outcome) = result.expect(
+            "the budget-pause diagnosis must survive: the judge must not turn this into a \
+             generic information blocker",
+        );
+        assert!(outcome.budget_paused.is_some());
+    }
+
     /// PR #1883 review (Codex #3874941288): the sibling of
     /// `a_capped_turn_settles_failed_and_feeds_run_capped_nodes` for the OTHER
     /// signal that settles this attempt row `Failed` — `outcome.budget_paused`.
@@ -3547,6 +4730,102 @@ mod tests {
             Some(
                 "agent paused for lack of inference budget/credits: acme is out of inference credits"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spend_halted_turn_skips_the_judge_and_settles_failed() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-spend-halted-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = Arc::new(EscalatingJudgeProvider::default());
+        deps.provider = provider.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "here is what I found so far".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: "researcher".to_string(),
+                spent_usd: 5.25,
+                cap_usd: 5.0,
+            }),
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990-spend"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1990-spend"),
+        );
+        let capped = RunCappedNodes::default();
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990-spend".to_string(),
+            "run-1990-spend".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            capped.clone(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "spend_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "the report must be sent" },
+                }),
+            )
+            .await
+            .expect("a spend-halted turn is still Ok — the reply is a real, partial checkpoint");
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a spend-halted turn must not pay for a sufficiency judge"
+        );
+        assert!(outcome.halted_for_spend.is_some());
+
+        assert_eq!(
+            capped.take(),
+            vec!["spend_step".to_string()],
+            "the spend-halted node's id must reach the channel the runner reconciles against"
+        );
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1990-spend".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+        assert!(
+            attempts[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("spend cap partway through")),
+            "the spend-halt diagnosis must survive to the attempt row, got {:?}",
+            attempts[0].error
         );
     }
 
@@ -4427,6 +5706,7 @@ mod tests {
                     require: "field_present".to_string(),
                     field: Some("=item.missing".to_string()),
                 }),
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -5954,6 +7234,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6010,6 +7291,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6183,6 +7465,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6246,6 +7529,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,

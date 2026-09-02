@@ -1489,6 +1489,10 @@ type WorkflowNode {
 	single words, so no camelCase mirror is needed.
 	"""
 	postcondition: JSON
+	"""
+	Optional semantic sufficiency policy, exposed as JSON like postcondition.
+	"""
+	verify: JSON
 }
 
 """

@@ -301,6 +301,7 @@ pub fn sample_kind_slug(kind: SampleKind) -> &'static str {
         SampleKind::OauthCall => "oauth-call",
         SampleKind::SearchCall => "search-call",
         SampleKind::PlanningCall => "planning-call",
+        SampleKind::JudgeCall => "judge-call",
         SampleKind::TriageCall => "triage-call",
         SampleKind::SetupCall => "setup-call",
         SampleKind::AuthoringCall => "authoring-call",

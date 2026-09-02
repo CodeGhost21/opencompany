@@ -413,6 +413,7 @@ async fn run_workflow_inner(
     // `Failed` for this, and the run-level row must be told to agree before the
     // capability bundle (and the fact it is carrying) drops.
     let capped = super::caps::RunCappedNodes::default();
+    let halted = super::caps::RunHaltedNodes::default();
     let approvals = super::caps::RunApprovals::default();
     // Card-less files written by agent nodes. Kept outside the capability
     // bundle so a failed/blocked engine future cannot drop the capture before
@@ -456,6 +457,7 @@ async fn run_workflow_inner(
             board: board.clone(),
             blocks: blocks.clone(),
             capped: capped.clone(),
+            halted: halted.clone(),
             approvals: approvals.clone(),
             artifacts: run_artifacts.clone(),
             // A dry run records nothing: it makes no effects, so an attempt row
@@ -527,6 +529,7 @@ async fn run_workflow_inner(
         // below so the durable event records the same status the settle-time
         // `reclassify_capped_nodes` will put on the in-memory row.
         let collector_capped = capped.clone();
+        let collector_halted = halted.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
             // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
@@ -589,7 +592,9 @@ async fn run_workflow_inner(
                         // `Finished` — so the durable event can simply be right
                         // the first time instead of being corrected by every
                         // reader forever.
-                        let journaled_status = if collector_capped.contains(&node_id) {
+                        let journaled_status = if collector_halted.contains(&node_id) {
+                            crate::ports::WorkflowNodeStatus::Declined
+                        } else if collector_capped.contains(&node_id) {
                             crate::ports::WorkflowNodeStatus::Error
                         } else {
                             status
@@ -875,7 +880,7 @@ async fn run_workflow_inner(
     // grace window and its future was dropped, so there is no outcome to read —
     // `cancelled_run()` reports the stop with an empty body, and the trail is the
     // journal, not this return.
-    let outcome = match outcome_opt {
+    let mut outcome = match outcome_opt {
         Some(Ok(mut outcome)) => {
             // The checkpointed-initial-run race (issue #1991 review): the
             // token above never reached the engine, so a finish inside the
@@ -900,6 +905,7 @@ async fn run_workflow_inner(
         // reports the error, and the block survives on the approval receipts.
         Some(Err(err)) => {
             let blocked = blocks.take();
+            let halted_nodes = halted.take();
             // Issue #1008: the engine returns no `outcome.output` on this arm, so
             // the run's per-node output lives ONLY in the map the progress
             // observer accumulated. Persist that, flagged `partial`, on BOTH the
@@ -910,14 +916,13 @@ async fn run_workflow_inner(
                 merge_transcripts(&Value::Object(partial_nodes), &node_transcripts),
                 &captured_artifacts,
             );
-            // `only_blocked_nodes_errored` reads `nodes[].status == Error` to
+            // `only_expected_nodes_errored` reads `nodes[].status == Error` to
             // decide whether every errored row belongs to a blocked node, so it
             // MUST run before the capped-node reclassification below: a capped
             // node's row is still `Ok` at this point, and reclassifying first
             // would add its fresh `Error` row to this check and misread an
             // otherwise-clean block as a genuine failure.
-            let is_genuine_failure =
-                blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked);
+            let is_genuine_failure = !only_expected_nodes_errored(&nodes, &blocked, &halted_nodes);
             // Issue #1865 (PR #1883 review): the sibling reclassification the
             // clean-finish arm applies near the bottom of this function, reached
             // here too — both branches below are early returns that used to skip
@@ -929,6 +934,23 @@ async fn run_workflow_inner(
             // unit tests around `reclassify_capped_nodes` already covered.
             let mut nodes = nodes;
             reclassify_capped_nodes(&mut nodes, &capped.take());
+            reclassify_halted_nodes(&mut nodes, &halted_nodes);
+            // Codex review on #1990 (#3904894275): scrubbed and noticed here,
+            // before branching on `is_genuine_failure`, not only in the
+            // halt-only/halt-plus-block exits below. A halted sibling that
+            // shares this run with a genuinely failed node still gets its row
+            // reclassified `Declined` two lines up, but until this moved up
+            // here the `partial_output` this arm persists and returns kept
+            // the halted node's rejected reply verbatim — the failed run's
+            // snapshot presented that reply as produced output with no
+            // `Declined` explanation, unlike every other exit from this
+            // function.
+            let partial_output = without_node_ids(partial_output, &halted_nodes);
+            for node_id in &halted_nodes {
+                notices.push(format!(
+                    "The step \"{node_id}\" concluded that no further work was needed."
+                ));
+            }
             if is_genuine_failure {
                 // No continuation ever reuses a genuinely-failed run's thread
                 // id — only an approval or blocked-node resume does, and
@@ -982,6 +1004,31 @@ async fn run_workflow_inner(
                         blocked_nodes: blocked,
                         approvals: approvals.take(),
                     }),
+                });
+            }
+            if blocked.is_empty() {
+                if !persist_run_output(
+                    run_output_store.as_deref(),
+                    &record.id,
+                    &workflow.id,
+                    &run_id,
+                    &partial_output,
+                    true,
+                )
+                .await
+                {
+                    notices.push(run_output_persist_failed_notice());
+                }
+                return Ok(WorkflowRun {
+                    output: serde_json::json!({ "nodes": partial_output }),
+                    pending_approvals: Vec::new(),
+                    deliveries: Vec::new(),
+                    cancelled: false,
+                    nodes,
+                    notices: notices.take(),
+                    board: board.take(),
+                    blocked_nodes: Vec::new(),
+                    approvals: approvals.take(),
                 });
             }
             tracing::info!(
@@ -1064,6 +1111,17 @@ async fn run_workflow_inner(
             ));
         }
     };
+
+    let halted_nodes = halted.take();
+    reclassify_halted_nodes(&mut nodes, &halted_nodes);
+    if let Some(raw_nodes) = outcome.output.get_mut("nodes") {
+        *raw_nodes = without_node_ids(std::mem::take(raw_nodes), &halted_nodes);
+    }
+    for node_id in &halted_nodes {
+        notices.push(format!(
+            "The step \"{node_id}\" concluded that no further work was needed."
+        ));
+    }
 
     // Issue #398: the **clean** node-boundary cancel. The engine observed the
     // flipped token and wound down at a boundary, so unlike the hard-abort arm
@@ -1436,6 +1494,7 @@ async fn prune_checkpoint_lineage(
 /// would satisfy the check by default and get relabelled as a plain block,
 /// dropping the real failure exactly as the doc comment above says this guard
 /// exists to prevent.
+#[cfg(test)]
 fn only_blocked_nodes_errored(
     nodes: &[crate::ports::WorkflowRunNodeRow],
     blocked: &[crate::ports::WorkflowBlockedNode],
@@ -1445,6 +1504,22 @@ fn only_blocked_nodes_errored(
         .filter(|row| row.status == WorkflowNodeStatus::Error)
         .peekable();
     errored.peek().is_some() && errored.all(|row| blocked.iter().any(|b| b.node_id == row.node_id))
+}
+
+fn only_expected_nodes_errored(
+    nodes: &[crate::ports::WorkflowRunNodeRow],
+    blocked: &[crate::ports::WorkflowBlockedNode],
+    halted: &[String],
+) -> bool {
+    let mut errored = nodes
+        .iter()
+        .filter(|row| row.status == WorkflowNodeStatus::Error)
+        .peekable();
+    errored.peek().is_some()
+        && errored.all(|row| {
+            blocked.iter().any(|b| b.node_id == row.node_id)
+                || halted.iter().any(|id| id == &row.node_id)
+        })
 }
 
 /// Reclassifies a blocked node's row and lists it as something the run is
@@ -1513,10 +1588,29 @@ fn reclassify_capped_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], cappe
         // function's own doc): a node waiting on a person is the more
         // specific fact, and a future caller that somehow did name one in
         // both must not have this flip hide the approval behind a plain
-        // failure — the same direction `only_blocked_nodes_errored`'s guard
+        // failure — the same direction `only_expected_nodes_errored`'s guard
         // already leans in.
-        if row.status != WorkflowNodeStatus::Blocked && capped.iter().any(|id| id == &row.node_id) {
+        //
+        // Coderabbit review on #1990: `Declined` joins that exemption for the
+        // same reason. When `retry.max_attempts > 1`, a node whose judge
+        // halted it benignly can be retried, and if that retry then hits the
+        // iteration cap, `RunCappedNodes` names the same node id
+        // `reclassify_halted_nodes` already settled `Declined` — a correct,
+        // more specific fact that a plain `Error` must not overwrite.
+        if row.status != WorkflowNodeStatus::Blocked
+            && row.status != WorkflowNodeStatus::Declined
+            && capped.iter().any(|id| id == &row.node_id)
+        {
             row.status = WorkflowNodeStatus::Error;
+        }
+    }
+}
+
+/// Relabels the engine's capability-error row as an intentional benign stop.
+fn reclassify_halted_nodes(nodes: &mut [crate::ports::WorkflowRunNodeRow], halted: &[String]) {
+    for row in nodes.iter_mut() {
+        if halted.iter().any(|id| id == &row.node_id) {
+            row.status = WorkflowNodeStatus::Declined;
         }
     }
 }
@@ -1613,6 +1707,15 @@ fn without_nodes(mut output: Value, blocked: &[crate::ports::WorkflowBlockedNode
     if let Value::Object(nodes) = &mut output {
         for b in blocked {
             nodes.remove(&b.node_id);
+        }
+    }
+    output
+}
+
+fn without_node_ids(mut output: Value, ids: &[String]) -> Value {
+    if let Value::Object(nodes) = &mut output {
+        for id in ids {
+            nodes.remove(id);
         }
     }
     output
@@ -2656,6 +2759,49 @@ mod tests {
         );
     }
 
+    /// Coderabbit review on #1990: when `retry.max_attempts > 1`, tinyflows can
+    /// retry a node after its judge answered `halt_benign` on an earlier
+    /// attempt. If that retry itself hits the iteration cap, `RunCappedNodes`
+    /// picks up the same node id `reclassify_halted_nodes` already relabelled
+    /// `Declined` — and without this guard, `Blocked` was the only status this
+    /// function refused to override, so it would flip a correct benign-stop row
+    /// to `Error` and raise a false failure notice for a node that already
+    /// settled its more specific, correct fact.
+    #[test]
+    fn reclassify_capped_nodes_never_overrides_an_already_declined_row() {
+        let mut nodes = vec![node_row("verify", WorkflowNodeStatus::Declined)];
+        reclassify_capped_nodes(&mut nodes, &["verify".to_string()]);
+        assert_eq!(
+            nodes[0].status,
+            WorkflowNodeStatus::Declined,
+            "a benign-halt row must never be relabelled Error"
+        );
+    }
+
+    #[test]
+    fn reclassify_halted_nodes_marks_only_the_benign_stop_declined() {
+        let mut nodes = vec![
+            node_row("prepare", WorkflowNodeStatus::Ok),
+            node_row("verify", WorkflowNodeStatus::Error),
+        ];
+        reclassify_halted_nodes(&mut nodes, &["verify".to_string()]);
+        assert_eq!(nodes[0].status, WorkflowNodeStatus::Ok);
+        assert_eq!(nodes[1].status, WorkflowNodeStatus::Declined);
+    }
+
+    #[test]
+    fn a_halt_does_not_hide_an_unrelated_failure() {
+        let nodes = vec![
+            node_row("optional", WorkflowNodeStatus::Error),
+            node_row("broken", WorkflowNodeStatus::Error),
+        ];
+        assert!(!only_expected_nodes_errored(
+            &nodes,
+            &[],
+            &["optional".to_string()]
+        ));
+    }
+
     /// A workflow lane that records which agent it served. Its reply names the
     /// lane so the run output proves the same routing decision as the call log.
     struct RecordingLane {
@@ -3118,6 +3264,157 @@ to = "done"
     #[tokio::test]
     async fn a_capped_node_is_reclassified_even_when_a_later_node_blocks_the_run() {
         assert_capped_sibling_reclassified_before_early_return(true).await;
+    }
+
+    /// A turn double for `start -> ok_branch (-> done)`, in parallel with a
+    /// `bad_branch` tool_call that fails on its own (unknown slug, no model
+    /// call involved). `ok_branch`'s turn always reports a real, non-empty
+    /// reply; the scripted judge behind `deps.provider` is what answers
+    /// `halt_benign` for it.
+    struct HaltOkTurn;
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for HaltOkTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "The requested report was already delivered last week.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    fn halt_plus_fail_graph() -> WorkflowFile {
+        parse_workflow(
+            r#"
+id = "halt_plus_fail"
+name = "Halt plus fail"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "ok_branch"
+kind = "agent"
+name = "Ok branch"
+summary = "Check whether the report is already done."
+agent = "ok_agent"
+[node.verify]
+criteria = "The report must be delivered."
+[[node]]
+id = "bad_branch"
+kind = "tool_call"
+name = "Bad branch"
+[node.config]
+slug = "bogus_tool"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "ok_branch"
+[[edge]]
+from = "start"
+to = "bad_branch"
+[[edge]]
+from = "ok_branch"
+to = "done"
+[[edge]]
+from = "bad_branch"
+to = "done"
+"#,
+        )
+        .expect("halt-plus-fail graph parses")
+    }
+
+    /// Codex review on #1990 (#3904894275): when parallel branches contain
+    /// both a benign halt and a genuine node failure, the `is_genuine_failure`
+    /// early return must scrub the halted node's output and raise its notice
+    /// exactly like the halt-only and halt-plus-block exits reached lower in
+    /// the same function — before this fix it reclassified the halted row but
+    /// persisted and returned the ORIGINAL `partial_output`, so the failed
+    /// run's snapshot presented `ok_branch`'s rejected reply as produced
+    /// output with no `Declined` explanation.
+    #[tokio::test]
+    async fn a_genuine_failure_scrubs_a_benign_halt_sibling_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(HaltOkTurn);
+        let ctx = WorkflowRunContext::new(false);
+
+        let result = run_workflow_lane_aware(
+            turn,
+            deps,
+            &record,
+            &halt_plus_fail_graph(),
+            serde_json::json!({ "request": "go" }),
+            &ctx,
+        )
+        .await;
+
+        let err = result.expect_err("a genuine sibling failure must fail the run");
+        let partial = err
+            .partial_run()
+            .expect("a genuine failure carries the partial run");
+
+        assert!(
+            partial
+                .notices
+                .iter()
+                .any(|n| n.contains("ok_branch") && n.contains("no further work was needed")),
+            "the halted sibling's benign-stop notice must be raised even when a real \
+             failure ends the run: {:?}",
+            partial.notices
+        );
+        let nodes = partial
+            .output
+            .as_object()
+            .expect("partial output is a node-keyed object");
+        assert!(
+            !nodes.contains_key("ok_branch"),
+            "the halted sibling's rejected reply must be scrubbed from the persisted \
+             snapshot, exactly like the halt-only and halt-plus-block exits: {:?}",
+            partial.output
+        );
     }
 
     /// A turn double for `start -> capped_work -> gated_work -> done`:
@@ -4687,6 +4984,7 @@ to = "done"
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };

@@ -393,6 +393,35 @@ stays the plain `{text, agent_ref}` shape it always had, regardless of what
 the agent happens to reply, so this feature changes nothing for a workflow
 that never opted into it.
 
+## Semantic sufficiency verification is opt-in
+
+An agent node may add a `verify` table after its deterministic `postcondition`:
+
+```toml
+[node.verify]
+criteria = "The recommendation names one choice and cites the evidence used."
+```
+
+Presence enables one tool-less judge call after the deterministic postcondition
+passes. `criteria` is optional; without it, the node instruction is the standard.
+Each call has a hard timeout, no retry, and its usage remains metered even when
+the answer is malformed and discarded. A `recover` verdict (below) spends a
+second, bounded judge call to re-verify the augmented reply, so a single node
+can meter up to two calls in one turn.
+
+The judge returns one closed verdict. `continue` advances normally; `retry`
+fails through the node's ordinary retry/error policy; `recover` searches at
+most three bounded rungs (company facts, workspace context, then one peer);
+`escalate` uses the existing information/infrastructure/transient blocker
+taxonomy; and `halt_benign` settles the attempt and node as `Declined`, meaning
+the work was intentionally unnecessary rather than failed. A failed, blank, or
+otherwise insufficient output is never allowed to become `halt_benign`.
+
+The peer rung depends on #1859's board-read capability. Until that capability is
+present it is recorded as skipped; the judge does not broadcast to the roster,
+and an exhausted recovery ladder escalates the missing information instead.
+Workflows without `verify` take the legacy path and spend no judge call.
+
 ## The engine-only kinds OpenCompany rejects
 
 The engine catalog carries four kinds the parser does **not** accept:

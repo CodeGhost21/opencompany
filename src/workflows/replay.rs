@@ -741,6 +741,7 @@ mod tests {
                     repeatable: *repeatable,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 })
                 .collect(),
             edges: Vec::<WorkflowEdgeDef>::new(),

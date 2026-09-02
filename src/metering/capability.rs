@@ -286,6 +286,7 @@ pub fn tokens_in(samples: &[UsageSample]) -> u64 {
                 s.kind,
                 SampleKind::Inference
                     | SampleKind::PlanningCall
+                    | SampleKind::JudgeCall
                     | SampleKind::TriageCall
                     | SampleKind::SelectorCall
                     | SampleKind::SetupCall

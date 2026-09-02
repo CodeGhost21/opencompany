@@ -1374,6 +1374,11 @@ function RunNodeChip({
             border: "border-status-blocked/50 bg-status-blocked-soft",
             dot: "bg-status-blocked",
           }
+        : node.status === "declined"
+          ? {
+              border: "border-status-idle/50 bg-status-idle-soft",
+              dot: "bg-status-idle",
+            }
         : {
             border: "border-status-failed/50 bg-status-failed-soft",
             dot: "bg-status-failed",

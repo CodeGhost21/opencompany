@@ -4886,6 +4886,14 @@ fn summarize_run(
     let mut md = format!("Ran workflow **{}** (`{}`).\n\n", file.name.trim(), file.id);
     md.push_str("## Per-node outcome\n");
     let nodes = run.output.get("nodes").and_then(Value::as_object);
+    // A declined node is scrubbed from `output`, so without this it is
+    // indistinguishable from one the run never reached.
+    let declined: Vec<&str> = run
+        .nodes
+        .iter()
+        .filter(|n| n.status == WorkflowNodeStatus::Declined)
+        .map(|n| n.node_id.as_str())
+        .collect();
     // Whether any per-node line carried output — drives the footer, which only
     // makes sense when there is something to read the full of.
     let mut rendered_output = false;
@@ -4929,6 +4937,10 @@ fn summarize_run(
                             )),
                         }
                     }
+                    None if declined.contains(&id) => md.push_str(&format!(
+                        "- **{name}** (`{id}`, {kind}): not needed — the step stopped here on \
+                         purpose\n"
+                    )),
                     None => md.push_str(&format!("- **{name}** (`{id}`, {kind}): not reached\n")),
                 }
             }
@@ -4976,7 +4988,17 @@ fn summarize_run(
             paused.join(", ")
         ));
     }
-    if blocked.is_empty() && paused.is_empty() {
+    if !declined.is_empty() {
+        md.push_str(&format!(
+            "\n**{} step(s) were declined as not needed:** {}. Each judged the work already done \
+             or unnecessary and stopped its own branch deliberately — this is not a failure, but \
+             nothing downstream of {} ran.\n",
+            declined.len(),
+            declined.join(", "),
+            if declined.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    if blocked.is_empty() && paused.is_empty() && declined.is_empty() {
         md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
     }
 
@@ -5603,6 +5625,7 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
                 repeatable: None,
                 destination: n.destination,
                 postcondition: None,
+                verify: None,
             });
         }
         Ok(Self {
@@ -10876,6 +10899,50 @@ name = "Morning"
         assert!(
             md.contains("1 report(s) did NOT reach a destination"),
             "{md}"
+        );
+    }
+
+    /// Codex review on #1990 (#3905407434): a `halt_benign` judge verdict
+    /// scrubs the declined node from `run.output`, so this summary — which
+    /// derives its per-node lines from that map and separately inspects only
+    /// `Error` rows — called the node "not reached" and still claimed the run
+    /// reached its terminal nodes. The intentional stop was invisible to the
+    /// agent that started the run.
+    #[test]
+    fn the_summary_reports_a_declined_node_as_not_needed() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let declined = WorkflowRun {
+            output: json!({ "nodes": { "start": { "items": ["go"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "worker".into(),
+                status: WorkflowNodeStatus::Declined,
+                elapsed_ms: 12,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let md = summarize_run(&file, &declined, "run-declined", RunOutputStored::Stored);
+        assert!(
+            md.contains("not needed"),
+            "a declined node must read as an intentional stop: {md}"
+        );
+        assert!(
+            !md.contains("**Worker** (`worker`, agent): not reached"),
+            "a declined node is not an unreached one: {md}"
+        );
+        assert!(
+            !md.contains("reached its terminal node(s) without pausing"),
+            "the run stopped on purpose; the happy-path sentence is false: {md}"
+        );
+        assert!(
+            !md.contains("NOT a clean run"),
+            "a declined node is not an error: {md}"
         );
     }
 

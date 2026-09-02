@@ -181,6 +181,14 @@ export function NodeDetailPanel({
           </DetailField>
         )}
 
+        {node.verify && (
+          <DetailField label="Semantic verification">
+            <p className="text-sm leading-snug">
+              {node.verify.criteria ?? "Checks whether this step is sufficient to continue."}
+            </p>
+          </DetailField>
+        )}
+
         {/* Issue #596: what this node actually produced on the run being
             inspected — the make.com per-node output view. Only rendered when a
             run is being inspected (a live run's clicked node, or a past run
@@ -197,6 +205,7 @@ export function NodeDetailPanel({
           !node.destination &&
           !node.requiresApproval &&
           !node.postcondition &&
+          !node.verify &&
           // Issue #850: `repeatable === false` renders the "not repeated on
           // approval" badge above, so a node whose only detail is that
           // declaration must not also claim it has no extra details.

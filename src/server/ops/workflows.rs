@@ -95,10 +95,10 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
-    WorkflowNodeDef, WorkflowPostconditionDef, WorkflowRetryDef, courtesy_validate_draft,
-    create_company_workflow, delete_company_workflow, list_workflows_with_globals,
-    load_workflow_with_globals, rollback_company_workflow, seed_file_exists,
-    set_company_workflow_enabled, update_company_workflow, workflow_version,
+    WorkflowJudgeDef, WorkflowNodeDef, WorkflowPostconditionDef, WorkflowRetryDef,
+    courtesy_validate_draft, create_company_workflow, delete_company_workflow,
+    list_workflows_with_globals, load_workflow_with_globals, rollback_company_workflow,
+    seed_file_exists, set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -395,6 +395,8 @@ struct WorkflowNode {
     /// see [`WorkflowPostconditionDef`].
     #[serde(skip_serializing_if = "Option::is_none")]
     postcondition: Option<WorkflowPostconditionDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<WorkflowJudgeDef>,
 }
 
 /// The camelCase retry policy shape the console reads back (`maxAttempts` /
@@ -437,6 +439,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             repeatable: n.repeatable,
             destination: n.destination,
             postcondition: n.postcondition,
+            verify: n.verify,
         }
     }
 }
@@ -689,6 +692,9 @@ struct CreateNode {
     /// silently discarded — see [`WorkflowPostconditionDef`].
     #[serde(default)]
     postcondition: Option<WorkflowPostconditionDef>,
+    /// Optional semantic sufficiency policy for an agent node.
+    #[serde(default)]
+    verify: Option<WorkflowJudgeDef>,
 }
 
 /// The camelCase retry policy the create body carries (`maxAttempts` /
@@ -755,6 +761,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 repeatable: n.repeatable,
                 destination: n.destination,
                 postcondition: n.postcondition,
+                verify: n.verify,
             });
         }
         Ok(Self {
@@ -2412,8 +2419,8 @@ async fn fix_from_run(
     )?
     .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`/
-    // `postcondition` field on `WorkflowNodeSpec` (the builder never authors
-    // any of the four — see its own doc comment), so a node that had any of
+    // `postcondition`/`verify` fields on `WorkflowNodeSpec` (the builder never
+    // authors them), so a node that had any of
     // them set loses it silently once the operator saves the correction.
     // `repeatable` is the safety declaration issue #850 exists to protect;
     // `postcondition` (issue #1866) is the deterministic run-safety gate —
@@ -2432,6 +2439,7 @@ async fn fix_from_run(
                 || n.retry.is_some()
                 || n.repeatable.is_some()
                 || n.postcondition.is_some()
+                || n.verify.is_some()
         })
         .map(|n| n.name.clone())
         .collect();
@@ -2479,7 +2487,7 @@ async fn fix_from_run(
             let (ok, advisories) = workflow_readiness(&spec);
             if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry/repeatable/postcondition on {} — this correction does not \
+                    "on_error/retry/repeatable/postcondition/verify on {} — this correction does not \
                      carry these per-node policies through; reapply them after reviewing if the \
                      node is still there.",
                     dropped_policy_nodes.join(", ")
@@ -4089,6 +4097,7 @@ mod tests {
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -4133,6 +4142,7 @@ mod tests {
                     repeatable: Some(false),
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 WorkflowNodeDef {
                     id: "read".into(),
@@ -4148,6 +4158,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: Vec::new(),
@@ -4344,6 +4355,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 WorkflowNodeDef {
                     id: "done".into(),
@@ -4359,6 +4371,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: Vec::new(),

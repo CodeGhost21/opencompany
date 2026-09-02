@@ -108,8 +108,9 @@ pub enum RunStatus {
     Failed,
     /// Terminal: the attempt was cancelled before it could settle.
     Cancelled,
-    /// Terminal: the workflow compiler **declined by design** to automate the
-    /// work — "better done once than built into a workflow" (issue #1809).
+    /// Terminal: work **declined by design** — either the workflow compiler
+    /// concluded it should not automate the card, or a running step correctly
+    /// concluded that advancing would be unnecessary or wrong.
     ///
     /// Neither an error nor an ordinary success: the builder was asked whether
     /// the card should become a workflow and its honest answer was "don't". It

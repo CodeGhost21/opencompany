@@ -2229,6 +2229,10 @@ pub enum WorkflowNodeStatus {
     /// failure count would hide real failures among approvals nobody has
     /// answered yet.
     Blocked,
+    /// The node intentionally stopped because advancing would be incorrect or
+    /// unnecessary. Host-reclassified from the capability error used to halt
+    /// the branch; never emitted by tinyflows and not an error.
+    Declined,
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -8937,6 +8941,7 @@ mod test {
             // test of its own so a fourth reading cannot be added without
             // someone editing this list.
             WorkflowNodeStatus::Blocked,
+            WorkflowNodeStatus::Declined,
         ] {
             let event = CompanyEvent::WorkflowNodeFinished {
                 workflow_id: "digest".to_string(),
