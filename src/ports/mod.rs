@@ -85,7 +85,7 @@ pub use secrets::SecretStore;
 pub use sessions::{SessionKind, SessionRecord, SessionStore};
 pub use skills_state::{SkillSource, SkillState, SkillStateStore};
 pub use store::CompanyStore;
-pub use tasks::{TaskRecord, TaskStore};
+pub use tasks::{TaskOrigin, TaskRecord, TaskStore};
 pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};

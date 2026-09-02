@@ -580,8 +580,7 @@ mod test {
             priority: "medium".to_string(),
             assignee: "maya".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -597,7 +596,7 @@ mod test {
     /// A card carrying an `origin_chat_id` — one spawned during a handoff.
     fn delegated_card(column: &str) -> TaskRecord {
         let mut c = card(column, None);
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = crate::ports::TaskOrigin::new(Some("strategy".to_string()), None);
         c
     }
 

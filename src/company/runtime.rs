@@ -122,7 +122,7 @@ const RELAY_SCAN_MAX_PAGES: usize = 8;
 #[cfg(feature = "openhuman")]
 fn is_review_target(card: &TaskRecord, desk: &str) -> bool {
     card.column == crate::ports::tasks::COLUMN_IN_REVIEW
-        && card.origin_chat_id.as_deref().is_some_and(|origin| {
+        && card.origin_chat_id().is_some_and(|origin| {
             crate::server::chat_history::same_conversation(Some(origin), Some(desk))
         })
 }
@@ -3835,7 +3835,12 @@ impl CompanyRuntime {
                     .await
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|card| (card.id, card.origin_parent))
+                    .map(|card| {
+                        // The origin borrows the card, so read it before `id`
+                        // moves out of it.
+                        let origin_parent = card.origin_parent();
+                        (card.id, origin_parent)
+                    })
                     .collect()
             } else {
                 std::collections::HashMap::new()
@@ -3857,6 +3862,17 @@ impl CompanyRuntime {
                 .as_deref()
                 .and_then(|id| origins.get(id).copied())
                 .flatten();
+            // Guarded the way `publish_continuation` and
+            // `announce_continuation_failure` guard theirs, and for the reason
+            // `resolvable_parent` documents: the console folds a transcript by
+            // parent and *drops* a reply whose parent it cannot resolve in this
+            // channel rather than rendering it flat. A dispatched card can
+            // settle long after it was raised, so its recorded root may have
+            // been pruned by now — and an unresolvable root would make the
+            // delegate's answer vanish with nothing on screen to say so
+            // (coderabbit on #1982). Falling back to the channel is the same
+            // landing an unthreaded hand-off has always had.
+            let parent = self.resolvable_parent(parent, chat_id).await;
             // Scanned host-side from the reply text, same as
             // `publish_continuation` and `journal_chat_replies` — the
             // console's picker never touched this message.
@@ -6640,8 +6656,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6719,8 +6734,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7228,8 +7242,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7323,8 +7336,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7482,8 +7494,7 @@ mod tests {
             updated_at_millis: 0,
             // The field the whole bug turns on: without an origin thread,
             // `relay_reply` is never called at all (a board-created card).
-            origin_chat_id: Some("strategy".to_string()),
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7638,10 +7649,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: origin.to_string(),
             updated_at_millis: 0,
-            origin_chat_id: Some(origin.to_string()),
-            // Channel-level, like every card this test raises: it is about
-            // which surface a relay lands on, not which thread (#1890).
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some(origin.to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7658,7 +7666,7 @@ mod tests {
         // Built the way `run_task` builds them: the speaker is the origin DM's
         // own agent, or the orchestrator for a shared surface.
         let relay = |c: &TaskRecord| {
-            let origin = c.origin_chat_id.clone().expect("origin");
+            let origin = c.origin_chat_id().map(str::to_string).expect("origin");
             let speaker = relay_speaker(&record, &origin, orchestrator);
             relay_reply(c, orchestrator, &speaker, origin, &[])
         };
@@ -7843,7 +7851,29 @@ mod tests {
     async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
         let (rt, _home_dir) = runtime_with_events().await;
         let id = rt.id().clone();
-        let root = crate::ports::types::EventSeq::new(41);
+
+        // The root has to be *in* the journal, not merely named by the card.
+        // `journal_dispatch_replies` now guards its parent through
+        // `resolvable_parent` (coderabbit on #1982), which is what stops a
+        // pruned root turning the delegate's answer into a reply the console
+        // silently drops. A fixture that names a sequence nothing was ever
+        // written at is the pruned case, so it has to write one.
+        let root = rt
+            .events()
+            .append(
+                &id,
+                CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    text: "Draft the launch email".to_string(),
+                    by: None,
+                    chat: Some("general".to_string()),
+                    parent: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("the root is journaled");
 
         let mut card = crate::ports::tasks::TaskRecord {
             id: "t-relay".to_string(),
@@ -7853,8 +7883,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "writer".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: Some("general".to_string()),
-            origin_parent: Some(root),
+            origin: crate::ports::TaskOrigin::new(Some("general".to_string()), Some(root)),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7904,7 +7933,8 @@ mod tests {
         // And a card raised at channel level still relays flat — `None` is the
         // channel-level conversation, not a gap.
         card.id = "t-flat".to_string();
-        card.origin_parent = None;
+        card.origin =
+            crate::ports::TaskOrigin::new(card.origin_chat_id().map(str::to_string), None);
         rt.tasks().upsert(&id, &card).await.unwrap();
         let report = crate::runtime::types::CycleReport {
             responses: vec![relay(Some("t-flat"))],
@@ -8647,8 +8677,7 @@ mod tests {
                 priority: "medium".to_string(),
                 assignee: "ceo".to_string(),
                 updated_at_millis: 1,
-                origin_chat_id: Some(origin.to_string()),
-                origin_parent: None,
+                origin: crate::ports::TaskOrigin::new(Some(origin.to_string()), None),
                 parent_task_id: None,
                 output: None,
                 plan: None,
@@ -9516,8 +9545,7 @@ mod tests {
                 priority: "medium".to_string(),
                 assignee: "eng".to_string(),
                 updated_at_millis: 1,
-                origin_chat_id: Some("dm:eng".to_string()),
-                origin_parent: None,
+                origin: crate::ports::TaskOrigin::new(Some("dm:eng".to_string()), None),
                 parent_task_id: None,
                 output: None,
                 plan: None,
