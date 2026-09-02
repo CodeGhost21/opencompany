@@ -129,7 +129,21 @@ fs2 = "0.4"
 # and `axum`, so this is a direct-use declaration, not new compilation.
 tower = { version = "0.5", features = ["util"] }
 
-tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, features = ["sqlite"] }
+# TinyAgents was split into a workspace of focused crates upstream, and the
+# model layer moved further still into `tinyinference` (a submodule of
+# tinyagents). There is no longer a single `tinyagents` package to depend on —
+# the old path now resolves to a virtual manifest — so this names the two
+# members opencompany actually uses, exactly as openhuman does:
+#
+# - `tinyagents-harness` — the agent loop's `tool` types.
+# - `tinyinference` — `ChatModel`, `ModelRequest`/`Response`, `Message`, `Usage`.
+#
+# Paths rebased onto the vendored checkout, same as the WS4 entries below, so
+# there is still one checkout and one crate identity.
+tinyagents-harness = { path = "vendor/openhuman/vendor/tinyagents/crates/tinyagents-harness", optional = true, features = [
+    "sqlite",
+] }
+tinyinference = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference", optional = true }
 
 # WS4: openhuman embedded as a library (the harness). Only links under the
 # `openhuman` feature; the default build pulls none of this enormous native
@@ -390,7 +404,7 @@ default = ["oauth", "platform-jwt", "documents", "tinymemory"]
 # It is already in the default set via `oauth`, so this adds nothing there.
 documents = ["dep:pdf-extract", "dep:calamine", "dep:quick-xml", "dep:zip", "dep:reqwest"]
 
-tiny = ["tinyagents"]
+tiny = ["tinyagents-harness", "tinyinference"]
 # WS4: embed `vendor/openhuman` (`openhuman_core`) directly as the tenant agent
 # harness via `AgentBuilder`. `src/harness/` compiles only under this feature;
 # the default build stays offline and echo-brained (byte-for-byte unaffected).
@@ -565,23 +579,37 @@ paypal = ["dep:reqwest"]
 [patch."https://github.com/tinyhumansai/tinymemory"]
 tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
 
+# The same hazard one crate over: `tinycortex` depends on `tinyinference` by git
+# rev, which `[patch.crates-io]` does not rewrite either. Without this entry
+# cargo resolves a second `tinyinference` beside the path copy openhuman and
+# this crate use, and the two `ChatModel`s are different types. Replicated from
+# openhuman's own Cargo.toml with the path rebased onto the vendored checkout.
+[patch."https://github.com/tinyhumansai/tinyinference"]
+tinyinference = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference" }
+
 [patch.crates-io]
-# Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
-# `^2.1` requirement while keeping a single checkout and crate identity.
-tinyagents = { path = "vendor/openhuman/vendor/tinyagents" }
+# No `tinyagents` entry: the crate no longer exists as a package (the workspace
+# split), and nothing in the graph asks crates.io for it any more — openhuman
+# names the members by path and tinyflows dropped the requirement. An entry here
+# would point at a virtual manifest and fail resolution outright.
 # WS4: openhuman's own Cargo.toml `[patch.crates-io]` is ignored when it is a
 # path dependency, so its vendored-submodule patches must be replicated here
 # (paths rebased onto `vendor/openhuman/vendor/...`). These entries are inert in
 # the default build — none of these crates are in the graph until the
 # `openhuman` feature is on — so they leave the offline build unaffected.
-tinyflows = { path = "vendor/openhuman/vendor/tinyflows" }
+# tinyflows split into a workspace too; the package now lives in `crates/`.
+tinyflows = { path = "vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
 tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
 # `tinymemory-core` consumes the TinyCortex contract by version while
 # OpenHuman consumes the implementation by path. Keep both on one checkout so
 # their public trait identities remain identical.
 tinycortex-api = { path = "vendor/openhuman/vendor/tinycortex/api" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
-tinyplace = { path = "vendor/openhuman/vendor/tinyplace/sdk/rust" }
+# No `tinyplace` entry: openhuman dropped the submodule, so the path this
+# patched onto no longer exists at the pin and Cargo fails to load the source
+# outright — a patch path is resolved eagerly, whatever the feature set. Nothing
+# here consumes the crate either; the `tinyplace` FEATURE above is unrelated (it
+# only turns on `reqwest`).
 # Arrived with the #499 pin bump, and is NOT a submodule — openhuman vendors it
 # as a plain in-tree directory. Replicated for the same reason as the entries
 # above, but the reason it matters here is specific: without it Cargo resolves

@@ -2200,9 +2200,11 @@ pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String>
 /// catalogue has never heard of it.
 #[cfg(feature = "openhuman")]
 fn composio_toolkit_of(slug: &str) -> Option<String> {
-    use openhuman_core::openhuman::memory::sync::composio::providers::{
-        catalog_for_toolkit, toolkit_from_slug,
-    };
+    // The curated catalogue moved upstream into TinyMemory's Composio
+    // vocabulary; `tinymemory_api` re-exports `tinymemory_bus::composio`
+    // wholesale, so this is the same items openhuman itself now uses.
+    use tinymemory_api::composio::catalogs::catalog_for_toolkit;
+    use tinymemory_api::composio::scopes::toolkit_from_slug;
     let toolkit = toolkit_from_slug(slug)?;
     // The slug's prefix is *some* word for every non-empty slug, so the
     // catalogue lookup is what separates a real toolkit from a typo.
@@ -2220,9 +2222,8 @@ fn composio_toolkit_of(_slug: &str) -> Option<String> {
 /// curated catalogue? Unknown is **not** a read.
 #[cfg(feature = "openhuman")]
 fn composio_catalog_lookup(slug: &str) -> CatalogLookup {
-    use openhuman_core::openhuman::memory::sync::composio::providers::{
-        ToolScope, catalog_for_toolkit, find_curated, toolkit_from_slug,
-    };
+    use tinymemory_api::composio::catalogs::catalog_for_toolkit;
+    use tinymemory_api::composio::scopes::{ToolScope, find_curated, toolkit_from_slug};
     let Some(toolkit) = toolkit_from_slug(slug) else {
         return CatalogLookup::UnknownToolkit { toolkit: None };
     };
@@ -3612,9 +3613,7 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn we_do_not_fall_back_to_the_upstream_read_default() {
-        use openhuman_core::openhuman::memory::sync::composio::providers::{
-            ToolScope, classify_unknown,
-        };
+        use tinymemory_api::composio::scopes::{ToolScope, classify_unknown};
         assert_eq!(
             classify_unknown("GITHUB_INVENT_A_NEW_VERB"),
             ToolScope::Read,
@@ -3662,9 +3661,8 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn the_fallback_never_calls_a_curated_write_a_read() {
-        use openhuman_core::openhuman::memory::sync::composio::providers::{
-            ToolScope, agent_ready_toolkits, catalog_for_toolkit,
-        };
+        use tinymemory_api::composio::catalogs::catalog_for_toolkit;
+        use tinymemory_api::composio::scopes::{ToolScope, agent_ready_toolkits};
 
         let entries: Vec<_> = agent_ready_toolkits()
             .into_iter()

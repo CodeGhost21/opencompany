@@ -4290,8 +4290,8 @@ impl HarnessBrain {
 mod tests {
     use super::*;
 
-    use tinyagents::harness::message::Message;
-    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+    use tinyinference::message::Message;
+    use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
     use crate::company::CompanyManifest;
     use crate::harness::provider::{HarnessModel, MockProvider};
@@ -4999,8 +4999,8 @@ description = "Builds it."
             &self,
             _state: &(),
             _request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
-            Err(tinyagents::TinyAgentsError::Model(
+        ) -> tinyinference::Result<ModelResponse> {
+            Err(tinyinference::Error::Model(
                 "USER_INSUFFICIENT_CREDITS: insufficient budget for this account — add credits \
                  to continue"
                     .to_string(),
@@ -10342,7 +10342,7 @@ members = ["eng1", "eng2"]
             &self,
             _state: &(),
             request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(action) = self.actions.lock().unwrap().pop_front() {
                 let key = if self.key.is_empty() {
@@ -10688,10 +10688,10 @@ members = ["eng1", "eng2"]
     fn a_triage_request_is_recognised_as_one() {
         let triage = ModelRequest {
             messages: vec![
-                tinyagents::harness::message::Message::system(
+                tinyinference::message::Message::system(
                     crate::harness::triage::system_prompt_for_test(),
                 ),
-                tinyagents::harness::message::Message::user("hello".to_string()),
+                tinyinference::message::Message::user("hello".to_string()),
             ],
             ..ModelRequest::default()
         };
@@ -10702,10 +10702,8 @@ members = ["eng1", "eng2"]
         );
         let turn = ModelRequest {
             messages: vec![
-                tinyagents::harness::message::Message::system(
-                    "You are the CEO of Acme.".to_string(),
-                ),
-                tinyagents::harness::message::Message::user("ship it".to_string()),
+                tinyinference::message::Message::system("You are the CEO of Acme.".to_string()),
+                tinyinference::message::Message::user("ship it".to_string()),
             ],
             ..ModelRequest::default()
         };
@@ -10741,7 +10739,7 @@ members = ["eng1", "eng2"]
             &self,
             _state: &(),
             request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             if is_selection_request(&request) {
                 self.selector_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -10768,10 +10766,10 @@ members = ["eng1", "eng2"]
     fn a_selection_request_is_recognised_as_one() {
         let selection = ModelRequest {
             messages: vec![
-                tinyagents::harness::message::Message::system(
+                tinyinference::message::Message::system(
                     crate::harness::selector::system_prompt_for_test(),
                 ),
-                tinyagents::harness::message::Message::user("who owns login?".to_string()),
+                tinyinference::message::Message::user("who owns login?".to_string()),
             ],
             ..ModelRequest::default()
         };
@@ -11093,7 +11091,7 @@ members = ["eng1", "eng2"]
             &self,
             _state: &(),
             request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             // Issue #678: a triage escalation is a classification, not a turn.
             // It rides the same `HarnessModel` handle the roster runs on, so
             // without this it would consume a scripted push and shift every
@@ -11111,7 +11109,7 @@ members = ["eng1", "eng2"]
             }
             let invoke = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if self.faults.fail_from.is_some_and(|from| invoke >= from) {
-                return Err(tinyagents::TinyAgentsError::Model(
+                return Err(tinyinference::Error::Model(
                     "the delegate's provider fell over".to_string(),
                 ));
             }

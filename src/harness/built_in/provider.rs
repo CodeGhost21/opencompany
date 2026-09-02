@@ -1,6 +1,6 @@
 //! Inference model implementations for the embedded harness.
 //!
-//! openhuman's inference now runs on tinyagents [`ChatModel<()>`] (the old
+//! openhuman's inference now runs on tinyinference [`ChatModel<()>`] (the old
 //! `Provider` trait was deleted upstream), so opencompany brings its own
 //! implementations. Consistent with the spec non-goal "not a model host", only
 //! two production surfaces ship:
@@ -34,13 +34,13 @@ use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use async_trait::async_trait;
 
-use tinyagents::harness::message::{AssistantMessage, ContentBlock, Message};
-use tinyagents::harness::model::{
+use tinyinference::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference::model::{
     ChatModel, Modalities, ModelProfile, ModelRequest, ModelResponse, ToolChoice,
 };
-use tinyagents::harness::tool::{ToolCall, ToolSchema};
-use tinyagents::harness::usage::Usage;
-use tinyagents::{Result as TaResult, TinyAgentsError};
+use tinyinference::tool::{ToolCall, ToolSchema};
+use tinyinference::usage::Usage;
+use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use crate::app::config::EnvSource;
 use crate::company::Inference;
@@ -69,7 +69,7 @@ pub const OPENROUTER_TITLE: &str = "OpenCompany";
 /// backend-charged USD. Must match openhuman's `OPENHUMAN_USAGE_META_KEY`.
 const OPENHUMAN_USAGE_META_KEY: &str = "openhuman_usage_meta";
 
-/// A harness inference model: a tinyagents [`ChatModel<()>`] plus the telemetry
+/// A harness inference model: a tinyinference [`ChatModel<()>`] plus the telemetry
 /// slug OpenCompany attributes per-turn cost to.
 ///
 /// `ChatModel` carries no provider identity, so this thin supertrait re-adds the
@@ -645,7 +645,7 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
 });
 
 /// Extract token usage from an OpenAI-compatible chat-completion payload as a
-/// tinyagents [`Usage`], or `None` when the payload carries no `usage` block.
+/// tinyinference [`Usage`], or `None` when the payload carries no `usage` block.
 ///
 /// Cached-input tokens follow the same precedence the legacy path used: the
 /// `openhuman.usage.cached_input_tokens` envelope wins over the standard
@@ -715,7 +715,7 @@ fn inject_usage_meta(
     }
 }
 
-/// Parse the OpenAI `choices[0].message.tool_calls[]` array into tinyagents
+/// Parse the OpenAI `choices[0].message.tool_calls[]` array into tinyinference
 /// [`ToolCall`]s. `function.arguments` arrives as a JSON **string**, which is
 /// parsed back into a value; an unparseable blob is preserved verbatim and the
 /// call is flagged [`ToolCall::invalid`] (mirroring tinyagents' tolerance of
@@ -900,7 +900,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             .iter()
             .any(|call| call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
     {
-        return Err(TinyAgentsError::Model(
+        return Err(InferenceError::Model(
             "inference returned request_approval with sibling tool calls; the whole batch was \
              refused so the approval boundary cannot be crossed"
                 .to_string(),
@@ -1011,7 +1011,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
             .as_deref()
             .map(|r| format!(" (finish_reason: {r})"))
             .unwrap_or_default();
-        return Err(TinyAgentsError::Model(format!(
+        return Err(InferenceError::Model(format!(
             "inference response requested a tool call that failed to parse{detail}"
         )));
     }
@@ -1092,11 +1092,12 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
     }
 
     // Only a genuinely empty turn (no text anywhere, no tool call) is an error.
-    // Fold `finish_reason` into the message so a truncation (`length`) or
-    // `content_filter` stop is diagnosable rather than hidden behind a generic
-    // "carried neither" string.
+    // Fold what the payload actually said into the message so a truncation
+    // (`length`), a `content_filter` stop, and a provider that answered 200
+    // with nothing in it are each diagnosable rather than hidden behind one
+    // generic "carried neither" string. See [`empty_turn_facts`].
     if content.is_empty() && tool_calls.is_empty() {
-        return Err(TinyAgentsError::Model(format!(
+        return Err(InferenceError::Model(format!(
             "inference response carried neither choices[0].message.content nor tool_calls{}",
             empty_turn_facts(&payload, finish_reason.as_deref())
         )));
@@ -1319,7 +1320,7 @@ impl ChatModel<()> for HostedProvider {
         // Resolved per request, never captured: on the hosted platform this reads
         // a token file the cluster rewrites in place every few minutes.
         let bearer = self.config.credential.current().await.map_err(|e| {
-            TinyAgentsError::Model(format!("resolving the TinyHumans credential: {e}"))
+            InferenceError::Model(format!("resolving the TinyHumans credential: {e}"))
         })?;
         if let Some(bearer) = &bearer {
             http = http.bearer_auth(bearer);
@@ -1331,7 +1332,7 @@ impl ChatModel<()> for HostedProvider {
         let response = http
             .send()
             .await
-            .map_err(|e| TinyAgentsError::Model(format!("hosted inference request failed: {e}")))?;
+            .map_err(|e| InferenceError::Model(format!("hosted inference request failed: {e}")))?;
         let status = response.status();
         if !status.is_success() {
             // A rejected bearer may mean the platform rotated the token early;
@@ -1348,9 +1349,9 @@ impl ChatModel<()> for HostedProvider {
             // default `[inference]`.
             if let Some(advice) = model_unavailable_advice(status, &error, &models_url, None, None)
             {
-                return Err(TinyAgentsError::Model(advice));
+                return Err(InferenceError::Model(advice));
             }
-            return Err(TinyAgentsError::Model(error));
+            return Err(InferenceError::Model(error));
         }
 
         // Published only now, once *this* request has come back 2xx, and
@@ -1367,7 +1368,7 @@ impl ChatModel<()> for HostedProvider {
         *self.telemetry_model.write().unwrap() = Some(crate::metering::ModelSlug::classify(model));
 
         let payload: serde_json::Value = response.json().await.map_err(|e| {
-            TinyAgentsError::Model(format!("hosted inference response was not JSON: {e}"))
+            InferenceError::Model(format!("hosted inference response was not JSON: {e}"))
         })?;
         model_response_from_payload(payload)
     }
@@ -1756,7 +1757,7 @@ impl ChatModel<()> for TenantProvider {
         let decl = self
             .resolve()
             .await
-            .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+            .map_err(|e| InferenceError::Model(e.to_string()))?;
         let messages = wire_messages(&request.messages);
         let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
         let temperature = request.temperature.unwrap_or(0.0);
@@ -1770,7 +1771,7 @@ impl ChatModel<()> for TenantProvider {
             &request.tool_choice,
         )
         .await
-        .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+        .map_err(|e| InferenceError::Model(e.to_string()))?;
         // Always this harness's real id — `self.scope.id` is meaningful
         // whether or not this is the company's *default* harness (the
         // default's own `[harness.inference]` beats the company mapping the
@@ -1786,7 +1787,7 @@ impl ChatModel<()> for TenantProvider {
             Some(decl.source),
         )
         .await
-        .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
+        .map_err(|e| InferenceError::Model(e.to_string()))?;
         // Classified from `plan.model` — the exact string that goes on the wire,
         // *after* the tenant `[inference].models` table has been applied — so
         // the sample names what actually ran rather than the tier that was
@@ -3317,13 +3318,13 @@ mod tests {
     /// are the outbound half of native tool calling.
     #[test]
     fn tools_and_tool_history_serialize_to_openai_wire() {
-        use tinyagents::harness::message::Message;
+        use tinyinference::message::Message;
 
         let tools = wire_tools(&[ToolSchema {
             name: "check_inventory".to_string(),
             description: "look up stock".to_string(),
             parameters: serde_json::json!({ "type": "object" }),
-            format: tinyagents::harness::tool::ToolFormat::default(),
+            format: tinyinference::tool::ToolFormat::default(),
         }]);
         let mut body = serde_json::json!({ "model": "chat-v1" });
         attach_tools(&mut body, tools, &ToolChoice::Required, true);
@@ -3338,7 +3339,7 @@ mod tests {
                 name: "check_inventory".to_string(),
                 description: "look up stock".to_string(),
                 parameters: serde_json::json!({ "type": "object" }),
-                format: tinyagents::harness::tool::ToolFormat::default(),
+                format: tinyinference::tool::ToolFormat::default(),
             }]),
             &ToolChoice::Required,
             false,

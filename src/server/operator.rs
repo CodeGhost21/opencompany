@@ -3208,7 +3208,7 @@ fn turn_failure_notice(detail: &str) -> String {
 /// The operator-facing sentence for a failure the inference path produced, or
 /// `None` when the error did not come from there.
 fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
-    use tinyagents::harness::retry::{
+    use tinyagents_harness::retry::{
         ProviderFailureClass, classify_provider_failure, structured_http_status,
     };
 
