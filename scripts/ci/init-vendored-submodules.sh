@@ -126,10 +126,26 @@ if [ -z "${VENDORED_CRATES}" ]; then
   exit 1
 fi
 
+# SSH-DECLARED SUBMODULES ARE REWRITTEN TO HTTPS
+#
+# The URLs come from whatever `.gitmodules` upstream wrote, and they are not
+# consistent: `tinyagents` declares `vendor/tinyinference` as
+# `git@github.com:tinyhumansai/tinyinference.git` while every one of its
+# siblings uses `https://`. A developer with an SSH key never notices; CI
+# authenticates with a token and has no key at all, so the clone fails with
+# "Could not read from remote repository" and every Rust lane dies in the
+# checkout step, before a crate compiles.
+#
+# Rewritten per invocation with `-c` rather than `git config --global`: this
+# script also runs on developer machines, and quietly mutating a person's
+# global git config to fix a CI problem is not this script's business. The
+# repositories are the same either way — only the transport differs.
+REWRITE_SSH='url.https://github.com/.insteadOf=git@github.com:'
+
 # Unquoted on purpose — the newline-separated list becomes one argument per
 # path. Submodule paths carry no whitespace.
 # shellcheck disable=SC2086
-git -C vendor/openhuman submodule update --init --depth 1 ${VENDORED_CRATES}
+git -C vendor/openhuman -c "${REWRITE_SSH}" submodule update --init --depth 1 ${VENDORED_CRATES}
 
 # SECOND LEVEL: each of the crates just checked out may itself declare
 # `vendor/`-prefixed submodules that its own manifest needs (a path dependency
@@ -181,5 +197,5 @@ for crate in ${VENDORED_CRATES}; do
   fi
 
   # shellcheck disable=SC2086
-  git -C "${crate_path}" submodule update --init --depth 1 ${NESTED_CRATES}
+  git -C "${crate_path}" -c "${REWRITE_SSH}" submodule update --init --depth 1 ${NESTED_CRATES}
 done
