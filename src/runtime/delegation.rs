@@ -2838,7 +2838,16 @@ impl<'a> DelegationRunner<'a> {
                 card.title == title
                     && (card.column == COLUMN_TODO || card.column == COLUMN_PLANNING)
                     && (card.assignee.is_empty() || self.addressed_to(chat_id, &card.assignee))
-                    && (card.origin_chat_id().is_none() || card.origin_chat_id() == chat_id)
+                    // Desk **and** thread. Matching the desk alone lets a turn
+                    // adopt a same-titled card raised in a *different* thread of
+                    // the same desk, and then settle somebody else's card into
+                    // this thread — the split #1890 B exists to prevent, arrived
+                    // at from the other side. An origin-less card is still
+                    // adoptable: it belongs to no conversation, so it contradicts
+                    // none (coderabbit on #1982).
+                    && (card.origin_chat_id().is_none()
+                        || (card.origin_chat_id() == chat_id
+                            && card.origin_parent() == self.thread_root))
             })
             .map(|card| card.id))
     }
@@ -6410,6 +6419,65 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .expect("operator message handled");
 
         assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
+    }
+
+    /// …nor is one from a different **thread of the same desk**, which the
+    /// desk-only clause did not hold.
+    ///
+    /// The desk matched, so a same-titled card raised in another thread was
+    /// adopted and settled by this turn: one thread received an answer it never
+    /// asked for while the other's card moved under it. That is #1890 B's split
+    /// reached from the other side — the conversation a card belongs to read as
+    /// a desk when it is a desk *and a thread* (coderabbit on #1982).
+    #[tokio::test]
+    async fn a_handler_card_from_another_thread_of_the_same_desk_is_not_adopted() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "another-threads-card".to_string(),
+                    title,
+                    note: None,
+                    column: COLUMN_PLANNING.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: now_millis(),
+                    // The same desk this message is addressed to — and a thread
+                    // inside it that this message is not in.
+                    origin: TaskOrigin::new(
+                        Some("dm:engineer".to_string()),
+                        Some(crate::ports::types::EventSeq::new(41)),
+                    ),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .expect("seed the card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", imperative, Some("dm:engineer"))
+            .await
+            .expect("operator message handled");
+
+        assert_ne!(
+            turn.spawned_task.as_deref(),
+            Some("another-threads-card"),
+            "a card from another thread of this desk is not this message's card",
+        );
     }
 
     /// …and a card opened from a *different* conversation is still not ours,

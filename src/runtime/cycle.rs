@@ -1423,9 +1423,21 @@ working on):\n{}\n]",
             let mut done: Vec<&&TaskRecord> = settled
                 .iter()
                 .filter(|c| {
-                    let origin = c.origin_chat_id();
-                    (chat_history::same_conversation(origin, Some(desk_id.as_str()))
-                        || chat_history::same_conversation(origin, Some(desk_name.as_str())))
+                    // A recorded desk is required before any of this compares.
+                    // `same_conversation(None, "General")` is `true` — `None`
+                    // is one of General's four spellings *for a message* — but
+                    // a card with no origin was raised by no conversation at
+                    // all, and reading its absence as "General" briefs
+                    // board-only work into an unaddressed turn as work "raised
+                    // in this conversation". `chat_history::owns` already draws
+                    // that line for the terminal (`a_terminal_with_no_origin_
+                    // belongs_to_nobody_not_to_general`); this now draws the
+                    // same one (coderabbit on #1982).
+                    let Some(origin) = c.origin_chat_id() else {
+                        return false;
+                    };
+                    (chat_history::same_conversation(Some(origin), Some(desk_id.as_str()))
+                        || chat_history::same_conversation(Some(origin), Some(desk_name.as_str())))
                         && c.origin_parent() == thread
                 })
                 .collect();
@@ -11581,6 +11593,57 @@ timeout)",
         assert!(
             text.contains("Draft the launch email"),
             "the name-stamped card is the id-addressed desk's own work: {text}"
+        );
+    }
+
+    /// A card **no conversation raised** is briefed into none of them.
+    ///
+    /// `same_conversation(None, "General")` is `true`, because `None` is one of
+    /// General's four spellings *for a message*. A card's absent origin is not a
+    /// spelling: it means nobody raised it. Reading it as General told an
+    /// unaddressed turn that board-only work had been "raised in this
+    /// conversation". `chat_history::owns` already draws that line for the
+    /// terminal — `a_terminal_with_no_origin_belongs_to_nobody_not_to_general`
+    /// pins it — and this is the same line, one layer up (coderabbit on #1982).
+    #[tokio::test]
+    async fn a_card_no_conversation_raised_is_briefed_into_none_of_them() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt.store.load(&id).await.unwrap().expect("the record");
+
+        // Raised on the board, or through `spawn_task` from a turn with no
+        // conversation: no desk, and therefore no thread inside one.
+        let mut card = settled_card("board-only", "Rotate the signing key");
+        card.origin = None;
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            text: "did that ship?".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        }];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.unwrap(),
+            )
+            .await;
+
+        assert!(
+            !message_text(&events[0]).contains("Rotate the signing key"),
+            "work no conversation raised is not this conversation's: {}",
+            message_text(&events[0])
         );
     }
 
