@@ -2594,14 +2594,6 @@ impl HarnessAgentRunner {
                     let recovered =
                         crate::workflows::judge::ask_around(&self.deps, &self.company, question)
                             .await;
-                    // Codex review on #1990: found evidence is not itself proof
-                    // the gap is closed — it is raw snippets the ORIGINAL turn
-                    // never saw or acted on. A refusal like "I cannot draft the
-                    // email without the customer's name" plus an appended
-                    // "Recovered company context:" block is still that same
-                    // refusal; without a second judge pass on the augmented
-                    // text, it settled Succeeded and rode downstream as the
-                    // deliverable. Re-verify before accepting.
                     let recovered_and_sufficient = match &recovered.evidence {
                         Some(evidence) => {
                             let verified = crate::workflows::judge::augment_with_recovery(
@@ -2625,6 +2617,29 @@ impl HarnessAgentRunner {
                         None => None,
                     };
                     if let Some(verified) = recovered_and_sufficient {
+                        if let Some(spec) = request.get("postcondition") {
+                            let recovered_parsed = serde_json::from_str::<Value>(verified.trim())
+                                .unwrap_or(Value::Null);
+                            let envelope = json!({
+                                "text": &verified,
+                                "agent_ref": agent_ref,
+                                "json": recovered_parsed,
+                            });
+                            if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope)
+                            {
+                                let message = format!(
+                                    "workflow node `{}` recovered a reply that still fails its postcondition: {gap}",
+                                    node_id.as_deref().unwrap_or(agent_ref)
+                                );
+                                self.settle_attempt(
+                                    run_sink.as_ref(),
+                                    crate::ports::RunStatus::Failed,
+                                    Some(message.clone()),
+                                )
+                                .await;
+                                return Err(EngineError::Capability(message));
+                            }
+                        }
                         outcome.reply = verified;
                     } else {
                         let message = format!(
@@ -4297,7 +4312,7 @@ mod tests {
                 json!({
                     "node_id": "draft",
                     "prompt": "Draft the customer email.",
-                    "postcondition": { "require": "field_present", "field": "json.draft" },
+                    "postcondition": { "require": "non_empty" },
                     "verify": { "criteria": "must include the customer's name" }
                 }),
             )
@@ -4316,6 +4331,98 @@ mod tests {
             value.get("draft").is_none(),
             "the pre-recovery parse must not ship alongside a reply that no longer carries it: \
              {value}"
+        );
+    }
+
+    /// `augment_with_recovery` always appends a `Recovered company context:`
+    /// prose block to the reply, so a reply that satisfied a declared
+    /// `field_present` postcondition before recovery (its JSON parsed and
+    /// carried the field) stops satisfying it after (the augmented text no
+    /// longer parses as JSON at all). A node must not settle `Succeeded`
+    /// carrying an output that no longer satisfies the postcondition its own
+    /// gate certified — the recovered reply is re-checked against the same
+    /// postcondition, and a node whose recovery breaks it fails instead of
+    /// silently shipping the field as absent.
+    #[tokio::test]
+    async fn a_recovered_reply_that_fails_its_postcondition_does_not_settle_succeeded() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"draft\": \"no customer name yet\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990j"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990j"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990j".to_string(),
+            "run-1990j".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "postcondition": { "require": "field_present", "field": "json.draft" },
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a recovered reply that no longer satisfies its declared postcondition must not \
+             settle Succeeded"
+        );
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1990j".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        let statuses: Vec<_> = attempts.iter().map(|a| a.status).collect();
+        assert_eq!(
+            statuses,
+            vec![crate::ports::RunStatus::Failed],
+            "the recovered-but-noncompliant node must settle Failed, not Succeeded: {statuses:?}"
         );
     }
 
