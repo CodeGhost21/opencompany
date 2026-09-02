@@ -49,6 +49,20 @@ use serde::{Deserialize, Serialize};
 /// surface that would have to redact.
 pub const BLOCKER_EFFECT_PREFIX: &str = "blocker";
 
+/// Whether `effect` is a parked blocker — its kind is `blocker.<class>` (issue
+/// #1863).
+///
+/// The one predicate the resolve path branches on to keep a blocker away from
+/// effect execution: a blocker's effect is inert, so a resolving `Approve` must
+/// route to resume, never `perform_effect`. Kind-checked rather than
+/// payload-checked because the kind is the part that survives redaction, the
+/// same reason [`BlockerKind::effect_kind`] puts the class there.
+pub fn is_blocker_effect(effect: &crate::ports::types::Effect) -> bool {
+    effect
+        .kind
+        .starts_with(&format!("{BLOCKER_EFFECT_PREFIX}."))
+}
+
 /// **What is missing.** The primary axis: it decides whether the work parks at
 /// all, and which recovery is worth trying before a person is asked.
 ///
@@ -293,6 +307,148 @@ impl BlockerPayload {
     }
 }
 
+/// What an operator's answer asks the stopped step to do (issue #1863).
+///
+/// The four-way verdict the resume path turns on. It is the durable twin of
+/// [`BlockerReplyIntent`](crate::company::task_intent::BlockerReplyIntent)'s
+/// four answering arms — the classifier decides it from an operator's words,
+/// this carries it back into the stopped step so a restart mid-resume replays
+/// the same decision rather than losing it.
+///
+/// Serialized `snake_case`, with [`Self::as_str`] returning the identical
+/// literal, on exactly the terms [`BlockerKind`] keeps: the token is journaled,
+/// so a rename is a data migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerVerdict {
+    /// Run the stopped step again as it was.
+    Retry,
+    /// Answer or correct it — the [`BlockerResolution::answer`] carries what
+    /// changed, and the step re-enters carrying it.
+    Amend,
+    /// Waive the blocker and let the work proceed as if it were satisfied.
+    Skip,
+    /// Abandon the stopped work. The one verdict that does not re-enter.
+    Cancel,
+}
+
+impl BlockerVerdict {
+    /// The wire/storage token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Amend => "amend",
+            Self::Skip => "skip",
+            Self::Cancel => "cancel",
+        }
+    }
+
+    /// Parses a wire token back into a verdict, or `None`.
+    pub fn from_wire(word: &str) -> Option<Self> {
+        Some(match word {
+            "retry" => Self::Retry,
+            "amend" => Self::Amend,
+            "skip" => Self::Skip,
+            "cancel" => Self::Cancel,
+            _ => return None,
+        })
+    }
+
+    /// Whether this verdict **re-enters** the stopped step.
+    ///
+    /// Every verdict but [`Cancel`](Self::Cancel) resumes: a retry runs the step
+    /// again, an amend runs it with the answer, a skip proceeds past it. Cancel
+    /// abandons the work and starts nothing — the one place the resume fork
+    /// short-circuits before any cycle.
+    pub fn resumes(self) -> bool {
+        !matches!(self, Self::Cancel)
+    }
+
+    /// The [`Verdict`](crate::ports::types::Verdict) the approval event records.
+    ///
+    /// The gate has only two decisions, so the four blocker verdicts lower onto
+    /// them: every resuming verdict is an [`Approve`](crate::ports::types::Verdict::Approve)
+    /// — the operator answered, and the durable approval says so — while
+    /// [`Cancel`](Self::Cancel) is a [`Deny`](crate::ports::types::Verdict::Deny).
+    /// The rich four-way answer rides the resolution beside the event, never the
+    /// event itself, so the two-value audit surface is unchanged.
+    pub fn event_verdict(self) -> crate::ports::types::Verdict {
+        use crate::ports::types::Verdict;
+        match self {
+            Self::Retry | Self::Amend | Self::Skip => Verdict::Approve,
+            Self::Cancel => Verdict::Deny,
+        }
+    }
+}
+
+/// The operator's durable answer to a parked blocker (issue #1863).
+///
+/// Banked before the detached resume spawns and re-armed at boot, so a restart
+/// between the answer and the re-entry replays it rather than dropping the
+/// operator's decision on the floor — the same restart-durable pattern
+/// `ApprovalContinuation` keeps for an explicit request.
+///
+/// It carries what the two-value approval [`Verdict`](crate::ports::types::Verdict)
+/// cannot: which of the four things the operator asked for, and — for an
+/// [`Amend`](BlockerVerdict::Amend) — the words that answer the question.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockerResolution {
+    /// What the operator asked the stopped step to do.
+    pub verdict: BlockerVerdict,
+    /// The operator's answer, when they gave one — the correction an
+    /// [`Amend`](BlockerVerdict::Amend) re-enters carrying. Empty for a bare
+    /// retry, skip or cancel, which need no words, and skipped on the wire when
+    /// empty so a resolution written without one reads back the same.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answer: String,
+    /// Which stopped step this answer re-enters, copied off the parked
+    /// blocker's [`BlockerPayload::step`] at resolve time.
+    ///
+    /// Carried here rather than re-read from the approval at resume time
+    /// because the journal **scrubs a parked effect's payload** once it is
+    /// recorded (issue #372's redaction), so the step is gone from the durable
+    /// approval by the time the detached resume runs. Banking it on the
+    /// resolution makes the answer self-contained: the resume knows which card
+    /// or node to re-enter without the payload, and a restart replays it whole.
+    ///
+    /// `None` for a bare agent question with no step behind it, where the whole
+    /// of the resume is carrying the answer back into the DM it was asked in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<BlockerStep>,
+}
+
+impl BlockerResolution {
+    /// A resolution carrying a verdict, no answer text and no step.
+    pub fn new(verdict: BlockerVerdict) -> Self {
+        Self {
+            verdict,
+            answer: String::new(),
+            step: None,
+        }
+    }
+
+    /// A resolution carrying an operator's answer.
+    pub fn answered(verdict: BlockerVerdict, answer: impl Into<String>) -> Self {
+        Self {
+            verdict,
+            answer: answer.into(),
+            step: None,
+        }
+    }
+
+    /// The same resolution with its stopped step recorded.
+    pub fn with_step(mut self, step: Option<BlockerStep>) -> Self {
+        self.step = step;
+        self
+    }
+
+    /// Whether resolving with this re-enters the stopped step — a shorthand for
+    /// [`BlockerVerdict::resumes`].
+    pub fn resumes(&self) -> bool {
+        self.verdict.resumes()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -466,6 +622,61 @@ mod test {
         let json = serde_json::to_value(&grouped).expect("serializes");
         let back: BlockerPayload = serde_json::from_value(json).expect("parses");
         assert_eq!(back.group_key.as_deref(), Some("connection:slack"));
+    }
+
+    #[test]
+    fn verdict_wire_round_trips() {
+        for verdict in [
+            BlockerVerdict::Retry,
+            BlockerVerdict::Amend,
+            BlockerVerdict::Skip,
+            BlockerVerdict::Cancel,
+        ] {
+            assert_eq!(BlockerVerdict::from_wire(verdict.as_str()), Some(verdict));
+            let json = serde_json::to_string(&verdict).expect("verdict serializes");
+            assert_eq!(json, format!("\"{}\"", verdict.as_str()));
+        }
+        assert_eq!(BlockerVerdict::from_wire("nonsense"), None);
+    }
+
+    /// The mapping the sharpest risk turns on: only [`BlockerVerdict::Cancel`]
+    /// denies, and only it declines to re-enter. Every answering verdict is an
+    /// approve that resumes — and an approve that must never execute the inert
+    /// blocker effect (that guard lives in the resolve path).
+    #[test]
+    fn only_cancel_denies_and_declines_to_resume() {
+        use crate::ports::types::Verdict;
+        for verdict in [
+            BlockerVerdict::Retry,
+            BlockerVerdict::Amend,
+            BlockerVerdict::Skip,
+        ] {
+            assert_eq!(verdict.event_verdict(), Verdict::Approve, "{verdict:?}");
+            assert!(verdict.resumes(), "{verdict:?} must re-enter the step");
+        }
+        assert_eq!(BlockerVerdict::Cancel.event_verdict(), Verdict::Deny);
+        assert!(
+            !BlockerVerdict::Cancel.resumes(),
+            "cancel abandons the work and starts nothing"
+        );
+    }
+
+    /// The answer is additive: a resolution written with no words reads back
+    /// with none, and one carrying an amendment round-trips.
+    #[test]
+    fn resolution_answer_is_additive_and_round_trips() {
+        let bare = BlockerResolution::new(BlockerVerdict::Retry);
+        let json = serde_json::to_value(&bare).expect("serializes");
+        assert_eq!(json, serde_json::json!({ "verdict": "retry" }));
+        let back: BlockerResolution = serde_json::from_value(json).expect("parses");
+        assert_eq!(back, bare);
+        assert_eq!(back.answer, "");
+
+        let amended = BlockerResolution::answered(BlockerVerdict::Amend, "use gpt-4o-mini");
+        let json = serde_json::to_value(&amended).expect("serializes");
+        let back: BlockerResolution = serde_json::from_value(json).expect("parses");
+        assert_eq!(back, amended);
+        assert!(back.resumes());
     }
 
     /// The step survives a round trip through JSON, because that is how it

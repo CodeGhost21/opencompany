@@ -1872,6 +1872,19 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<()> {
+        // Issue #1863: a blocker's effect is INERT. It carries a question, not a
+        // tool call — `park_blocker` stamps `agent: None` and mints no grant —
+        // so approving one must re-enter the stopped step, never execute the
+        // payload. Without this guard a resuming verdict (Retry/Amend/Skip, all
+        // mapped to `Approve`) would fall through to the native `agent.is_none()`
+        // arm below and hand the blocker payload to `execute_effect_once`, which
+        // would ledger a phantom spend and route nothing while reading as
+        // success. The answer is already armed on the grant set's blocker
+        // side-channel by the resolve entrypoint, and `continue_turn`'s blocker
+        // fork drives the actual resume; there is nothing to do here.
+        if crate::ports::blockers::is_blocker_effect(&effect) {
+            return Ok(());
+        }
         // Issue #1098: a gate carries no teammate but can still hold a standing
         // permission for its workflow, so that case is taken before the native
         // fall-through below. Only for `GrantScope::Tool` — a `Once` approval of
@@ -2417,6 +2430,12 @@ approval.]"
         self.rt
             .grants
             .rehydrate_continuations(self.rt.journal.replayed_approval_continuations());
+        // Issue #1863: a blocker answered moments before a restart must re-enter
+        // the stopped step on the other side rather than evaporate, exactly as a
+        // grant or a continuation does above.
+        self.rt
+            .grants
+            .rehydrate_blocker_resolutions(self.rt.journal.replayed_blocker_resolutions());
         // Issue #374: standing grants outlive a restart too — a week-long
         // permission that evaporated on every deploy would be worse than not
         // offering one. Anything already past its deadline is folded out by the

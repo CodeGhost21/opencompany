@@ -33,6 +33,7 @@ use serde_json::Value;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
+use crate::ports::blockers::BlockerResolution;
 use crate::ports::journal::{Durability, JournalStore};
 use crate::ports::types::{Actor, ApprovalId, CompanyId, Effect, EventSeq, StartedBy};
 use crate::runtime::grants::{ApprovalContinuation, GrantId, GrantedCall, StandingGrant};
@@ -282,6 +283,22 @@ enum JournalRecord {
         id: ApprovalId,
         /// Epoch-millis the expiry was recorded.
         at_millis: u64,
+    },
+    /// An operator's answer to a parked blocker, banked before the detached
+    /// resume spawns so a restart mid-resume replays it (issue #1863). It
+    /// conveys no authority to execute anything — a blocker's effect is inert —
+    /// only which of the four things the operator asked for, and their words.
+    BlockerResolved {
+        /// The blocker approval the answer settles.
+        id: ApprovalId,
+        /// The verdict and answer, whole.
+        resolution: BlockerResolution,
+    },
+    /// A parked blocker's answer was re-entered into the stopped step, so it no
+    /// longer needs re-arming on the next boot.
+    BlockerResumed {
+        /// The blocker approval whose answer was consumed by the resume.
+        id: ApprovalId,
     },
     /// A grant redeemed by its agent — the tool ran.
     GrantConsumed {
@@ -661,6 +678,13 @@ impl JournalRecord {
             | Self::ApprovalContinuationDispatched { .. } => Durability::Host,
             Self::ApprovalContinuationConsumed { .. }
             | Self::ApprovalContinuationExpired { .. } => Durability::Process,
+            // The same direction as `ApprovalContinuationQueued`: losing a
+            // blocker's answer after `ApprovalResolved` survived would leave a
+            // decided blocker with nothing to re-enter the stopped step. The
+            // paired `BlockerResumed` only clears a re-armed answer, so a lost
+            // clear replays as "still armed" — re-resuming, the safe direction.
+            Self::BlockerResolved { .. } => Durability::Host,
+            Self::BlockerResumed { .. } => Durability::Process,
             // The same direction as `ApprovalGranted`, one scope wider.
             Self::StandingGrantMinted { .. } => Durability::Process,
             // Deadline arithmetic rather than state: `replayed_standing_grants`
@@ -1064,6 +1088,12 @@ struct State {
     /// Explicit approval follow-ups still owed after replay. Kept separate from
     /// grants because a denial is a continuation, never executable authority.
     approval_continuations: HashMap<ApprovalId, ApprovalContinuation>,
+    /// Blocker answers armed but not yet re-entered after replay (issue #1863).
+    /// Kept separate from [`approval_continuations`](Self::approval_continuations)
+    /// for the same reason that map is kept from `grants`: a blocker answer is
+    /// not executable authority. A [`BlockerResumed`](JournalRecord::BlockerResumed)
+    /// removes an entry once the stopped step has re-entered.
+    blocker_resolutions: HashMap<ApprovalId, BlockerResolution>,
     /// Standing grants minted and not yet revoked or expired (issue #374).
     ///
     /// Removed from on both terminal records for the same reason as
@@ -1429,6 +1459,12 @@ impl RuntimeJournal {
             | JournalRecord::ApprovalContinuationConsumed { id }
             | JournalRecord::ApprovalContinuationExpired { id, .. } => {
                 state.approval_continuations.remove(&id);
+            }
+            JournalRecord::BlockerResolved { id, resolution } => {
+                state.blocker_resolutions.insert(id, resolution);
+            }
+            JournalRecord::BlockerResumed { id } => {
+                state.blocker_resolutions.remove(&id);
             }
             JournalRecord::GrantConsumed { id, effect } => {
                 state.grants.remove(&id);
@@ -2420,6 +2456,38 @@ impl RuntimeJournal {
         .await
     }
 
+    /// Banks an operator's answer to a parked blocker before the resume is
+    /// armed in memory (issue #1863), the blocker twin of
+    /// [`record_approval_continuation`](Self::record_approval_continuation).
+    pub async fn record_blocker_resolution(
+        &self,
+        id: &ApprovalId,
+        resolution: &BlockerResolution,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocker_resolutions
+            .insert(id.clone(), resolution.clone());
+        self.append(&JournalRecord::BlockerResolved {
+            id: id.clone(),
+            resolution: resolution.clone(),
+        })
+        .await
+    }
+
+    /// Records that a parked blocker's answer was re-entered into the stopped
+    /// step, so it is not re-armed on the next boot.
+    pub async fn record_blocker_resumed(&self, id: &ApprovalId) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocker_resolutions
+            .remove(id);
+        self.append(&JournalRecord::BlockerResumed { id: id.clone() })
+            .await
+    }
+
     /// Records that an explicit approval continuation reached its agent.
     pub async fn record_approval_continuation_consumed(&self, id: &ApprovalId) -> Result<()> {
         self.state
@@ -2533,6 +2601,19 @@ impl RuntimeJournal {
             .approval_continuations
             .values()
             .cloned()
+            .collect()
+    }
+
+    /// Every blocker answer replay left armed but not yet re-entered (issue
+    /// #1863), for the boot rebuild to re-arm on the live grant set — the
+    /// blocker twin of [`replayed_approval_continuations`](Self::replayed_approval_continuations).
+    pub fn replayed_blocker_resolutions(&self) -> Vec<(ApprovalId, BlockerResolution)> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .blocker_resolutions
+            .iter()
+            .map(|(id, resolution)| (id.clone(), resolution.clone()))
             .collect()
     }
 
