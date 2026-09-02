@@ -980,13 +980,32 @@ pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
     BlockerReplyIntent::Amend
 }
 
-/// Whether any whole word of `lower` is in `words` — the same word-split match
-/// [`contains_action`] uses, so `okay` matches `ok`-the-word but `okra` never
-/// matches `ok`.
+/// Whether any whole word of `lower` is in `words` and is not negated by a
+/// preceding "not"/"don't"/… within two tokens — so `okay` matches `ok`-the-word
+/// but `okra` never matches `ok`, and `don't retry` no longer reads as a retry.
 fn mentions_any(lower: &str, words: &[&str]) -> bool {
-    lower
+    let flattened = lower.replace(['\'', '\u{2019}'], "");
+    let tokens: Vec<&str> = flattened
         .split(|c: char| !c.is_alphanumeric())
-        .any(|word| words.contains(&word))
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .enumerate()
+        .any(|(i, word)| words.contains(word) && !negated_before(&tokens, i))
+}
+
+/// Negations that flip a following verdict word to a non-verdict, apostrophes
+/// already stripped so `don't` reads as `dont`.
+const NEGATIONS: &[&str] = &[
+    "not", "no", "never", "cannot", "dont", "doesnt", "wont", "cant", "isnt", "arent",
+];
+
+/// Whether a negation sits within the two tokens before `i`.
+fn negated_before(tokens: &[&str], i: usize) -> bool {
+    tokens[i.saturating_sub(2)..i]
+        .iter()
+        .any(|token| NEGATIONS.contains(token))
 }
 
 /// Words that carry no instruction — greetings, thanks, fillers. A message made
@@ -1739,6 +1758,27 @@ mod blocker_reply_tests {
             classify_blocker_reply("order some okra for the office"),
             BlockerReplyIntent::Amend,
             "a substring of a verdict word is not that verdict"
+        );
+    }
+
+    #[test]
+    fn a_negated_verdict_word_is_not_that_verdict() {
+        for reply in [
+            "don't retry this",
+            "do not retry",
+            "not approved",
+            "no, cancel",
+        ] {
+            assert_ne!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Retry,
+                "a negated verdict word must not read as the positive verdict: {reply:?}"
+            );
+        }
+        assert_ne!(
+            classify_blocker_reply("no, cancel"),
+            BlockerReplyIntent::Cancel,
+            "a negated cancel is not a cancel"
         );
     }
 }
