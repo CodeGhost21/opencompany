@@ -210,7 +210,7 @@ use crate::runtime::builder::agent_scoped_grants;
 #[derive(Clone)]
 pub struct HarnessDeps {
     /// The inference model shared across a company's agents. A [`HarnessModel`]
-    /// is a tinyagents [`ChatModel<()>`](tinyinference::model::ChatModel)
+    /// is a tinyinference [`ChatModel<()>`](tinyinference::model::ChatModel)
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
     /// `Arc<dyn ChatModel<()>>` at the openhuman `AgentBuilder::chat_model` seam.
     pub provider: Arc<dyn HarnessModel>,

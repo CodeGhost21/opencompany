@@ -1,6 +1,6 @@
 //! Inference model implementations for the embedded harness.
 //!
-//! openhuman's inference now runs on tinyagents [`ChatModel<()>`] (the old
+//! openhuman's inference now runs on tinyinference [`ChatModel<()>`] (the old
 //! `Provider` trait was deleted upstream), so opencompany brings its own
 //! implementations. Consistent with the spec non-goal "not a model host", only
 //! two production surfaces ship:
@@ -69,7 +69,7 @@ pub const OPENROUTER_TITLE: &str = "OpenCompany";
 /// backend-charged USD. Must match openhuman's `OPENHUMAN_USAGE_META_KEY`.
 const OPENHUMAN_USAGE_META_KEY: &str = "openhuman_usage_meta";
 
-/// A harness inference model: a tinyagents [`ChatModel<()>`] plus the telemetry
+/// A harness inference model: a tinyinference [`ChatModel<()>`] plus the telemetry
 /// slug OpenCompany attributes per-turn cost to.
 ///
 /// `ChatModel` carries no provider identity, so this thin supertrait re-adds the
@@ -645,7 +645,7 @@ static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
 });
 
 /// Extract token usage from an OpenAI-compatible chat-completion payload as a
-/// tinyagents [`Usage`], or `None` when the payload carries no `usage` block.
+/// tinyinference [`Usage`], or `None` when the payload carries no `usage` block.
 ///
 /// Cached-input tokens follow the same precedence the legacy path used: the
 /// `openhuman.usage.cached_input_tokens` envelope wins over the standard
@@ -715,7 +715,7 @@ fn inject_usage_meta(
     }
 }
 
-/// Parse the OpenAI `choices[0].message.tool_calls[]` array into tinyagents
+/// Parse the OpenAI `choices[0].message.tool_calls[]` array into tinyinference
 /// [`ToolCall`]s. `function.arguments` arrives as a JSON **string**, which is
 /// parsed back into a value; an unparseable blob is preserved verbatim and the
 /// call is flagged [`ToolCall::invalid`] (mirroring tinyagents' tolerance of

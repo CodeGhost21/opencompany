@@ -1608,7 +1608,7 @@ async fn call_model(
 
 /// Recovers the token/cost totals from a completed call.
 ///
-/// Cost is not on tinyagents' [`Usage`](tinyinference::usage::Usage) — the
+/// Cost is not on tinyinference's [`Usage`](tinyinference::usage::Usage) — the
 /// managed backend reports it in a billing envelope the provider re-projects
 /// onto [`ModelResponse::raw`] under `openhuman_usage_meta`. Reading it here
 /// rather than inventing a price is what keeps the Usage view's planning spend

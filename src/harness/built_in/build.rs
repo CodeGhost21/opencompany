@@ -1177,7 +1177,7 @@ pub fn build_agent(
     let agent_definition_name = manifest_agent.id.as_str();
 
     let mut agent = AgentBuilder::default()
-        // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
+        // `HarnessModel` upcasts to the tinyinference `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
         .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
