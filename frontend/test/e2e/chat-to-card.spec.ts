@@ -87,7 +87,9 @@ test("any message on a desk thread can be added to the board", async ({ page }) 
   // separate surface with its own thread rail down the left — which is the
   // wireframe issue #2020 was filed against.
   await origin.click();
-  await expect(page).toHaveURL(/#\/chat\/.+/);
+  // The Engineering desk's own channel, not merely some channel: a regression
+  // that landed the jump on the wrong one would still match a bare `/.+/`.
+  await expect(page).toHaveURL(/#\/chat\/engineering(?:[/?]|$)/);
   // `data-active` is a boolean attribute the sidebar row renders empty when
   // set and omits when not, so the assertion is on its presence.
   await expect(
