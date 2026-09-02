@@ -370,6 +370,23 @@ pub const CONTINUATION_PERFORMED_KEY: &str = "__opencompany_performed";
 /// question and stack a duplicate card.
 pub const CONTINUATION_DENIED_KEY: &str = "__opencompany_denied";
 
+/// The reserved trigger-input key an **answered node blocker** rides into a
+/// continuation run under (issue #2005).
+///
+/// Reserved on [`CONTINUATION_DELIVERED_KEY`]'s terms — host-written, host-read,
+/// opaque to the engine — and stripped before two parked gates are compared
+/// ([`is_same_gate`]) for the reason all three ledger keys are.
+///
+/// Where it differs from them is the direction it is allowed to fail in.
+/// A ledger says what must NOT happen again, so a garbled one degrades to
+/// "deliver / call / ask" — the pre-ledger behaviour, and safe. This key
+/// carries the operator's own decision about a stopped node, so degrading it to
+/// "nothing known" is exactly the silent drop the blocker family exists to
+/// prevent. [`blocker_answers_in_input`] therefore reads it strictly and fails
+/// loudly, and the caller settles the node rather than running it as if nobody
+/// had answered.
+pub const CONTINUATION_BLOCKER_KEY: &str = "__opencompany_blockers";
+
 /// What approving a workflow gate actually does, in the operator's own terms.
 ///
 /// This rides the card as [`PAYLOAD_NOTE`] rather than living only in a design
@@ -515,6 +532,145 @@ pub fn denied_in_input(input: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One node whose blocker an operator has answered, riding a continuation's
+/// trigger input under [`CONTINUATION_BLOCKER_KEY`] (issue #2005).
+///
+/// The durable [`BlockerResolution`](crate::ports::blockers::BlockerResolution)
+/// narrowed to what the engine side needs: which node the answer is about, what
+/// the operator asked for, and the words an
+/// [`Amend`](crate::ports::blockers::BlockerVerdict::Amend) re-enters carrying.
+/// `node` is the run's own resolved node id — the graph node when there is one,
+/// the agent ref otherwise — which is the same identity
+/// [`BlockerStep::Node`](crate::ports::blockers::BlockerStep::Node) and
+/// [`WorkflowBlockedNode::node_id`](crate::ports::WorkflowBlockedNode::node_id)
+/// carry, so the park and the re-entry agree by construction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockerAnswer {
+    /// The node the answer re-enters.
+    pub node: String,
+    /// What the operator asked that node to do.
+    pub verdict: crate::ports::blockers::BlockerVerdict,
+    /// The operator's words, for the verdict that carries them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answer: String,
+}
+
+/// Every answered blocker riding `input`, or a loud error for a key that is
+/// present and unreadable (issue #2005).
+///
+/// Strict where [`delivered_in_input`] and its siblings are tolerant, and the
+/// asymmetry is the point — see [`CONTINUATION_BLOCKER_KEY`]. A row that names
+/// a verdict this build does not know, or that is not an answer at all, means
+/// the host and the engine disagree about what the operator decided; running
+/// the node as though nobody had answered would spend a turn on the identical
+/// failure and re-park the identical question, with the answer gone.
+///
+/// An absent key is not an error: it is a first run, and every node runs as it
+/// always did.
+pub fn blocker_answers_in_input(input: &Value) -> Result<Vec<BlockerAnswer>> {
+    let Some(raw) = input.get(CONTINUATION_BLOCKER_KEY) else {
+        return Ok(Vec::new());
+    };
+    let rows = raw.as_array().ok_or_else(|| {
+        OpenCompanyError::InvalidRequest(format!(
+            "a workflow run's trigger input carries `{CONTINUATION_BLOCKER_KEY}` as something \
+             other than a list of answered blockers, so an operator's answer cannot be read"
+        ))
+    })?;
+    rows.iter()
+        .map(|row| {
+            serde_json::from_value::<BlockerAnswer>(row.clone()).map_err(|err| {
+                OpenCompanyError::InvalidRequest(format!(
+                    "a workflow run's trigger input carries an unreadable answered blocker \
+                     under `{CONTINUATION_BLOCKER_KEY}`: {err}"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// The answer riding `input` for `node`, if the operator gave one.
+///
+/// The one call an executing node makes. Errors on the same terms
+/// [`blocker_answers_in_input`] does, and on one more:
+/// [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) never starts a
+/// run — the resume fork short-circuits before any cycle — so finding one here
+/// means a cancelled blocker's answer reached a running graph, and the node
+/// must stop rather than quietly carry on as if the operator had said yes.
+pub fn blocker_answer_for(input: &Value, node: &str) -> Result<Option<BlockerAnswer>> {
+    let Some(answer) = blocker_answers_in_input(input)?
+        .into_iter()
+        .find(|answer| answer.node == node)
+    else {
+        return Ok(None);
+    };
+    if !answer.verdict.resumes() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "workflow node `{node}` was reached carrying a `{}` blocker answer, which starts \
+             no run at all",
+            answer.verdict.as_str()
+        )));
+    }
+    Ok(Some(answer))
+}
+
+/// Writes `answer` onto the trigger input under [`CONTINUATION_BLOCKER_KEY`],
+/// superseding any earlier answer for the same node (issue #2005).
+///
+/// Accumulating rather than replacing the whole list, on [`with_denied`]'s
+/// reasoning: a graph whose second node blocks after the first was answered
+/// must not forget the first, or the continuation re-runs a node the operator
+/// already skipped. Last write per node wins — a node retried, blocked again
+/// and then skipped is skipped, because the newer decision is the operator's
+/// current one.
+///
+/// A non-object input becomes one carrying just this key: there is nowhere else
+/// to put it, and [`with_approvals`] already takes the same liberty.
+pub fn with_blocker_answer(input: Value, answer: &BlockerAnswer) -> Value {
+    let mut answers = blocker_answers_in_input(&input).unwrap_or_default();
+    answers.retain(|prior| prior.node != answer.node);
+    answers.push(answer.clone());
+    let mut map = match input {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    map.insert(
+        CONTINUATION_BLOCKER_KEY.to_string(),
+        serde_json::json!(answers),
+    );
+    Value::Object(map)
+}
+
+/// The trigger input a node blocker's continuation runs with (issue #2005):
+/// the blocked run's own input, plus the operator's answer for `node`.
+///
+/// Refuses a non-resuming verdict rather than building an input for it. A
+/// [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) settles the run
+/// and starts nothing, so reaching here with one is a caller that skipped the
+/// fork — loud beats a continuation that re-runs the work the operator asked to
+/// abandon.
+pub fn blocker_continuation_input(
+    input: Value,
+    node: &str,
+    resolution: &crate::ports::blockers::BlockerResolution,
+) -> Result<Value> {
+    if !resolution.resumes() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "a workflow continuation was asked for on node `{node}` with a `{}` blocker \
+             answer, which abandons the work rather than re-entering it",
+            resolution.verdict.as_str()
+        )));
+    }
+    Ok(with_blocker_answer(
+        input,
+        &BlockerAnswer {
+            node: node.to_string(),
+            verdict: resolution.verdict,
+            answer: resolution.answer.clone(),
+        },
+    ))
 }
 
 /// The gate node a parked [`WORKFLOW_APPROVE_KIND`] effect is asking about, or
@@ -864,16 +1020,17 @@ fn decided_input(effect: &Effect) -> Option<Value> {
 /// `input` with the reserved host-threaded ledger keys removed. A non-object
 /// input is returned as-is — there is nothing to strip.
 ///
-/// All three keys, and none is optional: a continuation's input differs from
+/// All four keys, and none is optional: a continuation's input differs from
 /// the paused run's by exactly these — the delivery ledger (#438), the
-/// outward-call ledger (#846) and the denial ledger (#978) — so letting any of
-/// those differences count would make every continuation gate a "new" decision
-/// and stack a duplicate card.
+/// outward-call ledger (#846), the denial ledger (#978) and an answered node
+/// blocker (#2005) — so letting any of those differences count would make every
+/// continuation gate a "new" decision and stack a duplicate card.
 fn without_ledger(mut input: Value) -> Value {
     if let Value::Object(map) = &mut input {
         map.remove(CONTINUATION_DELIVERED_KEY);
         map.remove(CONTINUATION_PERFORMED_KEY);
         map.remove(CONTINUATION_DENIED_KEY);
+        map.remove(CONTINUATION_BLOCKER_KEY);
     }
     input
 }
@@ -2228,6 +2385,172 @@ mod tests {
         let input = single_continuation_input(&card).expect("continues");
         assert!(input.get(CONTINUATION_DELIVERED_KEY).is_none(), "{input}");
         assert!(delivered_in_input(&input).is_empty());
+    }
+
+    // ── Issue #2005: the answered-blocker key ────────────────────────────────
+
+    fn resolution(
+        verdict: crate::ports::blockers::BlockerVerdict,
+        answer: &str,
+    ) -> crate::ports::blockers::BlockerResolution {
+        crate::ports::blockers::BlockerResolution::answered(verdict, answer)
+    }
+
+    /// A first run carries no answer, and reading one is not an error — it is
+    /// the ordinary case for every node that never blocked.
+    #[test]
+    fn an_input_with_no_answered_blocker_reads_as_nothing() {
+        let input = serde_json::json!({ "request": "x" });
+        assert!(
+            blocker_answers_in_input(&input)
+                .expect("readable")
+                .is_empty()
+        );
+        assert!(
+            blocker_answer_for(&input, "draft")
+                .expect("readable")
+                .is_none()
+        );
+    }
+
+    /// The headline of the thread: the verdict and the operator's words ride
+    /// the continuation's trigger input, keyed by the node they re-enter.
+    #[test]
+    fn an_answer_rides_the_trigger_input_keyed_by_its_node() {
+        use crate::ports::blockers::BlockerVerdict;
+        let input = blocker_continuation_input(
+            serde_json::json!({ "request": "x" }),
+            "draft",
+            &resolution(BlockerVerdict::Amend, "use gpt-4o-mini"),
+        )
+        .expect("continues");
+        assert_eq!(input["request"], "x", "the blocked run's input is kept");
+        let answer = blocker_answer_for(&input, "draft")
+            .expect("readable")
+            .expect("the answer is there");
+        assert_eq!(answer.verdict, BlockerVerdict::Amend);
+        assert_eq!(answer.answer, "use gpt-4o-mini");
+        assert!(
+            blocker_answer_for(&input, "other")
+                .expect("readable")
+                .is_none(),
+            "an answer is about one node, not the graph"
+        );
+    }
+
+    /// A two-blocker lineage must not forget the first node's answer when the
+    /// second is decided — the same accumulation the denial ledger keeps.
+    #[test]
+    fn a_second_nodes_answer_does_not_forget_the_first() {
+        use crate::ports::blockers::BlockerVerdict;
+        let first = blocker_continuation_input(
+            serde_json::json!({ "request": "x" }),
+            "draft",
+            &resolution(BlockerVerdict::Skip, ""),
+        )
+        .expect("continues");
+        let second =
+            blocker_continuation_input(first, "review", &resolution(BlockerVerdict::Retry, ""))
+                .expect("continues");
+        assert_eq!(
+            blocker_answers_in_input(&second).expect("readable").len(),
+            2
+        );
+        assert_eq!(
+            blocker_answer_for(&second, "draft")
+                .expect("readable")
+                .expect("kept")
+                .verdict,
+            BlockerVerdict::Skip
+        );
+    }
+
+    /// A node retried, blocked again and then skipped is skipped: the operator's
+    /// newest decision is the one in force.
+    #[test]
+    fn a_later_answer_supersedes_an_earlier_one_for_the_same_node() {
+        use crate::ports::blockers::BlockerVerdict;
+        let first = blocker_continuation_input(
+            serde_json::json!({ "request": "x" }),
+            "draft",
+            &resolution(BlockerVerdict::Retry, ""),
+        )
+        .expect("continues");
+        let second =
+            blocker_continuation_input(first, "draft", &resolution(BlockerVerdict::Skip, ""))
+                .expect("continues");
+        assert_eq!(
+            blocker_answers_in_input(&second).expect("readable").len(),
+            1,
+            "one node carries one live decision"
+        );
+        assert_eq!(
+            blocker_answer_for(&second, "draft")
+                .expect("readable")
+                .expect("kept")
+                .verdict,
+            BlockerVerdict::Skip
+        );
+    }
+
+    /// The asymmetry with the ledgers, pinned: an unreadable answer is loud.
+    /// Degrading it to "nobody answered" would re-run the node into the
+    /// identical failure with the operator's decision gone.
+    #[test]
+    fn an_unreadable_answer_is_loud_rather_than_ignored() {
+        let not_a_list = serde_json::json!({ CONTINUATION_BLOCKER_KEY: "retry" });
+        assert!(blocker_answers_in_input(&not_a_list).is_err());
+
+        let unknown_verdict = serde_json::json!({
+            CONTINUATION_BLOCKER_KEY: [{ "node": "draft", "verdict": "shrug" }]
+        });
+        assert!(blocker_answers_in_input(&unknown_verdict).is_err());
+        assert!(blocker_answer_for(&unknown_verdict, "draft").is_err());
+
+        let no_node = serde_json::json!({
+            CONTINUATION_BLOCKER_KEY: [{ "verdict": "retry" }]
+        });
+        assert!(blocker_answers_in_input(&no_node).is_err());
+    }
+
+    /// A cancel abandons the work, so neither the writer nor the reader will
+    /// carry one into a run.
+    #[test]
+    fn a_cancelled_answer_is_refused_at_both_ends() {
+        use crate::ports::blockers::BlockerVerdict;
+        assert!(
+            blocker_continuation_input(
+                serde_json::json!({ "request": "x" }),
+                "draft",
+                &resolution(BlockerVerdict::Cancel, ""),
+            )
+            .is_err(),
+            "a cancel builds no continuation input"
+        );
+        let smuggled = serde_json::json!({
+            CONTINUATION_BLOCKER_KEY: [{ "node": "draft", "verdict": "cancel" }]
+        });
+        assert!(
+            blocker_answer_for(&smuggled, "draft").is_err(),
+            "a node reached carrying a cancel must stop, not carry on"
+        );
+    }
+
+    /// The key describes what was already decided, not what is being decided,
+    /// so it must not split one gate into two cards on a continuation.
+    #[test]
+    fn an_answered_blocker_is_not_part_of_a_gates_identity() {
+        use crate::ports::blockers::BlockerVerdict;
+        let input = serde_json::json!({ "request": "x" });
+        let paused = gate_effect("digest", "gate", &input, "run-1", &[], &[], None);
+        let resumed_input =
+            blocker_continuation_input(input, "draft", &resolution(BlockerVerdict::Retry, ""))
+                .expect("continues");
+        let resumed = gate_effect("digest", "gate", &resumed_input, "run-2", &[], &[], None);
+        assert!(
+            is_same_gate(&paused, &resumed),
+            "one gate, one decision, however many blockers the lineage answered"
+        );
     }
 
     /// The ledger must not make a continuation's gate look like a *different*
