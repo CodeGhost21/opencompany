@@ -1700,6 +1700,13 @@ impl HarnessAgentRunner {
             agent: None,
             run_id: Some(self.run_id.clone()),
         };
+
+        let turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, resolved_node_id);
+        let already_stashed = parking.blocked_nodes.is_armed(&turn);
+        self.stash_node_blocker_resume(parking, resolved_node_id)
+            .await;
+
         match parking
             .park_and_journal(
                 &self.company,
@@ -1714,8 +1721,6 @@ impl HarnessAgentRunner {
             .await
         {
             Ok(approval_id) => {
-                self.stash_node_blocker_resume(parking, resolved_node_id)
-                    .await;
                 tracing::info!(
                     company = %self.company,
                     run_id = %self.run_id,
@@ -1727,6 +1732,22 @@ impl HarnessAgentRunner {
                 Some(approval_id.to_string())
             }
             Err(err) => {
+                if !already_stashed {
+                    parking.blocked_nodes.release(&turn);
+                    if let Err(release_err) =
+                        parking.journal.record_blocked_node_released(&turn).await
+                    {
+                        tracing::warn!(
+                            company = %self.company,
+                            run_id = %self.run_id,
+                            node = resolved_node_id,
+                            error = %release_err,
+                            "workflow agent node: a blocker's stash could not be durably \
+                             retired after its park failed; a stale entry may linger until \
+                             a manual sweep"
+                        );
+                    }
+                }
                 // Loud, and then the node settles `Failed` as it did before:
                 // holding a run open on a question that reached nobody would be
                 // strictly worse than the failure it replaced.
@@ -1801,6 +1822,20 @@ impl HarnessAgentRunner {
             .into_iter()
             .partition(|r| r.effect.kind.starts_with("blocker."));
         requests = remaining;
+
+        let blocker_stash_already_armed = !blocker_requests.is_empty()
+            && self
+                .deps
+                .delivery
+                .as_ref()
+                .and_then(|d| d.parking.as_ref())
+                .is_some_and(|parking| parking.blocked_nodes.is_armed(node_turn));
+        if !blocker_requests.is_empty()
+            && let Some(parking) = self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref())
+        {
+            self.stash_node_blocker_resume(parking, resolved_node_id)
+                .await;
+        }
         for mut blocker_request in blocker_requests {
             // Extract the blocker payload from the effect, add the node step, and park it.
             let mut payload: crate::ports::blockers::BlockerPayload =
@@ -1850,8 +1885,6 @@ impl HarnessAgentRunner {
                 .await
             {
                 Ok(approval_id) => {
-                    self.stash_node_blocker_resume(parking, resolved_node_id)
-                        .await;
                     push_tool(&mut summary.tools, &blocker_request.tool);
                     summary.approval_ids.push(approval_id.to_string());
                     summary.blockers += 1;
@@ -1913,6 +1946,27 @@ impl HarnessAgentRunner {
             // none filed no receipt at all — `summary.unparkable` stayed 0 and
             // the node read as clean. The discard bookkeeping now happens
             // first; this only has to flush what it recorded.
+            if !blocker_stash_already_armed
+                && summary.approval_ids.is_empty()
+                && let Some(parking) = self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref())
+            {
+                parking.blocked_nodes.release(node_turn);
+                if let Err(error) = parking
+                    .journal
+                    .record_blocked_node_released(node_turn)
+                    .await
+                {
+                    tracing::warn!(
+                        company = %self.company,
+                        run_id = %self.run_id,
+                        node_turn,
+                        %error,
+                        "workflow agent node: every blocker for this node failed to park, but \
+                         retiring the stash armed for it also failed durably; a stale entry may \
+                         linger until a manual sweep"
+                    );
+                }
+            }
             self.approvals.extend(rows);
             return summary;
         }
@@ -3237,13 +3291,10 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
             if parked.unparkable == 1 { "it" } else { "them" }
         ));
     }
-    // What deciding the cards actually does, which is not one answer. A gated
-    // call's park carries the node's turn key, so a verdict re-runs the turn and
-    // the run goes on. A blocker's does not — it is parked `Unlinked` with no
-    // continuation, because answering a question is not authorising a call — and
-    // its answer re-enters the step down its own path instead, which is what the
-    // four words mean rather than a bare approve. Saying only "this continues"
-    // for a blocker would hide that a cancel stops the run.
+    // Gated calls and blocker questions resume differently: a gated call's
+    // approval re-runs the turn, a blocker's approve/deny re-enters or stops
+    // the step — the sentence below has to name only the verdicts the console
+    // can actually send for whichever shape (or mix) is waiting.
     let resume = if waiting == 0 {
         String::new()
     } else if parked.blockers == 0 {
@@ -3262,8 +3313,8 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
         )
     } else {
         " Some of these are gated tool calls, which continue this run when approved; the rest \
-         are questions the agent raised, which re-enter the step they stopped — retry, answer or \
-         skip carries it on, cancel stops the run."
+         are questions the agent raised, which re-enter the step they stopped — approving runs \
+         it again, and denying stops the run."
             .to_string()
     };
     format!(
@@ -6200,6 +6251,16 @@ mod tests {
             "a mixed node has to describe both, since neither sentence is true of all of it: \
              {text}"
         );
+        assert!(
+            text.contains("denying stops the run"),
+            "a mixed node's blocker cards still only resolve by approve or deny, the same \
+             vocabulary the blocker-only branch above uses: {text}"
+        );
+        assert!(
+            !text.contains("retry") && !text.contains("skip") && !text.contains("cancel"),
+            "the console only reaches approve/deny on a workflow-node blocker, so a mixed node \
+             must not promise verdicts it cannot send: {text}"
+        );
 
         // Nothing was parked at all — every call failed to park — so there is
         // no card to promise anything about.
@@ -8486,6 +8547,270 @@ mod tests {
                 .expect("a parked blocker must stash the run its answer re-enters");
             assert_eq!(stashed.workflow_id, "reporting");
             assert_eq!(stashed.input, trigger_input);
+        }
+
+        /// A resolver racing in against a live blocker park must always find
+        /// the stash already armed. This spies on the approval gate's own
+        /// `park` call and captures whether the stash is armed at that exact
+        /// point — deterministic, no wall-clock race needed, on the same
+        /// principle as
+        /// `park_and_journal_arms_the_continuation_slot_before_the_card_is_parkable`
+        /// in `workflows::delivery`.
+        #[tokio::test]
+        async fn park_node_blocker_as_arms_the_stash_before_the_card_is_parkable() {
+            use crate::ports::ApprovalGate;
+            use crate::ports::types::{Actor, ApprovalId, Effect, PolicyDecision, Verdict};
+
+            struct Spy {
+                inner: Arc<dyn ApprovalGate>,
+                blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
+                turn: String,
+                armed_at_park: std::sync::Mutex<Option<bool>>,
+            }
+
+            #[async_trait]
+            impl ApprovalGate for Spy {
+                async fn evaluate(
+                    &self,
+                    company: &CompanyId,
+                    effect: &Effect,
+                ) -> crate::Result<PolicyDecision> {
+                    self.inner.evaluate(company, effect).await
+                }
+
+                async fn park(
+                    &self,
+                    company: &CompanyId,
+                    effect: Effect,
+                ) -> crate::Result<ApprovalId> {
+                    *self.armed_at_park.lock().expect("spy lock") =
+                        Some(self.blocked_nodes.is_armed(&self.turn));
+                    self.inner.park(company, effect).await
+                }
+
+                async fn resolve(
+                    &self,
+                    id: &ApprovalId,
+                    verdict: Verdict,
+                    by: Actor,
+                ) -> crate::Result<Option<Effect>> {
+                    self.inner.resolve(id, verdict, by).await
+                }
+            }
+
+            let dir = tmp("oc-2005-race-a-");
+            let (mut deps, _journal) =
+                crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+            let parking = deps
+                .delivery
+                .clone()
+                .expect("delivery")
+                .parking
+                .clone()
+                .expect("parking");
+
+            let run_id = "run-2005-race-a".to_string();
+            let turn = workflow_node_turn_key(&run_id, "gather");
+            let spy = Arc::new(Spy {
+                inner: parking.approvals.clone(),
+                blocked_nodes: parking.blocked_nodes.clone(),
+                turn: turn.clone(),
+                armed_at_park: std::sync::Mutex::new(None),
+            });
+            let mut spied_parking = parking.clone();
+            spied_parking.approvals = spy.clone();
+            deps.delivery.as_mut().expect("delivery").parking = Some(spied_parking);
+
+            let trigger_input = json!({ "topic": "quarterly numbers" });
+            let board_claim = Arc::new(deps.delegations.claim_board(&run_id));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(&run_id));
+            let runner = HarnessAgentRunner::new(
+                single_turn(&deps),
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                run_id,
+                None,
+                trigger_input,
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            );
+
+            let parked = runner
+                .park_node_blocker_as(
+                    "gather",
+                    "the model id `gpt-nope` was rejected",
+                    BlockerKind::Infrastructure,
+                    BlockerSource::Provider,
+                    "a model id this provider serves",
+                )
+                .await;
+            assert!(parked.is_some(), "the blocker parks");
+
+            let captured = spy
+                .armed_at_park
+                .lock()
+                .expect("spy lock")
+                .expect("park was called");
+            assert!(
+                captured,
+                "the blocked-node stash must already be armed by the time the approval gate's \
+                 park() runs, before the card becomes resolvable to a concurrent operator"
+            );
+        }
+
+        /// The same proof as above, for the sibling site: a blocker card
+        /// extracted from a node's gated-call batch inside `park_gated_calls`.
+        #[tokio::test]
+        async fn park_gated_calls_blocker_extraction_arms_the_stash_before_the_first_card_is_parkable()
+         {
+            use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+            use crate::ports::ApprovalGate;
+            use crate::ports::blockers::BlockerPayload;
+            use crate::ports::types::{
+                Actor, ApprovalId, Effect, EffectGroup, PolicyDecision, Verdict,
+            };
+
+            struct Spy {
+                inner: Arc<dyn ApprovalGate>,
+                blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
+                turn: String,
+                armed_at_park: std::sync::Mutex<Option<bool>>,
+            }
+
+            #[async_trait]
+            impl ApprovalGate for Spy {
+                async fn evaluate(
+                    &self,
+                    company: &CompanyId,
+                    effect: &Effect,
+                ) -> crate::Result<PolicyDecision> {
+                    self.inner.evaluate(company, effect).await
+                }
+
+                async fn park(
+                    &self,
+                    company: &CompanyId,
+                    effect: Effect,
+                ) -> crate::Result<ApprovalId> {
+                    *self.armed_at_park.lock().expect("spy lock") =
+                        Some(self.blocked_nodes.is_armed(&self.turn));
+                    self.inner.park(company, effect).await
+                }
+
+                async fn resolve(
+                    &self,
+                    id: &ApprovalId,
+                    verdict: Verdict,
+                    by: Actor,
+                ) -> crate::Result<Option<Effect>> {
+                    self.inner.resolve(id, verdict, by).await
+                }
+            }
+
+            let dir = tmp("oc-2005-race-b-");
+            let (mut deps, _journal) =
+                crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+            let parking = deps
+                .delivery
+                .clone()
+                .expect("delivery")
+                .parking
+                .clone()
+                .expect("parking");
+
+            let run_id = "run-2005-race-b".to_string();
+            let turn = workflow_node_turn_key(&run_id, "work");
+            let spy = Arc::new(Spy {
+                inner: parking.approvals.clone(),
+                blocked_nodes: parking.blocked_nodes.clone(),
+                turn: turn.clone(),
+                armed_at_park: std::sync::Mutex::new(None),
+            });
+            let mut spied_parking = parking.clone();
+            spied_parking.approvals = spy.clone();
+            deps.delivery.as_mut().expect("delivery").parking = Some(spied_parking);
+
+            let queue = deps.approval_requests.clone();
+            let trigger_input = json!({ "topic": "quarterly numbers" });
+            let board_claim = Arc::new(deps.delegations.claim_board(&run_id));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(&run_id));
+            let runner = HarnessAgentRunner::new(
+                single_turn(&deps),
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                run_id.clone(),
+                None,
+                trigger_input,
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            );
+
+            let payload = BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::AgentQuestion,
+                step: None,
+                reason: "which quarter should I report?".to_string(),
+                needed: "the quarter to report on".to_string(),
+                group_key: None,
+            };
+            let effect_kind = payload.effect_kind();
+            let reason = payload.reason.clone();
+            let payload_value = serde_json::to_value(&payload).expect("payload serializes");
+
+            let claim = queue.claim(ApprovalScope::Run(run_id.clone()));
+            claim
+                .scoped(async {
+                    queue.push(ApprovalRequest {
+                        tool: "escalate_to_human".to_string(),
+                        reason,
+                        effect: Effect {
+                            kind: effect_kind,
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: payload_value,
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                })
+                .await;
+
+            claim
+                .scoped(runner.park_gated_calls(Some("work"), "work", &turn))
+                .await;
+
+            let captured = spy
+                .armed_at_park
+                .lock()
+                .expect("spy lock")
+                .expect("park was called");
+            assert!(
+                captured,
+                "a blocker card extracted from a node's gated-call batch must find the stash \
+                 already armed by the time the approval gate's park() runs"
+            );
         }
     }
 }
