@@ -89,6 +89,20 @@ pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod memory_tools;
+/// Recovering a tool call that a model on the **native** transport wrote into
+/// its message body as prose instead of emitting it through the structured
+/// channel. Validated against the tools the turn itself offered — the marker a
+/// shared parser cannot use — and applied in the provider, which is the last
+/// point on this turn path where a text-shaped call can still become a real
+/// one. See [`native_salvage`].
+pub mod native_salvage;
+/// End-to-end proof that a tool call a model wrote as **text** is executed by a
+/// real turn: the harness, the grant gates, the approval policy, the dispatch
+/// and the meter are all real, and the recovered call's synthesized id is shown
+/// to keep its cycle paired all the way back into the model's context. Only the
+/// model's output and the search backend are scripted. Test-only.
+#[cfg(test)]
+mod native_salvage_turn_test;
 pub mod orchestrator;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed
