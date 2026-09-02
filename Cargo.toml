@@ -605,7 +605,11 @@ tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
 # their public trait identities remain identical.
 tinycortex-api = { path = "vendor/openhuman/vendor/tinycortex/api" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
-tinyplace = { path = "vendor/openhuman/vendor/tinyplace/sdk/rust" }
+# No `tinyplace` entry: openhuman dropped the submodule, so the path this
+# patched onto no longer exists at the pin and Cargo fails to load the source
+# outright — a patch path is resolved eagerly, whatever the feature set. Nothing
+# here consumes the crate either; the `tinyplace` FEATURE above is unrelated (it
+# only turns on `reqwest`).
 # Arrived with the #499 pin bump, and is NOT a submodule — openhuman vendors it
 # as a plain in-tree directory. Replicated for the same reason as the entries
 # above, but the reason it matters here is specific: without it Cargo resolves
