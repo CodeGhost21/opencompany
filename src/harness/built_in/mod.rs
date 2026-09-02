@@ -3998,6 +3998,7 @@ impl HarnessPool {
                 events: events.clone(),
                 store: deps.store.clone(),
                 thread_root: chat.thread_root,
+                current_message_seq: chat.message_seq,
             }),
             _ => None,
         };
