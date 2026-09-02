@@ -47,11 +47,31 @@ export function VirtualList<T>({
 }: VirtualListProps<T>) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const rowEls = useRef(new Map<string, HTMLDivElement>());
+  const rowKeys = useRef(new WeakMap<HTMLDivElement, string>());
   const heights = useRef(new Map<string, number>());
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewport, setViewport] = useState(0);
   const [scrollMargin, setScrollMargin] = useState(0);
+  const [resizeObserver] = useState<ResizeObserver | null>(() =>
+    typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver((entries) => {
+          let changed = false;
+          for (const entry of entries) {
+            const key = rowKeys.current.get(entry.target as HTMLDivElement);
+            if (!key) continue;
+            const measured = entry.contentRect.height;
+            if (measured > 0 && Math.abs((heights.current.get(key) ?? -1) - measured) > 1) {
+              heights.current.set(key, measured);
+              changed = true;
+            }
+          }
+          if (changed) bump();
+        }),
+  );
+
+  useEffect(() => () => resizeObserver?.disconnect(), [resizeObserver]);
 
   const laneCount = Math.max(1, lanes);
   const rowCount = Math.ceil(items.length / laneCount);
@@ -118,10 +138,23 @@ export function VirtualList<T>({
     if (changed) bump();
   });
 
-  const setRowEl = useCallback((key: string, el: HTMLDivElement | null) => {
-    if (el) rowEls.current.set(key, el);
-    else rowEls.current.delete(key);
-  }, []);
+  const setRowEl = useCallback(
+    (key: string, el: HTMLDivElement | null) => {
+      if (el) {
+        rowEls.current.set(key, el);
+        rowKeys.current.set(el, key);
+        resizeObserver?.observe(el);
+      } else {
+        const prev = rowEls.current.get(key);
+        if (prev) {
+          resizeObserver?.unobserve(prev);
+          rowKeys.current.delete(prev);
+        }
+        rowEls.current.delete(key);
+      }
+    },
+    [resizeObserver],
+  );
 
   const rows: ReactNode[] = [];
   for (let r = win.startIndex; r <= win.endIndex; r++) {
