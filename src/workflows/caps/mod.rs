@@ -2604,10 +2604,6 @@ impl HarnessAgentRunner {
                     // deliverable. Re-verify before accepting.
                     let recovered_and_sufficient = match &recovered.evidence {
                         Some(evidence) => {
-                            let augmented = format!(
-                                "{}\n\nRecovered company context:\n{evidence}",
-                                outcome.reply
-                            );
                             let verified = crate::workflows::judge::augment_with_recovery(
                                 &outcome.reply,
                                 evidence,
@@ -2624,12 +2620,12 @@ impl HarnessAgentRunner {
                             )
                             .await;
                             (reverdict == crate::workflows::judge::SufficiencyVerdict::Continue)
-                                .then_some(augmented)
+                                .then_some(verified)
                         }
                         None => None,
                     };
-                    if let Some(augmented) = recovered_and_sufficient {
-                        outcome.reply = augmented;
+                    if let Some(verified) = recovered_and_sufficient {
+                        outcome.reply = verified;
                     } else {
                         let message = format!(
                             "workflow node `{lineage_node}` needs missing information; recovery tried {}",
@@ -4151,6 +4147,86 @@ mod tests {
             reverify_prompt.contains("Recovered company context"),
             "the second judge call must see the augmented output, not the original refusal alone: \
              {reverify_prompt}"
+        );
+    }
+
+    /// The text a node ships after a successful recovery must be the exact
+    /// text the re-verification judge was shown. `augment_with_recovery`
+    /// bounds the reply so the evidence survives the judge's output window;
+    /// a separately composed, unbounded string would let an oversized reply
+    /// ship content the judge never read.
+    #[tokio::test]
+    async fn a_recovered_reply_ships_the_exact_text_the_judge_certified() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-certified-text-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let oversized = "R".repeat(25_000);
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: oversized.clone(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990h"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990h".to_string(),
+            "run-1990h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (_value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await
+            .expect("a `continue` re-verdict accepts the recovered reply");
+
+        let judged = script.seen.lock().expect("seen")[1].to_string();
+        let escaped = serde_json::to_string(&outcome.reply).expect("reply serializes");
+        assert!(
+            judged.contains(escaped.trim_matches('"')),
+            "the reply stored on the outcome must be the same text the re-verification judge \
+             read, but the judge never saw it ({} stored chars)",
+            outcome.reply.chars().count()
+        );
+        assert!(
+            outcome.reply.chars().count() < oversized.chars().count(),
+            "the fixture must be large enough that recovery augmentation has to bound it, \
+             otherwise this test cannot observe the divergence"
         );
     }
 
