@@ -565,6 +565,64 @@ async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
     assert!(blank.get("originChatId").is_none(), "{blank}");
 }
 
+/// A card raised inside a thread carries the thread root on both the task
+/// detail and board wire responses, not only on the stored `TaskRecord`.
+///
+/// `originParent` is stamped by the tool-spawn path rather than the REST
+/// create body, so the record is seeded directly here.
+#[tokio::test]
+async fn a_task_detail_response_carries_the_thread_root_of_a_threaded_origin() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "threaded".into(),
+                title: "Ship the brief".into(),
+                note: None,
+                column: crate::ports::tasks::COLUMN_TODO.into(),
+                priority: "medium".into(),
+                assignee: String::new(),
+                updated_at_millis: 1,
+                origin: crate::ports::tasks::TaskOrigin::new(
+                    Some("strategy".to_string()),
+                    Some(crate::ports::types::EventSeq::new(41)),
+                ),
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
+                bounced: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, detail) = send(&state, "GET", "/api/v1/company/tasks/threaded", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["task"]["originChatId"], "strategy");
+    assert_eq!(detail["task"]["originParent"], 41, "{detail}");
+
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let card = board
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "threaded")
+        .unwrap();
+    assert_eq!(card["originParent"], 41, "{card}");
+}
+
 /// Issue #339: the card's output link reaches the console on **both** reads.
 ///
 /// The board read matters as much as task detail here, and that is the whole
