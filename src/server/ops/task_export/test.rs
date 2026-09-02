@@ -44,6 +44,7 @@ fn card(title: &str) -> TaskCard {
         cost: None,
         parent_task_id: None,
         origin_chat_id: None,
+        origin_parent: None,
         origin_run_id: None,
         origin_workflow_id: None,
         bounced: None,
