@@ -2558,6 +2558,7 @@ impl HarnessAgentRunner {
         }
 
         if outcome.budget_paused.is_none()
+            && outcome.halted_for_spend.is_none()
             && let Some(verify) = request.get("verify")
         {
             let criteria = verify
@@ -2800,6 +2801,12 @@ impl HarnessAgentRunner {
                     pause.summary
                 )),
             )
+        } else if let Some(halt) = &outcome.halted_for_spend {
+            self.capped.push(lineage_node.clone());
+            (
+                crate::ports::RunStatus::Failed,
+                Some(crate::harness::built_in::brain::spend_halt_notice(halt)),
+            )
         } else {
             (crate::ports::RunStatus::Succeeded, None)
         };
@@ -2936,6 +2943,10 @@ impl AgentRunner for HarnessAgentRunner {
         } else if outcome.budget_paused.is_some() {
             StopReason::LimitStop {
                 limit: "budget_exhausted".to_string(),
+            }
+        } else if outcome.halted_for_spend.is_some() {
+            StopReason::LimitStop {
+                limit: "spend_halt".to_string(),
             }
         } else {
             StopReason::Finished
@@ -4719,6 +4730,102 @@ mod tests {
             Some(
                 "agent paused for lack of inference budget/credits: acme is out of inference credits"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spend_halted_turn_skips_the_judge_and_settles_failed() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-spend-halted-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = Arc::new(EscalatingJudgeProvider::default());
+        deps.provider = provider.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "here is what I found so far".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: "researcher".to_string(),
+                spent_usd: 5.25,
+                cap_usd: 5.0,
+            }),
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990-spend"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1990-spend"),
+        );
+        let capped = RunCappedNodes::default();
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990-spend".to_string(),
+            "run-1990-spend".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            capped.clone(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "spend_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "the report must be sent" },
+                }),
+            )
+            .await
+            .expect("a spend-halted turn is still Ok — the reply is a real, partial checkpoint");
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a spend-halted turn must not pay for a sufficiency judge"
+        );
+        assert!(outcome.halted_for_spend.is_some());
+
+        assert_eq!(
+            capped.take(),
+            vec!["spend_step".to_string()],
+            "the spend-halted node's id must reach the channel the runner reconciles against"
+        );
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1990-spend".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+        assert!(
+            attempts[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("spend cap partway through")),
+            "the spend-halt diagnosis must survive to the attempt row, got {:?}",
+            attempts[0].error
         );
     }
 
