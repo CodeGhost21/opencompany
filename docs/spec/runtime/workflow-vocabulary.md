@@ -417,9 +417,28 @@ taxonomy; and `halt_benign` settles the attempt and node as `Declined`, meaning
 the work was intentionally unnecessary rather than failed. A failed, blank, or
 otherwise insufficient output is never allowed to become `halt_benign`.
 
-The peer rung depends on #1859's board-read capability. Until that capability is
-present it is recorded as skipped; the judge does not broadcast to the roster,
-and an exhausted recovery ladder escalates the missing information instead.
+The three rungs run in order and each runs only when every rung above it found
+nothing. The first two are local reads — the company fact store, then workspace
+context. The third puts the question to **one** roster peer, never a broadcast:
+the teammate whose role, description or name shares the most terms with the
+question, chosen by the same term extraction the fact rung queries with. The
+node's own agent is excluded, ties keep roster order, and a question no role
+matches skips the rung rather than picking arbitrarily.
+
+That peer runs exactly one background turn under its own wall-clock bound, and
+its reply enters the evidence tagged `peer <id> (<role>):` so the
+re-verification judge and the operator's blocker card both see where the answer
+came from. The consultation is metered as that peer's own turn, not as a
+`JudgeCall`, so a node's judge metering still describes only its judge calls.
+It carries no authority: anything the consulted peer stages — a hand-off, a
+card, a publish — is discarded rather than executed for this run, no attempt is
+settled for it, and it fires at most once per node attempt even when the peer
+is the orchestrator and runs a nested graph. The rung is skipped when the
+plan-level token ceiling is already spent, and a peer that answers with nothing,
+fails or overruns its bound leaves the ladder empty — recovery never degrades
+into advancing anyway. An exhausted ladder escalates the missing information as
+before, with each rung's outcome recorded on the blocker.
+
 Workflows without `verify` take the legacy path and spend no judge call.
 
 ## The engine-only kinds OpenCompany rejects
