@@ -91,6 +91,7 @@ import {
   taskApprovalRows,
   RESUME_BLOCKED_REASON,
 } from "@/lib/task-approvals";
+import { originConversation } from "@/lib/task-origin";
 import { formatDuration, timeOf } from "@/lib/timeline-format";
 import { TimelineList, runStatusTone } from "@/views/runs/RunTimeline";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -399,7 +400,8 @@ export function TaskDetailView({
   onDecide,
   onBack,
   onNavigate,
-  onOpenThread,
+  chatChannelByThread,
+  onOpenChannel,
   onDeleted,
 }: {
   client: OpenCompanyClient;
@@ -440,8 +442,10 @@ export function TaskDetailView({
   onBack: () => void;
   /** Navigate the detail to a neighbouring (lineage) task. */
   onNavigate: (id: string) => void;
-  /** Open the chat thread this card was created from (issue #246). */
-  onOpenThread?: (threadId: string) => void;
+  /** The shell's host thread → Room channel map, which places this card's origin. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
+  /** Open the Room channel this card's conversation lives on (issue #246). */
+  onOpenChannel?: (channelId: string) => void;
   /*
    * There is no `onSaved`. There was, and every one of its five call sites
    * handed a saved card to a `() => {}`: it existed to reconcile the board
@@ -773,7 +777,8 @@ export function TaskDetailView({
 
             <OriginThreadRow
               originChatId={detail.task.originChatId}
-              onOpenThread={onOpenThread}
+              chatChannelByThread={chatChannelByThread}
+              onOpenChannel={onOpenChannel}
             />
 
             <LineageRail
@@ -1573,20 +1578,25 @@ export function ControlBar({
  * onto the board. Renders nothing for a card with no conversation behind it,
  * which is every card the `+` button creates.
  *
- * Falls back to plain text when no navigation callback is supplied: stating the
- * origin is the part that must always work; the jump is a convenience the host
- * screen may or may not be able to offer.
+ * The jump is offered only when the origin thread resolves to a channel the
+ * Room tab can open ({@link originConversation}) and the host screen supplied
+ * somewhere to go. Otherwise it falls back to plain text: stating the origin is
+ * the part that must always work, and a button that cannot land anywhere is
+ * worse than no button.
  */
-function OriginThreadRow({
+export function OriginThreadRow({
   originChatId,
-  onOpenThread,
+  chatChannelByThread,
+  onOpenChannel,
 }: {
   originChatId?: string;
-  onOpenThread?: (threadId: string) => void;
+  chatChannelByThread?: Readonly<Record<string, string>>;
+  onOpenChannel?: (channelId: string) => void;
 }) {
-  if (!originChatId) return null;
+  const origin = originConversation(originChatId, chatChannelByThread);
+  if (origin.kind === "none") return null;
   const label = "Opened from chat";
-  if (!onOpenThread) {
+  if (origin.kind === "unreachable" || !onOpenChannel) {
     return (
       <div className="flex items-center gap-2 rounded-xl border bg-card/40 px-3 py-2 text-xs text-muted-foreground">
         <MessagesSquare className="size-3.5 shrink-0" />
@@ -1594,10 +1604,11 @@ function OriginThreadRow({
       </div>
     );
   }
+  const { channelId } = origin;
   return (
     <button
       className="flex w-full items-center gap-2 rounded-xl border bg-card/40 px-3 py-2 text-left text-xs transition-colors hover:bg-accent"
-      onClick={() => onOpenThread(originChatId)}
+      onClick={() => onOpenChannel(channelId)}
     >
       <MessagesSquare className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate">{label}</span>

@@ -3617,13 +3617,14 @@ export function AppShell({
               onDecide={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
               }
-              // Issue #246: the card → chat half of the round trip. A card
-              // opened from a conversation remembers which one, so its detail
-              // screen can put the operator back in that thread.
-              onOpenThread={(threadId) => {
-                setActiveThreadId(threadId);
-                setView("conversation");
-              }}
+              // Issue #246: the card → chat half of the round trip. The card
+              // carries the host thread it was opened from; the map is what
+              // turns that into the Room channel rendering it, which is the
+              // whole address (`#/chat/<channelId>`) — so the destination is
+              // linkable and Back returns to the card. The row states the
+              // origin without offering a jump when no channel carries it.
+              chatChannelByThread={chatChannelByThread}
+              onOpenChannel={(channelId) => navigate("chat", channelId)}
               // Back, and a deleted card, go to the board — which is the
               // `tasks` ledger. Through `navigate` so the address follows.
               onLeave={() =>
