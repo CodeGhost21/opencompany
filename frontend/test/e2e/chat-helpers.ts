@@ -37,3 +37,13 @@ export function reply(page: Page, marker: string): Locator {
 export function workingRow(page: Page): Locator {
   return page.getByTestId("working-indicator");
 }
+
+/**
+ * The live receipt for a turn this console just sent (issue #1934), which now
+ * rides a detached turn past its 202 into the queued/working window (issue
+ * #2021) — so on a same-session send it, not the bare {@link workingRow}, is the
+ * in-flight indicator.
+ */
+export function liveReceipt(page: Page): Locator {
+  return page.getByTestId("chat-live-receipt");
+}
