@@ -639,6 +639,10 @@ describe("resolving a live frame's thread id against the shell's map", () => {
   it("answers null for a dm:-prefixed id naming no teammate in the map", () => {
     expect(channelForThread(MAP, "dm:ghost")).toBeNull();
   });
+
+  it("folds a dm:-prefixed id's case, the way the host resolves the teammate it names", () => {
+    expect(channelForThread(MAP, "dm:ENG")).toBe("dm:eng");
+  });
 });
 
 /**
