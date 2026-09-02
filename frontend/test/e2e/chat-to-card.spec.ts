@@ -105,6 +105,67 @@ test("any message on a desk thread can be added to the board", async ({ page }) 
   await expect(origin).toBeVisible();
 });
 
+/**
+ * Issue #2020: a card raised from **inside a thread** opens that thread on the
+ * jump back, not merely the channel it lives in.
+ *
+ * The test above proves the channel-level half; it cannot prove this half,
+ * because a first message in an empty conversation and a reply nested under it
+ * both resolve to the same channel — the console would land in the right place
+ * either way even with the thread root dropped on the floor. So this seeds a
+ * root message and a threaded reply to it directly (the same REST surface
+ * `sayFromElsewhere`-style specs already use for setup elsewhere in this
+ * suite), lets the deterministic "Track" triage open the card from the reply,
+ * and asserts the jump renders the thread panel holding the *root's* text —
+ * not the reply's, and not merely the channel.
+ */
+test("a card raised inside a thread opens that thread on the jump back, not just the channel", async ({
+  page,
+  request,
+}) => {
+  const API = "/api/v1/company";
+  const marker = Date.now();
+  const rootText = `quick sync on Q3 priorities ${marker}`;
+  const rootResponse = await request.post(`${API}/chat`, {
+    data: { text: rootText, chat: "engineering" },
+  });
+  expect(rootResponse.ok(), await rootResponse.text()).toBeTruthy();
+  const rootId = (await rootResponse.json()).messageId as string;
+  expect(rootId).toBeTruthy();
+
+  // An imperative lead ("build …") is what the deterministic triage cards —
+  // independent of whatever the echo brain answers with — and `parent` is
+  // what makes this a threaded reply rather than a second channel-level line.
+  const replyText = `build the onboarding checklist ${marker}`;
+  const replyResponse = await request.post(`${API}/chat`, {
+    data: { text: replyText, chat: "engineering", parent: rootId },
+  });
+  expect(replyResponse.ok(), await replyResponse.text()).toBeTruthy();
+
+  const tasksResponse = await request.get(`${API}/tasks`);
+  expect(tasksResponse.ok()).toBeTruthy();
+  const tasks = (await tasksResponse.json()) as Array<{ id: string; title: string }>;
+  const card = tasks.find((t) => t.title.includes(String(marker)));
+  expect(card, `no card opened from "${replyText}": ${JSON.stringify(tasks)}`).toBeTruthy();
+
+  await page.goto(`/#/tasks/${card!.id}`);
+  await dismissWelcome(page);
+  const origin = page.getByRole("button", { name: /Opened from chat/ });
+  await expect(origin).toBeVisible({ timeout: 15_000 });
+  await origin.click();
+
+  await expect(page).toHaveURL(/#\/chat\/engineering(?:[/?]|$)/);
+
+  const thread = page
+    .locator("aside")
+    .filter({ has: page.getByRole("heading", { name: "Thread" }) });
+  await expect(thread).toBeVisible({ timeout: 15_000 });
+  // The root's own text is in the panel — proof the jump opened *that*
+  // thread, since a channel-level landing (or the reply's own self-thread)
+  // would show none of this or the wrong message.
+  await expect(thread.getByText(rootText, { exact: true })).toBeVisible({ timeout: 15_000 });
+});
+
 test("a card the orchestrator opens is chipped in chat, and survives a reload", async ({
   page,
 }) => {
