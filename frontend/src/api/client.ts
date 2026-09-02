@@ -1487,9 +1487,9 @@ function settleWithin<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-/** A real `AbortError`, reusing the signal's reason when it is already one. */
+/** A real `AbortError`, reusing the signal's reason when it already is one. */
 function abortError(reason: unknown): Error {
-  if (reason instanceof Error) return reason;
+  if (reason instanceof Error && reason.name === "AbortError") return reason;
   return new DOMException("The operation was aborted.", "AbortError");
 }
 

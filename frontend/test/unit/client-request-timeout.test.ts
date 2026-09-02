@@ -148,4 +148,21 @@ describe("the request deadline", () => {
     expect((err as Error).name).toBe("AbortError");
     expect(err).not.toBeInstanceOf(ApiError);
   });
+
+  it("normalizes a caller's abort reason to AbortError even when it is an ordinary Error", async () => {
+    const client = clientOn(new StubTransport(NEVER));
+    const abort = new AbortController();
+
+    const read = client.get("/api/v1/company/mcp/servers", { signal: abort.signal });
+    abort.abort(new Error("superseded"));
+
+    const err = await read.then(
+      () => {
+        throw new Error("expected the read to reject");
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).toBe("AbortError");
+  });
 });
