@@ -2250,7 +2250,7 @@ impl HarnessAgentRunner {
             );
             self.notices.push(notice);
         }
-        let message = compose_turn_message(&instruction, self.run_request.as_deref());
+        let mut message = compose_turn_message(&instruction, self.run_request.as_deref());
         // Issue #881: which node this is. `translate` writes it in the
         // first-class config layer beside `agent_ref` (config cannot shadow
         // it), because the vendored `AgentRunner` boundary carries no node
@@ -2281,6 +2281,90 @@ impl HarnessAgentRunner {
         self.halted.retract(&lineage_node);
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
+
+        // ── Issue #2005: the operator's answer to this node's blocker ────────
+        //
+        // The engine-side half of the blocker family. #1863 banked the verdict
+        // and delivered it into the DM; a workflow node's re-entry rides the
+        // trigger input instead, because a paused run is settled and the only
+        // way back in is a fresh run carrying what the last one learned. The
+        // answer is read here, before an attempt row is minted or a token is
+        // spent, so a `skip` costs nothing.
+        //
+        // A malformed answer fails the node rather than degrading to "nobody
+        // answered". The degrade is the exact silent drop this family exists to
+        // close: the node would spend a turn on the identical failure, park the
+        // identical question, and the operator's decision would be gone.
+        let blocker_answer = match crate::runtime::workflow_resume::blocker_answer_for(
+            &self.trigger_input,
+            &lineage_node,
+        ) {
+            Ok(answer) => answer,
+            Err(err) => {
+                let message = format!("workflow node `{lineage_node}`: {err}");
+                tracing::error!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    node = %lineage_node,
+                    "workflow agent node: {message}"
+                );
+                return Err(EngineError::Capability(message));
+            }
+        };
+        if let Some(answer) = &blocker_answer {
+            use crate::ports::blockers::BlockerVerdict;
+            match answer.verdict {
+                // Waived: the node does not run at all, and the branch below it
+                // proceeds on a host-authored output. Running it would re-park
+                // the very question the operator just declined to answer.
+                BlockerVerdict::Skip => {
+                    let reply = "This step was skipped: an operator waived the blocker it \
+                                 stopped on."
+                        .to_string();
+                    tracing::info!(
+                        company = %self.company,
+                        workflow = %self.workflow_id,
+                        run_id = %self.run_id,
+                        node = %lineage_node,
+                        "workflow agent node: skipped on the operator's answer to its blocker"
+                    );
+                    return Ok((
+                        json!({ "text": reply, "agent_ref": agent_ref }),
+                        crate::harness::built_in::TurnOutcome {
+                            reply,
+                            steps: Vec::new(),
+                            hit_iteration_cap: false,
+                            abnormal_stop: None,
+                            halted_for_spend: None,
+                            budget_paused: None,
+                        },
+                    ));
+                }
+                // Corrected: the node runs again carrying the operator's words,
+                // the same shape `resume_task_card` gives an amended card — the
+                // correction has to reach the turn, or the re-run repeats the
+                // failure it was answering.
+                BlockerVerdict::Amend if !answer.answer.trim().is_empty() => {
+                    message = format!(
+                        "{message}\n\n## Answer from the operator\n{}",
+                        answer.answer.trim()
+                    );
+                }
+                // A bare amend and a retry both re-run the step as it was.
+                BlockerVerdict::Amend | BlockerVerdict::Retry => {}
+                // `blocker_answer_for` refuses this arm before it can be built,
+                // and a cancel starts no run in the first place.
+                BlockerVerdict::Cancel => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` was reached carrying a cancelled \
+                         blocker answer"
+                    );
+                    return Err(EngineError::Capability(message));
+                }
+            }
+        }
+
         // The node runs in its roster agent's sandbox, not the workflow tool
         // workspace. Snapshot it immediately before inference so the post-turn
         // drain can distinguish this node's writes from files already there.
@@ -3153,13 +3237,13 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
             if parked.unparkable == 1 { "it" } else { "them" }
         ));
     }
-    // What deciding the cards actually does, which is not one answer
-    // (CodeRabbit review on #1905). A gated call's park carries the node's turn
-    // key, so a verdict re-runs the turn and the run goes on. A blocker's does
-    // not — it is parked `Unlinked` with no continuation, deliberately, because
-    // answering a question is not authorising a call — so deciding it resumes
-    // nothing until #1863/#1864. Promising an auto-resume for those is how an
-    // operator ends up approving a card and watching a run that never moves.
+    // What deciding the cards actually does, which is not one answer. A gated
+    // call's park carries the node's turn key, so a verdict re-runs the turn and
+    // the run goes on. A blocker's does not — it is parked `Unlinked` with no
+    // continuation, because answering a question is not authorising a call — and
+    // its answer re-enters the step down its own path instead, which is what the
+    // four words mean rather than a bare approve. Saying only "this continues"
+    // for a blocker would hide that a cancel stops the run.
     let resume = if waiting == 0 {
         String::new()
     } else if parked.blockers == 0 {
@@ -3169,8 +3253,8 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     } else if parked.blockers == waiting {
         format!(
             " {} a question the agent raised, not a call waiting to be authorised: answering it \
-             is recorded against the card, but it does not restart this run — re-run the \
-             workflow once the answer is in hand.",
+             re-enters this step — retry runs it again, an answer runs it again carrying your \
+             words, skip moves past it, and cancel stops the run.",
             if waiting == 1 {
                 "The card is"
             } else {
@@ -3179,8 +3263,8 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
         )
     } else {
         " Some of these are gated tool calls, which continue this run when approved; the rest \
-         are questions the agent raised, which are recorded but do not restart it — re-run the \
-         workflow once those are answered."
+         are questions the agent raised, which re-enter the step they stopped — retry, answer or \
+         skip carries it on, cancel stops the run."
             .to_string()
     };
     format!(
@@ -6062,6 +6146,11 @@ mod tests {
     /// "Approving the card continues this run automatically" for both, which
     /// for a blocker is an operator approving a card and then watching a run
     /// that never moves.
+    ///
+    /// Issue #2005 moved the truthful line rather than removing the rule: a
+    /// blocker's answer now DOES re-enter the step, but not by approving — the
+    /// four verdicts differ, and one of them stops the run. The card must
+    /// describe that, not borrow the gated call's sentence.
     #[test]
     fn the_diagnosis_only_promises_a_resume_it_can_keep() {
         let gated = ParkedCalls {
@@ -6085,11 +6174,15 @@ mod tests {
         let text = blocked_diagnosis(Some("work"), "writer", &blocker);
         assert!(
             !text.contains("continues this run automatically"),
-            "a blocker resumes nothing until #1863/#1864: {text}"
+            "a blocker is not decided by approving it: {text}"
         );
         assert!(
-            text.contains("does not restart this run"),
-            "and it has to say so, not merely omit the promise: {text}"
+            text.contains("re-enters this step"),
+            "an answered blocker does re-enter the step it stopped: {text}"
+        );
+        assert!(
+            text.contains("cancel stops the run"),
+            "and the one verdict that starts nothing has to be named: {text}"
         );
 
         let mixed = ParkedCalls {
@@ -6103,7 +6196,8 @@ mod tests {
         };
         let text = blocked_diagnosis(Some("work"), "writer", &mixed);
         assert!(
-            text.contains("continue this run when approved") && text.contains("do not restart it"),
+            text.contains("continue this run when approved")
+                && text.contains("re-enter the step they stopped"),
             "a mixed node has to describe both, since neither sentence is true of all of it: \
              {text}"
         );
@@ -6118,7 +6212,7 @@ mod tests {
         };
         let text = blocked_diagnosis(Some("work"), "writer", &none_parked);
         assert!(!text.contains("Approving the card"), "{text}");
-        assert!(!text.contains("does not restart"), "{text}");
+        assert!(!text.contains("re-enters this step"), "{text}");
     }
 
     #[tokio::test]
@@ -8040,5 +8134,359 @@ mod tests {
         )
         .await;
         assert!(blocks.take().is_empty());
+    }
+
+    /// Issue #2005: the engine-side trigger reader — what an answered blocker
+    /// riding the continuation's trigger input actually does to the node it
+    /// names.
+    mod node_blocker_answer {
+        use super::*;
+        use crate::ports::blockers::{BlockerKind, BlockerSource, BlockerVerdict};
+        use crate::runtime::workflow_resume::{
+            BlockerAnswer, CONTINUATION_BLOCKER_KEY, with_blocker_answer, workflow_node_turn_key,
+        };
+
+        const RUN_ID: &str = "run-2005";
+
+        /// A turn double that records the message it was handed, so an amend's
+        /// injection is provable and a skip's non-execution is too.
+        struct MessageRecordingTurn {
+            messages: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl MessageRecordingTurn {
+            fn new() -> Self {
+                Self {
+                    messages: std::sync::Mutex::new(Vec::new()),
+                }
+            }
+
+            fn messages(&self) -> Vec<String> {
+                self.messages.lock().expect("messages").clone()
+            }
+        }
+
+        #[async_trait]
+        impl RunTurn for MessageRecordingTurn {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+
+            async fn run_steered(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _control: &crate::company::steer::SteerControl,
+                _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+
+            async fn run_steered_background(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _control: &crate::company::steer::SteerControl,
+                _chat: crate::runtime::delegation::ChatTarget<'_>,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+
+            async fn run_background_workflow(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+                _workflow_run_id: &str,
+                _node_id: &str,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+        }
+
+        fn answered(node: &str, verdict: BlockerVerdict, answer: &str) -> Value {
+            with_blocker_answer(
+                json!({ "topic": "quarterly numbers" }),
+                &BlockerAnswer {
+                    node: node.to_string(),
+                    verdict,
+                    answer: answer.to_string(),
+                },
+            )
+        }
+
+        async fn runner_with(
+            dir: &std::path::Path,
+            turn: Arc<MessageRecordingTurn>,
+            trigger_input: Value,
+        ) -> HarnessAgentRunner {
+            let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir);
+            let board_claim = Arc::new(deps.delegations.claim_board(RUN_ID));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
+            HarnessAgentRunner::new(
+                turn,
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                RUN_ID.to_string(),
+                None,
+                trigger_input,
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            )
+        }
+
+        fn tmp(prefix: &str) -> tempfile::TempDir {
+            tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir()
+                .expect("tempdir")
+        }
+
+        /// A skip proceeds past the node without spending a turn on the
+        /// question the operator just waived.
+        #[tokio::test]
+        async fn a_skipped_node_does_not_run_its_turn() {
+            let dir = tmp("oc-2005-skip-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("gather", BlockerVerdict::Skip, ""),
+            )
+            .await;
+
+            let (value, outcome) = runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("a skipped node still produces an output the branch can bind");
+
+            assert!(
+                turn.messages().is_empty(),
+                "a waived node must not spend a turn: {:?}",
+                turn.messages()
+            );
+            assert!(outcome.reply.contains("skipped"), "{}", outcome.reply);
+            assert_eq!(value["agent_ref"], "researcher");
+        }
+
+        /// An amend re-runs the node carrying the operator's correction — the
+        /// workflow twin of the card path's note append.
+        #[tokio::test]
+        async fn an_amended_node_re_runs_carrying_the_operators_words() {
+            let dir = tmp("oc-2005-amend-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("gather", BlockerVerdict::Amend, "use gpt-4o-mini instead"),
+            )
+            .await;
+
+            runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("an amended node runs");
+
+            let messages = turn.messages();
+            assert_eq!(messages.len(), 1, "the node runs exactly once");
+            assert!(
+                messages[0].contains("use gpt-4o-mini instead"),
+                "the correction has to reach the turn, or the re-run repeats the failure: {}",
+                messages[0]
+            );
+        }
+
+        /// A retry runs the step again as it was — no correction to inject.
+        #[tokio::test]
+        async fn a_retried_node_runs_again_as_it_was() {
+            let dir = tmp("oc-2005-retry-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("gather", BlockerVerdict::Retry, ""),
+            )
+            .await;
+
+            runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("a retried node runs");
+
+            let messages = turn.messages();
+            assert_eq!(messages.len(), 1);
+            assert!(
+                !messages[0].contains("Answer from the operator"),
+                "a bare retry carries no words: {}",
+                messages[0]
+            );
+        }
+
+        /// One node's answer is not the graph's: every other node runs as it
+        /// always did.
+        #[tokio::test]
+        async fn an_answer_for_another_node_leaves_this_one_alone() {
+            let dir = tmp("oc-2005-other-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("review", BlockerVerdict::Skip, ""),
+            )
+            .await;
+
+            runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("an unanswered node runs");
+
+            assert_eq!(turn.messages().len(), 1);
+        }
+
+        /// An unreadable answer fails the node rather than degrading to
+        /// "nobody answered" — the degrade would spend a turn on the identical
+        /// failure with the operator's decision gone.
+        #[tokio::test]
+        async fn an_unreadable_answer_fails_the_node_rather_than_running_it() {
+            let dir = tmp("oc-2005-garbled-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                json!({
+                    CONTINUATION_BLOCKER_KEY: [{ "node": "gather", "verdict": "shrug" }]
+                }),
+            )
+            .await;
+
+            let outcome = runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await;
+
+            assert!(outcome.is_err(), "a garbled answer must stop the node");
+            assert!(turn.messages().is_empty(), "and must not spend a turn");
+        }
+
+        /// A cancel starts no run at all, so a node reached carrying one is a
+        /// host bug — and stops loudly rather than carrying on as if the
+        /// operator had said yes.
+        #[tokio::test]
+        async fn a_cancelled_answer_stops_the_node() {
+            let dir = tmp("oc-2005-cancel-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                json!({
+                    CONTINUATION_BLOCKER_KEY: [{ "node": "gather", "verdict": "cancel" }]
+                }),
+            )
+            .await;
+
+            let outcome = runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await;
+
+            assert!(outcome.is_err());
+            assert!(turn.messages().is_empty());
+        }
+
+        /// The other half of the thread: a blocker's park has to stash what the
+        /// answer's re-entry will need. The gated-call arm cannot cover it — a
+        /// turn that parked no gated call returns before reaching that arm, and
+        /// the runner's settle-time pass refuses to arm a turn that is not
+        /// already armed — so without this the answer reaches a resume with no
+        /// run to continue.
+        #[tokio::test]
+        async fn parking_a_node_blocker_stashes_the_run_its_answer_re_enters() {
+            let dir = tmp("oc-2005-stash-");
+            let (deps, _journal) =
+                crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+            let parking = deps
+                .delivery
+                .clone()
+                .expect("delivery")
+                .parking
+                .clone()
+                .expect("parking");
+            let trigger_input = json!({ "topic": "quarterly numbers" });
+            let board_claim = Arc::new(deps.delegations.claim_board(RUN_ID));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
+            let runner = HarnessAgentRunner::new(
+                single_turn(&deps),
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                RUN_ID.to_string(),
+                None,
+                trigger_input.clone(),
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            );
+
+            let parked = runner
+                .park_node_blocker_as(
+                    "gather",
+                    "the model id `gpt-nope` was rejected",
+                    BlockerKind::Infrastructure,
+                    BlockerSource::Provider,
+                    "a model id this provider serves",
+                )
+                .await;
+            assert!(parked.is_some(), "the blocker parks");
+
+            let stashed = parking
+                .blocked_nodes
+                .peek(&workflow_node_turn_key(RUN_ID, "gather"))
+                .expect("a parked blocker must stash the run its answer re-enters");
+            assert_eq!(stashed.workflow_id, "reporting");
+            assert_eq!(stashed.input, trigger_input);
+        }
     }
 }
