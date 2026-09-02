@@ -3090,6 +3090,7 @@ mod turn_failure_notice_tests {
     /// The failure that put a wall of provider JSON into company chat, verbatim
     /// from the 1/9 round (issue #2016). None of it may reach the operator, and
     /// what they read instead has to say whether waiting will help.
+    #[cfg(feature = "openhuman")]
     #[test]
     fn a_rate_limit_reaches_the_operator_as_a_sentence_not_a_payload() {
         let raw = concat!(
@@ -3129,6 +3130,7 @@ mod turn_failure_notice_tests {
 
     /// Quota exhaustion is not wait-and-retry — somebody has to go and fix the
     /// account — so it must not be worded like a transient blip.
+    #[cfg(feature = "openhuman")]
     #[test]
     fn quota_exhaustion_points_at_the_account() {
         let notice = turn_failure_notice(concat!(
@@ -3144,6 +3146,7 @@ mod turn_failure_notice_tests {
     /// it invisible, a 402 fell through to the `Retryable` default and was
     /// reported as "temporarily unavailable" — telling an operator to wait for
     /// something that will never clear on its own.
+    #[cfg(feature = "openhuman")]
     #[test]
     fn a_status_only_our_own_prefix_carries_is_still_classified() {
         let notice = turn_failure_notice("inference returned 402 Payment Required: no credit");
@@ -3206,26 +3209,26 @@ fn turn_failure_notice(detail: &str) -> String {
 }
 
 /// The operator-facing sentence for a failure the inference path produced, or
-/// `None` when the error did not come from there.
+/// `None` when the failure did not come from there.
+///
+/// Deliberately narrow about when it blames the provider. The classifier falls
+/// back to `Retryable` for text it recognizes nothing in, so classifying every
+/// failure indiscriminately would report a tool that ran out of wall-clock as a
+/// provider outage. A cause is named only when the error is one the inference
+/// path actually emits, or carries a recognizable HTTP status.
 fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
-    use tinyagents_harness::retry::{
-        ProviderFailureClass, classify_provider_failure, structured_http_status,
-    };
-
     let lower = detail.to_ascii_lowercase();
 
-    // An empty turn is its own case, and not one more retrying fixes — the
-    // harness has already retried it by the time this is written.
+    // An empty turn is its own case, and not one more retrying fixes: the
+    // harness has already retried it by the time this is written. Recognized
+    // from our own error text, so it holds in every build.
     if lower.contains("carried neither") {
         return Some(
             "This turn couldn't be finished — the AI provider returned an empty response.",
         );
     }
 
-    // Only speak about the provider when the error is one of ours from the
-    // inference path, or carries a recognizable HTTP status.
-    let status = status_after_marker(&lower, "inference returned ")
-        .or_else(|| structured_http_status(detail));
+    let status = status_after_marker(&lower, "inference returned ");
     let from_inference = lower.contains("inference returned")
         || lower.contains("inference request failed")
         || lower.contains("inference response")
@@ -3234,22 +3237,49 @@ fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
         return None;
     }
 
+    classified_provider_sentence(status, detail)
+}
+
+/// The sentence for a recognized provider failure, classified through the
+/// harness's own [`classify_provider_failure`].
+///
+/// Reused rather than re-implemented: the crate already knows which 429s are
+/// transient and which mean an account needs topping up, and a second
+/// classifier here would drift from the one that decides whether to retry.
+///
+/// [`classify_provider_failure`]: tinyagents_harness::retry::classify_provider_failure
+#[cfg(feature = "openhuman")]
+fn classified_provider_sentence(status: Option<u16>, detail: &str) -> Option<&'static str> {
+    use tinyagents_harness::retry::{
+        ProviderFailureClass, classify_provider_failure, structured_http_status,
+    };
+
+    let status = status.or_else(|| structured_http_status(detail));
     Some(match classify_provider_failure(status, None, detail) {
         ProviderFailureClass::RateLimited => {
             "This turn couldn't be finished — the AI provider is rate-limiting requests."
         }
         ProviderFailureClass::NonRetryableRateLimit => {
             "This turn couldn't be finished — the AI provider reports no quota or credit left. \
-             An admin needs to check the provider account under Settings → Inference."
+             An admin needs to check the provider account under Settings."
         }
         ProviderFailureClass::NonRetryable => {
             "This turn couldn't be finished — the AI provider rejected the request, usually a \
-             model or configuration mismatch. An admin can check Settings → Inference."
+             model or configuration mismatch. An admin can check Settings."
         }
         ProviderFailureClass::UpstreamUnhealthy | ProviderFailureClass::Retryable => {
             "This turn couldn't be finished — the AI provider is temporarily unavailable."
         }
     })
+}
+
+/// The default build links no inference harness at all — it keeps the
+/// echo-brained offline behaviour — so it produces no provider failures to
+/// classify and has no classifier to reach for. The generic notice is the
+/// honest answer there.
+#[cfg(not(feature = "openhuman"))]
+fn classified_provider_sentence(_status: Option<u16>, _detail: &str) -> Option<&'static str> {
+    None
 }
 
 /// Everything a chat turn needs once it is off the request's future.
