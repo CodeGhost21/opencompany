@@ -8,6 +8,7 @@ import type { TurnStep } from "@/api/types";
 import {
   ChatLiveReceipt,
   formatElapsed,
+  receiptStateLine,
   shouldClearReceipt,
   RECEIPT_STALL_AFTER_MS,
   type ChatReceipt,
@@ -48,6 +49,7 @@ async function render(props: {
   receipt: ChatReceipt;
   agentNames?: Record<string, string>;
   steps?: TurnStep[];
+  queued?: boolean;
 }) {
   await act(async () => {
     root.render(
@@ -56,6 +58,7 @@ async function render(props: {
         receipt: props.receipt,
         agentNames: props.agentNames,
         steps: props.steps ?? [],
+        queued: props.queued,
       }),
     );
   });
@@ -165,6 +168,79 @@ describe("ChatLiveReceipt", () => {
       vi.advanceTimersByTime(3_000);
     });
     expect(text()).toContain("3s");
+  });
+
+  /**
+   * Issue #2021: the receipt now rides a detached turn past its 202 into the
+   * queued/working window. In the queued state (turn accepted, still waiting on
+   * the per-company serial lock) it must word its base line "Queued" — not the
+   * synchronous "Sent" — while keeping the elapsed clock and, crucially, the 30s
+   * stall notice. This is the exact affordance the bug lost: a first question to
+   * an idle agent that detached and sat "● Queued…" for minutes with no clock
+   * and no stall.
+   */
+  it("words the base line Queued (not Sent) while the detached turn is queued", async () => {
+    await render({
+      receipt: { startedAt: BASE - 4_000, lastFrameAt: BASE - 4_000 },
+      queued: true,
+    });
+    expect(text()).toContain("Queued");
+    expect(text()).not.toContain("Sent");
+    // The clock the bare open-turn "Queued…" row never had.
+    expect(text()).toContain("4s");
+  });
+
+  it("still fires the 30s stall notice on a queued turn stuck on the serial lock", async () => {
+    await render({
+      receipt: { startedAt: BASE, lastFrameAt: BASE },
+      queued: true,
+    });
+    expect(receiptEl().dataset.stalled).toBe("false");
+    await act(async () => {
+      vi.advanceTimersByTime(RECEIPT_STALL_AFTER_MS);
+    });
+    expect(receiptEl().dataset.stalled).toBe("true");
+    expect(text()).toContain("No update for 30s");
+  });
+
+  it("progresses out of Queued to the picked-up name once a frame names an agent", async () => {
+    // The poll flips pending→running and the first live frame names the desk:
+    // the receipt leaves "Queued" for the same "Picked up by <name>" the
+    // synchronous window shows, so the handoff is seamless rather than a downgrade.
+    await render({
+      receipt: { startedAt: BASE, lastFrameAt: BASE, agentId: "a-ada" },
+      agentNames: { "a-ada": "Ada" },
+      queued: false,
+    });
+    expect(text()).toContain("Picked up by Ada");
+    expect(text()).not.toContain("Queued");
+  });
+});
+
+describe("receiptStateLine", () => {
+  const ch = channel();
+  const base: ChatReceipt = { startedAt: BASE, lastFrameAt: BASE };
+
+  it("reads Queued when queued and nothing more specific is known (issue #2021)", () => {
+    expect(receiptStateLine(base, [], undefined, ch, true)).toBe("Queued");
+  });
+
+  it("reads Sent when not queued and nothing more specific is known", () => {
+    expect(receiptStateLine(base, [], undefined, ch, false)).toBe("Sent");
+    // The queued argument is optional and defaults to the synchronous wording.
+    expect(receiptStateLine(base, [], undefined, ch)).toBe("Sent");
+  });
+
+  it("lets a named agent outrank the queued base word", () => {
+    const picked: ChatReceipt = { ...base, agentId: "a-ada" };
+    expect(receiptStateLine(picked, [], { "a-ada": "Ada" }, ch, true)).toBe("Picked up by Ada");
+  });
+
+  it("lets a running step outrank both the name and the queued base word", () => {
+    const picked: ChatReceipt = { ...base, agentId: "a-ada" };
+    expect(
+      receiptStateLine(picked, [runningStep("Searching the web")], { "a-ada": "Ada" }, ch, true),
+    ).toBe("On step Searching the web");
   });
 });
 
