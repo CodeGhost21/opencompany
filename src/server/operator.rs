@@ -3063,6 +3063,195 @@ async fn chat_and_emit(
     })))
 }
 
+/// The HTTP status written immediately after `marker` in `lower`, when one is.
+///
+/// `lower` must already be lowercased. Only a three-digit run counts, so a
+/// message that merely mentions the marker cannot produce a status.
+///
+/// Needed because our own errors read `inference returned 429 Too Many
+/// Requests: …`, and `structured_http_status` looks for a status at the start
+/// of the string, after a `(`, or behind an `http`/`status:` marker — none of
+/// which that shape offers. The status we already knew was therefore invisible
+/// to the classifier, leaving classification to whatever prose the provider
+/// happened to choose.
+fn status_after_marker(lower: &str, marker: &str) -> Option<u16> {
+    let rest = lower.split_once(marker)?.1.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod turn_failure_notice_tests {
+    use super::{provider_failure_sentence, turn_failure_notice};
+
+    /// The failure that put a wall of provider JSON into company chat, verbatim
+    /// from the 1/9 round (issue #2016). None of it may reach the operator, and
+    /// what they read instead has to say whether waiting will help.
+    #[test]
+    fn a_rate_limit_reaches_the_operator_as_a_sentence_not_a_payload() {
+        let raw = concat!(
+            "turn for 'frontend_engineer': inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"Provider returned error","code":429,"metadata":"#,
+            r#"{"raw":"deepseek/deepseek-chat is temporarily rate-limited upstream. "#,
+            r#"Please retry shortly, or add your own key to accumulate your rate limits: "#,
+            r#"https://openrouter.ai/settings/integrations","provider_name":"DeepInfra"}}}"#,
+        );
+        let notice = turn_failure_notice(raw);
+
+        assert!(notice.contains("rate-limiting"), "{notice}");
+        for leaked in ["{", "openrouter.ai", "deepseek", "DeepInfra", "429"] {
+            assert!(
+                !notice.contains(leaked),
+                "the provider payload leaked {leaked:?} into chat: {notice}"
+            );
+        }
+    }
+
+    /// An empty inference is its own message: the harness has already retried it
+    /// by the time this is written, so leading with "try again" is wrong advice
+    /// and the cause is worth naming.
+    #[test]
+    fn an_empty_inference_says_so() {
+        let notice = turn_failure_notice(concat!(
+            "inference response carried neither choices[0].message.content nor tool_calls ",
+            "(finish_reason: failed; choices: 1; usage: in=0 out=0 total=0)"
+        ));
+
+        assert!(notice.contains("empty response"), "{notice}");
+        assert!(
+            !notice.contains("finish_reason"),
+            "diagnostics leaked into chat: {notice}"
+        );
+    }
+
+    /// Quota exhaustion is not wait-and-retry — somebody has to go and fix the
+    /// account — so it must not be worded like a transient blip.
+    #[test]
+    fn quota_exhaustion_points_at_the_account() {
+        let notice = turn_failure_notice(concat!(
+            "inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"insufficient balance"}}"#
+        ));
+
+        assert!(notice.contains("quota or credit"), "{notice}");
+        assert!(notice.contains("Settings"), "{notice}");
+    }
+
+    /// A status our own error format hides from `structured_http_status`. With
+    /// it invisible, a 402 fell through to the `Retryable` default and was
+    /// reported as "temporarily unavailable" — telling an operator to wait for
+    /// something that will never clear on its own.
+    #[test]
+    fn a_status_only_our_own_prefix_carries_is_still_classified() {
+        let notice = turn_failure_notice("inference returned 402 Payment Required: no credit");
+
+        assert!(notice.contains("rejected the request"), "{notice}");
+    }
+
+    /// The guard against over-claiming. `classify_provider_failure` falls back
+    /// to `Retryable` for text it recognizes nothing in, so a tool that ran out
+    /// of wall-clock would otherwise be reported as a provider outage.
+    #[test]
+    fn a_failure_that_is_not_the_providers_is_not_blamed_on_it() {
+        let raw = "the tool call exceeded its wall-clock budget";
+
+        assert!(
+            provider_failure_sentence(raw).is_none(),
+            "a non-provider failure must not be classified as one"
+        );
+        let notice = turn_failure_notice(raw);
+        assert!(notice.contains("something went wrong"), "{notice}");
+        assert!(!notice.contains("provider"), "{notice}");
+    }
+
+    /// Whatever the cause, the operator is told the turn left nothing behind —
+    /// the one fact they need in order to decide whether to re-send.
+    #[test]
+    fn every_notice_states_that_nothing_was_half_done() {
+        for raw in [
+            "inference returned 429 Too Many Requests: rate limited",
+            "inference response carried neither choices[0].message.content nor tool_calls",
+            "something else entirely",
+        ] {
+            assert!(
+                turn_failure_notice(raw).contains("Nothing was left half-done"),
+                "missing for: {raw}"
+            );
+        }
+    }
+}
+
+/// What an operator is told when a turn could not be finished.
+///
+/// The raw error is a diagnostic and never belongs in company chat. On the
+/// rate-limit path it was a wall of provider JSON with a settings URL in it,
+/// which is what a tester saw instead of an answer (issue #2016). It is logged
+/// in full at the call site; this renders the one sentence that tells the
+/// operator whether to wait, retry, or go and fix something.
+///
+/// Deliberately narrow about when it blames the provider. `classify_provider_
+/// failure` falls back to `Retryable` for text it recognizes nothing in, so
+/// classifying every failure would describe a tool that timed out as a provider
+/// outage. A cause is named only when the error is one the inference path
+/// actually emits; anything else keeps the generic wording.
+fn turn_failure_notice(detail: &str) -> String {
+    const CLOSING: &str = "Nothing was left half-done.";
+    let cause = provider_failure_sentence(detail).unwrap_or(
+        "This turn couldn't be finished — something went wrong or a step took too long.",
+    );
+    format!("{cause} {CLOSING} Send the message again to retry.")
+}
+
+/// The operator-facing sentence for a failure the inference path produced, or
+/// `None` when the error did not come from there.
+fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
+    use tinyagents::harness::retry::{
+        ProviderFailureClass, classify_provider_failure, structured_http_status,
+    };
+
+    let lower = detail.to_ascii_lowercase();
+
+    // An empty turn is its own case, and not one more retrying fixes — the
+    // harness has already retried it by the time this is written.
+    if lower.contains("carried neither") {
+        return Some(
+            "This turn couldn't be finished — the AI provider returned an empty response.",
+        );
+    }
+
+    // Only speak about the provider when the error is one of ours from the
+    // inference path, or carries a recognizable HTTP status.
+    let status = status_after_marker(&lower, "inference returned ")
+        .or_else(|| structured_http_status(detail));
+    let from_inference = lower.contains("inference returned")
+        || lower.contains("inference request failed")
+        || lower.contains("inference response")
+        || lower.contains("configured inference model");
+    if !from_inference && status.is_none() {
+        return None;
+    }
+
+    Some(match classify_provider_failure(status, None, detail) {
+        ProviderFailureClass::RateLimited => {
+            "This turn couldn't be finished — the AI provider is rate-limiting requests."
+        }
+        ProviderFailureClass::NonRetryableRateLimit => {
+            "This turn couldn't be finished — the AI provider reports no quota or credit left. \
+             An admin needs to check the provider account under Settings → Inference."
+        }
+        ProviderFailureClass::NonRetryable => {
+            "This turn couldn't be finished — the AI provider rejected the request, usually a \
+             model or configuration mismatch. An admin can check Settings → Inference."
+        }
+        ProviderFailureClass::UpstreamUnhealthy | ProviderFailureClass::Retryable => {
+            "This turn couldn't be finished — the AI provider is temporarily unavailable."
+        }
+    })
+}
+
 /// Everything a chat turn needs once it is off the request's future.
 ///
 /// A struct rather than six positional arguments because the spawn boundary is
@@ -3137,18 +3326,22 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                     parent: reply_thread(parent, accepted.message_seq),
                     chat_id: desk.clone(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
-                    text: format!(
-                        "This turn couldn't be finished — something went wrong or \
-                         a step took too long ({}). Nothing was left half-done. \
-                         Send the message again to retry; if it keeps failing, \
-                         try breaking it into a smaller request.",
-                        err.0
-                    ),
+                    text: turn_failure_notice(&err.0.to_string()),
                     steps: Vec::new(),
                     task_id: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
                 };
+                // The raw provider text is a diagnostic, not an operator
+                // message: it is unbounded, provider-shaped, and on the rate-limit
+                // path it carried a wall of JSON and a settings URL into company
+                // chat. It stays here, in full (issue #2016).
+                tracing::warn!(
+                    company = %company,
+                    desk = %desk,
+                    detail = %err.0,
+                    "a chat turn could not be finished"
+                );
                 if let Err(journal_err) = runtime.events().append(&company, notice).await {
                     tracing::warn!(
                         company = %company,
