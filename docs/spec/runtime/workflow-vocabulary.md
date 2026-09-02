@@ -404,8 +404,10 @@ criteria = "The recommendation names one choice and cites the evidence used."
 
 Presence enables one tool-less judge call after the deterministic postcondition
 passes. `criteria` is optional; without it, the node instruction is the standard.
-The call has a hard timeout, no retry, and its usage remains metered even when
-the answer is malformed and discarded.
+Each call has a hard timeout, no retry, and its usage remains metered even when
+the answer is malformed and discarded. A `recover` verdict (below) spends a
+second, bounded judge call to re-verify the augmented reply, so a single node
+can meter up to two calls in one turn.
 
 The judge returns one closed verdict. `continue` advances normally; `retry`
 fails through the node's ordinary retry/error policy; `recover` searches at
