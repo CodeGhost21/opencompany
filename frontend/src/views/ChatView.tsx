@@ -1276,8 +1276,20 @@ export function ChatView({
 
   // An open thread only makes sense while its parent is on screen; switching
   // channels closes it rather than leaving a panel pointing at nothing.
+  // `?thread=<id>` on the hash opens straight into that thread instead, and
+  // is consumed (stripped via `replaceState`) so it does not reopen on a
+  // later switch back to this channel.
   useEffect(() => {
-    setOpenThreadId(null);
+    if (!channel?.id) return;
+    const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+    const params = new URLSearchParams(query);
+    const threadId = params.get("thread");
+    setOpenThreadId(threadId);
+    if (threadId !== null) {
+      params.delete("thread");
+      const qs = params.toString();
+      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+    }
   }, [channel?.id]);
 
   // Whoever owns the unread counts needs to know what is actually being looked

@@ -27,7 +27,7 @@ use crate::ports::tasks::{
     COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction, TaskOutputSource,
     TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion, is_board_column,
 };
-use crate::ports::types::CompanyEvent;
+use crate::ports::types::{CompanyEvent, EventSeq};
 use crate::ports::{generate_id, now_millis};
 use crate::runtime::assignee;
 use crate::server::error::ApiError;
@@ -124,6 +124,12 @@ pub(crate) struct TaskCard {
     /// shape is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) origin_chat_id: Option<String>,
+    /// The message within `originChatId` the raising turn replied to, when
+    /// the card was opened from inside a thread rather than the channel's own
+    /// timeline. Omitted for a channel-level origin, and for every card
+    /// without an `originChatId` at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) origin_parent: Option<EventSeq>,
     /// What the card's latest successful attempt produced (issue #339) — the
     /// link that turns a finished card into something the operator can open.
     ///
@@ -195,7 +201,10 @@ impl From<TaskRecord> for TaskCard {
         // Taken out first: the DTO keeps the desk flat, and the literal below
         // moves the record apart field by field, so the origin cannot be read
         // through a borrow partway down it.
-        let origin_chat_id = t.origin.map(|origin| origin.origin_chat_id);
+        let (origin_chat_id, origin_parent) = match t.origin {
+            Some(origin) => (Some(origin.origin_chat_id), origin.origin_parent),
+            None => (None, None),
+        };
         Self {
             id: t.id,
             title: t.title,
@@ -208,6 +217,7 @@ impl From<TaskRecord> for TaskCard {
             cost: None,
             parent_task_id: t.parent_task_id,
             origin_chat_id,
+            origin_parent,
             output: t.output,
             plan: t.plan,
             deliverable: t.deliverable,
@@ -216,6 +226,60 @@ impl From<TaskRecord> for TaskCard {
             origin_workflow_id: t.origin_workflow_id,
             bounced: t.bounced,
         }
+    }
+}
+
+#[cfg(test)]
+mod task_card_origin_test {
+    use super::*;
+    use crate::ports::tasks::TaskOrigin;
+
+    fn plain_record() -> TaskRecord {
+        TaskRecord {
+            id: "t-1".to_string(),
+            title: "Draft the spec".to_string(),
+            note: None,
+            column: "todo".to_string(),
+            priority: "medium".to_string(),
+            assignee: "maya".to_string(),
+            updated_at_millis: 7,
+            origin: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        }
+    }
+
+    #[test]
+    fn a_card_raised_inside_a_thread_carries_its_thread_root_onto_the_card() {
+        let mut record = plain_record();
+        record.origin = TaskOrigin::new(Some("engineering".to_string()), Some(EventSeq::new(41)));
+        let card = TaskCard::from(record);
+        assert_eq!(card.origin_chat_id.as_deref(), Some("engineering"));
+        assert_eq!(card.origin_parent, Some(EventSeq::new(41)));
+
+        let json = serde_json::to_string(&card).expect("serializes");
+        assert!(json.contains(r#""originChatId":"engineering""#), "{json}");
+        assert!(json.contains(r#""originParent":41"#), "{json}");
+    }
+
+    /// A card raised straight into a channel carries no thread root, and the
+    /// field stays absent on the wire rather than serializing `null`.
+    #[test]
+    fn a_channel_level_origin_carries_no_thread_root() {
+        let mut record = plain_record();
+        record.origin = TaskOrigin::new(Some("engineering".to_string()), None);
+        let card = TaskCard::from(record);
+        assert_eq!(card.origin_parent, None);
+
+        let json = serde_json::to_string(&card).expect("serializes");
+        assert!(!json.contains("originParent"), "{json}");
     }
 }
 

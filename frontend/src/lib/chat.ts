@@ -66,12 +66,27 @@ export function isGeneralChannel(id: string): boolean {
  *
  * `null` when the map does not know the thread — never a fall back to whatever
  * the operator has open, which is issue #368's bug.
+ *
+ * Also resolves a `dm:`-prefixed **channel** id standing in for its thread:
+ * the map is keyed on the bare teammate id (`dmThreadId`), so an origin
+ * recorded in the console-local channel form (a direct API caller, not this
+ * console's own "Add to board") missed it on an exact match even though that
+ * teammate's DM is reachable. Folded case-insensitively, the same way the
+ * host's own `resolve_roster_agent_id` resolves a `dm:`-addressed teammate —
+ * an origin stamped from a caller's differently-cased address (`dm:DESIGNER`
+ * against a roster id of `designer`) is the same teammate, not a miss.
  */
 export function generalAwareChannel(
   map: Readonly<Record<string, string>>,
   threadId: string,
 ): string | null {
-  return map[threadId] ?? (isGeneralChannel(threadId) ? (map[MAIN_THREAD_ID] ?? null) : null);
+  if (map[threadId]) return map[threadId];
+  if (isGeneralChannel(threadId)) return map[MAIN_THREAD_ID] ?? null;
+  const bareId = threadId.startsWith("dm:") ? threadId.slice("dm:".length) : null;
+  if (!bareId) return null;
+  if (map[bareId]) return map[bareId];
+  const key = Object.keys(map).find((k) => k.toLowerCase() === bareId.toLowerCase());
+  return key ? map[key] : null;
 }
 
 /** One person's reaction on one line. Mirrors `ChatReactionDto` on the host. */
