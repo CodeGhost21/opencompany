@@ -315,7 +315,7 @@ pub fn build_confined_agent(
     let tools: Vec<Box<dyn Tool>> = Vec::new();
 
     AgentBuilder::default()
-        .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
+        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)
@@ -324,7 +324,6 @@ pub fn build_confined_agent(
             confined_persona(company_name, confinement),
             /* omit_identity */ true,
             /* omit_safety_preamble */ false,
-            /* omit_skills_catalog */ true,
         ))
         .model_name(model)
         .workspace_dir(workspace)

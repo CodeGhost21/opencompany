@@ -54,8 +54,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;

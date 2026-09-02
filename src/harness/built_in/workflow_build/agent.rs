@@ -118,7 +118,7 @@ pub(super) fn build_copilot_agent(
     let _ = std::fs::create_dir_all(&workspace);
 
     let mut agent = AgentBuilder::default()
-        .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
+        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)

@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -657,12 +657,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for PanicIfInvokedProvider {
+    impl tinyinference::model::ChatModel<()> for PanicIfInvokedProvider {
         async fn invoke(
             &self,
             _state: &(),
             _request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ModelResponse::assistant(
                 "{\"verdict\":\"continue\"}".to_string(),

@@ -95,8 +95,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde::Deserialize;
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::harness::HarnessDeps;
@@ -1608,7 +1608,7 @@ async fn call_model(
 
 /// Recovers the token/cost totals from a completed call.
 ///
-/// Cost is not on tinyagents' [`Usage`](tinyagents::harness::usage::Usage) — the
+/// Cost is not on tinyagents' [`Usage`](tinyinference::usage::Usage) — the
 /// managed backend reports it in a billing envelope the provider re-projects
 /// onto [`ModelResponse::raw`] under `openhuman_usage_meta`. Reading it here
 /// rather than inventing a price is what keeps the Usage view's planning spend

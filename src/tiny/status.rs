@@ -19,8 +19,12 @@ impl RuntimeModuleStatus {
         vec![
             Self {
                 name: "tinyagents",
-                enabled: cfg!(feature = "tinyagents"),
-                role: "agent harness, graphs, registry, and RLM runtime",
+                // The checkout is still `tinyagents`, but it is a workspace now
+                // and this crate links two of its members: the harness, and
+                // `tinyinference` (vendored under it) for the model layer. The
+                // graph/registry/RLM members are openhuman's, not ours.
+                enabled: cfg!(feature = "tinyagents-harness"),
+                role: "agent harness and inference model layer",
                 path: "vendor/openhuman/vendor/tinyagents",
             },
             Self {
