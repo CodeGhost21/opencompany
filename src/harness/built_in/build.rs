@@ -1103,7 +1103,6 @@ pub fn build_agent(
 
     let prompt_builder = SystemPromptBuilder::for_subagent(
         persona, /* omit_identity */ true, /* omit_safety_preamble */ false,
-        /* omit_skills_catalog */ true,
     );
 
     let model = deps
@@ -1178,9 +1177,9 @@ pub fn build_agent(
     let agent_definition_name = manifest_agent.id.as_str();
 
     let mut agent = AgentBuilder::default()
-        // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
+        // `HarnessModel` upcasts to the tinyinference `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
-        .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
+        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)

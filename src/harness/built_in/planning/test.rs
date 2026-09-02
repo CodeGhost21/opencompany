@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use tinyagents::harness::model::{ChatModel, ModelResponse};
-use tinyagents::harness::usage::Usage;
-use tinyagents::{Result as TaResult, TinyAgentsError};
+use tinyinference::model::{ChatModel, ModelResponse};
+use tinyinference::usage::Usage;
+use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::*;
 use crate::company::CompanyManifest;
@@ -126,7 +126,7 @@ impl ChatModel<()> for ScriptedModel {
                     None => response,
                 })
             }
-            None => Err(TinyAgentsError::Model("the brain is down".to_string())),
+            None => Err(InferenceError::Model("the brain is down".to_string())),
         }
     }
 }
@@ -1762,8 +1762,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         priority: "medium".to_string(),
         assignee: assignee.to_string(),
         updated_at_millis: 7,
-        origin_chat_id: None,
-        origin_parent: None,
+        origin: None,
         parent_task_id: None,
         plan: None,
         planning_attempts: Vec::new(),

@@ -122,7 +122,7 @@ const RELAY_SCAN_MAX_PAGES: usize = 8;
 #[cfg(feature = "openhuman")]
 fn is_review_target(card: &TaskRecord, desk: &str) -> bool {
     card.column == crate::ports::tasks::COLUMN_IN_REVIEW
-        && card.origin_chat_id.as_deref().is_some_and(|origin| {
+        && card.origin_chat_id().is_some_and(|origin| {
             crate::server::chat_history::same_conversation(Some(origin), Some(desk))
         })
 }
@@ -1556,6 +1556,57 @@ impl CompanyRuntime {
         }
     }
 
+    /// Files the durable "a blocker was answered, picking it back up"
+    /// notification (issue #2008), the settle-side counterpart to
+    /// [`notify_blocker_parked`](Self::notify_blocker_parked).
+    ///
+    /// The park badged the operator that a person was blocked; nothing badged
+    /// them when the answer landed and the work resumed. Filed on the same DM
+    /// thread with the same thin `Approval` subject, so a console that folds
+    /// blocker badges by conversation clears the parked one and shows that the
+    /// stopped step is moving again. Best-effort — the resume already stands —
+    /// and a no-op for a blocker raised in no conversation, which has no thread
+    /// to badge.
+    #[cfg(feature = "openhuman")]
+    async fn notify_blocker_resumed(
+        &self,
+        id: &ApprovalId,
+        thread: Option<&str>,
+        resolution: &crate::ports::blockers::BlockerResolution,
+    ) {
+        use crate::ports::blockers::BlockerStep;
+        let Some(thread) = thread else {
+            return;
+        };
+        let sender = thread.strip_prefix("dm:").unwrap_or(thread);
+        let step = match &resolution.step {
+            Some(BlockerStep::Task { task_id }) => task_id.clone(),
+            Some(BlockerStep::Node { node_id, .. }) => node_id.clone(),
+            None => "a question".to_string(),
+        };
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: "blocker_resumed".to_string(),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Approval,
+                id: id.as_ref().to_string(),
+            },
+            created_at: now_millis(),
+            title: format!("{sender}'s blocker on {step} was answered — picking it back up"),
+            audience: None,
+            context: Some(thread.to_string()),
+        };
+        if let Err(err) = self.notifications().append(&self.id, &note).await {
+            tracing::warn!(
+                company = %self.id,
+                approval = %id.as_ref(),
+                error = %err,
+                "[blockers] a blocker-resumed notification could not be recorded; the resume \
+                 still stands, but nobody is badged for it"
+            );
+        }
+    }
+
     /// Withdraws a blocker this pass just parked, because the card write that
     /// was supposed to follow it failed (issue #1861).
     ///
@@ -2096,11 +2147,73 @@ impl CompanyRuntime {
         scope: GrantScope,
     ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
         self.ensure_accepting()?;
+        #[cfg(feature = "openhuman")]
+        self.arm_console_blocker_resolution(id, verdict).await?;
         let receipt = CycleRunner::new(self)
             .settle_approval(id, verdict, by, scope)
             .await?;
         self.retire_if_expired(id, &receipt).await?;
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
+    }
+
+    /// Arms a parked blocker's resolution when the answer arrives through the
+    /// console approvals path rather than a DM reply (issue #2008).
+    ///
+    /// [`apply_blocker_reply`](Self::apply_blocker_reply) is the only other place
+    /// that banks a [`BlockerResolution`], and until this the console's
+    /// `Approve`/`Deny` reached [`settle_approval`](crate::runtime::cycle::CycleRunner::settle_approval)
+    /// with nothing armed: the blocker's effect settled inert (the #1861
+    /// never-execute guard) and [`spawn_follow_up`](Self::spawn_follow_up)'s
+    /// [`take_blocker_resolution`](crate::runtime::grants::GrantSet::take_blocker_resolution)
+    /// found none, so the run fell through to a plain `continue_turn` and the card
+    /// never left `paused`. Arming here routes it into the same resume fork a DM
+    /// answer takes.
+    ///
+    /// Runs **before** the settle, the restart-durable ordering
+    /// `apply_blocker_reply` keeps, and reads the step off the still-parked
+    /// payload before the settle scrubs it. Three guards keep it from touching
+    /// anything else:
+    /// * a resolution already armed — the DM path banked its richer answer
+    ///   (an amend carries the operator's words) before reaching here — is left
+    ///   alone;
+    /// * an id that is not a genuinely-parked blocker arms nothing, so an
+    ///   ordinary approval, an already-resolved id or an expired one is
+    ///   untouched — and a resolution is never left banked for a settle that
+    ///   returns `AlreadyResolved`/`Expired` and so never consumes it, which a
+    ///   later boot would otherwise re-arm and resume a second time.
+    #[cfg(feature = "openhuman")]
+    async fn arm_console_blocker_resolution(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        verdict: Verdict,
+    ) -> Result<()> {
+        use crate::ports::blockers::{BlockerPayload, BlockerResolution, BlockerVerdict};
+        if self.grants.peek_blocker_resolution(id).is_some() {
+            return Ok(());
+        }
+        let Some(parked) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
+            return Ok(());
+        };
+        if !crate::ports::blockers::is_blocker_effect(&parked.effect) {
+            return Ok(());
+        }
+        let step = serde_json::from_value::<BlockerPayload>(parked.effect.payload.clone())
+            .ok()
+            .and_then(|payload| payload.step);
+        let verdict = match verdict {
+            Verdict::Approve => BlockerVerdict::Retry,
+            Verdict::Deny => BlockerVerdict::Cancel,
+        };
+        let resolution = BlockerResolution {
+            verdict,
+            answer: String::new(),
+            step,
+        };
+        self.journal
+            .record_blocker_resolution(id, &resolution)
+            .await?;
+        self.grants.arm_blocker_resolution(id, resolution);
+        Ok(())
     }
 
     /// Finishes the retirement a [`ResolveReceipt::Expired`] owes (issue #1449).
@@ -2349,12 +2462,20 @@ impl CompanyRuntime {
         approval_id: &ApprovalId,
         resolution: crate::ports::blockers::BlockerResolution,
     ) -> Result<CycleReport> {
-        let thread = self
-            .journal
-            .approval_conversation(approval_id)
-            .and_then(|conversation| conversation.thread);
+        let conversation = self.journal.approval_conversation(approval_id);
+        let thread = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.thread.clone());
+        let origin_parent = conversation
+            .as_ref()
+            .and_then(|conversation| conversation.parent);
         let outcome = self
-            .drive_blocker_resume(&resolution, resolution.step.as_ref(), thread.as_deref())
+            .drive_blocker_resume(
+                &resolution,
+                resolution.step.as_ref(),
+                thread.as_deref(),
+                origin_parent,
+            )
             .await;
         // Retire the armed answer whether or not the drive succeeded: a failed
         // resume is reported, not retried forever, and re-arming it would resume
@@ -2370,6 +2491,10 @@ impl CompanyRuntime {
             );
         }
         outcome?;
+        if resolution.resumes() {
+            self.notify_blocker_resumed(approval_id, thread.as_deref(), &resolution)
+                .await;
+        }
         Ok(CycleRunner::new(self).already_resolved_report())
     }
 
@@ -2381,13 +2506,15 @@ impl CompanyRuntime {
         resolution: &crate::ports::blockers::BlockerResolution,
         step: Option<&crate::ports::blockers::BlockerStep>,
         thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
     ) -> Result<()> {
         use crate::ports::blockers::BlockerStep;
 
         match step {
             Some(BlockerStep::Task { task_id }) => {
                 if resolution.resumes() {
-                    self.resume_task_card(task_id, resolution, thread).await
+                    self.resume_task_card(task_id, resolution, thread, origin_parent)
+                        .await
                 } else {
                     self.cancel_task_card(task_id, thread).await
                 }
@@ -2417,12 +2544,23 @@ impl CompanyRuntime {
     /// operator's answer onto the card note first, so the re-run reads the
     /// correction. A card an operator has since dragged out of `paused` is left
     /// alone — the same guard the expiry mover keeps.
+    ///
+    /// The re-dispatch is also pointed at the thread the blocker was answered in
+    /// (issue #2008): the dispatch relay
+    /// ([`journal_dispatch_replies`](Self::journal_dispatch_replies)) keys the
+    /// resumed run's **output** on the card's origin, and a board- or
+    /// planning-pass card carries none (the answer would relay nowhere) while a
+    /// card raised elsewhere carries a different thread than the blocker
+    /// conversation. Stamping the blocker's own thread here lands the output back
+    /// where the operator answered — the delivery half `post_blocker_resume_note`
+    /// only acknowledged before.
     #[cfg(feature = "openhuman")]
     async fn resume_task_card(
         self: &Arc<Self>,
         task_id: &str,
         resolution: &crate::ports::blockers::BlockerResolution,
         thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
     ) -> Result<()> {
         use crate::ports::blockers::BlockerVerdict;
 
@@ -2451,6 +2589,10 @@ impl CompanyRuntime {
                 "operator",
                 &resolution.answer,
             ));
+        }
+        if let Some(thread) = thread {
+            card.origin =
+                crate::ports::tasks::TaskOrigin::new(Some(thread.to_string()), origin_parent);
         }
         card.column = IN_PROGRESS.to_string();
         card.updated_at_millis = now_millis();
@@ -3835,7 +3977,12 @@ impl CompanyRuntime {
                     .await
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|card| (card.id, card.origin_parent))
+                    .map(|card| {
+                        // The origin borrows the card, so read it before `id`
+                        // moves out of it.
+                        let origin_parent = card.origin_parent();
+                        (card.id, origin_parent)
+                    })
                     .collect()
             } else {
                 std::collections::HashMap::new()
@@ -3857,6 +4004,17 @@ impl CompanyRuntime {
                 .as_deref()
                 .and_then(|id| origins.get(id).copied())
                 .flatten();
+            // Guarded the way `publish_continuation` and
+            // `announce_continuation_failure` guard theirs, and for the reason
+            // `resolvable_parent` documents: the console folds a transcript by
+            // parent and *drops* a reply whose parent it cannot resolve in this
+            // channel rather than rendering it flat. A dispatched card can
+            // settle long after it was raised, so its recorded root may have
+            // been pruned by now — and an unresolvable root would make the
+            // delegate's answer vanish with nothing on screen to say so
+            // (coderabbit on #1982). Falling back to the channel is the same
+            // landing an unthreaded hand-off has always had.
+            let parent = self.resolvable_parent(parent, chat_id).await;
             // Scanned host-side from the reply text, same as
             // `publish_continuation` and `journal_chat_replies` — the
             // console's picker never touched this message.
@@ -6640,8 +6798,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6719,8 +6876,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7228,8 +7384,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7323,8 +7478,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7482,8 +7636,7 @@ mod tests {
             updated_at_millis: 0,
             // The field the whole bug turns on: without an origin thread,
             // `relay_reply` is never called at all (a board-created card).
-            origin_chat_id: Some("strategy".to_string()),
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7638,10 +7791,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: origin.to_string(),
             updated_at_millis: 0,
-            origin_chat_id: Some(origin.to_string()),
-            // Channel-level, like every card this test raises: it is about
-            // which surface a relay lands on, not which thread (#1890).
-            origin_parent: None,
+            origin: crate::ports::TaskOrigin::new(Some(origin.to_string()), None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7658,7 +7808,7 @@ mod tests {
         // Built the way `run_task` builds them: the speaker is the origin DM's
         // own agent, or the orchestrator for a shared surface.
         let relay = |c: &TaskRecord| {
-            let origin = c.origin_chat_id.clone().expect("origin");
+            let origin = c.origin_chat_id().map(str::to_string).expect("origin");
             let speaker = relay_speaker(&record, &origin, orchestrator);
             relay_reply(c, orchestrator, &speaker, origin, &[])
         };
@@ -7843,7 +7993,29 @@ mod tests {
     async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
         let (rt, _home_dir) = runtime_with_events().await;
         let id = rt.id().clone();
-        let root = crate::ports::types::EventSeq::new(41);
+
+        // The root has to be *in* the journal, not merely named by the card.
+        // `journal_dispatch_replies` now guards its parent through
+        // `resolvable_parent` (coderabbit on #1982), which is what stops a
+        // pruned root turning the delegate's answer into a reply the console
+        // silently drops. A fixture that names a sequence nothing was ever
+        // written at is the pruned case, so it has to write one.
+        let root = rt
+            .events()
+            .append(
+                &id,
+                CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    text: "Draft the launch email".to_string(),
+                    by: None,
+                    chat: Some("general".to_string()),
+                    parent: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("the root is journaled");
 
         let mut card = crate::ports::tasks::TaskRecord {
             id: "t-relay".to_string(),
@@ -7853,8 +8025,7 @@ mod tests {
             priority: "medium".to_string(),
             assignee: "writer".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: Some("general".to_string()),
-            origin_parent: Some(root),
+            origin: crate::ports::TaskOrigin::new(Some("general".to_string()), Some(root)),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -7904,7 +8075,8 @@ mod tests {
         // And a card raised at channel level still relays flat — `None` is the
         // channel-level conversation, not a gap.
         card.id = "t-flat".to_string();
-        card.origin_parent = None;
+        card.origin =
+            crate::ports::TaskOrigin::new(card.origin_chat_id().map(str::to_string), None);
         rt.tasks().upsert(&id, &card).await.unwrap();
         let report = crate::runtime::types::CycleReport {
             responses: vec![relay(Some("t-flat"))],
@@ -8647,8 +8819,7 @@ mod tests {
                 priority: "medium".to_string(),
                 assignee: "ceo".to_string(),
                 updated_at_millis: 1,
-                origin_chat_id: Some(origin.to_string()),
-                origin_parent: None,
+                origin: crate::ports::TaskOrigin::new(Some(origin.to_string()), None),
                 parent_task_id: None,
                 output: None,
                 plan: None,
@@ -9516,8 +9687,7 @@ mod tests {
                 priority: "medium".to_string(),
                 assignee: "eng".to_string(),
                 updated_at_millis: 1,
-                origin_chat_id: Some("dm:eng".to_string()),
-                origin_parent: None,
+                origin: crate::ports::TaskOrigin::new(Some("dm:eng".to_string()), None),
                 parent_task_id: None,
                 output: None,
                 plan: None,
@@ -9767,6 +9937,154 @@ mod tests {
                 stored(&second, "t-1").await.column,
                 COLUMN_IN_PROGRESS,
                 "a blocker parked before the restart re-enters the card after it"
+            );
+        }
+
+        fn operator() -> crate::ports::types::Actor {
+            crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::Operator,
+                id: "operator".to_string(),
+            }
+        }
+
+        /// Issue #2008: an operator answering a blocker from the console
+        /// Approvals page — not the DM — must arm the same resolution a DM reply
+        /// does, so the paused card re-enters through the dispatch edge. Without
+        /// the console-side arming the verdict settles but the resume fork finds
+        /// nothing and the card stays `paused`.
+        #[tokio::test]
+        async fn console_approve_resumes_the_paused_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            runtime
+                .resolve_approval(&id, crate::ports::types::Verdict::Approve, operator())
+                .await
+                .expect("resolves");
+
+            assert!(
+                runtime.pending_approvals().is_empty(),
+                "the approved blocker is retired"
+            );
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_IN_PROGRESS,
+                "a console Approve arms the blocker resolution and re-enters the paused card"
+            );
+        }
+
+        /// Issue #2008: the console Approve must not execute the inert blocker
+        /// effect — the #1861 never-execute guard still holds on this path, the
+        /// same way it does for a DM answer.
+        #[tokio::test]
+        async fn console_approve_never_executes_the_blocker_effect() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            runtime
+                .resolve_approval(&id, crate::ports::types::Verdict::Approve, operator())
+                .await
+                .expect("resolves");
+
+            assert!(
+                !runtime.journal.is_executed(&format!("approval:{id}")),
+                "a console Approve of a blocker must resume, never perform_effect"
+            );
+        }
+
+        /// Issue #2008: the resumed run's **output** must land back in the thread
+        /// the blocker was answered in. The card here was raised in `general`,
+        /// but its blocker parked into `dm:eng`; on resume the card's origin is
+        /// re-pointed at that DM so the dispatch relay delivers the output there,
+        /// and a `blocker_resumed` notification badges the same thread.
+        #[tokio::test]
+        async fn console_approve_routes_output_to_the_blocker_thread() {
+            let (runtime, _home) = runtime().await;
+            let mut seeded = card("t-1", COLUMN_PAUSED);
+            seeded.origin = crate::ports::TaskOrigin::new(Some("general".to_string()), None);
+            seed(&runtime, &seeded).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            runtime
+                .resolve_approval(&id, crate::ports::types::Verdict::Approve, operator())
+                .await
+                .expect("resolves");
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.origin_chat_id(),
+                Some("dm:eng"),
+                "the resumed run reports back into the thread the blocker was answered in"
+            );
+            let resumed = runtime
+                .notifications()
+                .list(runtime.id(), "eng")
+                .await
+                .expect("notifications")
+                .into_iter()
+                .find(|n| n.notification.kind == "blocker_resumed")
+                .expect("a blocker-resumed notification is filed");
+            assert_eq!(
+                resumed.notification.context.as_deref(),
+                Some("dm:eng"),
+                "the badge lands on the DM the blocker was answered in"
+            );
+        }
+
+        /// Issue #2008: a console Deny abandons the work — it maps to a cancel,
+        /// which settles the card back to To-do and re-dispatches nothing.
+        #[tokio::test]
+        async fn console_deny_cancels_the_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            runtime
+                .resolve_approval(&id, crate::ports::types::Verdict::Deny, operator())
+                .await
+                .expect("resolves");
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_TODO,
+                "a console Deny abandons the work rather than re-dispatching it"
             );
         }
     }

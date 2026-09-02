@@ -208,7 +208,7 @@ use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup,
     OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
 };
-use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
+use crate::ports::{Cognition, TaskOrigin, TaskRecord, UsageMetering, generate_id, now_millis};
 
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
@@ -1754,7 +1754,7 @@ impl HarnessBrain {
         // deliberately empty: a dispatched card discards them into the note.
         self.journal_task_outcome(&card, &responder, result_text, artifact_ids)
             .await;
-        let Some(origin) = card.origin_chat_id.clone() else {
+        let Some(origin) = card.origin_chat_id().map(str::to_string) else {
             return Ok(None);
         };
         let orchestrator = self.orchestrator();
@@ -1813,7 +1813,7 @@ impl HarnessBrain {
         self.settle_run_end(sink, TaskRunEnd::Failed, &text, 0)
             .await;
 
-        let Some(origin) = card.origin_chat_id.clone() else {
+        let Some(origin) = card.origin_chat_id().map(str::to_string) else {
             // A refusal has no relay, but its terminal outcome still belongs
             // on the task timeline.
             self.journal_task_outcome(&card, &orchestrator, text, Vec::new())
@@ -2095,14 +2095,14 @@ impl HarnessBrain {
                     // why capturing it here cannot miss a path. A board-created
                     // card carries `None` and gets no channel marker: no
                     // conversation raised it.
-                    origin_chat_id: card.origin_chat_id.clone(),
+                    origin_chat_id: card.origin_chat_id().map(str::to_string),
                     // Issue #1890 B: the thread inside that channel, captured
                     // off the card on exactly the terms above. This is the
                     // whole of what B repairs — without it the terminal names a
                     // channel and no thread, so a card raised inside a thread
                     // settled flat in the channel and the thread that asked for
                     // the work never showed it finishing.
-                    origin_parent: card.origin_parent,
+                    origin_parent: card.origin_parent(),
                 },
             )
             .await
@@ -2716,13 +2716,12 @@ impl HarnessBrain {
             updated_at_millis: now_millis(),
             // The conversation this came out of, so the card points back at the
             // thread that produced it (#151 §3.2's field, same meaning).
-            origin_chat_id: chat.chat_id.map(str::to_string),
             // Issue #1890 B: and the thread inside it, so a file published
             // inside a thread leaves its card pointing at that thread rather
-            // than at the channel around it. `None` is the channel-level
-            // conversation, which is where every publish landed before threads
-            // were part of the key.
-            origin_parent: chat.thread_root,
+            // than at the channel around it. `None` for the thread is the
+            // channel-level conversation, which is where every publish landed
+            // before threads were part of the key.
+            origin: TaskOrigin::new(chat.chat_id.map(str::to_string), chat.thread_root),
             // A chat turn has no card in scope, so this is a lineage root —
             // the same `None` a `spawn_task` from an ordinary chat turn writes.
             parent_task_id: None,
@@ -4291,8 +4290,8 @@ impl HarnessBrain {
 mod tests {
     use super::*;
 
-    use tinyagents::harness::message::Message;
-    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+    use tinyinference::message::Message;
+    use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
     use crate::company::CompanyManifest;
     use crate::harness::provider::{HarnessModel, MockProvider};
@@ -5000,8 +4999,8 @@ description = "Builds it."
             &self,
             _state: &(),
             _request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
-            Err(tinyagents::TinyAgentsError::Model(
+        ) -> tinyinference::Result<ModelResponse> {
+            Err(tinyinference::Error::Model(
                 "USER_INSUFFICIENT_CREDITS: insufficient budget for this account — add credits \
                  to continue"
                     .to_string(),
@@ -5862,8 +5861,7 @@ members = ["engineer"]
             priority: "high".to_string(),
             assignee: assignee.to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -5896,7 +5894,7 @@ members = ["engineer"]
         // which would satisfy the no-post-back assertion below without ever
         // running the dispatch this test is about.
         let mut c = card("t-no-origin", "engineer");
-        c.origin_chat_id = None;
+        c.origin = TaskOrigin::new(None, None);
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -5923,7 +5921,7 @@ members = ["engineer"]
         // orchestrator — so the credit would be correctly suppressed and this
         // test would prove nothing about the one-voice relay.
         let mut c = card("t-origin", "engineer");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -5974,8 +5972,7 @@ members = ["engineer"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks, events) = brain_with_tasks_and_events(dir.path());
         let mut c = card("t-threaded", "engineer");
-        c.origin_chat_id = Some("strategy".to_string());
-        c.origin_parent = Some(EventSeq::new(41));
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), Some(EventSeq::new(41)));
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -6014,7 +6011,7 @@ members = ["engineer"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks, events) = brain_with_tasks_and_events(dir.path());
         let mut c = card("t-flat", "engineer");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -6100,7 +6097,7 @@ members = ["engineer"]
         // A roster assignee: since #205 an off-roster one never runs a turn, so
         // it would settle to `todo` and prove nothing about the terminal.
         let mut c = card("t-origin", "engineer");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -6154,7 +6151,7 @@ members = ["engineer"]
         let (brain, ops) = brain_with_artifacts(dir.path());
         // Empty assignee → the default responder, so the turn actually runs.
         let mut c = card("t-origin", "");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         ops.upsert(&CompanyId::new("acme"), &c).await.expect("seed");
 
         brain
@@ -6546,7 +6543,7 @@ members = ["engineer"]
         // …and it belongs to the same conversation, like the card the
         // no-card-in-scope path mints. Two minting paths must not disagree
         // about where their card posts back.
-        assert_eq!(cards[0].origin_chat_id.as_deref(), Some("strategy"));
+        assert_eq!(cards[0].origin_chat_id(), Some("strategy"));
     }
 
     /// Each artifact records the agent that published **it** (#463 review).
@@ -6647,7 +6644,7 @@ members = ["engineer"]
         let (brain, ops, _provider) =
             brain_that_steers_itself(dir.path(), "t-cancel", vec![SteerAction::Cancel]);
         let mut c = card("t-cancel", "");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         ops.upsert(&CompanyId::new("acme"), &c).await.expect("seed");
 
         brain
@@ -6688,7 +6685,7 @@ members = ["engineer"]
         assert_eq!(board_card.column, COLUMN_IN_REVIEW);
 
         let mut delegated = card("t2", "maya");
-        delegated.origin_chat_id = Some("strategy".to_string());
+        delegated.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         settle(&mut delegated, TaskRunEnd::Completed, "maya", "shipped");
         assert_eq!(
             delegated.column, COLUMN_IN_REVIEW,
@@ -6711,7 +6708,7 @@ members = ["engineer"]
             vec![redirect(), redirect(), redirect(), redirect()],
         );
         let mut c = card("t1", "");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
 
         brain
@@ -6862,7 +6859,7 @@ members = ["engineer"]
             "an ordinary turn failure must carry the bounce chip: {settled:?}"
         );
         assert!(
-            settled.origin_chat_id.is_none(),
+            settled.origin_chat_id().is_none(),
             "this is exactly the board-created shape with no relay target: {settled:?}"
         );
 
@@ -7070,7 +7067,7 @@ members = ["engineer"]
         let refused = only_card(&tasks).await;
         assert_eq!(refused.column, COLUMN_TODO);
         assert!(
-            refused.origin_chat_id.is_none(),
+            refused.origin_chat_id().is_none(),
             "this is exactly the board-created shape with no relay target: {refused:?}"
         );
 
@@ -7206,7 +7203,7 @@ members = ["engineer"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_tasks(dir.path());
         let mut c = card("t-origin", "Shane");
-        c.origin_chat_id = Some("strategy".to_string());
+        c.origin = TaskOrigin::new(Some("strategy".to_string()), None);
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -7253,7 +7250,7 @@ members = ["engineer"]
         // "engineer" is a real roster agent (not the orchestrator "ceo"), so
         // `relay_speaker` claims this as a private DM and returns "engineer"
         // instead of falling back to the orchestrator.
-        c.origin_chat_id = Some("engineer".to_string());
+        c.origin = TaskOrigin::new(Some("engineer".to_string()), None);
         tasks
             .upsert(&CompanyId::new("acme"), &c)
             .await
@@ -9718,7 +9715,7 @@ members = ["eng1", "eng2"]
         // is covered by the delegated target".
         //
         // The delegated target does cover the *drain*, which was already bound
-        // by `in_thread(grant.origin_parent)`. It never covered the re-issued
+        // by `in_thread(grant.origin_parent())`. It never covered the re-issued
         // call itself: that turn ran against whatever history the agent
         // happened to be holding and then published its answer into the origin
         // thread regardless — grounded in one conversation, answering into
@@ -10116,8 +10113,7 @@ members = ["eng1", "eng2"]
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -10346,7 +10342,7 @@ members = ["eng1", "eng2"]
             &self,
             _state: &(),
             request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(action) = self.actions.lock().unwrap().pop_front() {
                 let key = if self.key.is_empty() {
@@ -10692,10 +10688,10 @@ members = ["eng1", "eng2"]
     fn a_triage_request_is_recognised_as_one() {
         let triage = ModelRequest {
             messages: vec![
-                tinyagents::harness::message::Message::system(
+                tinyinference::message::Message::system(
                     crate::harness::triage::system_prompt_for_test(),
                 ),
-                tinyagents::harness::message::Message::user("hello".to_string()),
+                tinyinference::message::Message::user("hello".to_string()),
             ],
             ..ModelRequest::default()
         };
@@ -10706,10 +10702,8 @@ members = ["eng1", "eng2"]
         );
         let turn = ModelRequest {
             messages: vec![
-                tinyagents::harness::message::Message::system(
-                    "You are the CEO of Acme.".to_string(),
-                ),
-                tinyagents::harness::message::Message::user("ship it".to_string()),
+                tinyinference::message::Message::system("You are the CEO of Acme.".to_string()),
+                tinyinference::message::Message::user("ship it".to_string()),
             ],
             ..ModelRequest::default()
         };
@@ -10745,7 +10739,7 @@ members = ["eng1", "eng2"]
             &self,
             _state: &(),
             request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             if is_selection_request(&request) {
                 self.selector_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -10772,10 +10766,10 @@ members = ["eng1", "eng2"]
     fn a_selection_request_is_recognised_as_one() {
         let selection = ModelRequest {
             messages: vec![
-                tinyagents::harness::message::Message::system(
+                tinyinference::message::Message::system(
                     crate::harness::selector::system_prompt_for_test(),
                 ),
-                tinyagents::harness::message::Message::user("who owns login?".to_string()),
+                tinyinference::message::Message::user("who owns login?".to_string()),
             ],
             ..ModelRequest::default()
         };
@@ -11097,7 +11091,7 @@ members = ["eng1", "eng2"]
             &self,
             _state: &(),
             request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             // Issue #678: a triage escalation is a classification, not a turn.
             // It rides the same `HarnessModel` handle the roster runs on, so
             // without this it would consume a scripted push and shift every
@@ -11115,7 +11109,7 @@ members = ["eng1", "eng2"]
             }
             let invoke = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if self.faults.fail_from.is_some_and(|from| invoke >= from) {
-                return Err(tinyagents::TinyAgentsError::Model(
+                return Err(tinyinference::Error::Model(
                     "the delegate's provider fell over".to_string(),
                 ));
             }

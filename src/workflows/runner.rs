@@ -5753,12 +5753,12 @@ to = "done"
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for RecordingSlowProvider {
+    impl tinyinference::model::ChatModel<()> for RecordingSlowProvider {
         async fn invoke(
             &self,
             _state: &(),
-            request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             // Scan the whole conversation, not just the last user turn: the
             // openhuman harness reshapes an agent node's authored instruction
             // into a multi-message prompt, so the node's marker can land in any
@@ -5781,7 +5781,7 @@ to = "done"
                     () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
                 }
             }
-            Ok(tinyagents::harness::model::ModelResponse::assistant(
+            Ok(tinyinference::model::ModelResponse::assistant(
                 "acknowledged".to_string(),
             ))
         }
@@ -7438,12 +7438,12 @@ to = "done"
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for StallingProvider {
+    impl tinyinference::model::ChatModel<()> for StallingProvider {
         async fn invoke(
             &self,
             _state: &(),
-            _request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            _request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             self.entered.notify_waiters();
             // Never returns. The run is stopped by the future being dropped,
             // which is the mechanism under test.
@@ -7802,15 +7802,15 @@ to = "ceo"
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for ReleasableProvider {
+    impl tinyinference::model::ChatModel<()> for ReleasableProvider {
         async fn invoke(
             &self,
             _state: &(),
-            _request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            _request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             self.entered.notify_waiters();
             self.release.notified().await;
-            Ok(tinyagents::harness::model::ModelResponse::assistant(
+            Ok(tinyinference::model::ModelResponse::assistant(
                 "released".to_string(),
             ))
         }
@@ -8043,17 +8043,17 @@ to = "done"
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for GatedProvider {
+    impl tinyinference::model::ChatModel<()> for GatedProvider {
         async fn invoke(
             &self,
             state: &(),
-            request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             self.entered.notify_waiters();
             // `notify_one` carries a permit, so a release that lands before this
             // registers is not lost — no ordering race with the test.
             self.release.notified().await;
-            tinyagents::harness::model::ChatModel::invoke(&self.inner, state, request).await
+            tinyinference::model::ChatModel::invoke(&self.inner, state, request).await
         }
     }
 
@@ -8182,14 +8182,14 @@ to = "done"
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for CountingProvider {
+    impl tinyinference::model::ChatModel<()> for CountingProvider {
         async fn invoke(
             &self,
             state: &(),
-            request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tinyagents::harness::model::ChatModel::invoke(&self.inner, state, request).await
+            tinyinference::model::ChatModel::invoke(&self.inner, state, request).await
         }
     }
 

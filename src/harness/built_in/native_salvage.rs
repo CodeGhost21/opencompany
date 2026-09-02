@@ -25,7 +25,7 @@
 //! turn path**. Since openhuman #4249 removed the legacy engine, every turn runs
 //! through the tinyagents harness, and its loop takes a turn's tool calls from
 //! exactly one place — `response.tool_calls()` on the structured
-//! [`ModelResponse`](tinyagents::harness::model::ModelResponse)
+//! [`ModelResponse`](tinyinference::model::ModelResponse)
 //! (`agent_loop/run_loop.rs`). It never parses model text. The injected
 //! `ToolDispatcher` still renders the transcript and the prompt protocol, but
 //! its `parse_response` is reached only by the end-of-turn wrap-up check.
@@ -108,8 +108,8 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
-use tinyagents::harness::model::ToolChoice;
-use tinyagents::harness::tool::{ToolCall, ToolSchema};
+use tinyinference::model::ToolChoice;
+use tinyinference::tool::{ToolCall, ToolSchema};
 
 /// Object keys that name a tool **and say the object is a call**.
 ///

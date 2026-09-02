@@ -32,7 +32,7 @@ use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::runs::{RunFilter, RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskRecord, column_label};
+use crate::ports::tasks::{COLUMN_TODO, TaskOrigin, TaskRecord, column_label};
 use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
@@ -1423,10 +1423,22 @@ working on):\n{}\n]",
             let mut done: Vec<&&TaskRecord> = settled
                 .iter()
                 .filter(|c| {
-                    let origin = c.origin_chat_id.as_deref();
-                    (chat_history::same_conversation(origin, Some(desk_id.as_str()))
-                        || chat_history::same_conversation(origin, Some(desk_name.as_str())))
-                        && c.origin_parent == thread
+                    // A recorded desk is required before any of this compares.
+                    // `same_conversation(None, "General")` is `true` — `None`
+                    // is one of General's four spellings *for a message* — but
+                    // a card with no origin was raised by no conversation at
+                    // all, and reading its absence as "General" briefs
+                    // board-only work into an unaddressed turn as work "raised
+                    // in this conversation". `chat_history::owns` already draws
+                    // that line for the terminal (`a_terminal_with_no_origin_
+                    // belongs_to_nobody_not_to_general`); this now draws the
+                    // same one (coderabbit on #1982).
+                    let Some(origin) = c.origin_chat_id() else {
+                        return false;
+                    };
+                    (chat_history::same_conversation(Some(origin), Some(desk_id.as_str()))
+                        || chat_history::same_conversation(Some(origin), Some(desk_name.as_str())))
+                        && c.origin_parent() == thread
                 })
                 .collect();
             if done.is_empty() {
@@ -3490,12 +3502,12 @@ impl<'a> CycleHostImpl<'a> {
             priority: "medium".to_string(),
             assignee: parsed.assignee.unwrap_or_default(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
-            // And therefore no thread inside one either (#1890 B): this tool
-            // surface never recorded the channel, so there is nothing to
-            // narrow. The pair stays absent together, which is what a reader
-            // must be able to rely on.
-            origin_parent: None,
+            // No conversation at all (#1890 B, step 5): this tool surface never
+            // recorded the channel, so there is no thread inside one to narrow
+            // either. The desk and the thread are one value now, so "absent
+            // together" is the only state this can be in rather than an
+            // invariant a reader has to trust.
+            origin: TaskOrigin::new(None, None),
             // No parent (#185), for the same reason as the harness path: this
             // is a chat-turn delegation, so no task is in scope to be the
             // parent. Lineage is set through the task API's `parentTaskId`.
@@ -3613,12 +3625,12 @@ impl<'a> CycleHostImpl<'a> {
             priority: "medium".to_string(),
             assignee: desk_id.clone(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
-            // And therefore no thread inside one either (#1890 B): this tool
-            // surface never recorded the channel, so there is nothing to
-            // narrow. The pair stays absent together, which is what a reader
-            // must be able to rely on.
-            origin_parent: None,
+            // No conversation at all (#1890 B, step 5): this tool surface never
+            // recorded the channel, so there is no thread inside one to narrow
+            // either. The desk and the thread are one value now, so "absent
+            // together" is the only state this can be in rather than an
+            // invariant a reader has to trust.
+            origin: TaskOrigin::new(None, None),
             // No parent (#185), for the same reason as the harness path: this
             // is a chat-turn delegation, so no task is in scope to be the
             // parent. Lineage is set through the task API's `parentTaskId`.
@@ -3679,6 +3691,14 @@ const THREAD_INDEX_MAX: usize = 5;
 /// than by streaming it from the head, so this costs the page and not the
 /// company's history.
 const THREAD_INDEX_PAGE: usize = 256;
+
+/// Characters of a root kept as an index row's opening words.
+///
+/// One constant because two places must agree on it: the opening is cut to
+/// this, and the self-exclusion below re-cuts the current message to compare
+/// against that cut. A literal in each is two values that must match with
+/// nothing making them — which is the defect this whole change removes.
+const THREAD_OPENING_CHARS: usize = 120;
 
 /// One line of the index — a thread the turn may decide to ask about.
 struct ThreadLine {
@@ -3779,7 +3799,7 @@ fn thread_index(
             CompanyEvent::OperatorMessage {
                 text, parent: None, ..
             } => {
-                let opening = first_line(text, 120);
+                let opening = first_line(text, THREAD_OPENING_CHARS);
                 if opening.is_empty() {
                     continue;
                 }
@@ -3811,9 +3831,14 @@ fn thread_index(
     let mut lines: Vec<ThreadLine> = roots
         .into_iter()
         .filter(|(seq, line)| {
-            Some(*seq) != current
-                && !(!line.opening.is_empty()
-                    && current_message.trim().starts_with(line.opening.as_str()))
+            // Compared through `first_line` on both sides, not raw. `opening`
+            // is already truncated, and truncation appends `…`, so a message
+            // whose first line runs past THREAD_OPENING_CHARS never
+            // `starts_with` its own opening — and the turn was then listed in
+            // its own index as somebody else's conversation
+            // (coderabbit on #1982).
+            let mine = first_line(current_message, THREAD_OPENING_CHARS);
+            Some(*seq) != current && !(!line.opening.is_empty() && mine == line.opening)
         })
         .map(|(seq, mut line)| {
             line.replies = replies.get(&seq).copied().unwrap_or(0);
@@ -3824,7 +3849,7 @@ fn thread_index(
             // question "did that ship?" for a thread the turn is not in.
             line.landed = settled
                 .iter()
-                .find(|card| card.origin_parent == Some(seq))
+                .find(|card| card.origin_parent() == Some(seq))
                 .map(|card| {
                     format!(
                         "finished → {}",
@@ -4184,8 +4209,7 @@ mod test {
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: TaskOrigin::new(None, None),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -4360,8 +4384,7 @@ mod test {
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: TaskOrigin::new(None, None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -4503,8 +4526,7 @@ mod test {
                         priority: "medium".to_string(),
                         assignee: "ceo".to_string(),
                         updated_at_millis: 1,
-                        origin_chat_id: None,
-                        origin_parent: None,
+                        origin: TaskOrigin::new(None, None),
                         parent_task_id: None,
                         output: None,
                         plan: None,
@@ -5398,8 +5420,7 @@ members = ["writer"]
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -5486,8 +5507,7 @@ members = ["writer"]
                     priority: "medium".to_string(),
                     assignee: "ceo".to_string(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -9825,8 +9845,7 @@ members = ["writer"]
                     priority: "medium".into(),
                     assignee: "eng".into(),
                     updated_at_millis: 0,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -9906,8 +9925,7 @@ members = ["writer"]
                     priority: "medium".into(),
                     assignee: "eng".into(),
                     updated_at_millis: 0,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     // Nothing has run yet, so there is no deliverable to point at
                     // (issue #339). The first successful settle stamps it.
@@ -11054,8 +11072,7 @@ members = ["writer"]
             priority: "medium".to_string(),
             assignee: "engineer".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -11110,8 +11127,7 @@ members = ["writer"]
             priority: "medium".to_string(),
             assignee: "writer".to_string(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -11162,15 +11178,13 @@ timeout)",
             .expect("the company record");
 
         let mut mine = settled_card("t-mine", "Draft the launch email");
-        mine.origin_chat_id = Some("growth".to_string());
-        mine.origin_parent = Some(EventSeq::new(41));
+        mine.origin = TaskOrigin::new(Some("growth".to_string()), Some(EventSeq::new(41)));
         let mut sibling = settled_card("t-sibling", "Pull the Q3 CAC");
-        sibling.origin_chat_id = Some("growth".to_string());
-        sibling.origin_parent = Some(EventSeq::new(43));
+        sibling.origin = TaskOrigin::new(Some("growth".to_string()), Some(EventSeq::new(43)));
         // Raised in the same channel, but at channel level rather than in a
         // thread. `None` is a conversation of its own, not a wildcard.
         let mut channel_level = settled_card("t-channel", "Renew the domain");
-        channel_level.origin_chat_id = Some("growth".to_string());
+        channel_level.origin = TaskOrigin::new(Some("growth".to_string()), None);
         for card in [&mine, &sibling, &channel_level] {
             rt.tasks().upsert(&id, card).await.unwrap();
         }
@@ -11225,7 +11239,7 @@ timeout)",
 
         let mut running = settled_card("t-running", "Rebuild the pricing page");
         running.column = crate::ports::tasks::COLUMN_IN_PROGRESS.to_string();
-        running.origin_chat_id = Some("growth".to_string());
+        running.origin = TaskOrigin::new(Some("growth".to_string()), None);
         rt.tasks().upsert(&id, &running).await.unwrap();
 
         let mut events = vec![operator_in_thread("growth", None, "did that ship?")];
@@ -11266,7 +11280,7 @@ timeout)",
         let total = SETTLED_WORK_BRIEFING_MAX + 4;
         for n in 0..total {
             let mut card = settled_card(&format!("t-{n}"), &format!("Card number {n}"));
-            card.origin_chat_id = Some("growth".to_string());
+            card.origin = TaskOrigin::new(Some("growth".to_string()), None);
             // Ascending, so the newest is the highest-numbered — the order the
             // briefing keeps and the cap cuts against.
             card.updated_at_millis = n as u64;
@@ -11321,7 +11335,7 @@ timeout)",
             .expect("the company record");
 
         let mut card = settled_card("t-growth", "Draft the launch email");
-        card.origin_chat_id = Some("growth".to_string());
+        card.origin = TaskOrigin::new(Some("growth".to_string()), None);
         rt.tasks().upsert(&id, &card).await.unwrap();
 
         let mut events = vec![operator_in_thread("engineering", None, "what's up?")];
@@ -11352,8 +11366,7 @@ timeout)",
             // non-empty assignee.
             assignee: String::new(),
             updated_at_millis: 0,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -11560,8 +11573,7 @@ timeout)",
         let record = rt.store.load(&id).await.unwrap().expect("the record");
 
         let mut card = settled_card("t-id", "Draft the launch email");
-        card.origin_chat_id = Some("Growth".to_string());
-        card.origin_parent = Some(EventSeq::new(41));
+        card.origin = TaskOrigin::new(Some("Growth".to_string()), Some(EventSeq::new(41)));
         rt.tasks().upsert(&id, &card).await.unwrap();
 
         let mut events = vec![operator_in_thread(
@@ -11581,6 +11593,57 @@ timeout)",
         assert!(
             text.contains("Draft the launch email"),
             "the name-stamped card is the id-addressed desk's own work: {text}"
+        );
+    }
+
+    /// A card **no conversation raised** is briefed into none of them.
+    ///
+    /// `same_conversation(None, "General")` is `true`, because `None` is one of
+    /// General's four spellings *for a message*. A card's absent origin is not a
+    /// spelling: it means nobody raised it. Reading it as General told an
+    /// unaddressed turn that board-only work had been "raised in this
+    /// conversation". `chat_history::owns` already draws that line for the
+    /// terminal — `a_terminal_with_no_origin_belongs_to_nobody_not_to_general`
+    /// pins it — and this is the same line, one layer up (coderabbit on #1982).
+    #[tokio::test]
+    async fn a_card_no_conversation_raised_is_briefed_into_none_of_them() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = rt.id().clone();
+        let record = rt.store.load(&id).await.unwrap().expect("the record");
+
+        // Raised on the board, or through `spawn_task` from a turn with no
+        // conversation: no desk, and therefore no thread inside one.
+        let mut card = settled_card("board-only", "Rotate the signing key");
+        card.origin = None;
+        rt.tasks().upsert(&id, &card).await.unwrap();
+
+        let mut events = vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            text: "did that ship?".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        }];
+        CycleRunner::new(&rt)
+            .inject_handed_task_awareness(
+                &record,
+                &mut events,
+                &rt.tasks().list(&id).await.unwrap(),
+            )
+            .await;
+
+        assert!(
+            !message_text(&events[0]).contains("Rotate the signing key"),
+            "work no conversation raised is not this conversation's: {}",
+            message_text(&events[0])
         );
     }
 
@@ -11606,7 +11669,7 @@ timeout)",
         let mut card = settled_card("t-general", "Renew the domain");
         // Journaled by a client that named the desk; the message below names
         // nothing. Both are General, so they are one conversation.
-        card.origin_chat_id = Some("General".to_string());
+        card.origin = TaskOrigin::new(Some("General".to_string()), None);
         rt.tasks().upsert(&id, &card).await.unwrap();
 
         let mut events = vec![CompanyEvent::OperatorMessage {
@@ -11751,8 +11814,7 @@ timeout)",
     fn a_thread_whose_work_settled_says_where_it_landed() {
         let page = vec![op(41, "growth", None, "draft the launch email")];
         let mut card = settled_card("t-1", "Draft the launch email");
-        card.origin_chat_id = Some("growth".to_string());
-        card.origin_parent = Some(EventSeq::new(41));
+        card.origin = TaskOrigin::new(Some("growth".to_string()), Some(EventSeq::new(41)));
         let settled = vec![&card];
         let (lines, _) = thread_index(&page, "growth", "growth", None, "", &settled);
         assert_eq!(

@@ -98,8 +98,7 @@ impl TaskSeed {
                 .unwrap_or_else(|| "medium".to_string()),
             assignee: self.assignee.clone().unwrap_or_default(),
             updated_at_millis: at_millis,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -292,7 +291,7 @@ mod test {
         // The whole safety property: nothing seeded can enter the dispatching
         // or the billing column.
         assert_eq!(card.column, COLUMN_TODO);
-        assert!(card.origin_chat_id.is_none());
+        assert!(card.origin_chat_id().is_none());
         assert!(card.parent_task_id.is_none());
         assert!(card.origin_run_id.is_none());
         assert!(card.origin_workflow_id.is_none());

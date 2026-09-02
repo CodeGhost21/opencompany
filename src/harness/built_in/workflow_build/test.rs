@@ -16,10 +16,10 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinyagents::harness::model::{ChatModel, ModelProfile, ModelResponse};
-use tinyagents::harness::tool::ToolCall;
-use tinyagents::harness::usage::Usage;
-use tinyagents::{Result as TaResult, TinyAgentsError};
+use tinyinference::model::{ChatModel, ModelProfile, ModelResponse};
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
+use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::agent::copilot_persona;
 use super::tools::{
@@ -117,7 +117,7 @@ impl ChatModel<()> for ScriptedModel {
             runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
         }
         if self.fail {
-            return Err(TinyAgentsError::Model("the brain is down".to_string()));
+            return Err(InferenceError::Model("the brain is down".to_string()));
         }
         let reply = self.replies[index.min(self.replies.len() - 1)].clone();
         Ok(ModelResponse::assistant(reply))
@@ -923,8 +923,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         priority: "medium".to_string(),
         assignee: "maya".to_string(),
         updated_at_millis: 7,
-        origin_chat_id: None,
-        origin_parent: None,
+        origin: None,
         parent_task_id: None,
         output: None,
         plan,
