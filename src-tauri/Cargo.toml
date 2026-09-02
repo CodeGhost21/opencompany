@@ -162,11 +162,12 @@ tauri-build = { version = "2", features = [] }
 [patch."https://github.com/tinyhumansai/tinymemory"]
 tinymemory-api = { path = "../vendor/openhuman/vendor/tinymemory/crates/tinymemory-api" }
 
+[patch."https://github.com/tinyhumansai/tinyinference"]
+tinyinference = { path = "../vendor/openhuman/vendor/tinyagents/vendor/tinyinference/crates/tinyinference" }
+
 [patch.crates-io]
-tinyagents = { path = "../vendor/openhuman/vendor/tinyagents" }
-tinyflows = { path = "../vendor/openhuman/vendor/tinyflows" }
+tinyflows = { path = "../vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
 tinycortex = { path = "../vendor/openhuman/vendor/tinycortex" }
 tinycortex-api = { path = "../vendor/openhuman/vendor/tinycortex/api" }
 tinychannels = { path = "../vendor/openhuman/vendor/tinychannels" }
-tinyplace = { path = "../vendor/openhuman/vendor/tinyplace/sdk/rust" }
 motosan-ai-oauth = { path = "../vendor/openhuman/vendor/motosan-ai-oauth" }

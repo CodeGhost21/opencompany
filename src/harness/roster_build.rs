@@ -44,8 +44,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::company::setup::{
     AgentFocus, FallbackReason, MAX_AGENTS, MAX_DESCRIPTION, MIN_AGENTS, ProposedAgent,
@@ -819,8 +819,8 @@ mod test {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use tinyagents::Result as TaResult;
-    use tinyagents::harness::model::ChatModel;
+    use tinyinference::Result as TaResult;
+    use tinyinference::model::ChatModel;
 
     /// A model that answers from a script, one reply per call, and remembers the
     /// prompts it was sent.
@@ -889,7 +889,7 @@ mod test {
     #[async_trait]
     impl ChatModel<()> for UnreachableModel {
         async fn invoke(&self, _state: &(), _request: ModelRequest) -> TaResult<ModelResponse> {
-            Err(tinyagents::TinyAgentsError::Model(
+            Err(tinyinference::Error::Model(
                 "provider refused the call".to_string(),
             ))
         }

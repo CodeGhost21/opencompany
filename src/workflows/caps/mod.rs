@@ -4448,14 +4448,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for RecoverJudgeProvider {
+    impl tinyinference::model::ChatModel<()> for RecoverJudgeProvider {
         async fn invoke(
             &self,
             _state: &(),
-            _request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            _request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(tinyagents::harness::model::ModelResponse::assistant(
+            Ok(tinyinference::model::ModelResponse::assistant(
                 "{\"verdict\":\"recover\"}".to_string(),
             ))
         }
@@ -4552,14 +4552,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl tinyagents::harness::model::ChatModel<()> for EscalatingJudgeProvider {
+    impl tinyinference::model::ChatModel<()> for EscalatingJudgeProvider {
         async fn invoke(
             &self,
             _state: &(),
-            _request: tinyagents::harness::model::ModelRequest,
-        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            _request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(tinyagents::harness::model::ModelResponse::assistant(
+            Ok(tinyinference::model::ModelResponse::assistant(
                 "{\"verdict\":\"escalate\",\"gap\":\"information\"}".to_string(),
             ))
         }

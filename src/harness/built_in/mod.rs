@@ -210,7 +210,7 @@ use crate::runtime::builder::agent_scoped_grants;
 #[derive(Clone)]
 pub struct HarnessDeps {
     /// The inference model shared across a company's agents. A [`HarnessModel`]
-    /// is a tinyagents [`ChatModel<()>`](tinyagents::harness::model::ChatModel)
+    /// is a tinyinference [`ChatModel<()>`](tinyinference::model::ChatModel)
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
     /// `Arc<dyn ChatModel<()>>` at the openhuman `AgentBuilder::chat_model` seam.
     pub provider: Arc<dyn HarnessModel>,
@@ -1748,7 +1748,7 @@ const WALL_CLOCK_CEILING_LEAVES: [&str; 2] = [
 ///
 /// **Whole phrases, not the words `wall-clock budget`.** A provider's response
 /// body reaches this chain verbatim — `provider.rs` raises
-/// `TinyAgentsError::Model(format!("hosted inference returned {status}: {text}"))`
+/// `InferenceError::Model(format!("hosted inference returned {status}: {text}"))`
 /// — so a hosted or BYOK endpoint that says anything about a wall-clock budget
 /// of its own would otherwise be reported as this ceiling, complete with a
 /// measured duration of a second or two and an instruction to raise
@@ -5221,7 +5221,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use tinyagents::harness::model::{ChatModel, ModelRequest, ModelResponse};
+    use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
     use crate::company::CompanyManifest;
     use crate::harness::provider::MockProvider;
@@ -7206,11 +7206,11 @@ description = "Builds the product."
             &self,
             _state: &(),
             _request: ModelRequest,
-        ) -> tinyagents::Result<ModelResponse> {
+        ) -> tinyinference::Result<ModelResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self.script.lock().unwrap().pop_front() {
                 Some(Ok(reply)) => Ok(ModelResponse::assistant(reply)),
-                Some(Err(err)) => Err(tinyagents::TinyAgentsError::Model(err)),
+                Some(Err(err)) => Err(tinyinference::Error::Model(err)),
                 None => Ok(ModelResponse::assistant("exhausted")),
             }
         }
@@ -7448,7 +7448,7 @@ description = "Builds the product."
     }
 
     /// A provider's response body reaches this chain verbatim — `provider.rs`
-    /// raises `TinyAgentsError::Model("hosted inference returned {status}: {text}")`
+    /// raises `InferenceError::Model("hosted inference returned {status}: {text}")`
     /// — so an endpoint with a wall-clock budget of its own must not be read as
     /// OpenHuman's per-turn ceiling. That misdiagnosis is worse than the plain
     /// wrapper: it would report the second the request took as if it were a
@@ -11545,7 +11545,7 @@ budget_usd_daily = 0.0
         use std::sync::Mutex as StdMutex;
 
         use futures::stream::{self, BoxStream};
-        use tinyagents::harness::model::{ModelRequest, ModelResponse};
+        use tinyinference::model::{ModelRequest, ModelResponse};
 
         use crate::ports::events::EventStreamItem;
         use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
@@ -11670,7 +11670,7 @@ budget_usd_daily = 0.0
                 &self,
                 _state: &(),
                 request: ModelRequest,
-            ) -> tinyagents::Result<ModelResponse> {
+            ) -> tinyinference::Result<ModelResponse> {
                 let joined = request
                     .messages
                     .iter()

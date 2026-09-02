@@ -107,5 +107,6 @@ webhooks       | compile-only | - | Only `HttpWebhookSink` / `HmacSha256Signer` 
 dns            | compile-only | - | Only `HickoryDnsResolver` is gated. The `DnsResolver` trait, `StaticDnsResolver` and the pure record generation test at default features.
 
 # --- Compile-only, no gated test exists yet ---------------------------------
-tiny           | compile-only | - | A dependency switch: it brings the vendored `tinyagents` crate into scope for `openhuman`. No code is gated on `tiny` itself, so there is nothing for a lane to run.
-tinyagents     | compile-only | - | The implicit feature of the optional `tinyagents` dependency, enabled only via `tiny`. Nothing is gated on it directly.
+tiny           | compile-only | - | A dependency switch: it brings the vendored TinyAgents crates into scope for `openhuman`. No code is gated on `tiny` itself, so there is nothing for a lane to run.
+tinyagents-harness | compile-only | - | The implicit feature of the optional `tinyagents-harness` dependency, enabled only via `tiny`. Nothing is gated on it directly. (Upstream split `tinyagents` into a workspace, so the single `tinyagents` feature this replaces no longer names a crate.)
+tinyinference  | compile-only | - | The implicit feature of the optional `tinyinference` dependency — the model layer TinyAgents moved upstream — enabled only via `tiny`. Nothing is gated on it directly.
