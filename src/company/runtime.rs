@@ -2639,25 +2639,54 @@ impl CompanyRuntime {
         .await
     }
 
-    /// Carries a resolved workflow-node blocker's answer back into the run
-    /// (issue #1863).
+    /// Re-enters the workflow node a resolved blocker stopped, carrying the
+    /// operator's answer into the run (issues #1863, #2005).
     ///
     /// A [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) settles the
-    /// run and starts nothing. A resuming verdict banks the answer (already
-    /// durable) and delivers it into the DM the question was asked in, so the
-    /// operator's decision is never silently dropped. Re-executing the node from
-    /// the run's trigger input — retry re-runs it, amend injects the value, skip
-    /// treats it satisfied — is the workflow engine's own resume seam (issue
-    /// #1864's node-level restart lives beside it); this hands the answer across
-    /// without disturbing that machinery.
+    /// run and starts nothing — the short-circuit that runs before any cycle.
+    ///
+    /// A resuming verdict re-dispatches the run. A paused workflow run is
+    /// *settled*, not suspended (see
+    /// [`workflow_resume`](crate::runtime::workflow_resume)'s module docs), so
+    /// re-entry means a fresh supervised run started from the blocked run's own
+    /// trigger input with the answer threaded onto it under
+    /// [`CONTINUATION_BLOCKER_KEY`](crate::runtime::workflow_resume::CONTINUATION_BLOCKER_KEY).
+    /// The executing node reads it back and acts on the verdict: a retry runs
+    /// again as it was, an amend runs again carrying the operator's words, a
+    /// skip does not run at all and the branch proceeds past it.
+    ///
+    /// The facts that re-dispatch needs — workflow id, trigger input,
+    /// attribution, checkpoint lineage — are the blocked-node stash the park
+    /// armed (`stash_node_blocker_resume`), keyed per (run, node). Reusing that
+    /// key rather than a second registry is what makes the at-most-once
+    /// guarantee hold across both ways into this node: the gated-call resume and
+    /// this one share
+    /// [`is_blocked_node_dispatched`](crate::runtime::journal::RuntimeJournal::is_blocked_node_dispatched),
+    /// so whichever arrives second records the decision and launches nothing.
+    ///
+    /// **Every failure is loud.** A stash this host no longer holds, a graph
+    /// that has since been deleted, a build with no workflow execution wired —
+    /// each returns `Err`, which
+    /// [`resume_blocker`](Self::resume_blocker) propagates. Reporting a resume
+    /// that did not happen as success is the silent drop the blocker family
+    /// exists to close.
+    ///
+    /// Re-running from the trigger costs the upstream nodes again unless
+    /// #1864's node-level checkpoint restart is available for this lineage;
+    /// `spawn_blocked_node_continuation` picks the cheaper of the two. What it
+    /// must never cost is a second report: the delivery (#438), outward-call
+    /// (#846) and denial (#978) ledgers ride the same trigger input this
+    /// threads onto, unchanged, and `deliver_outputs` skips a node either
+    /// ledger already names.
     #[cfg(feature = "openhuman")]
     async fn resume_node_blocker(
         self: &Arc<Self>,
         run_id: &str,
-        _node_id: &str,
+        node_id: &str,
         resolution: &crate::ports::blockers::BlockerResolution,
         thread: Option<&str>,
     ) -> Result<()> {
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, node_id);
         if !resolution.resumes() {
             let outcome =
                 crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
@@ -2670,10 +2699,86 @@ impl CompanyRuntime {
                     "[blockers] a cancelled workflow-node blocker's run could not be settled"
                 );
             }
+            let stashed = self.blocked_nodes.peek(&turn);
+            self.prune_checkpoint_lineage_of_stash(stashed.as_ref())
+                .await;
+            self.retire_blocked_stash(&turn).await;
             return self
                 .post_blocker_resume_note(thread, "Okay — I've cancelled that workflow step.")
                 .await;
         }
+        // A continuation already launched for this node — by the gated-call
+        // resume, or by a ghost decision replaying this one — must not launch a
+        // second. Same guard, same reason as `resume_blocked_agent_node`: the
+        // dispatch marker is host-durable and the run behind it is not
+        // idempotent. Checked before the stash below is required: a node
+        // parking more than one blocker card shares this turn's stash, and
+        // resolving the first already retired it on dispatch — a second card's
+        // answer must find the dispatch marker and be acknowledged, not read
+        // the missing stash as "this host no longer holds the run".
+        if self.journal.is_blocked_node_dispatched(&turn) {
+            tracing::warn!(
+                company = %self.id,
+                %turn,
+                "[blockers] a blocker was answered on a node whose continuation was already \
+                 dispatched; recording the answer and retiring the stash without launching a \
+                 second continuation"
+            );
+            self.retire_blocked_stash(&turn).await;
+            return self
+                .post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+                .await;
+        }
+        // Read without taking: the spawn below can still fail, and retiring the
+        // stash first would leave a restart with no pending decision and no run
+        // to continue — the stranding shape `resume_blocked_agent_node`'s own
+        // Stage 4 comment describes.
+        let Some(stashed) = self.blocked_nodes.peek(&turn) else {
+            self.post_blocker_resume_note(
+                thread,
+                "I have your answer, but this host no longer holds that workflow run — re-run \
+                 the workflow to pick it back up.",
+            )
+            .await?;
+            self.retire_blocked_stash(&turn).await;
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "a blocker on workflow node `{node_id}` of run `{run_id}` was answered, but \
+                 this host no longer holds the run's stash, so the node cannot be re-entered"
+            )));
+        };
+        let input = crate::runtime::workflow_resume::blocker_continuation_input(
+            stashed.input,
+            node_id,
+            resolution,
+        )?;
+        if let Err(error) = crate::runtime::workflow_resume::spawn_blocked_node_continuation(
+            self,
+            &turn,
+            &stashed.workflow_id,
+            input,
+            stashed.started_by,
+            stashed.thread_id,
+            stashed.workflow_fingerprint,
+        )
+        .await
+        {
+            // The stash is deliberately left in place — nothing was admitted and
+            // nothing was marked dispatched, so it stays recoverable, exactly as
+            // `resume_blocked_agent_node`'s own failure arm keeps it. Said out
+            // loud in the blocker's own DM as well as returned, because the
+            // operator answered a question and is owed the news that the answer
+            // did not land.
+            self.post_blocker_resume_note(
+                thread,
+                &format!(
+                    "I have your answer, but that workflow step could not be restarted right \
+                     now: {error}"
+                ),
+            )
+            .await?;
+            return Err(error);
+        }
+        self.retire_blocked_stash(&turn).await;
         self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
             .await
     }
@@ -3530,11 +3635,8 @@ impl CompanyRuntime {
             // stop holding; retire it the same way that branch does and move
             // on, without touching the dispatched check below, which exists
             // solely to guard the *approved* replay path.
-            if !self
-                .blocked_nodes
-                .peek(&turn)
-                .is_some_and(|stashed| stashed.approved)
-            {
+            let stashed = self.blocked_nodes.peek(&turn);
+            if !stashed.as_ref().is_some_and(|stashed| stashed.approved) {
                 tracing::info!(
                     company = %self.id,
                     %turn,
@@ -3542,6 +3644,8 @@ impl CompanyRuntime {
                      with nothing approved, before its retirement could run; retiring the stash \
                      now instead of leaving it to rehydrate on every future boot"
                 );
+                self.prune_checkpoint_lineage_of_stash(stashed.as_ref())
+                    .await;
                 self.retire_blocked_stash(&turn).await;
                 continue;
             }
@@ -10085,6 +10189,653 @@ mod tests {
                 stored(&runtime, "t-1").await.column,
                 COLUMN_TODO,
                 "a console Deny abandons the work rather than re-dispatching it"
+            );
+        }
+    }
+
+    /// Issue #2005: the workflow-NODE half of the blocker resume — the answer
+    /// reaching the engine's trigger reader, not just the DM.
+    ///
+    /// The workflow runner is the only double, on `workflow_resume`'s own
+    /// reasoning: what is under test is whether a continuation run is started,
+    /// with what trigger input, and how many times.
+    #[cfg(feature = "openhuman")]
+    mod node_blocker_resume {
+        use std::sync::{Arc, Mutex};
+
+        use async_trait::async_trait;
+        use serde_json::{Value, json};
+
+        use crate::company::CompanyManifest;
+        use crate::company::runtime::CompanyRuntime;
+        use crate::company::task_intent::BlockerReplyIntent;
+        use crate::ports::blockers::{
+            BlockerKind, BlockerPayload, BlockerSource, BlockerStep, BlockerVerdict,
+        };
+        use crate::ports::types::{CompanyId, Effect, EffectGroup};
+        use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
+        use crate::runtime::RuntimeBuilder;
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        use crate::runtime::workflow_resume::{
+            CONTINUATION_BLOCKER_KEY, blocker_answer_for, workflow_node_turn_key,
+        };
+
+        const RUN_ID: &str = "run-that-blocked";
+        const NODE_ID: &str = "draft";
+        const WORKFLOW_TOML: &str = r#"
+id = "reporting"
+name = "Reporting"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "draft"
+kind = "output"
+name = "Draft"
+[[edge]]
+from = "start"
+to = "draft"
+"#;
+
+        #[derive(Clone, Debug)]
+        struct StartedRun {
+            workflow_id: String,
+            input: Value,
+        }
+
+        #[derive(Default)]
+        struct RecordingRunner {
+            started: Mutex<Vec<StartedRun>>,
+        }
+
+        impl RecordingRunner {
+            fn started(&self) -> Vec<StartedRun> {
+                self.started.lock().expect("recording runner").clone()
+            }
+        }
+
+        #[async_trait]
+        impl WorkflowRunner for RecordingRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                workflow: &crate::company::WorkflowFile,
+                input: Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                self.started
+                    .lock()
+                    .expect("recording runner")
+                    .push(StartedRun {
+                        workflow_id: workflow.id.clone(),
+                        input,
+                    });
+                Ok(WorkflowRun {
+                    output: json!({ "ok": true }),
+                    pending_approvals: Vec::new(),
+                    deliveries: Vec::new(),
+                    cancelled: false,
+                    nodes: Vec::new(),
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
+                })
+            }
+        }
+
+        fn manifest() -> CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            )
+            .expect("manifest")
+        }
+
+        fn seed_home() -> tempfile::TempDir {
+            let dir = tempfile::Builder::new()
+                .prefix("opencompany-node-blocker-")
+                .tempdir()
+                .expect("tempdir");
+            let workflows = dir.path().join("workflows");
+            std::fs::create_dir_all(&workflows).expect("workflows dir");
+            std::fs::write(workflows.join("reporting.toml"), WORKFLOW_TOML).expect("seed graph");
+            dir
+        }
+
+        async fn runtime(
+            home: &std::path::Path,
+            with_runner: bool,
+        ) -> (Arc<CompanyRuntime>, Arc<RecordingRunner>) {
+            let mut rt = RuntimeBuilder::new(home.to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+            let runner = Arc::new(RecordingRunner::default());
+            if with_runner {
+                rt.set_workflow_runner(runner.clone());
+            }
+            (Arc::new(rt), runner)
+        }
+
+        /// Parks a node blocker exactly as `park_node_blocker_as` does, and
+        /// arms the same per-(run, node) stash its `stash_node_blocker_resume`
+        /// writes at park time.
+        async fn park_node_blocker(rt: &Arc<CompanyRuntime>, input: Value) -> String {
+            park_node_blocker_stashed(rt, input, true, None).await
+        }
+
+        async fn park_node_blocker_stashed(
+            rt: &Arc<CompanyRuntime>,
+            input: Value,
+            stash: bool,
+            thread_id: Option<&str>,
+        ) -> String {
+            let payload = BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Provider,
+                step: Some(BlockerStep::Node {
+                    run_id: RUN_ID.to_string(),
+                    node_id: NODE_ID.to_string(),
+                }),
+                reason: "the model id `gpt-nope` was rejected".to_string(),
+                needed: "a model id this provider serves".to_string(),
+                group_key: None,
+            };
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: Some(RUN_ID.to_string()),
+            };
+            let id = rt
+                .approvals
+                .park(rt.id(), effect.clone())
+                .await
+                .expect("parks");
+            rt.journal()
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+            if stash {
+                let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+                rt.blocked_nodes.arm_checkpointed(
+                    &turn,
+                    "reporting",
+                    &input,
+                    &crate::ports::types::StartedBy::from_scheduled(false),
+                    thread_id,
+                    None,
+                );
+                rt.journal()
+                    .record_blocked_node_stashed_checkpointed(
+                        &turn,
+                        "reporting",
+                        &input,
+                        &crate::ports::types::StartedBy::from_scheduled(false),
+                        thread_id,
+                        None,
+                    )
+                    .await
+                    .expect("stashes");
+            }
+            id.to_string()
+        }
+
+        async fn answer(
+            rt: &Arc<CompanyRuntime>,
+            id: &str,
+            intent: BlockerReplyIntent,
+            text: &str,
+        ) {
+            let ids = vec![crate::ports::types::ApprovalId::from(id.to_string())];
+            rt.apply_blocker_reply(&ids, intent, text, None)
+                .await
+                .expect("applies");
+        }
+
+        /// The acceptance headline: a workflow parked at a failed node and
+        /// answered `retry` re-runs, and the answer is on the trigger input the
+        /// re-run carries — not banked in the DM and dropped.
+        #[tokio::test]
+        async fn retry_re_runs_the_node_with_the_answer_in_the_trigger_input() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Retry, "go ahead and retry").await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1, "a retry re-enters the node exactly once");
+            assert_eq!(started[0].workflow_id, "reporting");
+            assert_eq!(
+                started[0].input["topic"], "quarterly numbers",
+                "the blocked run's own trigger input is replayed"
+            );
+            let carried = blocker_answer_for(&started[0].input, NODE_ID)
+                .expect("readable")
+                .expect("the answer rides the trigger input");
+            assert_eq!(carried.verdict, BlockerVerdict::Retry);
+        }
+
+        /// An amend carries the operator's words into the re-run, the workflow
+        /// twin of the card path's note append.
+        #[tokio::test]
+        async fn amend_carries_the_operators_words_into_the_re_run() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(
+                &rt,
+                &id,
+                BlockerReplyIntent::Amend,
+                "use gpt-4o-mini instead",
+            )
+            .await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1);
+            let carried = blocker_answer_for(&started[0].input, NODE_ID)
+                .expect("readable")
+                .expect("the answer rides the trigger input");
+            assert_eq!(carried.verdict, BlockerVerdict::Amend);
+            assert_eq!(
+                carried.answer, "use gpt-4o-mini instead",
+                "the correction must reach the node, or the re-run repeats the failure"
+            );
+        }
+
+        /// A skip proceeds past the node: the run is re-entered carrying a
+        /// verdict the node reads as "waived", rather than being abandoned.
+        #[tokio::test]
+        async fn skip_continues_the_run_past_the_node() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Skip, "skip it").await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1, "a skip still continues the run");
+            let carried = blocker_answer_for(&started[0].input, NODE_ID)
+                .expect("readable")
+                .expect("the answer rides the trigger input");
+            assert_eq!(carried.verdict, BlockerVerdict::Skip);
+        }
+
+        /// The one verdict that starts nothing.
+        #[tokio::test]
+        async fn cancel_starts_no_run() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Cancel, "cancel that").await;
+
+            assert!(
+                runner.started().is_empty(),
+                "a cancel abandons the work rather than re-entering it"
+            );
+        }
+
+        /// The ledgers ride the same trigger input the answer is threaded onto,
+        /// so a continuation still knows what the blocked run already sent
+        /// (issues #438 / #846 / #978).
+        #[tokio::test]
+        async fn a_skip_continuation_still_carries_what_the_run_already_sent() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let input = json!({
+                "topic": "quarterly numbers",
+                crate::runtime::workflow_resume::CONTINUATION_DELIVERED_KEY: [
+                    { "node": "report", "kind": "owner" }
+                ],
+                crate::runtime::workflow_resume::CONTINUATION_PERFORMED_KEY: [
+                    { "node": "post", "tool": "send", "result": { "ok": true } }
+                ],
+                crate::runtime::workflow_resume::CONTINUATION_DENIED_KEY: ["refused-gate"],
+            });
+            let id = park_node_blocker(&rt, input).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Skip, "skip it").await;
+
+            let started = runner.started();
+            assert_eq!(started.len(), 1);
+            let carried = &started[0].input;
+            assert_eq!(
+                crate::runtime::workflow_resume::delivered_in_input(carried).len(),
+                1,
+                "the report the blocked run already delivered must not be sent twice"
+            );
+            assert_eq!(
+                crate::runtime::workflow_resume::performed_in_input(carried).len(),
+                1,
+                "the call the blocked run already made must not be made twice"
+            );
+            assert_eq!(
+                crate::runtime::workflow_resume::denied_in_input(carried),
+                vec!["refused-gate".to_string()],
+                "a gate the operator already refused must not be asked about again"
+            );
+        }
+
+        /// Answering twice re-enters the node once: the second decision finds
+        /// the continuation already dispatched and launches nothing.
+        #[tokio::test]
+        async fn a_node_is_re_entered_once_however_many_answers_land() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let first = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+            answer(&rt, &first, BlockerReplyIntent::Retry, "retry").await;
+
+            let second = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+            answer(&rt, &second, BlockerReplyIntent::Retry, "retry").await;
+
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the dispatch marker is what stops a second continuation for one node"
+            );
+        }
+
+        /// Two blocker cards on one node share one stash: only the first park
+        /// arms it. Resolving the first dispatches and retires that shared
+        /// stash — the second card's answer must then find the dispatch
+        /// marker and be acknowledged, not read the now-missing stash as "this
+        /// host no longer holds the run".
+        #[tokio::test]
+        async fn a_second_card_on_the_same_node_is_acknowledged_once_the_first_dispatches() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let first = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+            let second = park_node_blocker_stashed(
+                &rt,
+                json!({ "topic": "quarterly numbers" }),
+                false,
+                None,
+            )
+            .await;
+
+            answer(&rt, &first, BlockerReplyIntent::Retry, "retry").await;
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the first answer dispatches the node"
+            );
+
+            let ids = vec![crate::ports::types::ApprovalId::from(second)];
+            let outcome = rt
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await;
+
+            assert!(
+                outcome.is_ok(),
+                "the second card's answer must be acknowledged once the dispatch marker is set, \
+                 not returned as an error: {outcome:?}"
+            );
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the dispatch marker must still stop a second continuation for this node"
+            );
+        }
+
+        /// A host that no longer holds the run's stash reports it rather than
+        /// acknowledging a resume that did not happen.
+        #[tokio::test]
+        async fn an_answer_with_no_run_to_re_enter_is_reported_not_swallowed() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker_stashed(
+                &rt,
+                json!({ "topic": "quarterly numbers" }),
+                false,
+                None,
+            )
+            .await;
+
+            let ids = vec![crate::ports::types::ApprovalId::from(id)];
+            let outcome = rt
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await;
+
+            assert!(
+                outcome.is_err(),
+                "an answer that reached no run must not read as a resume"
+            );
+            assert!(runner.started().is_empty());
+        }
+
+        /// The reserved key is never written for a verdict that starts no run.
+        #[tokio::test]
+        async fn a_cancelled_answer_never_reaches_a_trigger_input() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let id = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
+
+            answer(&rt, &id, BlockerReplyIntent::Cancel, "cancel that").await;
+
+            assert!(
+                runner
+                    .started()
+                    .iter()
+                    .all(|run| run.input.get(CONTINUATION_BLOCKER_KEY).is_none()),
+                "a cancel writes no answer onto any trigger input"
+            );
+        }
+
+        /// A cancel must retire the per-node stash it parked with — in memory
+        /// and durably — and prune the checkpoint lineage that stash names,
+        /// the same as every other terminal outcome on this queue.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn a_cancelled_answer_retires_the_stash_and_prunes_its_checkpoint() {
+            use tinyflows::graph::Checkpointer;
+
+            let home = seed_home();
+            let mut rt = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.path().to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+            let checkpoints = std::sync::Arc::new(
+                crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                    home.path().join("checkpoints"),
+                ),
+            );
+            checkpoints
+                .put(tinyflows::graph::Checkpoint {
+                    thread_id: RUN_ID.to_string(),
+                    checkpoint_id: "c1".to_string(),
+                    run_id: Some(RUN_ID.to_string()),
+                    parent_checkpoint_id: None,
+                    namespace: Vec::new(),
+                    state: json!({}),
+                    next_nodes: vec![tinyflows::graph::ids::NodeId::new(NODE_ID)],
+                    completed_tasks: Vec::new(),
+                    pending_writes: Vec::new(),
+                    interrupts: Vec::new(),
+                    pending_activations: None,
+                    barrier_arrivals: Vec::new(),
+                    metadata: Value::Null,
+                })
+                .await
+                .expect("seed checkpoint");
+            rt.set_workflow_checkpoints(checkpoints.clone());
+            let rt = Arc::new(rt);
+
+            let payload = BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Provider,
+                step: Some(BlockerStep::Node {
+                    run_id: RUN_ID.to_string(),
+                    node_id: NODE_ID.to_string(),
+                }),
+                reason: "the model id `gpt-nope` was rejected".to_string(),
+                needed: "a model id this provider serves".to_string(),
+                group_key: None,
+            };
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: Some(RUN_ID.to_string()),
+            };
+            let id = rt
+                .approvals
+                .park(rt.id(), effect.clone())
+                .await
+                .expect("parks");
+            rt.journal()
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+            let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+            let input = json!({ "topic": "quarterly numbers" });
+            rt.blocked_nodes.arm_checkpointed(
+                &turn,
+                "reporting",
+                &input,
+                &crate::ports::types::StartedBy::from_scheduled(false),
+                Some(RUN_ID),
+                None,
+            );
+            rt.journal()
+                .record_blocked_node_stashed_checkpointed(
+                    &turn,
+                    "reporting",
+                    &input,
+                    &crate::ports::types::StartedBy::from_scheduled(false),
+                    Some(RUN_ID),
+                    None,
+                )
+                .await
+                .expect("stashes");
+
+            rt.apply_blocker_reply(&[id], BlockerReplyIntent::Cancel, "cancel that", None)
+                .await
+                .expect("applies");
+
+            assert!(
+                !rt.blocked_nodes.is_armed(&turn),
+                "a cancel must retire the stash it parked with, not leave it stranded until \
+                 restart"
+            );
+            assert!(
+                rt.journal()
+                    .blocked_stashes()
+                    .iter()
+                    .all(|(recorded_turn, ..)| recorded_turn != &turn),
+                "the durable stash mirror must be retired too"
+            );
+            let remaining = checkpoints
+                .get_thread(RUN_ID)
+                .await
+                .expect("checkpoint read");
+            assert!(
+                remaining.is_empty(),
+                "a cancel must prune the checkpoint lineage its stash named, the same as every \
+                 other terminal outcome: {remaining:?}"
+            );
+        }
+
+        /// The restart reconciler's own retire path for an unapproved stranded
+        /// stash (a cancel that crashed before its own cleanup ran, or any
+        /// other resolved-with-nothing-approved shape) must prune that stash's
+        /// checkpoint lineage too, not only release the stash.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn reconcile_stranded_blocked_nodes_prunes_checkpoint_lineage_for_an_unapproved_stash()
+         {
+            use tinyflows::graph::Checkpointer;
+
+            let home = seed_home();
+            let mut rt = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.path().to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+            let checkpoints = std::sync::Arc::new(
+                crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                    home.path().join("checkpoints"),
+                ),
+            );
+            checkpoints
+                .put(tinyflows::graph::Checkpoint {
+                    thread_id: RUN_ID.to_string(),
+                    checkpoint_id: "c1".to_string(),
+                    run_id: Some(RUN_ID.to_string()),
+                    parent_checkpoint_id: None,
+                    namespace: Vec::new(),
+                    state: json!({}),
+                    next_nodes: vec![tinyflows::graph::ids::NodeId::new(NODE_ID)],
+                    completed_tasks: Vec::new(),
+                    pending_writes: Vec::new(),
+                    interrupts: Vec::new(),
+                    pending_activations: None,
+                    barrier_arrivals: Vec::new(),
+                    metadata: Value::Null,
+                })
+                .await
+                .expect("seed checkpoint");
+            rt.set_workflow_checkpoints(checkpoints.clone());
+
+            // Stashed but never parked (or already resolved with nothing left
+            // in the journal's live set) — the same "stranded, unapproved"
+            // shape a crash mid-cleanup leaves behind.
+            let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+            rt.blocked_nodes.arm_checkpointed(
+                &turn,
+                "reporting",
+                &json!({ "topic": "quarterly numbers" }),
+                &crate::ports::types::StartedBy::from_scheduled(false),
+                Some(RUN_ID),
+                None,
+            );
+
+            rt.reconcile_stranded_blocked_nodes().await;
+
+            assert!(
+                !rt.blocked_nodes.is_armed(&turn),
+                "an unapproved stranded stash must be retired"
+            );
+            let remaining = checkpoints
+                .get_thread(RUN_ID)
+                .await
+                .expect("checkpoint read");
+            assert!(
+                remaining.is_empty(),
+                "the reconciler must prune the checkpoint lineage an unapproved stranded stash \
+                 names, not only release the stash: {remaining:?}"
             );
         }
     }
