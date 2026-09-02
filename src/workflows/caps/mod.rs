@@ -3253,8 +3253,7 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     } else if parked.blockers == waiting {
         format!(
             " {} a question the agent raised, not a call waiting to be authorised: answering it \
-             re-enters this step — retry runs it again, an answer runs it again carrying your \
-             words, skip moves past it, and cancel stops the run.",
+             re-enters this step — approving runs it again, and denying stops the run.",
             if waiting == 1 {
                 "The card is"
             } else {
@@ -6181,7 +6180,7 @@ mod tests {
             "an answered blocker does re-enter the step it stopped: {text}"
         );
         assert!(
-            text.contains("cancel stops the run"),
+            text.contains("denying stops the run"),
             "and the one verdict that starts nothing has to be named: {text}"
         );
 
