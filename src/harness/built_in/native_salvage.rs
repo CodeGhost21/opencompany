@@ -68,6 +68,31 @@
 //!   not compete with the native channel, it only catches what that channel
 //!   dropped.
 //!
+//! # This is a host-level compensation, and should not outlive its cause
+//!
+//! The defect underneath is upstream, in tinyagents. `NativeDialect` already
+//! carries a text fallback for exactly this case — empty structured calls, parse
+//! the text instead — and nothing in tinyagents ever reaches it, because its
+//! dialects are only callable through OpenHuman's `ToolDispatcher`. Inside
+//! tinyagents that fallback is dead code, which is why a gap this plain stayed
+//! invisible: it looks covered.
+//!
+//! The recovery below would sit more correctly in tinyagents' own loop, and the
+//! usual objection does not apply there. A free parser cannot validate a name
+//! against a belt it has no access to, but the loop can: `self.tools.schemas()`
+//! and the `response.tool_calls()` read that gives up on the turn are the same
+//! struct, a few hundred lines apart. Fixed there, every consumer of the runtime
+//! gets it rather than this host alone.
+//!
+//! It is here because tinyagents is a submodule of a submodule: landing it
+//! upstream is three sequenced pull requests and two pointer bumps, against a
+//! runtime other products depend on, while companies are shipping broken turns
+//! now. When the upstream fix lands, **delete this** — a compensation kept past
+//! its cause is just a second implementation of the same rule, and the two will
+//! disagree eventually. `refuse_approval_siblings` in
+//! [`provider`](super::provider) is the part that stays either way: the approval
+//! boundary is this crate's policy, not the runtime's.
+//!
 //! # Ids are synthesized, and that is load-bearing
 //!
 //! A recovered call has no provider id, and the agent loop pairs each tool

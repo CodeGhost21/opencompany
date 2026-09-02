@@ -833,6 +833,31 @@ fn extract_array_refusal_text(value: Option<&serde_json::Value>) -> Option<Strin
 /// null`. Errors only when the response carries neither text nor a tool call.
 ///
 /// Offers no tools, so a caller with no live turn behind it — the connectivity
+/// Refuse a whole batch that pairs `request_approval` with any sibling call.
+///
+/// `request_approval` is the boundary an effectful call is supposed to stop at,
+/// so a batch that requests approval *and* asks for something else in the same
+/// breath is refused outright rather than partly honoured — the policy fold only
+/// refuses calls sequenced after the approval, which would let a sibling ordered
+/// before it run before the pending flag is even set.
+///
+/// Extracted so both paths that can produce a batch get it: the parsed
+/// `message.tool_calls` array, and a batch recovered from message text.
+fn refuse_approval_siblings(tool_calls: &[ToolCall]) -> TaResult<()> {
+    if tool_calls.len() > 1
+        && tool_calls
+            .iter()
+            .any(|call| call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
+    {
+        return Err(TinyAgentsError::Model(
+            "inference returned request_approval with sibling tool calls; the whole batch was \
+             refused so the approval boundary cannot be crossed"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// probe, and every payload-shape test — gets exactly the wire parse and no
 /// text recovery.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
@@ -855,18 +880,12 @@ fn model_response_from_payload_offering(
     let raw_content = payload.pointer("/choices/0/message/content");
     let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
     let mut content = extract_content_text(raw_content);
+    // The model's own visible message, snapshotted before any fallback below
+    // can replace it. Read by the text-tool-call recovery, which must act on
+    // what the model *said* and never on what a fallback substituted for it.
+    let message_content = content.clone();
     let tool_calls = parse_tool_calls(&payload);
-    if tool_calls.len() > 1
-        && tool_calls
-            .iter()
-            .any(|call| call.name == crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND)
-    {
-        return Err(TinyAgentsError::Model(
-            "inference returned request_approval with sibling tool calls; the whole batch was \
-             refused so the approval boundary cannot be crossed"
-                .to_string(),
-        ));
-    }
+    refuse_approval_siblings(&tool_calls)?;
     let finish_reason = payload
         .pointer("/choices/0/finish_reason")
         .and_then(|v| v.as_str())
@@ -994,12 +1013,6 @@ fn model_response_from_payload_offering(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
-    // Whether the branch below resolved this turn to the provider's own safety
-    // response. Read by the text-tool-call recovery further down, which must
-    // not reach into a refusal: a refusal is a completed decision *not* to act,
-    // so recovering an action out of one would invert it.
-    let refused = refusal_text.is_some();
-
     if tool_calls.is_empty() && !raw_tool_call_requested {
         if let Some(refusal) = refusal_text {
             // A refusal is a *completed* decision, not a partial one — unlike
@@ -1067,14 +1080,33 @@ fn model_response_from_payload_offering(
     // nothing raw requested — so this can neither compete with the native
     // channel nor paper over a call the model really did make and whose body
     // failed to parse. That is a diagnosable error, not something to guess at.
+    //
+    // `content == message_content` is the load-bearing one: it requires that
+    // `content` is still the model's own visible message and not something a
+    // fallback above put there. That single check covers all three
+    // substitutions, and each of them must block a recovery for its own reason
+    // (Codex review on #2011):
+    //
+    //   * a **refusal** is a completed decision *not* to act, so recovering an
+    //     action out of one would invert it;
+    //   * `finish_reason: "failed"` cleared `content` precisely because the turn
+    //     did not succeed;
+    //   * promoted **reasoning** is the model deliberating, not answering — a
+    //     planning trace that merely *mentions* a call in JSON shape has not
+    //     requested it, and running it would execute a thought.
     let mut tool_calls = tool_calls;
     if tool_calls.is_empty()
         && !raw_tool_call_requested
-        && !refused
+        && content == message_content
         && !offered.is_empty()
         && let Some((cleaned, recovered)) =
             crate::harness::native_salvage::recover_text_tool_calls(&content, offered)
     {
+        // The same fail-closed batch check the parsed path gets. Applied to the
+        // recovered batch too, or a text response pairing `request_approval`
+        // with an effectful sibling would cross the approval boundary here that
+        // it cannot cross there (Codex review on #2011).
+        refuse_approval_siblings(&recovered)?;
         content = cleaned;
         tool_calls = recovered;
     }
@@ -2435,6 +2467,77 @@ mod tests {
         let resp = model_response_from_payload(payload).expect("reasoning-only turn parses");
         assert_eq!(resp.text(), "The answer is 42.");
         assert!(resp.message.tool_calls.is_empty());
+    }
+
+    /// A reasoning trace that *mentions* a call in JSON shape has not requested
+    /// it, and running it would execute a thought rather than an instruction.
+    ///
+    /// The promoted-reasoning path replaces `content` wholesale, so without the
+    /// `content == message_content` gate the text-tool-call recovery would read
+    /// a planning trace as an action and dispatch it — on a turn where the model
+    /// emitted no visible message and no structured call at all (Codex review on
+    /// #2011).
+    #[test]
+    fn a_tool_call_shape_inside_promoted_reasoning_is_never_recovered() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "I could answer this by calling \
+                                  {\"call\":\"read_ledger\",\"arguments\":{\"ledger\":\"tasks\"}} \
+                                  but let me think about it first."
+                }
+            }]
+        });
+        let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
+        let resp = model_response_from_payload_offering(payload, &offered)
+            .expect("the reasoning-only turn still parses");
+
+        assert!(
+            resp.message.tool_calls.is_empty(),
+            "a deliberation must never be dispatched as a call"
+        );
+        assert!(
+            resp.text().contains("read_ledger"),
+            "and the trace reaches the caller unaltered: {}",
+            resp.text()
+        );
+    }
+
+    /// The batch rule the parsed path enforces must hold for a recovered batch
+    /// too: `request_approval` beside any sibling is refused whole.
+    ///
+    /// Without it, a text response pairing an approval request with an effectful
+    /// call would cross the approval boundary here that it cannot cross when the
+    /// same pair arrives as a structured array — and the policy fold only
+    /// refuses calls sequenced *after* the approval, so a sibling ordered before
+    /// it would run before the pending flag is set (Codex review on #2011).
+    #[test]
+    fn a_recovered_batch_pairing_request_approval_with_a_sibling_is_refused() {
+        let approval = crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND;
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": format!(
+                        "Doing both now. {{\"call\":\"read_ledger\",\"arguments\":{{\"ledger\":\"tasks\"}}}} \
+                         and {{\"call\":\"{approval}\",\"arguments\":{{\"reason\":\"ship it\"}}}}"
+                    )
+                }
+            }]
+        });
+        let offered =
+            std::collections::BTreeSet::from(["read_ledger".to_string(), approval.to_string()]);
+        let err = model_response_from_payload_offering(payload, &offered)
+            .expect_err("the whole recovered batch must be refused");
+
+        assert!(
+            err.to_string().contains("approval boundary"),
+            "refused for the wrong reason: {err}"
+        );
     }
 
     /// A refusal turn: `content: null`, `finish_reason: "stop"`, a nonempty
