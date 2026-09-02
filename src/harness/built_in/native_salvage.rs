@@ -108,13 +108,29 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
+use tinyagents::harness::model::ToolChoice;
 use tinyagents::harness::tool::{ToolCall, ToolSchema};
 
-/// Object keys that may carry the tool **name**, in priority order.
+/// Object keys that name a tool **and say the object is a call**.
 ///
-/// `name` is the canonical one the vendored parser already accepts; the rest
-/// are drift observed in the wild. They are safe to accept here *only* because
-/// the resolved value is then checked against the tools this turn offered.
+/// `call`, `tool`, `tool_name`, `function_name` are drift observed in the wild,
+/// and none of them is a word ordinary JSON uses for anything else. A bare
+/// object keyed this way is a request, not a description of one.
+const CALL_NAME_KEYS: &[&str] = &["call", "tool", "tool_name", "function_name"];
+
+/// Every key that can carry a tool name, read only once intent is established.
+///
+/// The extra one here is `name` — an ordinary English word, and the reason
+/// [`CALL_NAME_KEYS`] exists separately. A model asked to *document* an offered
+/// tool writes exactly the shape a call has:
+///
+/// ```text
+/// Example: {"name":"write_file","arguments":{"path":"demo","content":"…"}}
+/// ```
+///
+/// Belt membership proves the tool exists, not that this object asks for it to
+/// run — and running it would mutate a workspace on the strength of a sentence
+/// that said "example" (Codex review on #2011).
 const NAME_KEYS: &[&str] = &["name", "call", "tool", "tool_name", "function_name"];
 
 /// Object keys that may carry the tool **arguments**, in priority order.
@@ -139,15 +155,36 @@ const BARE_CALL_ALLOWED_KEYS: &[&str] = &["id", "type", "index"];
 /// `call:`.
 const CALL_MARKERS: &[&str] = &["function_call:", "tool_call:", "functioncall:", "call:"];
 
-/// The names this turn actually offered the model, as the set the recovery
-/// validates against.
+/// The names this turn actually **authorized** the model to call, as the set
+/// the recovery validates against.
 ///
 /// Taken from the turn's own `ModelRequest`, not from a build-time belt: a turn
 /// that suppresses tools (`#1725`'s chat/small-talk path) advertises none, and
 /// this set is then empty — so the recovery is inert exactly when the model was
 /// never invited to call anything, with no separate flag to keep in step.
-pub fn offered_tool_names(tools: &[ToolSchema]) -> BTreeSet<String> {
-    tools.iter().map(|tool| tool.name.clone()).collect()
+///
+/// `tool_choice` narrows it, because the schemas alone are not the
+/// authorization (Codex review on #2011). A request that sends tools *and*
+/// `tool_choice: "none"` has told the model not to call any of them, and a
+/// request naming one tool has authorized exactly that one; recovering against
+/// the full schema list in either case would dispatch something this turn
+/// explicitly did not ask for.
+pub fn authorized_tool_names(tools: &[ToolSchema], choice: &ToolChoice) -> BTreeSet<String> {
+    match choice {
+        // Told not to call anything. Nothing is recoverable, whatever the
+        // schemas say.
+        ToolChoice::None => BTreeSet::new(),
+        // Pinned to one tool: it is the only authorization this turn carries,
+        // and only if it is actually on the wire.
+        ToolChoice::Tool(name) => tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .filter(|offered| offered == name)
+            .collect(),
+        ToolChoice::Auto | ToolChoice::Required => {
+            tools.iter().map(|tool| tool.name.clone()).collect()
+        }
+    }
 }
 
 /// Recover tool calls a model wrote into `content` as text, when the turn's
@@ -200,7 +237,11 @@ fn salvage(text: &str, known: &BTreeSet<String>) -> Option<(String, Vec<ToolCall
         let Ok(value) = serde_json::from_str::<Value>(&text[start..end]) else {
             continue;
         };
-        let Some((name, arguments)) = as_known_call(&value, known) else {
+        // Resolved before the accept decision, not after: an explicit marker is
+        // one of the two things that can license a bare `name`-keyed object.
+        let cut = marker_start(text, start);
+        let marked = cut != start;
+        let Some((name, arguments)) = as_known_call(&value, known, marked) else {
             continue;
         };
         calls.push(ToolCall {
@@ -213,7 +254,7 @@ fn salvage(text: &str, known: &BTreeSet<String>) -> Option<(String, Vec<ToolCall
             // model asked for this and its body would not parse".
             invalid: None,
         });
-        cuts.push((marker_start(text, start), end));
+        cuts.push((cut, end));
     }
 
     if calls.is_empty() {
@@ -227,7 +268,7 @@ fn salvage(text: &str, known: &BTreeSet<String>) -> Option<(String, Vec<ToolCall
 /// `None` for anything that is not unambiguously a call: an unknown or absent
 /// name, arguments that are present but not an object, or a bare name-only
 /// object carrying unrelated keys. Returns the resolved `(name, arguments)`.
-fn as_known_call(value: &Value, known: &BTreeSet<String>) -> Option<(String, Value)> {
+fn as_known_call(value: &Value, known: &BTreeSet<String>, marked: bool) -> Option<(String, Value)> {
     // `{"type":"function","function":{"name":…,"arguments":…}}` — the OpenAI
     // wire shape written out longhand. The `function` key is an unambiguous
     // marker, so the inner object is read directly.
@@ -249,6 +290,15 @@ fn as_known_call(value: &Value, known: &BTreeSet<String>) -> Option<(String, Val
     let object = value.as_object()?;
     let name = first_str(object, NAME_KEYS)?;
     if !known.contains(&name) {
+        return None;
+    }
+    // A bare object keyed only by the generic `name` is the shape a model uses
+    // to *describe* a tool as much as to call one, so belt membership alone
+    // must not dispatch it. Either the object says it is a call by the key it
+    // used, or the model said so with a marker in front of it. See
+    // [`NAME_KEYS`].
+    let says_it_is_a_call = first_str(object, CALL_NAME_KEYS).is_some();
+    if !says_it_is_a_call && !marked {
         return None;
     }
 
@@ -348,7 +398,18 @@ fn marker_start(text: &str, start: usize) -> usize {
         if !trimmed.is_char_boundary(cut) {
             continue;
         }
-        if trimmed[cut..].eq_ignore_ascii_case(marker) {
+        if !trimmed[cut..].eq_ignore_ascii_case(marker) {
+            continue;
+        }
+        // The marker has to be a word of its own. Without this, the `call:`
+        // marker matches the tail of an ordinary word — `Recall: {…}` cuts from
+        // inside "Recall" and leaves the operator reading "Re" (Codex review on
+        // #2011).
+        let delimited = trimmed[..cut]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_');
+        if delimited {
             return cut;
         }
     }
@@ -393,9 +454,16 @@ fn drop_empty_fences(text: &str) -> Cow<'_, str> {
         // The opener runs to the end of its own line — it may carry a language
         // tag, which is not body content — so the body is what follows the
         // first newline. A fence with no newline before its close has no body.
+        // A fence pair with no newline between them is an inline code span,
+        // not a block — ``` `` `do not delete` `` ``` has no opener line and no
+        // body, and treating it as an empty block deletes text the salvage
+        // never touched (Codex review on #2011). Only a pair whose opener ends
+        // in a newline is a block this may drop.
         let after_open = &text[open + 3..close];
-        let body = after_open.split_once('\n').map(|(_, rest)| rest);
-        if body.is_some_and(|body| !body.trim().is_empty()) {
+        let Some((_, body)) = after_open.split_once('\n') else {
+            continue;
+        };
+        if !body.trim().is_empty() {
             continue;
         }
         let buffer = out.get_or_insert_with(String::new);
@@ -732,6 +800,103 @@ mod tests {
 
         assert_eq!(calls.len(), 1);
         assert_eq!(text, "Here is what I found.\ncall:");
+    }
+
+    /// The false positive that belt membership alone cannot stop: a model asked
+    /// to *document* an offered tool writes the exact shape a call has.
+    ///
+    /// `write_file` is on the belt and the object carries real `arguments`, so
+    /// every structural check passes. Only the absence of an intent signal — no
+    /// call-family key, no marker — separates this from a request, and running
+    /// it would write a file because a sentence said "example".
+    #[test]
+    fn a_documented_example_keyed_only_by_name_is_not_dispatched() {
+        let raw = "Example: {\"name\":\"write_file\",\"arguments\":\
+                   {\"path\":\"demo\",\"content\":\"hi\"}}";
+        let (text, calls) = recover(raw);
+
+        assert!(
+            calls.is_empty(),
+            "a bare `name` object with no marker must not run a tool"
+        );
+        assert_eq!(text, raw, "and the example must reach chat unchanged");
+    }
+
+    /// The same object, with the model saying it is a call. Either signal is
+    /// enough — here it is the marker.
+    #[test]
+    fn a_name_keyed_object_behind_a_marker_is_dispatched() {
+        let raw = "Writing it now. function_call:{\"name\":\"write_file\",\
+                   \"arguments\":{\"path\":\"demo\"}}";
+        let (text, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(text, "Writing it now.");
+    }
+
+    /// And here it is the key: `call` is not a word ordinary JSON uses, so it
+    /// carries the intent by itself. This is the 1/9 fenced shape, which had no
+    /// marker at all.
+    #[test]
+    fn a_call_keyed_object_needs_no_marker() {
+        let raw = "Here is the board.\n\n```json\n{\"call\":\"read_ledger\",\
+                   \"arguments\":{\"ledger\":\"tasks\"}}\n```";
+        let (_, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_ledger");
+    }
+
+    /// `Recall:` ends in the `call:` marker. Cutting on a bare suffix match
+    /// takes two characters of an ordinary word with it and leaves the operator
+    /// reading "Re".
+    #[test]
+    fn a_marker_matched_inside_a_word_is_not_stripped() {
+        let raw = "Recall: {\"call\":\"list_desks\"}";
+        let (text, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1, "the object is still a call");
+        assert_eq!(text, "Recall:", "but the word must survive intact");
+    }
+
+    /// An inline triple-backtick span has no opener line and no body, so the
+    /// empty-fence sweep must leave it alone rather than delete its contents.
+    #[test]
+    fn an_inline_backtick_span_is_not_swept_as_an_empty_fence() {
+        let raw = "Important ```do not delete``` and now: {\"call\":\"list_desks\"}";
+        let (text, calls) = recover(raw);
+
+        assert_eq!(calls.len(), 1);
+        assert!(
+            text.contains("do not delete"),
+            "an inline code span must survive: {text:?}"
+        );
+    }
+
+    /// `tool_choice: "none"` authorizes nothing, whatever schemas rode along.
+    #[test]
+    fn tool_choice_none_authorizes_nothing() {
+        let schemas = [ToolSchema::new("read_ledger", "d", serde_json::json!({}))];
+        assert!(authorized_tool_names(&schemas, &ToolChoice::None).is_empty());
+    }
+
+    /// A pinned `tool_choice` authorizes that tool and no sibling on the wire.
+    #[test]
+    fn a_pinned_tool_choice_authorizes_only_that_tool() {
+        let schemas = [
+            ToolSchema::new("read_ledger", "d", serde_json::json!({})),
+            ToolSchema::new("write_file", "d", serde_json::json!({})),
+        ];
+        let authorized =
+            authorized_tool_names(&schemas, &ToolChoice::Tool("read_ledger".to_string()));
+
+        assert_eq!(authorized.len(), 1);
+        assert!(authorized.contains("read_ledger"));
+        assert!(
+            !authorized.contains("write_file"),
+            "a sibling schema is not authorized by a pinned choice"
+        );
     }
 
     /// A marker search that slices by byte offset must not panic when the

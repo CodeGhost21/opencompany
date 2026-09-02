@@ -880,10 +880,16 @@ fn model_response_from_payload_offering(
     let raw_content = payload.pointer("/choices/0/message/content");
     let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
     let mut content = extract_content_text(raw_content);
-    // The model's own visible message, snapshotted before any fallback below
-    // can replace it. Read by the text-tool-call recovery, which must act on
-    // what the model *said* and never on what a fallback substituted for it.
-    let message_content = content.clone();
+    // Whether a fallback below replaced the model's own visible message. Read
+    // by the text-tool-call recovery, which must act on what the model *said*
+    // and never on what a fallback substituted for it.
+    //
+    // Recorded as provenance rather than inferred by comparing the text against
+    // a snapshot: a gateway that echoes the same refusal string into both
+    // `content` and `message.refusal` leaves the substituted value equal to the
+    // original, so an equality check reads "untouched" for the one case that
+    // most needs to block (Codex review on #2011).
+    let mut content_substituted = false;
     let tool_calls = parse_tool_calls(&payload);
     refuse_approval_siblings(&tool_calls)?;
     let finish_reason = payload
@@ -1026,6 +1032,7 @@ fn model_response_from_payload_offering(
             // comment 3875167298). It always wins over leaked text/reasoning,
             // independent of how the turn finished.
             content = refusal;
+            content_substituted = true;
         } else if finish_reason.as_deref() == Some("failed") && !content.is_empty() {
             // `finish_reason: "failed"` is the documented HTTP-200-empty-
             // response silent provider failure (docs/spec/runtime/providers.md).
@@ -1043,6 +1050,7 @@ fn model_response_from_payload_offering(
             // falls through to the empty-turn error below, naming `failed` for
             // diagnosis (CodeRabbit review on #1779, comment 3878355364).
             content.clear();
+            content_substituted = true;
         } else if genuinely_finished && content_is_null && content.is_empty() {
             // Reasoning-model fallback: a reasoning-only turn returns
             // `content: null` with the visible text under `reasoning` /
@@ -1067,6 +1075,7 @@ fn model_response_from_payload_offering(
                 content =
                     extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
             }
+            content_substituted = true;
         }
     }
 
@@ -1081,11 +1090,10 @@ fn model_response_from_payload_offering(
     // channel nor paper over a call the model really did make and whose body
     // failed to parse. That is a diagnosable error, not something to guess at.
     //
-    // `content == message_content` is the load-bearing one: it requires that
-    // `content` is still the model's own visible message and not something a
-    // fallback above put there. That single check covers all three
-    // substitutions, and each of them must block a recovery for its own reason
-    // (Codex review on #2011):
+    // `!content_substituted` is the load-bearing one: it requires that `content`
+    // is still the model's own visible message and not something a fallback
+    // above put there. Each substitution must block a recovery for its own
+    // reason (Codex review on #2011):
     //
     //   * a **refusal** is a completed decision *not* to act, so recovering an
     //     action out of one would invert it;
@@ -1094,10 +1102,26 @@ fn model_response_from_payload_offering(
     //   * promoted **reasoning** is the model deliberating, not answering — a
     //     planning trace that merely *mentions* a call in JSON shape has not
     //     requested it, and running it would execute a thought.
+    //
+    // `!ended_unfinished` covers the other half of the same idea. A `length` or
+    // `content_filter` stop means the visible message is a fragment the model
+    // did not choose to end, so a balanced object inside it is not a completed
+    // request — the same reasoning that gates the reasoning fallback on
+    // `genuinely_finished`. It differs from that gate in admitting an *absent*
+    // finish_reason rather than allow-listing `stop`: the fallback is
+    // substituting hidden text for an answer, where an unrecognized reason
+    // should fail closed, whereas here the model's own visible message is the
+    // evidence, and refusing without a finish_reason would disable the recovery
+    // for exactly the non-conforming providers it exists for.
+    let ended_unfinished = matches!(
+        finish_reason.as_deref(),
+        Some("length" | "content_filter" | "failed")
+    );
     let mut tool_calls = tool_calls;
     if tool_calls.is_empty()
         && !raw_tool_call_requested
-        && content == message_content
+        && !content_substituted
+        && !ended_unfinished
         && !offered.is_empty()
         && let Some((cleaned, recovered)) =
             crate::harness::native_salvage::recover_text_tool_calls(&content, offered)
@@ -1328,10 +1352,13 @@ impl ChatModel<()> for HostedProvider {
             &request.tool_choice,
             self.product_identity,
         );
-        // Captured from the same list that goes on the wire, so what the
-        // response is allowed to name can never drift from what the request
-        // offered.
-        let offered = crate::harness::native_salvage::offered_tool_names(&request.tools);
+        // Captured from the same list and the same choice that go on the wire,
+        // so what the response is allowed to name can never drift from what the
+        // request authorized.
+        let offered = crate::harness::native_salvage::authorized_tool_names(
+            &request.tools,
+            &request.tool_choice,
+        );
 
         let base_url = self.config.base_url.trim_end_matches('/');
         let url = format!("{base_url}/chat/completions");
@@ -1798,9 +1825,12 @@ impl ChatModel<()> for TenantProvider {
         )
         .await
         .map_err(|e| TinyAgentsError::Model(e.to_string()))?;
-        // Captured from the same list the plan puts on the wire — see the
-        // matching line in `HostedProvider::invoke`.
-        let offered = crate::harness::native_salvage::offered_tool_names(&request.tools);
+        // Captured from the same list and choice the plan puts on the wire —
+        // see the matching lines in `HostedProvider::invoke`.
+        let offered = crate::harness::native_salvage::authorized_tool_names(
+            &request.tools,
+            &request.tool_choice,
+        );
         // Always this harness's real id — `self.scope.id` is meaningful
         // whether or not this is the company's *default* harness (the
         // default's own `[harness.inference]` beats the company mapping the
@@ -2503,6 +2533,62 @@ mod tests {
             resp.text().contains("read_ledger"),
             "and the trace reaches the caller unaltered: {}",
             resp.text()
+        );
+    }
+
+    /// A truncated response is a fragment the model did not choose to end, so a
+    /// balanced object inside it is not a completed request — the same reason
+    /// the reasoning fallback is gated on a finish reason (Codex review on
+    /// #2011). `content_filter` and `failed` are refused on the same terms.
+    #[test]
+    fn a_call_inside_a_truncated_response_is_not_recovered() {
+        let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
+        for reason in ["length", "content_filter", "failed"] {
+            let payload = serde_json::json!({
+                "choices": [{
+                    "finish_reason": reason,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Checking now. {\"call\":\"read_ledger\",\
+                                    \"arguments\":{\"ledger\":\"tasks\"}}"
+                    }
+                }]
+            });
+            let resp = model_response_from_payload_offering(payload, &offered);
+            let calls = resp.map(|r| r.message.tool_calls.len()).unwrap_or(0);
+            assert_eq!(
+                calls, 0,
+                "a `{reason}` stop must not dispatch a recovered call"
+            );
+        }
+    }
+
+    /// A gateway that echoes its refusal into **both** `message.refusal` and the
+    /// visible `content` leaves the substituted value equal to the original, so
+    /// comparing text against a snapshot reads "untouched" for the one case that
+    /// most needs to block. Provenance is tracked instead (Codex review on
+    /// #2011).
+    #[test]
+    fn a_refusal_duplicated_into_content_still_blocks_recovery() {
+        let refusal = "I can't do that. It would mean \
+                       {\"call\":\"read_ledger\",\"arguments\":{\"ledger\":\"tasks\"}}";
+        let payload = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": refusal,
+                    "refusal": refusal
+                }
+            }]
+        });
+        let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
+        let resp = model_response_from_payload_offering(payload, &offered)
+            .expect("the refusal turn still parses");
+
+        assert!(
+            resp.message.tool_calls.is_empty(),
+            "an action must never be recovered out of a refusal"
         );
     }
 
