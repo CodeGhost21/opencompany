@@ -1823,18 +1823,20 @@ impl HarnessAgentRunner {
             .partition(|r| r.effect.kind.starts_with("blocker."));
         requests = remaining;
 
-        let blocker_stash_already_armed = !blocker_requests.is_empty()
+        let blocker_stash_pre_existing = !blocker_requests.is_empty()
             && self
                 .deps
                 .delivery
                 .as_ref()
                 .and_then(|d| d.parking.as_ref())
                 .is_some_and(|parking| parking.blocked_nodes.is_armed(node_turn));
+        let mut blocker_stash_armed_this_call = false;
         if !blocker_requests.is_empty()
             && let Some(parking) = self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref())
         {
             self.stash_node_blocker_resume(parking, resolved_node_id)
                 .await;
+            blocker_stash_armed_this_call = true;
         }
         for mut blocker_request in blocker_requests {
             // Extract the blocker payload from the effect, add the node step, and park it.
@@ -1946,7 +1948,8 @@ impl HarnessAgentRunner {
             // none filed no receipt at all — `summary.unparkable` stayed 0 and
             // the node read as clean. The discard bookkeeping now happens
             // first; this only has to flush what it recorded.
-            if !blocker_stash_already_armed
+            if blocker_stash_armed_this_call
+                && !blocker_stash_pre_existing
                 && summary.approval_ids.is_empty()
                 && let Some(parking) = self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref())
             {
@@ -6465,6 +6468,64 @@ mod tests {
             );
         assert_eq!(stashed.1, "wf-1825-p1b");
         assert_eq!(stashed.2, trigger_input);
+    }
+
+    /// A node whose turn parks neither a gated call nor a blocker must never
+    /// touch the blocked-node stash at all — `park_gated_calls` runs on every
+    /// ordinary node, and most never block. The release-on-total-failure
+    /// cleanup this queues must only fire for a turn this very call armed.
+    #[tokio::test]
+    async fn park_gated_calls_leaves_an_unstashed_turn_untouched() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-2005-release-guard-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let trigger_input = json!({ "topic": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-2005-guard"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-2005-guard"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "reporting".to_string(),
+            "run-2005-guard".to_string(),
+            None,
+            trigger_input,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        // Nothing was ever queued for this node's turn — no blocker, no gated
+        // call — so this call never armed a stash for it.
+        let summary = runner
+            .park_gated_calls(Some("work"), "work", &node_turn)
+            .await;
+        assert_eq!(summary.approval_ids.len(), 0);
+
+        // A turn that never touches the journal never creates the file.
+        let raw = tokio::fs::read_to_string(dir.path().join("journal.jsonl"))
+            .await
+            .unwrap_or_default();
+        assert!(
+            !raw.contains("BlockedNodeReleased"),
+            "a turn this call never stashed must not durably record a release for it: {raw}"
+        );
     }
 
     /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
