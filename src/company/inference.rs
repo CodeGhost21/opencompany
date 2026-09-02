@@ -194,6 +194,20 @@ pub fn normalize_provider(provider: &str) -> &str {
     }
 }
 
+/// The setup wizard's "TinyHumans" (managed) card, before [`normalize_provider`]
+/// folds it into `openrouter`.
+///
+/// The managed choice must resolve to the platform endpoint and the injected
+/// managed credential, never to a `base_url` the operator never typed — the card
+/// has no URL field. Once normalized it is indistinguishable from a real
+/// `openrouter`, so the managed probe branch keys on the raw kind instead. Only
+/// [`decl_for_probe`] passes the raw kind here; [`resolve_effective_scoped`]
+/// normalizes first, so runtime resolution of a legacy `managed` blob is
+/// unaffected.
+fn is_managed_choice(provider: &str) -> bool {
+    matches!(provider.trim(), LEGACY_MANAGED | "tinyhumans")
+}
+
 /// OpenRouter's OpenAI-compatible base URL — used when the `openrouter`
 /// provider names no explicit `base_url`.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -368,6 +382,25 @@ fn resolve_endpoint(
 ) -> (String, Credential, bool) {
     let base_url_override = base_url_override.map(str::trim).filter(|s| !s.is_empty());
     let has_key = !key.trim().is_empty();
+
+    if is_managed_choice(provider) {
+        // The managed card carries no endpoint field, so a base URL left in the
+        // form by a previously-picked provider is stale, not a chosen endpoint:
+        // it never redirects the managed probe. The endpoint is always the
+        // platform's, and the credential is the operator's own key when given,
+        // else the injected managed one.
+        let base_url = env_default
+            .map(|e| e.base_url.clone())
+            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+        let credential = if has_key {
+            Credential::from_value(key)
+        } else {
+            env_default
+                .map(|e| e.credential.clone())
+                .unwrap_or(Credential::None)
+        };
+        return (base_url, credential, true);
+    }
 
     if normalize_provider(provider) == "openrouter" && !has_key {
         // The platform credential rides only the platform's own endpoint. A
@@ -1598,5 +1631,100 @@ mod tests {
             normalize_setup_base_url("openai_compatible", Some("https://llm.test/api")),
             Some("https://llm.test/api".to_string())
         );
+    }
+
+    // ---- first-run probe (decl_for_probe) ----------------------------------
+
+    fn managed_env() -> EnvDefault {
+        EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        }
+    }
+
+    /// The managed card sends `provider = "managed"` and, because it has no URL
+    /// field, whatever `base_url` a previously-picked provider left in the form —
+    /// `openrouter.ai` here. The probe must ignore that stale endpoint and reach
+    /// the managed endpoint with the managed credential. On the pre-fix code this
+    /// went direct to `openrouter.ai` with no credential and 401'd.
+    #[tokio::test]
+    async fn managed_probe_ignores_stale_base_url_and_uses_managed_endpoint() {
+        let env = managed_env();
+        let decl = decl_for_probe(
+            "managed",
+            Some("https://openrouter.ai/api/v1"),
+            None,
+            Some(&env),
+        );
+        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert!(decl.is_proxied());
+        assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+    }
+
+    /// A managed probe where the operator supplied their own TinyHumans key still
+    /// reaches the managed endpoint — not `openrouter.ai` — carrying that key.
+    #[tokio::test]
+    async fn managed_probe_with_own_key_keeps_the_managed_endpoint() {
+        let env = managed_env();
+        let decl = decl_for_probe(
+            "managed",
+            Some("https://openrouter.ai/api/v1"),
+            Some("th-key"),
+            Some(&env),
+        );
+        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert!(decl.is_proxied());
+        assert_eq!(bearer(&decl).await.as_deref(), Some("th-key"));
+    }
+
+    /// A host holding no managed credential probes the managed endpoint honestly
+    /// unauthenticated — so the failure names `api.tinyhumans.ai`, not the stale
+    /// `openrouter.ai` the form carried over.
+    #[tokio::test]
+    async fn managed_probe_without_env_default_reports_the_platform_endpoint() {
+        let decl = decl_for_probe("managed", Some("https://openrouter.ai/api/v1"), None, None);
+        assert_eq!(decl.base_url, PLATFORM_BASE_URL);
+        assert_eq!(bearer(&decl).await, None);
+    }
+
+    /// The real providers must keep honouring the form's `base_url` and `key` —
+    /// the managed diversion must not over-correct them.
+    #[tokio::test]
+    async fn other_provider_probes_still_honour_the_form_endpoint_and_key() {
+        let openrouter =
+            decl_for_probe("openrouter", Some("https://proxy/v1"), Some("or-key"), None);
+        assert_eq!(openrouter.base_url, "https://proxy/v1");
+        assert!(!openrouter.is_proxied());
+        assert_eq!(bearer(&openrouter).await.as_deref(), Some("or-key"));
+
+        let compatible = decl_for_probe(
+            "openai_compatible",
+            Some("https://llm.test/v1"),
+            Some("k"),
+            None,
+        );
+        assert_eq!(compatible.base_url, "https://llm.test/v1");
+        assert_eq!(bearer(&compatible).await.as_deref(), Some("k"));
+
+        let ollama = decl_for_probe("ollama", None, None, None);
+        assert_eq!(ollama.base_url, OLLAMA_DEFAULT_BASE_URL);
+        assert_eq!(bearer(&ollama).await, None);
+    }
+
+    /// A keyless `openrouter` with its own `base_url` override still goes direct
+    /// and keyless — the platform credential must never ride an arbitrary
+    /// endpoint. Unchanged by the managed fix.
+    #[tokio::test]
+    async fn keyless_openrouter_override_probe_stays_direct_and_keyless() {
+        let env = managed_env();
+        let decl = decl_for_probe(
+            "openrouter",
+            Some("https://attacker.example/v1"),
+            None,
+            Some(&env),
+        );
+        assert_eq!(decl.base_url, "https://attacker.example/v1");
+        assert!(!decl.is_proxied());
+        assert_eq!(bearer(&decl).await, None);
     }
 }
