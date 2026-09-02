@@ -1103,25 +1103,31 @@ fn model_response_from_payload_offering(
     //     planning trace that merely *mentions* a call in JSON shape has not
     //     requested it, and running it would execute a thought.
     //
-    // `!ended_unfinished` covers the other half of the same idea. A `length` or
-    // `content_filter` stop means the visible message is a fragment the model
-    // did not choose to end, so a balanced object inside it is not a completed
-    // request — the same reasoning that gates the reasoning fallback on
-    // `genuinely_finished`. It differs from that gate in admitting an *absent*
-    // finish_reason rather than allow-listing `stop`: the fallback is
-    // substituting hidden text for an answer, where an unrecognized reason
-    // should fail closed, whereas here the model's own visible message is the
-    // evidence, and refusing without a finish_reason would disable the recovery
-    // for exactly the non-conforming providers it exists for.
-    let ended_unfinished = matches!(
-        finish_reason.as_deref(),
-        Some("length" | "content_filter" | "failed")
-    );
+    // `finished_or_unstated` covers the other half of the same idea. A stop the
+    // model did not choose — `length`, `content_filter`, `failed` — leaves a
+    // fragment, and a balanced object inside a fragment is not a completed
+    // request.
+    //
+    // An **allow-list**, matching `genuinely_finished` above and the principle
+    // `unrecognized_finish_reason_reasoning_only_turn_errors` pins: a blocklist
+    // only refuses the failures someone thought of, so a provider answering
+    // `finish_reason: "error"` — a value this file's own tests already treat as
+    // non-success — would have had a call recovered out of a failed turn
+    // (CodeRabbit review on #2011).
+    //
+    // It admits one thing `genuinely_finished` does not: an **absent**
+    // finish_reason. That is the difference between the two guards and it is
+    // deliberate. The reasoning fallback substitutes hidden text for an answer,
+    // where saying nothing should fail closed; here the model's own visible
+    // message is the evidence, and refusing without a finish_reason would
+    // disable the recovery for exactly the non-conforming providers it exists
+    // for. Silence is not a failure signal — every named failure still is.
+    let finished_or_unstated = matches!(finish_reason.as_deref(), None | Some("stop"));
     let mut tool_calls = tool_calls;
     if tool_calls.is_empty()
         && !raw_tool_call_requested
         && !content_substituted
-        && !ended_unfinished
+        && finished_or_unstated
         && !offered.is_empty()
         && let Some((cleaned, recovered)) =
             crate::harness::native_salvage::recover_text_tool_calls(&content, offered)
@@ -2536,14 +2542,19 @@ mod tests {
         );
     }
 
-    /// A truncated response is a fragment the model did not choose to end, so a
-    /// balanced object inside it is not a completed request — the same reason
-    /// the reasoning fallback is gated on a finish reason (Codex review on
-    /// #2011). `content_filter` and `failed` are refused on the same terms.
+    /// A response the model did not choose to end is a fragment, so a balanced
+    /// object inside it is not a completed request — the same reason the
+    /// reasoning fallback is gated on a finish reason (Codex review on #2011).
+    ///
+    /// Includes `error`, which the guard names nowhere: the point of an
+    /// allow-list is that an unrecognized reason fails closed on its own.
     #[test]
     fn a_call_inside_a_truncated_response_is_not_recovered() {
         let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
-        for reason in ["length", "content_filter", "failed"] {
+        // `error` is the unrecognized-reason case: named nowhere in the guard,
+        // and refused because the guard allow-lists rather than blocklists
+        // (CodeRabbit review on #2011).
+        for reason in ["length", "content_filter", "failed", "error"] {
             let payload = serde_json::json!({
                 "choices": [{
                     "finish_reason": reason,
