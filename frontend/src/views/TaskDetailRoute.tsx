@@ -65,7 +65,7 @@ export function TaskDetailRoute({
   /** The shell's host thread → Room channel map, which places this card's origin. */
   chatChannelByThread?: Readonly<Record<string, string>>;
   /** Opens the Room channel this card's conversation lives on (issue #246). */
-  onOpenChannel?: (channelId: string) => void;
+  onOpenChannel?: (channelId: string, threadId?: string) => void;
   /** Where Back, and a deleted card, go: the board, which lives in Ledgers. */
   onLeave: () => void;
 }) {

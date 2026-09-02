@@ -288,6 +288,14 @@ export interface Task {
    */
   originChatId?: string;
   /**
+   * The message within `originChatId` the raising turn replied to, when the
+   * card was opened from inside a thread rather than the channel's own
+   * timeline. A stringified value of this equals that message's `id` in
+   * `chat/history`. Omitted for a channel-level origin, and for every card
+   * created before this field existed.
+   */
+  originParent?: number;
+  /**
    * The workflow run whose agent node opened this card (issue #661), and the
    * graph it is a run of.
    *

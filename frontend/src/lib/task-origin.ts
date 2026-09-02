@@ -16,8 +16,12 @@ export type OriginConversation =
   | { kind: "none" }
   /** It was, but no channel carries that thread — state the origin, offer no jump. */
   | { kind: "unreachable" }
-  /** It was, and the Room channel below renders it. */
-  | { kind: "channel"; channelId: string };
+  /**
+   * It was, and the Room channel below renders it. `threadId` names the
+   * message the card's thread panel should open to, when the card was raised
+   * inside a thread rather than the channel's own timeline.
+   */
+  | { kind: "channel"; channelId: string; threadId?: string };
 
 /**
  * Resolved through {@link channelForThread}, not a bare `map[originChatId]`:
@@ -28,10 +32,16 @@ export type OriginConversation =
 export function originConversation(
   originChatId: string | undefined | null,
   chatChannelByThread: Readonly<Record<string, string>> | undefined,
+  originParent?: number,
 ): OriginConversation {
   if (!originChatId) return { kind: "none" };
   const channelId = chatChannelByThread
     ? channelForThread(chatChannelByThread, originChatId)
     : null;
-  return channelId ? { kind: "channel", channelId } : { kind: "unreachable" };
+  if (!channelId) return { kind: "unreachable" };
+  return {
+    kind: "channel",
+    channelId,
+    threadId: originParent != null ? String(originParent) : undefined,
+  };
 }

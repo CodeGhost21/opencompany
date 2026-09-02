@@ -444,8 +444,12 @@ export function TaskDetailView({
   onNavigate: (id: string) => void;
   /** The shell's host thread → Room channel map, which places this card's origin. */
   chatChannelByThread?: Readonly<Record<string, string>>;
-  /** Open the Room channel this card's conversation lives on (issue #246). */
-  onOpenChannel?: (channelId: string) => void;
+  /**
+   * Open the Room channel this card's conversation lives on (issue #246),
+   * and — when the card was raised inside a thread — the message whose
+   * thread panel should open with it.
+   */
+  onOpenChannel?: (channelId: string, threadId?: string) => void;
   /*
    * There is no `onSaved`. There was, and every one of its five call sites
    * handed a saved card to a `() => {}`: it existed to reconcile the board
@@ -777,6 +781,7 @@ export function TaskDetailView({
 
             <OriginThreadRow
               originChatId={detail.task.originChatId}
+              originParent={detail.task.originParent}
               chatChannelByThread={chatChannelByThread}
               onOpenChannel={onOpenChannel}
             />
@@ -1586,14 +1591,16 @@ export function ControlBar({
  */
 export function OriginThreadRow({
   originChatId,
+  originParent,
   chatChannelByThread,
   onOpenChannel,
 }: {
   originChatId?: string;
+  originParent?: number;
   chatChannelByThread?: Readonly<Record<string, string>>;
-  onOpenChannel?: (channelId: string) => void;
+  onOpenChannel?: (channelId: string, threadId?: string) => void;
 }) {
-  const origin = originConversation(originChatId, chatChannelByThread);
+  const origin = originConversation(originChatId, chatChannelByThread, originParent);
   if (origin.kind === "none") return null;
   const label = "Opened from chat";
   if (origin.kind === "unreachable" || !onOpenChannel) {
@@ -1604,11 +1611,11 @@ export function OriginThreadRow({
       </div>
     );
   }
-  const { channelId } = origin;
+  const { channelId, threadId } = origin;
   return (
     <button
       className="flex w-full items-center gap-2 rounded-xl border bg-card/40 px-3 py-2 text-left text-xs transition-colors hover:bg-accent"
-      onClick={() => onOpenChannel(channelId)}
+      onClick={() => onOpenChannel(channelId, threadId)}
     >
       <MessagesSquare className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate">{label}</span>

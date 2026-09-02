@@ -3624,7 +3624,9 @@ export function AppShell({
               // linkable and Back returns to the card. The row states the
               // origin without offering a jump when no channel carries it.
               chatChannelByThread={chatChannelByThread}
-              onOpenChannel={(channelId) => navigate("chat", channelId)}
+              onOpenChannel={(channelId, threadId) =>
+                navigate("chat", channelId, { thread: threadId ?? null })
+              }
               // Back, and a deleted card, go to the board — which is the
               // `tasks` ledger. Through `navigate` so the address follows.
               onLeave={() =>
