@@ -840,6 +840,7 @@ mod test {
             }),
             reason: "the model `gpt-nonexistent` was rejected".to_string(),
             needed: "a model id this provider serves".to_string(),
+            group_key: None,
         }
     }
 
@@ -881,7 +882,11 @@ mod test {
             .await
             .expect("seed");
         let approval_id = runtime
-            .park_blocker(&blocker_payload("t-1"), "t-1")
+            .park_blocker(
+                &blocker_payload("t-1"),
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
             .await
             .expect("parks");
 
@@ -940,7 +945,11 @@ mod test {
             .await
             .expect("seed");
         runtime
-            .park_blocker(&blocker_payload("t-1"), "t-1")
+            .park_blocker(
+                &blocker_payload("t-1"),
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
             .await
             .expect("parks");
         assert_eq!(runtime.pending_approvals().len(), 1);
@@ -1007,7 +1016,11 @@ mod test {
             .await
             .expect("seed");
         runtime
-            .park_blocker(&blocker_payload("t-3"), "t-3")
+            .park_blocker(
+                &blocker_payload("t-3"),
+                "t-3",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
             .await
             .expect("parks");
 

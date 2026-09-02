@@ -2969,6 +2969,7 @@ impl HarnessBrain {
                     task_id: task_id.to_string(),
                 },
                 reason,
+                crate::harness::built_in::blockers::connection_group_key(reason),
                 run_id,
             ),
             None => TaskRunEnd::Failed,
@@ -3012,6 +3013,7 @@ impl HarnessBrain {
         class: crate::harness::built_in::blockers::BlockerClass,
         step: BlockerStep,
         reason: &str,
+        group_key: Option<String>,
         run_id: Option<&str>,
     ) -> TaskRunEnd {
         if !class.kind.parks() {
@@ -3023,6 +3025,7 @@ impl HarnessBrain {
             step: Some(step),
             reason: reason.to_string(),
             needed: class.needed.to_string(),
+            group_key,
         };
         let effect = Effect {
             kind: payload.effect_kind(),

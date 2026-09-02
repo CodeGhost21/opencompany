@@ -16,6 +16,15 @@ function isGeneralChat(context: string | null | undefined): boolean {
 }
 
 /**
+ * The notification kinds that badge a channel on the rail: a mention (#65) and
+ * a parked blocker (#1862). Both are "somebody wants you here" — a named
+ * message, or a teammate blocked in this DM awaiting a verdict.
+ */
+export function isBadgingKind(kind: string): boolean {
+  return kind === "mention" || kind === "blocker_parked";
+}
+
+/**
  * The rendered channel a mention's `context` badges, or `undefined` when it has
  * nowhere to land.
  *
@@ -109,8 +118,10 @@ export function mentionCountsByChannel(
     if (n.readAt !== undefined) continue;
     // `kind` rather than `subjectKind`: a future notification about a message
     // that is not a mention (a reply, a reaction) must not silently start
-    // badging as one.
-    if (n.kind !== "mention") continue;
+    // badging as one. A parked blocker (#1862) is the second summons that
+    // belongs on the rail — a teammate is blocked in this DM and wants a
+    // verdict — so it badges the same way a mention does.
+    if (!isBadgingKind(n.kind)) continue;
     // A row with no channel cannot be placed on the rail. Counted nowhere
     // rather than counted somewhere arbitrary.
     if (n.context === undefined || n.context === null) continue;
@@ -171,7 +182,7 @@ export function mentionsToClear(
 ): string[] {
   return notifications
     .filter((n) => {
-      if (n.readAt !== undefined || n.kind !== "mention" || n.context === undefined) {
+      if (n.readAt !== undefined || !isBadgingKind(n.kind) || n.context === undefined) {
         return false;
       }
       let inChannel: boolean;
@@ -192,6 +203,10 @@ export function mentionsToClear(
         inChannel = channelId === mainChannelId && isGeneralChat(n.context);
       }
       if (!inChannel) return false;
+      // A parked blocker has no summoning chat message — its card renders from
+      // the approvals feed, not the transcript — so opening the DM clears it
+      // outright, without the message-loaded gates the mention path needs.
+      if (n.kind === "blocker_parked") return true;
       // A mention inside a thread reply stays until that reply is actually on
       // screen. The main timeline folds replies into their parent
       // (`buildTimeline`), so a collapsed thread hides the text even while the

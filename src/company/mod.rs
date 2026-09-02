@@ -47,6 +47,7 @@ pub mod copilot;
 // platform token vs a static key). Always compiled: the answer decides whether a
 // company can think at all, in every build.
 pub mod billing;
+pub mod blocker_sender;
 pub mod credentials;
 pub mod dns;
 pub mod hosting;

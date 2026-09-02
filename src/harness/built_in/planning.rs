@@ -506,6 +506,9 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
             needed: crate::harness::built_in::blockers::PREREQ_BLOCKER
                 .needed
                 .to_string(),
+            // A card's own missing prerequisites are particular to that card —
+            // they group with nothing.
+            group_key: None,
         };
         settle_blocked(
             &runtime,
@@ -719,8 +722,13 @@ async fn settle_blocked(
     // Parked **before** the card is written, so the column the operator sees
     // and the queue they would answer from cannot disagree: a card that says
     // `paused` while nothing is parked is a card nothing can release.
+    let signals = crate::company::blocker_sender::BlockerSenderSignals {
+        started_by: None,
+        owner_desk: None,
+        assignee: (!card.assignee.is_empty()).then(|| card.assignee.clone()),
+    };
     let parked = match blocker {
-        Some(payload) => match runtime.park_blocker(&payload, task_id).await {
+        Some(payload) => match runtime.park_blocker(&payload, task_id, signals).await {
             Ok(approval_id) => {
                 tracing::info!(
                     company = %runtime.id(),

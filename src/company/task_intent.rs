@@ -887,6 +887,185 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// What an operator's reply to a parked blocker asks the company to do (issue
+/// #1862).
+///
+/// The four verdicts lower onto the existing [`Approve`/`Deny`] resolve surface
+/// — no new gate arm — so answering a blocker is the same durable decision as
+/// answering any approval. [`Unrelated`](Self::Unrelated) is the escape: a
+/// greeting or a question back is not a verdict, and the reply runs as an
+/// ordinary chat turn instead of settling anything.
+///
+/// Deliberately says nothing about resumption. Resolving a blocker is inert
+/// until #1863; this only records which verdict the operator gave.
+///
+/// [`Approve`/`Deny`]: crate::ports::types::Verdict
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockerReplyIntent {
+    /// Run the stopped step again as it was.
+    Retry,
+    /// Answer or correct it — the reply text carries what changed.
+    Amend,
+    /// Drop this blocker and let the work go on without it.
+    Skip,
+    /// Abandon the stopped work.
+    Cancel,
+    /// Not a verdict — ordinary conversation that must run as a normal turn.
+    Unrelated,
+}
+
+/// Words that plainly abandon the work — checked first, because "stop" and
+/// "drop" outrank every other reading.
+const CANCEL_WORDS: &[&str] = &[
+    "cancel", "abort", "abandon", "drop", "forget", "scrap", "kill", "discard",
+];
+
+/// Words that waive the blocker but keep the work going.
+const SKIP_WORDS: &[&str] = &["skip", "waive", "ignore", "bypass", "omit"];
+
+/// Words that ask for the same step again, unchanged. Strong signals only — a
+/// bare "yes"/"ok" is a [`GREETINGS`] entry and stays [`Unrelated`], so a
+/// passing affirmation in an ordinary sentence never reads as a verdict.
+///
+/// [`Unrelated`]: BlockerReplyIntent::Unrelated
+const RETRY_WORDS: &[&str] = &[
+    "retry", "again", "proceed", "continue", "approve", "approved", "rerun", "redo",
+];
+
+/// Classifies an operator's reply to a parked blocker (issue #1862),
+/// lexical-first and conservative.
+///
+/// The order is the priority: an abandon word wins over a waive word wins over
+/// a retry word, because "cancel it, but retry the other one" must read as a
+/// cancel of the thing in hand. A reply that is empty, a greeting, or a
+/// question back is [`Unrelated`](BlockerReplyIntent::Unrelated) — the operator
+/// is talking, not deciding. Everything else is
+/// [`Amend`](BlockerReplyIntent::Amend): a substantive line in a blocked
+/// teammate's DM is taken as answering the question, and the text becomes the
+/// correction.
+///
+/// Model-assisted disambiguation is #678; this is the lexical tier that abstains
+/// to [`Unrelated`] rather than guessing.
+pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return BlockerReplyIntent::Unrelated;
+    }
+    let lower = trimmed.to_lowercase();
+    let bare = bare_message(&lower);
+    if GREETINGS.contains(&bare) {
+        return BlockerReplyIntent::Unrelated;
+    }
+    let core = strip_lead_ins(&lower);
+    // A question back is the operator asking, not answering — it must run as a
+    // normal turn so the teammate can respond, not settle the blocker.
+    if is_question(core) {
+        return BlockerReplyIntent::Unrelated;
+    }
+    if mentions_any(&lower, CANCEL_WORDS) {
+        return BlockerReplyIntent::Cancel;
+    }
+    if mentions_any(&lower, SKIP_WORDS) {
+        return BlockerReplyIntent::Skip;
+    }
+    if mentions_any(&lower, RETRY_WORDS) || lower.contains("go ahead") {
+        return BlockerReplyIntent::Retry;
+    }
+    // A purely social line — "hello there", "thanks so much" — carries no
+    // answer, so it runs as a normal turn rather than being taken as a
+    // correction. A single non-social word tips it to a substantive answer.
+    if is_pure_social(&lower) {
+        return BlockerReplyIntent::Unrelated;
+    }
+    BlockerReplyIntent::Amend
+}
+
+/// Whether any whole word of `lower` is in `words` and is not negated by a
+/// preceding "not"/"don't"/… within two tokens — so `okay` matches `ok`-the-word
+/// but `okra` never matches `ok`, and `don't retry` no longer reads as a retry.
+fn mentions_any(lower: &str, words: &[&str]) -> bool {
+    let flattened = lower.replace(['\'', '\u{2019}'], "");
+    let tokens: Vec<&str> = flattened
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .enumerate()
+        .any(|(i, word)| words.contains(word) && !negated_before(&tokens, i))
+}
+
+/// Negations that flip a following verdict word to a non-verdict, apostrophes
+/// already stripped so `don't` reads as `dont`.
+const NEGATIONS: &[&str] = &[
+    "not", "no", "never", "cannot", "dont", "doesnt", "wont", "cant", "isnt", "arent",
+];
+
+/// Whether a negation sits within the two tokens before `i`.
+fn negated_before(tokens: &[&str], i: usize) -> bool {
+    tokens[i.saturating_sub(2)..i]
+        .iter()
+        .any(|token| NEGATIONS.contains(token))
+}
+
+/// Words that carry no instruction — greetings, thanks, fillers. A message made
+/// only of these is social, not an answer.
+const SOCIAL_WORDS: &[&str] = &[
+    "hi",
+    "hii",
+    "hiya",
+    "hey",
+    "hello",
+    "howdy",
+    "yo",
+    "sup",
+    "gm",
+    "good",
+    "morning",
+    "evening",
+    "afternoon",
+    "there",
+    "thanks",
+    "thank",
+    "you",
+    "ty",
+    "thx",
+    "cheers",
+    "so",
+    "much",
+    "ok",
+    "okay",
+    "k",
+    "kk",
+    "cool",
+    "nice",
+    "great",
+    "awesome",
+    "perfect",
+    "sure",
+    "np",
+    "sg",
+    "lol",
+    "haha",
+    "please",
+];
+
+/// Whether every word of `lower` is a [`SOCIAL_WORDS`] filler — a non-empty
+/// message with nothing to act on.
+fn is_pure_social(lower: &str) -> bool {
+    let mut seen = false;
+    for word in lower.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        seen = true;
+        if !SOCIAL_WORDS.contains(&word) {
+            return false;
+        }
+    }
+    seen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1473,5 +1652,133 @@ mod tests {
             assert!(!reply.trim().is_empty());
             assert!(reply.chars().count() <= 80, "{reply:?} is too long");
         }
+    }
+}
+
+#[cfg(test)]
+mod blocker_reply_tests {
+    use super::*;
+
+    #[test]
+    fn a_retry_word_asks_for_the_same_step_again() {
+        for reply in [
+            "retry",
+            "try it again",
+            "go ahead",
+            "yes, proceed",
+            "approved",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Retry,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_skip_word_waives_the_blocker() {
+        for reply in [
+            "skip it",
+            "waive this",
+            "just ignore it",
+            "bypass the check",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Skip,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancel_word_abandons_the_work() {
+        for reply in [
+            "cancel",
+            "abort this",
+            "drop it",
+            "forget about it",
+            "scrap the task",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Cancel,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// Abandon outranks retry: "cancel this and retry the other" is a cancel of
+    /// the thing in hand.
+    #[test]
+    fn abandon_outranks_retry_when_both_appear() {
+        assert_eq!(
+            classify_blocker_reply("cancel this one, retry the other"),
+            BlockerReplyIntent::Cancel
+        );
+    }
+
+    #[test]
+    fn a_substantive_answer_is_an_amendment() {
+        for reply in [
+            "use gpt-4o-mini instead",
+            "deploy to staging, not prod",
+            "the brief in the January doc is the current one",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Amend,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_greeting_or_a_question_back_is_unrelated() {
+        for reply in [
+            "hey",
+            "hello there",
+            "what do you mean?",
+            "which one is blocked?",
+            "   ",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Unrelated,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// The word match is on whole words: `okra` is not `ok`.
+    #[test]
+    fn a_verdict_word_matches_only_as_a_whole_word() {
+        assert_eq!(
+            classify_blocker_reply("order some okra for the office"),
+            BlockerReplyIntent::Amend,
+            "a substring of a verdict word is not that verdict"
+        );
+    }
+
+    #[test]
+    fn a_negated_verdict_word_is_not_that_verdict() {
+        for reply in [
+            "don't retry this",
+            "do not retry",
+            "not approved",
+            "no, cancel",
+        ] {
+            assert_ne!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Retry,
+                "a negated verdict word must not read as the positive verdict: {reply:?}"
+            );
+        }
+        assert_ne!(
+            classify_blocker_reply("no, cancel"),
+            BlockerReplyIntent::Cancel,
+            "a negated cancel is not a cancel"
+        );
     }
 }

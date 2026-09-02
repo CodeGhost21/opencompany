@@ -1511,6 +1511,11 @@ export type TimelineItem =
  * the second surface just wasn't reading it.
  */
 export function approvalBatchKey(approval: ApprovalSummary): string {
+  // A blocker folds by its root cause (#1862): every card stalled on one
+  // broken integration is one question, even across turns a batch would keep
+  // apart. Falls back to the turn batch, then to the id — so an ordinary
+  // approval groups exactly as before.
+  if (approval.group_key) return `group:${approval.group_key}`;
   return approval.batch ?? `solo:${approval.id}`;
 }
 

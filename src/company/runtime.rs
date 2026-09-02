@@ -1388,9 +1388,17 @@ impl CompanyRuntime {
         &self,
         payload: &crate::ports::blockers::BlockerPayload,
         task_id: &str,
+        signals: crate::company::blocker_sender::BlockerSenderSignals,
     ) -> Result<ApprovalId> {
         use crate::ports::types::{Effect, EffectGroup};
         use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        // Who this question is asked by, and therefore which DM it surfaces in.
+        // Resolved before the park so the same thread stamps the journal, the
+        // event and the notification — a card, a routed reply and a badge that
+        // cannot land in three different places.
+        let sender = self.resolve_blocker_sender(&signals).await;
+        let thread = crate::company::blocker_sender::dm_thread(&sender);
 
         let effect = Effect {
             kind: payload.effect_kind(),
@@ -1428,10 +1436,12 @@ impl CompanyRuntime {
                 &effect,
                 now_millis(),
                 TaskLink::from_task_id(Some(task_id)),
-                // No conversation: a planning pass is not anybody's turn, so
-                // there is no thread to thread the answer back into.
+                // The blocker's own conversation is the DM with the teammate it
+                // is attributed to. There is no parking turn behind it, so there
+                // is no message root to thread under — only the channel the
+                // reply routes into.
                 ApprovalConversation {
-                    thread: None,
+                    thread: Some(thread.clone()),
                     parent: None,
                 },
                 None,
@@ -1465,7 +1475,7 @@ impl CompanyRuntime {
                 CompanyEvent::ApprovalParked {
                     approval_id: approval_id.clone(),
                     effect_kind: effect.kind.clone(),
-                    thread: None,
+                    thread: Some(thread.clone()),
                 },
             )
             .await
@@ -1477,7 +1487,73 @@ impl CompanyRuntime {
                 "blocker parked and journaled, but its event-log entry failed",
             );
         }
+        self.notify_blocker_parked(&approval_id, &sender, payload)
+            .await;
         Ok(approval_id)
+    }
+
+    /// The teammate a blocker is attributed to, resolved from the live company
+    /// record (issue #1862). Falls back to the host identity when the record
+    /// cannot be loaded — a blocker must always land in a real DM channel, and
+    /// a transient store miss is not a reason to drop it on the floor.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn resolve_blocker_sender(
+        &self,
+        signals: &crate::company::blocker_sender::BlockerSenderSignals,
+    ) -> String {
+        match self.store().load(&self.id).await {
+            Ok(Some(record)) => crate::company::blocker_sender::resolve_sender(&record, signals),
+            _ => crate::company::blocker_sender::HOST_SENDER.to_string(),
+        }
+    }
+
+    /// Files the durable "someone is blocked" notification beside the park
+    /// (issue #1862), the sibling of
+    /// [`notify_approval_expired`](Self::notify_approval_expired).
+    ///
+    /// **Title only, and deliberately no payload.** The one-line title is the
+    /// operator-readable prose the blocker already carries in `reason`; the
+    /// arguments that produced the stop stay redacted at their single point
+    /// (`pending_approvals`), exactly as the thin `ApprovalParked` frame keeps
+    /// them. `context` is the DM channel, so a badge lands on the right
+    /// conversation without the console having loaded its transcript.
+    ///
+    /// Says a person is blocked, not that answering resumes anything: resume is
+    /// #1863, and the copy must not promise it.
+    #[cfg(feature = "openhuman")]
+    async fn notify_blocker_parked(
+        &self,
+        id: &ApprovalId,
+        sender: &str,
+        payload: &crate::ports::blockers::BlockerPayload,
+    ) {
+        use crate::ports::blockers::BlockerStep;
+        let step = match &payload.step {
+            Some(BlockerStep::Task { task_id }) => task_id.clone(),
+            Some(BlockerStep::Node { node_id, .. }) => node_id.clone(),
+            None => "a question".to_string(),
+        };
+        let note = crate::ports::notifications::Notification {
+            id: crate::ports::generate_id(),
+            kind: "blocker_parked".to_string(),
+            subject: crate::ports::notifications::Subject {
+                kind: crate::ports::notifications::SubjectKind::Approval,
+                id: id.as_ref().to_string(),
+            },
+            created_at: now_millis(),
+            title: format!("{sender} is blocked on {step}: {}", payload.reason),
+            audience: None,
+            context: Some(crate::company::blocker_sender::dm_thread(sender)),
+        };
+        if let Err(err) = self.notifications().append(&self.id, &note).await {
+            tracing::warn!(
+                company = %self.id,
+                approval = %id.as_ref(),
+                error = %err,
+                "[blockers] a blocker-parked notification could not be recorded; the park \
+                 still stands, but nobody is badged for it"
+            );
+        }
     }
 
     /// Withdraws a blocker this pass just parked, because the card write that
@@ -4971,8 +5047,259 @@ impl CompanyRuntime {
                 // together" would guess at a fact the journal already records,
                 // and would guess wrong exactly when two turns overlap.
                 batch: p.batch,
+                // Issue #1862: the shared root cause, so the console folds every
+                // card stalled on one broken integration into a single question.
+                group_key: blocker_group_key_of(&p.effect),
             })
             .collect()
+    }
+
+    /// Every pending blocker sharing `group_key` — the set one verdict fans
+    /// across (issue #1862).
+    ///
+    /// Ten cards stalled on one broken OAuth grant are one question, so
+    /// answering the card answers all of them. A blocker with no `group_key`
+    /// never reaches here (the caller resolves it alone), so a solo verdict can
+    /// never fan by accident. Oldest-first, the order
+    /// [`pending`](crate::runtime::journal::Journal::pending) already returns.
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn blocker_group_members(&self, group_key: &str) -> Vec<ApprovalId> {
+        self.journal
+            .pending()
+            .into_iter()
+            .filter(|p| blocker_group_key_of(&p.effect).as_deref() == Some(group_key))
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// The full group a single parked blocker belongs to — its root-cause
+    /// siblings, or itself alone when it carries no group key.
+    #[cfg(feature = "openhuman")]
+    fn blocker_group_of(&self, id: &ApprovalId) -> Vec<ApprovalId> {
+        match self
+            .journal
+            .pending()
+            .into_iter()
+            .find(|p| &p.id == id)
+            .and_then(|p| blocker_group_key_of(&p.effect))
+        {
+            Some(key) => self.blocker_group_members(&key),
+            None => vec![id.clone()],
+        }
+    }
+
+    /// The parked blockers pending in one DM, folded into root-cause groups
+    /// (issue #1862). Oldest-first, the order `pending` already returns.
+    #[cfg(feature = "openhuman")]
+    fn pending_blocker_groups(&self, desk: &str) -> Vec<PendingBlockerGroup> {
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        let mut groups: Vec<PendingBlockerGroup> = Vec::new();
+        for p in self.journal.pending() {
+            if !p.effect.kind.starts_with(&prefix) {
+                continue;
+            }
+            if !crate::server::chat_history::same_conversation(p.thread.as_deref(), Some(desk)) {
+                continue;
+            }
+            let Ok(payload) = serde_json::from_value::<crate::ports::blockers::BlockerPayload>(
+                p.effect.payload.clone(),
+            ) else {
+                continue;
+            };
+            let label: String = payload
+                .reason
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect();
+            match &payload.group_key {
+                Some(key) => {
+                    if let Some(group) = groups.iter_mut().find(|g| g.key.as_deref() == Some(key)) {
+                        group.ids.push(p.id);
+                    } else {
+                        groups.push(PendingBlockerGroup {
+                            key: Some(key.clone()),
+                            ids: vec![p.id],
+                            label,
+                        });
+                    }
+                }
+                None => groups.push(PendingBlockerGroup {
+                    key: None,
+                    ids: vec![p.id],
+                    label,
+                }),
+            }
+        }
+        groups
+    }
+
+    /// The approval id of the parked blocker at `parent`, when the reply's
+    /// parent is a blocker card (issue #1862) — the explicit reply tier.
+    ///
+    /// Reads the event at `parent` exactly as
+    /// [`review_anchor_card`](Self::review_anchor_card) does, and answers `None`
+    /// for anything that is not a still-pending `ApprovalParked` blocker. The
+    /// two are disjoint: a review anchor is a settle pill or relay bubble, a
+    /// blocker anchor is an `ApprovalParked` event, so neither steals the
+    /// other's replies.
+    #[cfg(feature = "openhuman")]
+    async fn parked_blocker_at(&self, desk: &str, parent: EventSeq) -> Result<Option<ApprovalId>> {
+        let stored = self.events.read_from(&self.id, parent, 1).await?;
+        let Some(stored) = stored.into_iter().next() else {
+            return Ok(None);
+        };
+        if stored.seq != parent {
+            return Ok(None);
+        }
+        let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
+        match stored.event {
+            CompanyEvent::ApprovalParked {
+                approval_id,
+                effect_kind,
+                thread,
+                ..
+            } if effect_kind.starts_with(&prefix)
+                && crate::server::chat_history::same_conversation(
+                    thread.as_deref(),
+                    Some(desk),
+                )
+                && self.is_blocker(&approval_id) =>
+            {
+                Ok(Some(approval_id))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Decides what an operator's reply in `desk` does to the blockers pending
+    /// there (issue #1862) — the read-only half, so the caller journals the
+    /// reply before anything settles.
+    ///
+    /// A reply parented to a blocker card resolves that card's whole group; an
+    /// unparented reply in a DM with a single pending group resolves it; one in
+    /// a DM with several groups is resolved only if the text names one,
+    /// otherwise it asks which and settles nothing. A reply that is not a
+    /// verdict — or a DM with no pending blocker — is
+    /// [`NotBlocker`](BlockerReplyPlan::NotBlocker), and the caller runs it as an
+    /// ordinary turn.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn plan_blocker_reply(
+        &self,
+        desk: &str,
+        parent: Option<EventSeq>,
+        text: &str,
+    ) -> Result<BlockerReplyPlan> {
+        use crate::company::task_intent::{BlockerReplyIntent, classify_blocker_reply};
+
+        let explicit = match parent {
+            Some(parent) => self
+                .parked_blocker_at(desk, parent)
+                .await?
+                .map(|id| self.blocker_group_of(&id)),
+            None => None,
+        };
+        let groups = self.pending_blocker_groups(desk);
+        if explicit.is_none() && groups.is_empty() {
+            return Ok(BlockerReplyPlan::NotBlocker);
+        }
+        let intent = classify_blocker_reply(text);
+        if intent == BlockerReplyIntent::Unrelated {
+            return Ok(BlockerReplyPlan::NotBlocker);
+        }
+        if let Some(ids) = explicit {
+            return Ok(BlockerReplyPlan::Resolve { ids, intent });
+        }
+        if groups.len() == 1 {
+            return Ok(BlockerReplyPlan::Resolve {
+                ids: groups[0].ids.clone(),
+                intent,
+            });
+        }
+        let lower = text.to_lowercase();
+        let mut named = groups.iter().filter(|group| {
+            group
+                .connection_hint()
+                .is_some_and(|hint| lower.contains(hint))
+        });
+        match (named.next(), named.next()) {
+            (Some(group), None) => Ok(BlockerReplyPlan::Resolve {
+                ids: group.ids.clone(),
+                intent,
+            }),
+            _ => Ok(BlockerReplyPlan::AskWhich {
+                prompt: ask_which_prompt(&groups),
+            }),
+        }
+    }
+
+    /// Records the operator's verdict on a blocker group (issue #1862), lowering
+    /// the four-way intent onto the existing Approve/Deny resolve surface and
+    /// **fanning it to every member** of the group.
+    ///
+    /// `retry` re-approves, `skip`/`cancel` deny, and `amend` overlays the
+    /// operator's correction onto the parked effect. Every arm is durably
+    /// recorded and inert until #1863 — the verdict is banked, no stopped step
+    /// re-runs here.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn apply_blocker_reply(
+        self: &Arc<Self>,
+        ids: &[ApprovalId],
+        intent: crate::company::task_intent::BlockerReplyIntent,
+        text: &str,
+        by: Option<&Actor>,
+    ) -> Result<()> {
+        use crate::company::task_intent::BlockerReplyIntent;
+
+        let actor = by.cloned().unwrap_or_else(|| Actor {
+            kind: ActorKind::Operator,
+            id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+        });
+        for id in ids {
+            match intent {
+                BlockerReplyIntent::Retry => {
+                    self.resolve_approval(id, Verdict::Approve, actor.clone())
+                        .await?;
+                }
+                BlockerReplyIntent::Skip | BlockerReplyIntent::Cancel => {
+                    self.resolve_approval(id, Verdict::Deny, actor.clone())
+                        .await?;
+                }
+                BlockerReplyIntent::Amend => {
+                    let overlay = serde_json::json!({ "amendment": text });
+                    self.resolve_approval_amended(id, overlay, actor.clone())
+                        .await?;
+                }
+                BlockerReplyIntent::Unrelated => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Posts the ask-which question back into the DM (issue #1862) as a durable
+    /// reply, so it survives a reload the way any transcript line does. Attributed
+    /// to the teammate whose DM this is — the `dm:<agent>` thread names them.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn post_blocker_prompt(&self, thread: &str, prompt: &str) -> Result<()> {
+        let agent_id = thread.strip_prefix("dm:").unwrap_or(thread).to_string();
+        self.events
+            .append(
+                &self.id,
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    chat_id: thread.to_string(),
+                    agent_id,
+                    text: prompt.to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// Captures a feedback item: persists it to the feedback family and logs a
@@ -5475,6 +5802,80 @@ fn workflow_run_of(parked: &crate::runtime::journal::PendingApproval) -> Option<
     )
     .then(|| parked.effect.run_id.clone())
     .flatten()
+}
+
+/// The root-cause group a parked blocker belongs to (issue #1862), or `None`
+/// for an ordinary approval or an ungrouped blocker.
+///
+/// Reads the `group_key` off the blocker payload, gated on the effect kind so a
+/// non-blocker effect that happens to carry a `group_key`-shaped field is never
+/// mistaken for one.
+fn blocker_group_key_of(effect: &crate::ports::types::Effect) -> Option<String> {
+    if !effect.kind.starts_with(&format!(
+        "{}.",
+        crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+    )) {
+        return None;
+    }
+    serde_json::from_value::<crate::ports::blockers::BlockerPayload>(effect.payload.clone())
+        .ok()?
+        .group_key
+}
+
+/// One root-cause group of parked blockers pending in a single DM (issue
+/// #1862): the approvals that share a cause, plus a one-line label for the
+/// ask-which prompt.
+#[cfg(feature = "openhuman")]
+struct PendingBlockerGroup {
+    /// The shared `group_key`, or `None` for a lone ungrouped blocker.
+    key: Option<String>,
+    /// Every approval in the group — the set a single verdict fans across.
+    ids: Vec<ApprovalId>,
+    /// The first line of the blocker's reason, for disambiguation copy.
+    label: String,
+}
+
+#[cfg(feature = "openhuman")]
+impl PendingBlockerGroup {
+    /// The connection name a `connection:<name>` group is about, used to match
+    /// a reply that names it. `None` for an ungrouped blocker, which therefore
+    /// never auto-resolves out of an ambiguous set — it can only be answered
+    /// from its own card.
+    fn connection_hint(&self) -> Option<&str> {
+        self.key
+            .as_deref()
+            .and_then(|k| k.strip_prefix("connection:"))
+    }
+}
+
+/// What resolving a blocker reply does, decided before anything is written.
+#[cfg(feature = "openhuman")]
+pub(crate) enum BlockerReplyPlan {
+    /// Not a verdict, or no blocker pending here — run an ordinary turn.
+    NotBlocker,
+    /// Settle these approvals with the operator's verdict.
+    Resolve {
+        ids: Vec<ApprovalId>,
+        intent: crate::company::task_intent::BlockerReplyIntent,
+    },
+    /// Several blockers pend and the reply named none — ask which, settle none.
+    AskWhich { prompt: String },
+}
+
+/// The line asked back when a DM holds several distinct blocked things and the
+/// reply did not name one (issue #1862). Says what is blocked and asks which —
+/// and deliberately does not promise that answering resumes anything (#1863).
+#[cfg(feature = "openhuman")]
+fn ask_which_prompt(groups: &[PendingBlockerGroup]) -> String {
+    let items = groups
+        .iter()
+        .enumerate()
+        .map(|(i, group)| format!("{}. {}", i + 1, group.label))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "A few different things are blocked in this chat. Which one do you mean?\n{items}\n\nReply naming it and what you'd like done."
+    )
 }
 
 /// Where a continuation's reply is journaled when the approval it resumes was
@@ -7774,9 +8175,16 @@ mod tests {
             }),
             reason: "the model `gpt-nonexistent` was rejected".to_string(),
             needed: "a model id this provider serves".to_string(),
+            group_key: None,
         };
 
-        let parked = runtime.park_blocker(&payload, "t-1").await;
+        let parked = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await;
         assert!(
             parked.is_err(),
             "an unjournaled park is reported as a failed park, so the caller returns the card"
@@ -8440,5 +8848,299 @@ mod tests {
             "a wholly refused blocked node starts no continuation, so its checkpoint lineage \
              must be pruned: {remaining:?}"
         );
+    }
+
+    /// Blocker DMs + reply attribution (issue #1862): a parked blocker surfaces
+    /// in the responsible teammate's DM, groups by root cause, and an operator's
+    /// reply routes back as a verdict.
+    #[cfg(feature = "openhuman")]
+    mod blocker_dms {
+        use crate::company::blocker_sender::BlockerSenderSignals;
+        use crate::company::runtime::{BlockerReplyPlan, CompanyRuntime};
+        use crate::company::task_intent::BlockerReplyIntent;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+        use crate::ports::types::CompanyId;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        async fn runtime() -> (Arc<CompanyRuntime>, TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-blocker-dms-")
+                .tempdir()
+                .expect("tempdir");
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n",
+            )
+            .expect("manifest");
+            let runtime = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            (runtime, home)
+        }
+
+        fn blocker(task_id: &str, group_key: Option<&str>) -> BlockerPayload {
+            BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Tool,
+                step: Some(BlockerStep::Task {
+                    task_id: task_id.to_string(),
+                }),
+                reason: format!("could not connect to mcp server for {task_id}"),
+                needed: "the integration reconnected from Apps".to_string(),
+                group_key: group_key.map(str::to_string),
+            }
+        }
+
+        fn assignee(id: &str) -> BlockerSenderSignals {
+            BlockerSenderSignals {
+                started_by: None,
+                owner_desk: None,
+                assignee: Some(id.to_string()),
+            }
+        }
+
+        /// A blocker parks into its teammate's DM: the approval's thread is that
+        /// DM, and a `blocker_parked` notification is filed pointing at it — with
+        /// no payload beyond the one-line title.
+        #[tokio::test]
+        async fn a_blocker_surfaces_in_the_responsible_teammates_dm() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(&blocker("t-1", None), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+
+            let pending = runtime.pending_approvals();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(
+                pending[0].thread.as_deref(),
+                Some("dm:eng"),
+                "the card routes into the DM with the teammate it is attributed to"
+            );
+
+            let notes = runtime
+                .notifications()
+                .list(runtime.id(), "eng")
+                .await
+                .expect("notifications");
+            let parked = notes
+                .iter()
+                .find(|n| n.notification.kind == "blocker_parked")
+                .expect("a blocker-parked notification is filed");
+            assert_eq!(parked.notification.context.as_deref(), Some("dm:eng"));
+            assert!(
+                parked.notification.title.contains("eng"),
+                "the title names who is blocked: {}",
+                parked.notification.title
+            );
+        }
+
+        /// The sender is resolved, not passed through: a park with no attribution
+        /// still lands in a real DM — the orchestrator's.
+        #[tokio::test]
+        async fn an_unattributed_blocker_falls_to_the_orchestrator_dm() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(
+                    &blocker("t-1", None),
+                    "t-1",
+                    BlockerSenderSignals::default(),
+                )
+                .await
+                .expect("parks");
+            assert_eq!(
+                runtime.pending_approvals()[0].thread.as_deref(),
+                Some("dm:ceo"),
+                "with nothing named, the first (orchestrator) agent answers"
+            );
+        }
+
+        /// Blockers sharing a root cause project as one group and are named by
+        /// the projection's `group_key`.
+        #[tokio::test]
+        async fn blockers_sharing_a_cause_group_together() {
+            let (runtime, _home) = runtime().await;
+            for task in ["t-1", "t-2", "t-3"] {
+                runtime
+                    .park_blocker(
+                        &blocker(task, Some("connection:slack")),
+                        task,
+                        assignee("eng"),
+                    )
+                    .await
+                    .expect("parks");
+            }
+            let members = runtime.blocker_group_members("connection:slack");
+            assert_eq!(
+                members.len(),
+                3,
+                "every card on the broken connection is one group"
+            );
+            for summary in runtime.pending_approvals() {
+                assert_eq!(summary.group_key.as_deref(), Some("connection:slack"));
+            }
+        }
+
+        /// A reply in a DM with a single pending blocker resolves it, and a
+        /// grouped reply fans the verdict to every card in the group.
+        #[tokio::test]
+        async fn a_reply_resolves_the_whole_group_and_fans_the_verdict() {
+            let (runtime, _home) = runtime().await;
+            for task in ["t-1", "t-2"] {
+                runtime
+                    .park_blocker(
+                        &blocker(task, Some("connection:slack")),
+                        task,
+                        assignee("eng"),
+                    )
+                    .await
+                    .expect("parks");
+            }
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "go ahead and retry")
+                .await
+                .expect("plan");
+            let ids = match plan {
+                BlockerReplyPlan::Resolve { ids, intent } => {
+                    assert_eq!(intent, BlockerReplyIntent::Retry);
+                    assert_eq!(ids.len(), 2, "one card, both parks");
+                    ids
+                }
+                _ => panic!("a single group in the DM resolves"),
+            };
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "go ahead and retry", None)
+                .await
+                .expect("applies");
+            assert!(
+                runtime.pending_approvals().is_empty(),
+                "the verdict fanned to every card in the group"
+            );
+        }
+
+        /// An unrelated reply is not a verdict — it falls through to an ordinary
+        /// turn rather than settling the blocker.
+        #[tokio::test]
+        async fn an_unrelated_reply_is_not_a_verdict() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(&blocker("t-1", None), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "hey, how's it going?")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(plan, BlockerReplyPlan::NotBlocker),
+                "a greeting runs as a normal turn and settles nothing"
+            );
+            assert_eq!(
+                runtime.pending_approvals().len(),
+                1,
+                "the blocker still pends"
+            );
+        }
+
+        /// Two distinct blocked things in one DM: a bare verdict asks which; a
+        /// verdict naming one resolves only that one.
+        #[tokio::test]
+        async fn several_blockers_disambiguate_by_name() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(
+                    &blocker("t-1", Some("connection:slack")),
+                    "t-1",
+                    assignee("eng"),
+                )
+                .await
+                .expect("parks");
+            runtime
+                .park_blocker(
+                    &blocker("t-2", Some("connection:notion")),
+                    "t-2",
+                    assignee("eng"),
+                )
+                .await
+                .expect("parks");
+
+            let ambiguous = runtime
+                .plan_blocker_reply("dm:eng", None, "retry it")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(ambiguous, BlockerReplyPlan::AskWhich { .. }),
+                "a bare verdict over two blocked things asks which"
+            );
+
+            let named = runtime
+                .plan_blocker_reply("dm:eng", None, "retry slack")
+                .await
+                .expect("plan");
+            match named {
+                BlockerReplyPlan::Resolve { ids, .. } => {
+                    assert_eq!(ids, runtime.blocker_group_members("connection:slack"));
+                }
+                _ => panic!("naming the connection resolves only its group"),
+            }
+        }
+
+        /// An explicit reply settles only a blocker parked in the same
+        /// conversation: a verdict threaded to another DM's blocker card, sent
+        /// from a desk with no blocker of its own, runs as an ordinary turn.
+        #[tokio::test]
+        async fn an_explicit_reply_stays_within_its_conversation() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(
+                    &blocker("t-1", Some("connection:slack")),
+                    "t-1",
+                    assignee("eng"),
+                )
+                .await
+                .expect("parks");
+            let parent = runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read")
+                .into_iter()
+                .find(|stored| {
+                    matches!(
+                        stored.event,
+                        crate::ports::types::CompanyEvent::ApprovalParked { .. }
+                    )
+                })
+                .expect("the park is on the log")
+                .seq;
+
+            let same = runtime
+                .plan_blocker_reply("dm:eng", Some(parent), "retry")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(same, BlockerReplyPlan::Resolve { .. }),
+                "a reply in the blocker's own DM resolves it"
+            );
+
+            let cross = runtime
+                .plan_blocker_reply("dm:ops", Some(parent), "retry")
+                .await
+                .expect("plan");
+            assert!(
+                matches!(cross, BlockerReplyPlan::NotBlocker),
+                "the same verdict from another conversation settles nothing"
+            );
+        }
     }
 }

@@ -2897,6 +2897,64 @@ async fn chat_and_emit(
             })));
         }
     }
+    // Issue #1862: a reply that answers a parked blocker settles its verdict
+    // rather than running a fresh turn. A reply parented to a blocker card
+    // resolves that card's group; free text in a DM that holds a single blocked
+    // thing resolves it; free text where several are blocked asks which. Runs
+    // after the review check above — the two anchor on different event kinds, so
+    // neither steals the other's replies — and only reaches here when the reply
+    // is a verdict for a blocker actually pending in this conversation;
+    // otherwise it falls through to the ordinary turn.
+    #[cfg(feature = "openhuman")]
+    {
+        let _serialized = runtime.task_writes.lock().await;
+        match runtime
+            .plan_blocker_reply(&desk, parent, &message.text)
+            .await?
+        {
+            crate::company::runtime::BlockerReplyPlan::Resolve { ids, intent } => {
+                let accepted =
+                    accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+                let message_id = accepted.message_seq.value().to_string();
+                let turn_id = accepted.turn_id.clone();
+                let applied = runtime
+                    .apply_blocker_reply(&ids, intent, &message.text, by.as_ref())
+                    .await
+                    .map_err(ApiError);
+                settle_chat_turn(&runtime, id, turn_id.as_deref(), applied.as_ref().err()).await;
+                applied?;
+                return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                    responses: Vec::new(),
+                    message_id: Some(message_id),
+                    still_awaiting: None,
+                    turn_id,
+                    outcome: None,
+                    review_feedback_applied: Some(true),
+                })));
+            }
+            crate::company::runtime::BlockerReplyPlan::AskWhich { prompt } => {
+                let accepted =
+                    accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+                let message_id = accepted.message_seq.value().to_string();
+                let turn_id = accepted.turn_id.clone();
+                let posted = runtime
+                    .post_blocker_prompt(&desk, &prompt)
+                    .await
+                    .map_err(ApiError);
+                settle_chat_turn(&runtime, id, turn_id.as_deref(), posted.as_ref().err()).await;
+                posted?;
+                return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                    responses: Vec::new(),
+                    message_id: Some(message_id),
+                    still_awaiting: None,
+                    turn_id,
+                    outcome: None,
+                    review_feedback_applied: Some(true),
+                })));
+            }
+            crate::company::runtime::BlockerReplyPlan::NotBlocker => {}
+        }
+    }
     // The turn runs on its own task, and the replies are journaled there too
     // (issue #882). Both used to sit in this handler's future, which hyper drops
     // the moment the peer goes away — and a reverse proxy in front of a hosted
