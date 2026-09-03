@@ -282,6 +282,19 @@ fn catalog() -> Vec<EngineOption> {
             durable: true,
         },
         EngineOption {
+            id: "cortex",
+            label: "CortexDB",
+            description: "An append-only event log with ranked recall. Replacement is \
+                          reconstructed on read, so keyed lookups scan the namespace and a \
+                          write is not readable for a second or two — see \
+                          docs/spec/runtime/memory-engine-cortex.md before choosing it.",
+            available: tinymemory,
+            unavailable_reason: feature(tinymemory, "tinymemory"),
+            requires_url: true,
+            requires_key: true,
+            durable: true,
+        },
+        EngineOption {
             id: "null",
             label: "No memory",
             description: "Every write is accepted and discarded, every read is empty. For \
@@ -308,6 +321,7 @@ fn split_engine(engine: &str) -> Option<(MemoryBackend, Option<&'static str>)> {
         "supermemory" => Some((MemoryBackend::Remote, Some("supermemory"))),
         "mem0" => Some((MemoryBackend::Remote, Some("mem0"))),
         "cognee" => Some((MemoryBackend::Remote, Some("cognee"))),
+        "cortex" => Some((MemoryBackend::Remote, Some("cortex"))),
         "null" => Some((MemoryBackend::Null, None)),
         _ => None,
     }
