@@ -1632,7 +1632,6 @@ impl CompanyRuntime {
     pub(crate) async fn unpark_blocker(self: &Arc<Self>, id: &ApprovalId) -> Result<()> {
         self.retire_approval(id, ExpiryReason::CardUnwritable, now_millis())
             .await
-            .map(|_released| ())
     }
 
     /// Thin `&self` wrapper around
@@ -2268,16 +2267,10 @@ impl CompanyRuntime {
         let unanswered = self.unanswered_blocker(id);
         let is_blocker = self.is_blocker(id);
         let waiting_runs = self.parked_workflow_attempts(id).await;
-        let released = self
-            .retire_approval(id, ExpiryReason::Ttl, now_millis())
+        self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
-        self.finish_expiry(
-            id,
-            is_blocker,
-            unanswered,
-            if released { Vec::new() } else { waiting_runs },
-        )
-        .await;
+        self.finish_expiry(id, is_blocker, unanswered, waiting_runs)
+            .await;
         Ok(())
     }
 
@@ -4658,14 +4651,9 @@ impl CompanyRuntime {
             // Issue B-012: and which workflow run was waiting on it, for the
             // same before-the-retirement reason as the two above.
             let waiting_runs = self.parked_workflow_attempts(id).await;
-            let released = self.retire_approval(id, ExpiryReason::Ttl, now).await?;
-            self.finish_expiry(
-                id,
-                is_blocker,
-                unanswered,
-                if released { Vec::new() } else { waiting_runs },
-            )
-            .await;
+            self.retire_approval(id, ExpiryReason::Ttl, now).await?;
+            self.finish_expiry(id, is_blocker, unanswered, waiting_runs)
+                .await;
         }
         Ok(expired)
     }
@@ -4697,7 +4685,7 @@ impl CompanyRuntime {
         id: &ApprovalId,
         was_blocker: bool,
         unanswered: Option<(String, String)>,
-        waiting_runs: Vec<String>,
+        waiting_runs: Vec<crate::ports::runs::RunRecord>,
     ) {
         // **The run that was waiting stops claiming it still is** (issue B-012).
         //
@@ -4716,23 +4704,35 @@ impl CompanyRuntime {
         // decision was made by the clock and nobody chose it. Not `Failed`:
         // nothing errored.
         //
-        // **Only when the expiry released nothing** (CodeRabbit on this PR).
-        // `retire_approval` deliberately resumes a workflow run whose *last*
-        // outstanding gate expired — "a workflow run releases even on an empty
-        // batch … so its approved siblings are not stranded" — and that resume
-        // is spawned, not awaited. Cancelling unconditionally would race it,
-        // and would cancel a run that is legitimately continuing with the
-        // expiry banked as a deny. The caller passes `None` in that case, so
-        // this settles exactly the rows nothing else will ever revisit.
+        // **Whether or not the expiry released a continuation** (Codex on this
+        // PR, third round). It is tempting to skip this when something was
+        // released — a node whose *other* gated call the operator approved does
+        // continue — but the continuation runs as a **new attempt**:
+        // `RunAttempts` is an in-memory map built fresh per run
+        // (`workflows/runner.rs`) and `caps` mints every attempt under
+        // `generate_id()`. Nothing ever writes this row again. So skipping it
+        // left exactly the stale `WaitingApproval` this issue exists to remove,
+        // and — because the continuation cannot touch this id — there was never
+        // a race here to avoid in the first place. This attempt stopped at a
+        // gate that defaulted to denied, which is true either way.
+        //
+        // **Usage is carried, not reset** (Codex, same round). `finish_run`
+        // assigns `run.usage` and `run.step_count` from the outcome
+        // (`ports/runs.rs`), and `RunOutcome::new` zeroes both — so settling
+        // from a bare outcome would silently erase the tokens and cost this
+        // attempt really did spend, on a row the billing surfaces read.
         //
         // Best-effort and last, like everything else here: a row that cannot be
         // written must not undo a default-deny that already happened.
-        for run_id in waiting_runs {
+        for row in waiting_runs {
+            let run_id = row.id;
             let outcome =
                 crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
                     .with_error(
-                        "the approval this run was waiting on expired and defaulted to denied",
-                    );
+                        "the approval this attempt was waiting on expired and defaulted to denied",
+                    )
+                    .with_usage(row.usage)
+                    .with_step_count(row.step_count);
             if let Err(err) = self.runs().finish_run(&self.id, &run_id, outcome).await {
                 tracing::warn!(
                     company = %self.id,
@@ -4848,7 +4848,10 @@ impl CompanyRuntime {
     /// Anything whose node cannot be resolved settles nothing — a stale row is
     /// the bug, but cancelling a sibling still waiting on a live decision would
     /// be a worse one.
-    async fn parked_workflow_attempts(&self, id: &ApprovalId) -> Vec<String> {
+    async fn parked_workflow_attempts(
+        &self,
+        id: &ApprovalId,
+    ) -> Vec<crate::ports::runs::RunRecord> {
         use crate::runtime::workflow_resume::{gate_node_id, run_and_node_from_node_turn};
 
         let Some(pending) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
@@ -4876,7 +4879,6 @@ impl CompanyRuntime {
             Ok(rows) => rows
                 .into_iter()
                 .filter(|row| row.node_id.as_deref() == Some(node.as_str()))
-                .map(|row| row.id)
                 .collect(),
             Err(err) => {
                 tracing::warn!(
@@ -5010,19 +5012,12 @@ impl CompanyRuntime {
     /// records `Deny`. That is the safety property the whole change rests on:
     /// an approval disappearing from the queue must never read as one that was
     /// granted.
-    /// Returns whether this retirement **released a continuation** — a turn or
-    /// workflow run that was waiting on the approval and has now been told.
-    ///
-    /// The caller needs to know, because a released workflow run goes on to
-    /// settle itself and must not be marked cancelled underneath the resume
-    /// this spawns (CodeRabbit on the B-012 PR). Only an expiry that releases
-    /// nothing leaves a row nobody will ever revisit.
     async fn retire_approval(
         self: &Arc<Self>,
         id: &ApprovalId,
         reason: ExpiryReason,
         at_millis: u64,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let explicit_request = self
             .approval_gate
             .take_expired_effect(id)
@@ -5058,15 +5053,9 @@ impl CompanyRuntime {
                         by,
                     },
                 ))));
-                // Released: the asking agent's continuation is queued and its
-                // settled verdict spawned, so this run has been told and will
-                // settle itself. Cancelling it here would race that (CodeRabbit
-                // on the B-012 PR). The error arm above deliberately falls
-                // through instead — nothing was queued, so nothing was told.
-                return Ok(true);
+                return Ok(());
             }
         }
-        let mut released_continuation = false;
         // Issue #469: releasing the turn this approval was blocking, and
         // running its continuation when this expiry was the last thing it
         // waited on. Spawned rather than awaited: the continuation is a full
@@ -5089,9 +5078,6 @@ impl CompanyRuntime {
                 // siblings are not stranded. A brain turn with nothing to
                 // report owes no cycle, exactly as before.
                 if workflow_run || !batch.is_empty() {
-                    // Told to the caller: a released run settles itself, and
-                    // must not be cancelled underneath this resume.
-                    released_continuation = true;
                     let rt = Arc::clone(self);
                     let released = id.clone();
                     let turn = turn.clone();
@@ -5133,7 +5119,7 @@ impl CompanyRuntime {
                 "approval expiry journaled but its event-log entry failed",
             );
         }
-        Ok(released_continuation)
+        Ok(())
     }
 
     /// Expires every single-use grant the agent never redeemed, and tells the
@@ -8519,30 +8505,23 @@ mod tests {
         );
     }
 
-    /// **The other half of B-012** (CodeRabbit on the B-012 PR). An expiry that
-    /// *releases* the node must not also cancel its attempt.
+    /// **An expiry settles its attempt even when it releases a continuation**
+    /// (Codex on the B-012 PR, third round).
     ///
-    /// `retire_approval` deliberately continues work whose last outstanding
-    /// decision expired — "a workflow run releases even on an empty batch … so
-    /// its approved siblings are not stranded" (issue #978) — and it **spawns**
-    /// that continuation rather than awaiting it. The first cut of B-012
-    /// cancelled the attempt unconditionally, which both raced the spawn and
-    /// cancelled work that was legitimately continuing with the expiry banked as
-    /// a deny. Suppressing the continuation instead would strand the siblings,
-    /// which is the bug #978 exists to prevent; so the cancellation is what
-    /// narrows, to the expiries that release nothing.
+    /// The tempting reading is that a released node is "still going" and must
+    /// not be settled. It is not: a continuation runs as a **new** attempt —
+    /// `RunAttempts` is rebuilt per run and `caps` mints every attempt under
+    /// `generate_id()` — so nothing ever writes this row again. Skipping it left
+    /// exactly the stale `WaitingApproval` this issue exists to remove, and the
+    /// earlier version of this test could not see that, because it asserted only
+    /// that the cancellation *error* was absent and never looked at the status.
     ///
-    /// The scenario is the one that makes a node's batch non-empty, because an
+    /// The scenario is the one that makes a node's batch non-empty, since an
     /// expiry alone never does (`ContinuationQueue::decide` banks no event for
-    /// one): **two** gated calls on one node, one answered by the operator and
-    /// one left to expire. That is also exactly when the siblings #978 protects
-    /// exist at all.
-    ///
-    /// Asserted on the **error text**, not the status: only `finish_expiry`
-    /// writes that sentence, so the assertion cannot race whatever the spawned
-    /// continuation goes on to do to the row.
+    /// one): two gated calls on one node, one answered and one expired.
     #[tokio::test]
-    async fn an_expiry_that_releases_the_run_does_not_also_cancel_it() {
+    async fn an_expiry_settles_its_attempt_even_when_it_releases_a_continuation() {
+        use crate::ports::runs::RunStatus;
         use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
         use std::sync::Arc;
 
@@ -8554,7 +8533,7 @@ mod tests {
 
         // The node's *second* gated call, answered by the operator before the
         // first expires. Its banked event is what makes the released batch
-        // non-empty, and so what makes this node continue rather than strand.
+        // non-empty, and so what makes this node continue at all.
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key("wr-released", "solve");
         rt.continuations.arm(&node_turn);
@@ -8587,11 +8566,66 @@ mod tests {
             .await
             .unwrap()
             .expect("the attempt row survives the sweep");
-        assert_ne!(
-            row.error.as_deref(),
-            Some("the approval this run was waiting on expired and defaulted to denied"),
-            "a released node continues through its own resume; the expiry must not settle it too"
+        assert_eq!(
+            row.status,
+            RunStatus::Cancelled,
+            "the released continuation runs as a NEW attempt, so this row is nobody else's \
+             to settle and must not be left reading `WaitingApproval`"
         );
+    }
+
+    /// **A settle that only changes status must not erase what the attempt
+    /// spent** (Codex on the B-012 PR, third round).
+    ///
+    /// `RunStore::finish_run` assigns `usage` and `step_count` from the outcome
+    /// rather than merging, and `RunOutcome::new` zeroes both — so cancelling an
+    /// expired attempt from a bare outcome silently wipes the tokens and cost it
+    /// really did spend, on a row the billing surfaces read.
+    #[tokio::test]
+    async fn settling_an_expired_attempt_keeps_the_usage_it_recorded() {
+        use crate::ports::runs::{RunOutcome, RunStatus};
+        use crate::ports::types::{ApprovalId, TokenUsage};
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        let approval = ApprovalId::new("appr-usage");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-usage", "solve", 0, false).await;
+
+        // What the attempt spent before it parked. Re-settled onto the parked
+        // row exactly as a real turn's trace fold would leave it.
+        let usage = TokenUsage {
+            input: 1_200,
+            output: 340,
+            cached_input: 0,
+            cost_usd: 0.042,
+        };
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                &attempt,
+                RunOutcome::new(RunStatus::WaitingApproval)
+                    .with_usage(usage.clone())
+                    .with_step_count(7),
+            )
+            .await
+            .unwrap();
+
+        rt.sweep_expired_approvals().await.unwrap();
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(row.status, RunStatus::Cancelled);
+        assert_eq!(
+            row.usage, usage,
+            "the expiry changed the status; it must not have erased the spend"
+        );
+        assert_eq!(row.step_count, 7, "nor the trace it recorded");
     }
 
     /// Issue #1865 (Codex review on PR #1883): a late resolve that discovers
