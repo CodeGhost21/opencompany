@@ -252,6 +252,15 @@ option. `frontend/src/lib/sentry.ts` re-adds it by hand for that reason.
 | `Sentry.init` | `frontend/src/main.tsx`, before the first render | A crash during the first render is the one worth reporting, and a boundary armed after it would miss it. |
 | `ErrorBoundary` | `frontend/src/main.tsx`, outside every provider | The thing that crashes may be `ThemeProvider` itself, and a boundary inside a provider cannot catch that provider's own throw. `CrashFallback` therefore depends on no context. |
 
+That independence has one consequence worth recording, because it was invisible
+until the screen was looked at in a browser: `next-themes` stamps `class="dark"`
+on `<html>` from an **effect**, so a crash during the first render means that
+effect never ran and every `.dark` token in `index.css` is unset. The crash
+screen painted in full light on a machine that had never shown a light pixel.
+`CrashFallback` therefore resolves the theme itself — `next-themes`' own
+`localStorage` key, then the OS preference — and puts `dark` on its own
+container.
+
 The console's crash screen shows the Sentry event id **only when an event was
 actually sent**. The SDK mints an id locally whether or not a DSN is configured,
 and showing it on an install that reports nothing hands the operator a reference

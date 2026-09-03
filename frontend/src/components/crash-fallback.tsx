@@ -14,8 +14,22 @@
  * It renders OUTSIDE `ThemeProvider`, `TooltipProvider` and the connection
  * registry, because the thing that crashed may be one of them. So: no `Button`,
  * no `Tooltip`, no context, no hook but `useState`. Plain elements and design
- * tokens, which are defined on `:root` in `index.css` and therefore resolve
- * whether or not `next-themes` ever got as far as stamping a class.
+ * tokens only.
+ *
+ * # Why it resolves the theme itself
+ *
+ * That independence has a cost that is easy to miss until you look at it in a
+ * browser, which is how this was found: `next-themes` stamps `class="dark"` on
+ * `<html>` from an **effect**, and a crash during the first render means that
+ * effect never runs. Everything in `index.css` under `.dark` is therefore
+ * unset, and the crash screen paints in full light on a machine that has never
+ * shown a light pixel — a white flash, at the moment the operator is least
+ * inclined to trust what they are looking at.
+ *
+ * So it reads `next-themes`' own `localStorage` key, falls back to the OS
+ * preference, and puts `dark` on its own container. Tokens are custom
+ * properties, so redefining them on that element is enough for everything
+ * inside it.
  *
  * # The event id, and why it is only sometimes shown
  *
@@ -36,6 +50,33 @@ export interface CrashFallbackProps {
   onReset: () => void;
 }
 
+/**
+ * Whether to paint dark, resolved without `next-themes`.
+ *
+ * `"theme"` is that library's default storage key, and the values it writes are
+ * `light` / `dark` / `system`. Anything else — including `system` and an absent
+ * key — falls through to the OS preference, which is what `enableSystem` means
+ * in `main.tsx`.
+ *
+ * Every access is guarded: a browser with site data blocked throws on the
+ * `localStorage` getter itself, and a crash screen that crashes is the one
+ * failure this component may not have.
+ */
+function prefersDark(): boolean {
+  try {
+    const stored = window.localStorage.getItem("theme");
+    if (stored === "dark") return true;
+    if (stored === "light") return false;
+  } catch {
+    // Fall through to the OS preference.
+  }
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
+
 /** The message to show for a thrown value, which is not necessarily an `Error`. */
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message || error.name;
@@ -45,6 +86,9 @@ function describe(error: unknown): string {
 
 export function CrashFallback({ error, eventId, onReset }: CrashFallbackProps) {
   const [copied, setCopied] = useState(false);
+  // Resolved once, at mount. Nothing can change it while this screen is up:
+  // the theme toggle lives in the tree that just unmounted.
+  const [dark] = useState(prefersDark);
   const reference = typeof eventId === "string" && eventId.length > 0 ? eventId : null;
 
   const copyReference = () => {
@@ -60,7 +104,10 @@ export function CrashFallback({ error, eventId, onReset }: CrashFallbackProps) {
   return (
     <div
       role="alert"
-      className="bg-background text-foreground flex min-h-screen items-center justify-center p-6"
+      // `dark` on this element rather than on `<html>`: the tokens are custom
+      // properties, so redefining them here covers everything inside, and this
+      // component still touches nothing it does not own.
+      className={`${dark ? "dark " : ""}bg-background text-foreground flex min-h-screen items-center justify-center p-6`}
     >
       <div className="w-full max-w-md space-y-4">
         <h1 className="text-lg font-semibold">The console hit an error</h1>
