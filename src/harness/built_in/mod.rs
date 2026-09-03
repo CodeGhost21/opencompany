@@ -1112,6 +1112,11 @@ impl CompanyAgent {
                             frame.with_workflow(run_id.clone(), node_id.clone())
                         }
                     };
+                    // Which *query* inside that thread, so a console holding two
+                    // in-flight turns on one thread keeps their rows apart.
+                    // Absent on a turn answering no journaled message, where the
+                    // console falls back to keying by thread alone.
+                    let frame = frame.with_message_seq(ctx.message_seq);
                     crate::turn_stream::publish(&ctx.company, frame);
                     seq += 1;
                 }
@@ -3651,6 +3656,12 @@ impl HarnessPool {
                     .map(str::to_string)
                     .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
             },
+            // A copilot turn is addressed by `chat_id` alone — this entry point
+            // takes no `ChatTarget` — so its frames key by thread, as every
+            // frame did before `messageSeq` existed. A copilot thread runs one
+            // turn at a time, so there is nothing here for the finer key to
+            // separate.
+            message_seq: None,
         });
 
         // The message goes to the model AS SENT. This is the retrieve→inject
@@ -3969,6 +3980,13 @@ impl HarnessPool {
                         .map(str::to_string)
                         .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
                 },
+                // The operator message this turn answers, read off the
+                // `ChatTarget` the caller already passes. Nothing new is
+                // threaded through the runtime to get it here — and pointedly
+                // NOT used to decide *whether* to stream, which is the
+                // conflation #1890 I removed and the revert of aa2787e9a
+                // re-established. `LiveStream` still decides that alone.
+                message_seq: chat.message_seq.map(|seq| seq.value()),
             }),
             // A workflow agent node (issue #1702): streams live, but keyed on
             // the workflow run + node so its frames land on the console's
@@ -3980,6 +3998,8 @@ impl HarnessPool {
                     run_id: run_id.to_string(),
                     node_id: node_id.to_string(),
                 },
+                // A workflow node answers a graph, not a message.
+                message_seq: None,
             }),
             LiveStream::Off => None,
         };

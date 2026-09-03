@@ -579,6 +579,7 @@ fn stream_for(chat: &str) -> crate::turn_stream::TurnStreamCtx {
         route: crate::turn_stream::LiveRoute::Chat {
             chat_id: chat.to_string(),
         },
+        message_seq: None,
     }
 }
 

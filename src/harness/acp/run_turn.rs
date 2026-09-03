@@ -384,6 +384,7 @@ impl AcpRunTurn {
                     .map(str::to_string)
                     .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
             },
+            message_seq: None,
         }
     }
 
@@ -772,6 +773,8 @@ impl RunTurn for AcpRunTurn {
                 run_id: workflow_run_id.to_string(),
                 node_id: node_id.to_string(),
             },
+            // A workflow node answers a graph, not a message.
+            message_seq: None,
         };
         self.run_once(company, agent_id, message, None, Some(ctx))
             .await
