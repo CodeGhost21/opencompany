@@ -434,6 +434,19 @@ impl TenantComposio {
                 // all, when a company clears a BYOK key it never used.
                 c.mode.hash(&mut hasher);
                 c.credential.hash_identity(&mut hasher);
+                // Under BYOK this is a *second* live credential — the
+                // managed-chain bearer `list_toolkits` fetches OpenHuman's
+                // curated catalog with, captured at resolve time and re-read
+                // per call through `catalog_token`. Missing it here means
+                // rotating the company's TinyHumans key while BYOK is active
+                // moves neither `mode` nor `credential`, so the roster keeps
+                // presenting the stale bearer: the curated fetch then fails on
+                // it and `LiveClient::list_toolkits` silently widens the
+                // provider grid to the account's own Composio directory,
+                // staying that way until some unrelated change happens to
+                // rebuild the roster. `Credential::None` under managed hashes
+                // to a fixed tag, so this is a no-op there.
+                c.catalog.hash_identity(&mut hasher);
                 c.toolkits.hash(&mut hasher);
                 // The pins are part of what the tools do, so a console change
                 // to one has to reach the agents the same cycle a token change
@@ -2445,6 +2458,49 @@ mod tests {
             TenantComposio::fingerprint(&managed),
             TenantComposio::fingerprint(&byok),
             "managed and BYOK must not fingerprint alike"
+        );
+    }
+
+    /// Under BYOK the config carries a *second* live credential — the
+    /// managed-chain bearer `list_toolkits` fetches OpenHuman's curated catalog
+    /// with. Rotating a company's TinyHumans key while BYOK is active changes
+    /// neither `mode` nor the Composio `credential`, so this bearer is the only
+    /// thing that moves; if the fingerprint did not cover it, the roster would
+    /// keep the stale one until some unrelated change happened to rebuild it,
+    /// and the curated fetch would keep failing on a bearer the operator
+    /// already rotated away from.
+    #[test]
+    fn fingerprint_moves_when_the_catalog_credential_rotates() {
+        let byok_with = |catalog: Credential| {
+            Some(
+                TenantComposio::from_access(
+                    "https://api.tinyhumans.ai",
+                    crate::company::composio::ComposioAccess {
+                        mode: ComposioMode::Byok,
+                        credential: Credential::from_value("ak_live"),
+                    },
+                    vec!["gmail".to_string()],
+                )
+                .with_catalog_credential(catalog),
+            )
+        };
+        let before = byok_with(Credential::from_value("th-company-a"));
+        let after = byok_with(Credential::from_value("th-company-b"));
+        assert_ne!(
+            TenantComposio::fingerprint(&before),
+            TenantComposio::fingerprint(&after),
+            "rotating the catalog bearer alone must still rebuild the roster"
+        );
+
+        // A managed config's `catalog` is always `Credential::None` (see
+        // `TenantComposio::new`), so this must be a genuine no-op there rather
+        // than a source of spurious rebuilds on every managed roster build.
+        let managed_a = config_with(Credential::from_value("same-bytes"));
+        let managed_b = config_with(Credential::from_value("same-bytes"));
+        assert_eq!(
+            TenantComposio::fingerprint(&managed_a),
+            TenantComposio::fingerprint(&managed_b),
+            "an always-None catalog credential must not itself vary the managed fingerprint"
         );
     }
 

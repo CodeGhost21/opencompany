@@ -200,9 +200,15 @@ recoverable — clearing the key puts the company back — and saying so before 
 switch is cheaper than explaining an empty grid after it.
 
 Under `byok` the console hides the managed route's token card entirely: the
-BYO backend token, the company TinyHumans key and the instance identity are all
-out of play, so offering a control over them would be offering a control that
-changes nothing about the calls being made.
+BYO backend token and the instance identity are out of play for **live
+Composio calls** — authorize, execute, list connections — so offering a
+control over them would be offering a control that changes nothing about
+those calls. The company's TinyHumans key is the one exception: it still
+authenticates the curated-catalog fetch (`TenantComposio::catalog`), so
+clearing it while a company is on BYOK degrades the provider grid to the
+account's own directory even though every Composio call keeps working. See
+`docs/spec/runtime/credentials.md`'s "The catalog is OpenHuman's, even under
+BYOK" for the full precedence.
 
 Everything else the panel offers is unchanged, disconnecting included: the host
 revokes through Composio's own `DELETE /api/v3/connected_accounts/{id}` rather

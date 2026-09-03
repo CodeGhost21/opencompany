@@ -301,9 +301,22 @@ pub async fn load_mode(company: &CompanyId, secrets: &dyn SecretStore) -> Result
 /// selects [`ComposioMode::Byok`]; an empty one clears the key and returns the
 /// company to [`ComposioMode::Managed`].
 ///
-/// The key is written first: if the second write fails, the company is left in
-/// managed mode holding an unread key, which is inert. The other order would
-/// leave it in BYOK mode with no key, which is an outage.
+/// The writes are ordered by **direction**, not fixed key-then-mode: whichever
+/// order leaves a failed second write inert, rather than in the outage this
+/// whole function exists to rule out.
+///
+/// Selecting BYOK writes the key first. If the mode write then fails, the
+/// company is still `Managed` holding an unread key — inert, since managed
+/// resolution never looks at [`API_KEY_KEY`].
+///
+/// Clearing writes the mode first. A fixed key-then-mode order would write the
+/// *empty* key first here — and if the mode write then failed, the company
+/// would stay `Byok` (its old mode, unwritten) with an empty key, which
+/// [`resolve_access`] resolves to [`Credential::None`]: the exact "BYOK mode,
+/// no key" outage the key-first rule above exists to avoid, reached from the
+/// other direction. Writing the mode first instead leaves a failed second
+/// write as `Managed` holding a stale-but-present key — inert, for the same
+/// reason as the set direction.
 pub async fn store_api_key(
     company: &CompanyId,
     secrets: &dyn SecretStore,
@@ -315,12 +328,21 @@ pub async fn store_api_key(
     } else {
         ComposioMode::Byok
     };
-    secrets
-        .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
-        .await?;
-    secrets
-        .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
-        .await?;
+    if mode.is_byok() {
+        secrets
+            .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
+            .await?;
+        secrets
+            .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
+            .await?;
+    } else {
+        secrets
+            .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
+            .await?;
+        secrets
+            .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
+            .await?;
+    }
     Ok(mode)
 }
 
@@ -814,6 +836,117 @@ mod tests {
         assert_eq!(mode, ComposioMode::Managed);
         let access = resolve_access(&company, &secrets, None).await.unwrap();
         assert_eq!(access.mode, ComposioMode::Managed);
+    }
+
+    /// Wraps [`MemSecrets`] and fails every `set` for one chosen key, so a test
+    /// can land a `store_api_key` call exactly at its second write and inspect
+    /// what the first one left behind.
+    struct SecretsFailingToWrite {
+        inner: MemSecrets,
+        blocked_key: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for SecretsFailingToWrite {
+        async fn get(&self, c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+            self.inner.get(c, key).await
+        }
+        async fn set(&self, c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+            if key == self.blocked_key {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "write refused by test".into(),
+                ));
+            }
+            self.inner.set(c, key, value).await
+        }
+    }
+
+    /// A clear that dies on its **first** write (the mode) must leave the
+    /// company exactly as it was: still `Byok`, still holding the key that was
+    /// working a moment ago. This is the direction issue #… — writing the mode
+    /// first for a clear — exists to protect: a fixed key-then-mode order would
+    /// have written the key EMPTY here, before ever reaching the (blocked) mode
+    /// write, stranding a `Byok` company with no key.
+    #[tokio::test]
+    async fn a_clear_that_fails_on_the_mode_write_leaves_byok_intact() {
+        let company = CompanyId::new("acme");
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: MODE_KEY,
+        };
+        // Seeded directly on `inner`, bypassing the wrapper's own blocking
+        // `set()` — the state under test is "already BYOK", not "how it got
+        // there", and going through `store_api_key` here would hit the very
+        // block this test exists to trigger before the test has even started.
+        secrets
+            .inner
+            .set(&company, API_KEY_KEY, SecretValue("ak_live".into()))
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+
+        let err = store_api_key(&company, &secrets, "").await;
+        assert!(
+            err.is_err(),
+            "the blocked write must propagate, not swallow"
+        );
+
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Byok
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("ak_live"),
+            "the key a moment ago worked and must still work — nothing broke"
+        );
+    }
+
+    /// A clear that dies on its **second** write (the key) must still have
+    /// landed the mode: the company reads back as `Managed`, with a stale
+    /// unused key sitting inert in `API_KEY_KEY` — never consulted once the
+    /// mode says managed.
+    #[tokio::test]
+    async fn a_clear_that_fails_on_the_key_write_still_lands_managed() {
+        let company = CompanyId::new("acme");
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: API_KEY_KEY,
+        };
+        // Seeded directly on `inner` for the same reason as the sibling test
+        // above: this test's block is `API_KEY_KEY`, and `store_api_key`'s set
+        // direction writes that key first — routing the initial BYOK selection
+        // through the wrapper would block before there was anything to clear.
+        secrets
+            .inner
+            .set(&company, API_KEY_KEY, SecretValue("ak_live".into()))
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+
+        let err = store_api_key(&company, &secrets, "").await;
+        assert!(err.is_err());
+
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Managed,
+            "the mode write is first for a clear, and it landed before the blocked one"
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            access.mode,
+            ComposioMode::Managed,
+            "a stale key under a managed mode is inert — resolve_access never reads it"
+        );
     }
 
     #[tokio::test]

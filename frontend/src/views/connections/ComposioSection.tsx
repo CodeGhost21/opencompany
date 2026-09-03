@@ -71,6 +71,46 @@ function modeOf(status: ComposioStatus | null): ComposioMode {
   return mode && mode in MODES ? mode : "managed";
 }
 
+/**
+ * Whether the legacy managed-route token card belongs on screen.
+ *
+ * Requires the SELECTED tile (`mode`) and the PERSISTED route (`!onByok`) to
+ * both be managed — not either alone. Either alone puts a second credential
+ * surface on screen at exactly the moment an operator is switching between
+ * them, and each direction breaks a different way:
+ *
+ * - Selected-only (`mode === "managed"`, ignoring `onByok`) shows this card to
+ *   a BYOK company that has merely *clicked* the managed tile, alongside the
+ *   real "Clear key & use OpenHuman-managed" control. This card's own Clear
+ *   calls the legacy `setComposioToken("")`, which erases the *preserved*
+ *   backend-token override (issue #586) without touching `composio/api_key`
+ *   or `composio/mode` at all — a button that looks like the way back to
+ *   managed but silently destroys a token the design keeps specifically to
+ *   restore, while leaving the company on BYOK regardless.
+ * - Persisted-only (`!onByok`, ignoring `mode`) shows it to a managed company
+ *   that has clicked the BYOK tile, so a Composio API key field and this
+ *   legacy backend-token field are both live with no way to tell which one
+ *   the Save below belongs to.
+ *
+ * Requiring both is the only gate under which exactly one credential surface
+ * is ever on screen, in either direction of the switch.
+ */
+export function showManagedTokenCard(input: {
+  mode: ComposioMode;
+  onByok: boolean;
+  canManage: boolean;
+  credentialed: boolean;
+  showOverride: boolean;
+  byoToken: boolean;
+}): boolean {
+  return (
+    input.mode === "managed" &&
+    !input.onByok &&
+    input.canManage &&
+    (!input.credentialed || input.showOverride || input.byoToken)
+  );
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -144,6 +184,14 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
 
   const requestGeneration = useRef(0);
   const modeButtons = useRef<(HTMLButtonElement | null)[]>([]);
+  // Focus in and back out of the inline confirmation. It is `role="alertdialog"`
+  // over a plain `<div>`, not a modal primitive with its own focus trap (see the
+  // "Not a modal" comment above), so nothing does this for free: opening it
+  // unmounts the "Save key" button that had focus, leaving focus on
+  // `document.body` — invisible to a mouse user, but a screen reader or keyboard
+  // user loses their place entirely.
+  const confirmOpenerRef = useRef<HTMLElement | null>(null);
+  const confirmPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -172,6 +220,23 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     setLoad("loading");
     void refresh();
   }, [refresh]);
+
+  // Opening moves focus onto the confirmation's primary action; closing
+  // returns it to whatever raised it — but only when focus is still exactly
+  // where opening left it (`document.body`). A save that succeeded and moved
+  // focus somewhere sensible on its own (the row that replaced this one) must
+  // not be yanked back to a button that may no longer say what it said.
+  useEffect(() => {
+    if (confirmSwitch) {
+      confirmPrimaryActionRef.current?.focus();
+      return;
+    }
+    const opener = confirmOpenerRef.current;
+    confirmOpenerRef.current = null;
+    if (opener?.isConnected && document.activeElement === document.body) {
+      opener.focus();
+    }
+  }, [confirmSwitch]);
 
   async function save() {
     if (!token.trim()) return;
@@ -261,6 +326,8 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
    */
   function requestApiKeySave() {
     if (persistedMode === "managed") {
+      confirmOpenerRef.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setConfirmSwitch(true);
       return;
     }
@@ -313,15 +380,17 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   // Everything below is about the managed route's credential tiers, and under
   // BYOK none of them is in play — the company's own Composio key is the whole
   // credential. Rendering the token card there would offer a control that
-  // changes nothing about the calls being made.
-  //
-  // Gated on the SELECTED mode, not the persisted one: an operator part-way
-  // through switching to BYOK would otherwise see two credential fields at once
-  // — a Composio API key and a backend token — with no way to tell which one the
-  // Save below belongs to. What is on screen should be the route being looked
-  // at, not the one being left.
-  const showTokenCard =
-    mode === "managed" && canManage && (!credentialed || showOverride || byoToken);
+  // changes nothing about the calls being made. See `showManagedTokenCard`'s
+  // own doc for why this needs both the selected tile AND the persisted route
+  // to agree, not either alone.
+  const showTokenCard = showManagedTokenCard({
+    mode,
+    onByok,
+    canManage,
+    credentialed,
+    showOverride,
+    byoToken,
+  });
   // The composio-grant tri-state, narrowed the same way `ProvidersSection` does
   // (issue #1478): `undefined` reads as "unknown", never as "not granted", so
   // this badge and the grid a few inches below it cannot disagree on the same
@@ -532,7 +601,12 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       this company back where it is now.
                     </p>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" disabled={busy !== null} onClick={() => void saveApiKey()}>
+                      <Button
+                        ref={confirmPrimaryActionRef}
+                        size="sm"
+                        disabled={busy !== null}
+                        onClick={() => void saveApiKey()}
+                      >
                         {busy === "route" ? (
                           <Loader2 className="size-4 animate-spin" />
                         ) : (

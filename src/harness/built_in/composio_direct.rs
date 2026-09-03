@@ -404,7 +404,13 @@ impl DirectComposio {
     ///
     /// `dropped` is computed from Composio's own `total_items` rather than
     /// guessed, so a truncated listing can say how much it is missing instead of
-    /// merely admitting that it might be.
+    /// merely admitting that it might be. When `total_items` never arrived on
+    /// any page — an older/degraded response shape — the exact count is
+    /// unknowable, but reaching this line at all is only possible via the page
+    /// budget running out with a live cursor still in hand (the loop's only
+    /// other exit returns early with `dropped: 0`), so *some* truncation is a
+    /// certainty even without a number for it. `.max(1)` reports that
+    /// certainty instead of letting an absent count read as a complete list.
     async fn get_paged<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -431,7 +437,12 @@ impl DirectComposio {
             }
         }
 
-        let dropped = total.unwrap_or(0).saturating_sub(items.len());
+        // Reaching here means the budget ran out with a cursor still live —
+        // see the doc comment above. `.max(1)` is a floor, not a substitute for
+        // the real count: when `total` is present, its subtraction already
+        // exceeds it (there is more data than what was fetched, by
+        // definition), so the floor only ever engages when `total` was absent.
+        let dropped = total.unwrap_or(0).saturating_sub(items.len()).max(1);
         Ok(Paged { items, dropped })
     }
 
@@ -784,6 +795,58 @@ mod tests {
             resp.toolkits,
             vec!["tk1", "tk2", "tk3"],
             "three pages are followed, not one"
+        );
+    }
+
+    /// A listing that hits the page budget with no `total_items` on any page —
+    /// an older or degraded response shape — still must not report `dropped: 0`.
+    /// Reaching the end of the budget with a live cursor in hand is itself proof
+    /// that more exists; the exact count is merely unknown, not zero.
+    #[tokio::test]
+    async fn a_truncated_listing_with_no_total_still_reports_dropped() {
+        use axum::extract::Query;
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::collections::HashMap;
+
+        async fn toolkits(
+            Query(params): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            let page: usize = params
+                .get("cursor")
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(1);
+            // No `total_items` field at all on any page.
+            Json(serde_json::json!({
+                "items": [{ "slug": format!("tk{page}"), "name": format!("Toolkit {page}") }],
+                "next_cursor": (page + 1).to_string(),
+            }))
+        }
+
+        let app = Router::new().route("/toolkits", get(toolkits));
+        let listener =
+            tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let direct = DirectComposio::new("ak_live").with_v3_base_for_test(format!("http://{addr}"));
+        let paged: Paged<V3Toolkit> = direct
+            .get_paged("/toolkits", &[("limit", "200".to_string())])
+            .await
+            .expect("page");
+        assert_eq!(
+            paged.items.len(),
+            3,
+            "the page budget, not the never-ending cursor"
+        );
+        assert!(
+            paged.dropped >= 1,
+            "no total_items must not read as a complete listing: dropped={}",
+            paged.dropped
         );
     }
 
