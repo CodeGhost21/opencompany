@@ -55,6 +55,12 @@ pub mod composio;
 /// live tools are behind `composio`, which CI never *runs*) — see
 /// [`composio_catalog`].
 pub mod composio_catalog;
+/// The BYOK half of the Composio surface: a company's **own** Composio account,
+/// reached directly at `backend.composio.dev` instead of through the
+/// OpenHuman-managed proxy. Mirrors OpenHuman's `backend` / `direct` split. See
+/// [`composio_direct`].
+#[cfg(feature = "composio")]
+pub mod composio_direct;
 /// End-to-end proof that #410's narrowable, self-describing Composio listing is
 /// reachable from a real turn on two large toolkits — the harness, the grant
 /// gate, the approval policy and the Composio client are all real; only the

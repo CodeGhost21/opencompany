@@ -175,6 +175,48 @@ asserted over a grant matrix by
 which is the standard #886 stated: prove the two agree by running both, not by
 reading them.
 
+## Two Composio accounts to choose between
+
+`GET …/composio` carries a `mode` alongside `credentialSource`, and the two
+answer different questions: the source names *whose identity* a call presents,
+the mode names *which host* it is presented to.
+
+- `managed` (the default) — Composio through the OpenHuman backend. Nothing to
+  paste; the backend holds the Composio account, enforces its toolkit allowlist
+  and bills the calls.
+- `byok` — straight to `backend.composio.dev` with this company's own Composio
+  API key, set through `PUT …/composio/api-key` (admin-only, write-only, never
+  echoed). An empty `apiKey` clears the key and returns the company to managed.
+
+`backendUrl` reports the host the calls actually reach, so it changes with the
+mode — a status still naming the managed backend after a switch would read as
+though nothing had happened.
+
+The console renders this as one picker in `ComposioSection`, with a
+confirmation on the first switch away from managed: the providers connected
+through OpenHuman's Composio account live in *that* account, so the provider
+grid goes empty until they are connected again in the company's own. That is
+recoverable — clearing the key puts the company back — and saying so before the
+switch is cheaper than explaining an empty grid after it.
+
+Under `byok` the console hides the managed route's token card entirely: the
+BYO backend token and the instance identity are out of play for **live
+Composio calls** — authorize, execute, list connections — so offering a
+control over them would be offering a control that changes nothing about
+those calls. The company's TinyHumans key is the one exception: it still
+authenticates the curated-catalog fetch (`TenantComposio::catalog`), so
+clearing it while a company is on BYOK degrades the provider grid to the
+account's own directory even though every Composio call keeps working. See
+`docs/spec/runtime/credentials.md`'s "The catalog is OpenHuman's, even under
+BYOK" for the full precedence.
+
+Everything else the panel offers is unchanged, disconnecting included: the host
+revokes through Composio's own `DELETE /api/v3/connected_accounts/{id}` rather
+than the backend's route, which is a difference in who is dialled, not in what
+the console can offer. `disconnectRouteFor` therefore takes no mode argument —
+the route is resolved from what a tile is connected through, never from which
+Composio the company uses.
+
 ## Releasing a connection: two routes, not interchangeable (issue #404)
 
 There are two disconnects and they act on different things:

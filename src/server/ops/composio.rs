@@ -70,7 +70,9 @@ use crate::AppState;
 // `token_configured` is gone from this list deliberately: the status route no
 // longer re-derives the credential tier from booleans, it asks the resolver
 // (`resolve_credential`) — see `credential_source_for` below.
-use crate::company::composio::{CatalogEntry, backend_url_or_default, store_token};
+use crate::company::composio::{
+    CatalogEntry, ComposioMode, backend_url_or_default, resolve_access, store_api_key, store_token,
+};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
@@ -91,6 +93,20 @@ const SWITCH_NOTE: &str =
 /// (issue #1471).
 const CLEAR_NOTE: &str =
     "Composio token cleared. Agents use whatever credential remains on their next turn.";
+
+/// The reminder attached to switching a company onto its own Composio account.
+///
+/// It names the consequence the radio button cannot: the providers connected
+/// through the managed route live in the platform's Composio tenant and are not
+/// visible from the company's own account, so the grid will look empty until
+/// they are connected again there.
+const BYOK_NOTE: &str = "This company now reaches Composio through its own account. Agents pick \
+     that up on their next turn. Providers connected through OpenHuman-managed Composio stay in \
+     that account — connect them again here, or clear the key to switch back.";
+
+/// The reminder attached to giving the managed route back.
+const MANAGED_NOTE: &str = "Composio API key cleared. This company is back on OpenHuman-managed \
+     Composio from the agents' next turn, with the providers it had connected there.";
 
 /// The toolkits the console should offer for a company, whether that answer
 /// came from open mode, and where the list came from.
@@ -211,7 +227,12 @@ async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, St
             "the Composio backend did not answer within {}s",
             composio_toolkits::FETCH_TIMEOUT.as_secs()
         )),
-        Ok(Err(err)) => Err(err.to_string()),
+        // `{err:#}`, not `to_string()`: the latter renders only the outermost
+        // context and drops the cause chain behind it, so a catalog that failed
+        // on a rejected API key reported the bare call name — "Composio v3
+        // /toolkits" — with nothing saying what went wrong. The operator-facing
+        // notice is the only place this surfaces, so it has to carry the reason.
+        Ok(Err(err)) => Err(format!("{err:#}")),
         Ok(Ok(toolkits)) if toolkits.is_empty() => {
             Err("the Composio backend returned an empty catalog".to_string())
         }
@@ -240,6 +261,7 @@ async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, S
 pub fn router() -> Router<AppState> {
     scoped("/composio", get(get_status))
         .merge(scoped("/composio/token", put(set_token)))
+        .merge(scoped("/composio/api-key", put(set_api_key)))
         .merge(scoped("/composio/authorize", post(authorize)))
         .merge(scoped("/composio/connections", get(connections)))
         .merge(scoped(
@@ -272,7 +294,21 @@ struct ComposioStatusDto {
     ///
     /// A tier name, never a credential and never a path.
     credential_source: CredentialSource,
-    /// The effective Composio backend URL (env override or default). Non-secret.
+    /// Which host this company's Composio calls go to — `managed` (proxied
+    /// through the OpenHuman backend, the default) or `byok` (straight to this
+    /// company's own Composio account).
+    ///
+    /// Orthogonal to [`Self::credential_source`], which names *whose identity*
+    /// a call presents rather than *which host* it is presented to. A BYOK
+    /// company reports `byok` + `static`; a company that pasted a backend token
+    /// override reports `managed` + `static`. Collapsing them into one field
+    /// would leave the console unable to say which of the two an operator is
+    /// looking at.
+    mode: ComposioMode,
+    /// The effective Composio backend URL (env override or default), or
+    /// Composio's own API host under BYOK. Non-secret, and the address the
+    /// calls really go to — a status line still naming the managed backend
+    /// after a switch to BYOK would read as though nothing had happened.
     backend_url: String,
     /// The manifest toolkit allowlist verbatim (empty = defer to the backend
     /// allowlist, i.e. open mode). Kept as-is so an operator can still see what
@@ -342,6 +378,22 @@ struct MutationResponse {
 #[serde(rename_all = "camelCase")]
 struct SetToken {
     token: String,
+}
+
+/// Set-API-key body. `apiKey` is write-only intake (never returned): a non-empty
+/// value stores this company's own Composio API key and switches it to BYOK, an
+/// explicit empty string clears the key and returns it to OpenHuman-managed
+/// Composio.
+///
+/// One field, not two. A `mode` an operator could set independently of the key
+/// would let them select BYOK with nothing stored — a company with no Composio
+/// tools and no obvious reason why — so the mode is a consequence of the key
+/// rather than a separate control. See
+/// [`store_api_key`](crate::company::composio::store_api_key).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetApiKey {
+    api_key: String,
 }
 
 /// `POST …/composio/authorize` body: the toolkit slug (`gmail` / `slack` /
@@ -425,7 +477,8 @@ struct ConnectedAccountDto {
     is_default: bool,
 }
 
-/// Which tier a company's Composio credential comes from.
+/// How a company reaches Composio — the route, and which tier its credential
+/// comes from.
 ///
 /// Asks the resolver itself rather than restating its precedence. The console
 /// must never be able to name a tier the agents are not on, and a second copy of
@@ -437,18 +490,14 @@ struct ConnectedAccountDto {
 /// below makes the whole handler future non-`Send`, which axum rejects. Callers
 /// resolve it from whichever environment they mean, so the matrix stays testable
 /// without mutating the process environment.
-async fn credential_source_for(
+async fn access_for(
     runtime: &CompanyRuntime,
     token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
-) -> Result<CredentialSource, ApiError> {
-    Ok(crate::company::composio::resolve_credential(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        token_source,
-    )
-    .await
-    .map_err(ApiError)?
-    .source())
+) -> Result<(ComposioMode, CredentialSource), ApiError> {
+    let access = resolve_access(runtime.id(), runtime.secrets().as_ref(), token_source)
+        .await
+        .map_err(ApiError)?;
+    Ok((access.mode, access.credential.source()))
 }
 
 /// Resolves the Composio status DTO for a company.
@@ -469,17 +518,24 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
             env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
         )
     };
-    let credential_source = credential_source_for(
+    let (mode, credential_source) = access_for(
         runtime,
         TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await?;
     let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
+    // Report the host the calls actually reach. Under BYOK the managed backend
+    // URL is resolved and then not used, so echoing it would be misdirection.
+    let backend_url = match mode {
+        ComposioMode::Byok => crate::company::composio::DIRECT_BASE_URL.to_string(),
+        ComposioMode::Managed => backend_url_or_default(env_url, api_url),
+    };
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
         granted,
         credential_source,
-        backend_url: backend_url_or_default(env_url, api_url),
+        mode,
+        backend_url,
         toolkits,
         open_mode,
         effective_toolkits: effective.slugs(),
@@ -532,6 +588,50 @@ async fn set_token(
             CLEAR_NOTE.to_string()
         } else {
             SWITCH_NOTE.to_string()
+        },
+    }))
+}
+
+/// `PUT …/composio/api-key` — bring this company's **own** Composio account, or
+/// give it back.
+///
+/// A non-empty `apiKey` stores the key and routes every Composio call straight
+/// to `backend.composio.dev` with it; an empty one clears the key and returns
+/// the company to the OpenHuman-managed backend. This is the BYOK half of the
+/// surface OpenHuman calls `direct` mode.
+///
+/// **Admin-only**, for the same reason [`set_token`] is: the key decides which
+/// Composio account every one of the company's agents acts through, and — since
+/// a BYOK account is billed to whoever owns it — who pays for the calls.
+///
+/// A switch in either direction is a **different tenant**: the providers
+/// connected under the old route are not the ones connected under the new one,
+/// so the console's cached catalog is dropped here exactly as a token change
+/// drops it, and the response carries the freshly-read status so the operator
+/// sees the new answer rather than the previous account's.
+async fn set_api_key(
+    company: AdminScopedCompany,
+    Json(body): Json<SetApiKey>,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let mode = store_api_key(runtime.id(), runtime.secrets().as_ref(), &body.api_key)
+        .await
+        .map_err(ApiError)?;
+    evict_catalog_cache(runtime);
+    journal(
+        &company,
+        match mode {
+            ComposioMode::Byok => "composio_byok_set",
+            ComposioMode::Managed => "composio_byok_cleared",
+        },
+        None,
+    )
+    .await?;
+    Ok(Json(MutationResponse {
+        status: effective_status(runtime).await?,
+        note: match mode {
+            ComposioMode::Byok => BYOK_NOTE.to_string(),
+            ComposioMode::Managed => MANAGED_NOTE.to_string(),
         },
     }))
 }
@@ -632,23 +732,33 @@ pub(crate) async fn resolve_tenant(
     // would attribute a company's Gmail to whichever identity happened to
     // resolve during the outage. The roster path can afford to shrug and
     // withhold tools; this one must say what went wrong and connect nothing.
-    let credential = crate::company::composio::resolve_credential(
+    let access = resolve_access(
         runtime.id(),
         runtime.secrets().as_ref(),
         crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await
     .map_err(ApiError)?;
-    if !credential.configured() {
+    if !access.credential.configured() {
+        // The two routes fail for different reasons and are recoverable in
+        // different places, so they say different things. A BYOK company told
+        // to "set its TinyHumans credential" would be sent to a control that
+        // has no effect on the route it chose.
         return Err(ApiError(crate::error::OpenCompanyError::Conflict(
-            "no Composio credential is available for this company — set the company's TinyHumans \
-             credential, or paste its own Composio token"
-                .to_string(),
+            match access.mode {
+                ComposioMode::Byok => "this company uses its own Composio account but no Composio \
+                     API key is stored — paste one, or clear it to go back to OpenHuman-managed \
+                     Composio"
+                    .to_string(),
+                ComposioMode::Managed => "no Composio credential is available for this company — \
+                     set the company's TinyHumans credential, or paste its own Composio token"
+                    .to_string(),
+            },
         )));
     }
-    Ok(crate::harness::composio::TenantComposio::new(
+    Ok(crate::harness::composio::TenantComposio::from_access(
         backend_url_or_default(backend_env, api_env),
-        credential,
+        access,
         toolkits,
     ))
 }
@@ -1013,8 +1123,11 @@ async fn connections_impl(_runtime: &CompanyRuntime) -> Result<Json<Vec<Connecti
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogEntry, CatalogSource, ComposioStatusDto, CredentialSource, credential_source_for,
+        CatalogEntry, CatalogSource, ComposioMode, ComposioStatusDto, CredentialSource,
+        TinyhumansTokenSource, access_for,
     };
+    use crate::company::runtime::CompanyRuntime;
+    use crate::server::error::ApiError;
     use crate::server::ops::composio_toolkits;
 
     use axum::body::{Body, to_bytes};
@@ -1534,6 +1647,98 @@ mod tests {
         assert_eq!(resp["status"]["credentialSource"], "none");
     }
 
+    /// BYOK end to end over the route: storing a Composio API key moves the
+    /// company onto its own account, the read plane says so without ever
+    /// carrying the key, and clearing it hands the managed route back.
+    #[tokio::test]
+    async fn a_company_can_bring_its_own_composio_account_and_give_it_back() {
+        const API_KEY: &str = "ak_live_company_own_key";
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        // Managed is the default and needs nothing stored.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(dto["mode"], "managed");
+
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": API_KEY })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "byok");
+        assert_eq!(
+            resp["status"]["credentialSource"], "static",
+            "the key is this company's own, which is the static tier"
+        );
+        assert!(
+            !raw.contains(API_KEY),
+            "the PUT response leaked the key: {raw}"
+        );
+
+        // The read plane reports the route and the host it reaches, and still
+        // carries no credential.
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(dto["mode"], "byok");
+        assert_eq!(
+            dto["backendUrl"],
+            crate::company::composio::DIRECT_BASE_URL,
+            "a status still naming the managed backend would read as though nothing changed"
+        );
+        assert!(
+            !raw.contains(API_KEY),
+            "the GET status leaked the key: {raw}"
+        );
+
+        // Clearing it returns the company to the managed route.
+        let (_, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "" })),
+        )
+        .await;
+        assert_eq!(resp["status"]["mode"], "managed");
+        assert_ne!(
+            resp["status"]["backendUrl"],
+            crate::company::composio::DIRECT_BASE_URL
+        );
+    }
+
+    /// Whose Composio account a company acts through — and therefore who pays
+    /// for the calls — is an admin's decision, exactly as the backend token is.
+    #[tokio::test]
+    async fn a_member_cannot_bring_its_own_composio_account() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "acme",
+            crate::ports::UserRole::Member,
+        )
+        .await;
+
+        let (status, body, raw) = send_as(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_live" })),
+            Auth::Cookie(member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{raw}");
+        assert_eq!(body["code"], "forbidden", "{body}");
+
+        // The refusal is real: the route did not move.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(
+            dto["mode"], "managed",
+            "a refused write stored nothing: {dto}"
+        );
+    }
+
     /// The note on a write names the operation (issue #1471): a set tells the
     /// operator a new token is live, a clear must not claim one exists — the
     /// effective credential after a clear is whatever tier remains, which may
@@ -1576,6 +1781,18 @@ mod tests {
             clear_note.contains("cleared"),
             "the clear names what it did: {clear_note}"
         );
+    }
+
+    /// The credential tier alone.
+    ///
+    /// The matrix below is about credential *precedence*; which route a company
+    /// takes is a separate question, asserted separately. Projecting here keeps
+    /// each test about one of them.
+    async fn credential_source_for(
+        runtime: &CompanyRuntime,
+        token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
+    ) -> Result<CredentialSource, ApiError> {
+        Ok(access_for(runtime, token_source).await?.1)
     }
 
     /// The hosted shape, driven through the env seam (no process mutation): a
@@ -1707,6 +1924,7 @@ mod tests {
             in_build: true,
             granted: true,
             credential_source: CredentialSource::Attested,
+            mode: ComposioMode::Managed,
             backend_url: "https://api.tinyhumans.ai".to_string(),
             toolkits: vec!["gmail".to_string()],
             open_mode: false,
@@ -1718,6 +1936,7 @@ mod tests {
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["credentialSource"], "attested");
         assert_eq!(json["catalogSource"], "manifest");
+        assert_eq!(json["mode"], "managed");
         let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
         keys.sort_unstable();
         assert_eq!(
@@ -1731,6 +1950,7 @@ mod tests {
                 "effectiveToolkits",
                 "granted",
                 "inBuild",
+                "mode",
                 "openMode",
                 "toolkits",
             ],

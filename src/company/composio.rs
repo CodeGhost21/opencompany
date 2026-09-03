@@ -145,6 +145,274 @@ pub async fn token_configured(company: &CompanyId, secrets: &dyn SecretStore) ->
         .unwrap_or(false))
 }
 
+// ── Routing mode: OpenHuman-managed, or the company's own Composio account ──
+//
+// Everything above this line is the **managed** route: calls go to the
+// OpenHuman/TinyHumans backend (`/agent-integrations/composio/*`), which owns
+// the Composio API key, the billing margin and the server-enforced toolkit
+// allowlist, and derives the Composio entity from the bearer it is handed.
+//
+// A company that holds its own Composio account can route around all of that.
+// In BYOK mode the harness talks to `backend.composio.dev` directly with that
+// company's `x-api-key` — nothing is proxied, nothing is billed here, and the
+// providers it can connect are whatever its own Composio dashboard permits.
+// This mirrors OpenHuman's own `backend` / `direct` split
+// (`vendor/openhuman/src/openhuman/integrations/composio/client.rs::create_composio_client`);
+// the vocabulary here is `managed` / `byok` to match the search surface next
+// door (`crate::company::search`), which made the same choice first.
+
+/// The [`SecretStore`] key holding this company's Composio routing mode — one
+/// of [`MANAGED_MODE`] or [`BYOK_MODE`].
+///
+/// Stored rather than inferred from "is there an API key", for the reason
+/// [`crate::company::search::PROVIDER_SECRET`] is stored: the mode decides
+/// which *API* the credential is presented to, and a credential sent to the
+/// wrong one fails in a way that reads like a bad credential. It also lets the
+/// console report the mode without reading a secret slot at all.
+pub const MODE_KEY: &str = "composio/mode";
+
+/// The [`SecretStore`] key holding this company's **own** Composio API key
+/// (`ak_…`), written by the console's Composio settings and read only to sign a
+/// call. Write-only over the API — never echoed back.
+///
+/// Distinct from [`TOKEN_KEY`], and not interchangeable with it: that one is a
+/// bearer the *TinyHumans backend* recognises, this one is a key *Composio*
+/// recognises. They authenticate different hosts.
+pub const API_KEY_KEY: &str = "composio/api_key";
+
+/// Storage + wire spelling of [`ComposioMode::Managed`].
+pub const MANAGED_MODE: &str = "managed";
+
+/// Storage + wire spelling of [`ComposioMode::Byok`].
+pub const BYOK_MODE: &str = "byok";
+
+/// The Composio API host a BYOK company's calls go to directly. Non-secret, and
+/// reported by the console in place of the backend URL so an operator can see
+/// that the route really did change.
+pub const DIRECT_BASE_URL: &str = "https://backend.composio.dev";
+
+/// The Composio entity a BYOK company's authorizations and executes are scoped
+/// to.
+///
+/// `default` on purpose, matching OpenHuman's own direct mode
+/// (`config.composio.entity_id`) and matching what a user sees in their own
+/// Composio dashboard. Scoping to the company id instead would isolate two
+/// OpenCompany companies sharing one key — but it would also hide every
+/// connection the operator already made in that account, which is the first
+/// thing a BYOK operator looks for. The shared-account caveat is the same one
+/// [`TOKEN_KEY`] already carries: two companies pasting one credential share
+/// one entity, and that cannot be prevented from this side.
+pub const DIRECT_ENTITY_ID: &str = "default";
+
+/// How this company reaches Composio.
+///
+/// Not a [`CredentialSource`](crate::company::credentials::CredentialSource):
+/// that names *whose identity* a call presents, this names *which host* it is
+/// presented to. A BYOK company is `Static`-sourced and `Byok`-routed; a
+/// company that pasted a [`TOKEN_KEY`] override is `Static`-sourced and
+/// `Managed`-routed. Collapsing the two would make either question
+/// unanswerable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComposioMode {
+    /// Proxied through the OpenHuman backend — the default, and the only route
+    /// that needs no configuration at all.
+    #[default]
+    Managed,
+    /// Straight to `backend.composio.dev` with the company's own API key.
+    Byok,
+}
+
+impl ComposioMode {
+    /// The stable wire spelling (`managed` / `byok`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => MANAGED_MODE,
+            Self::Byok => BYOK_MODE,
+        }
+    }
+
+    /// Whether `raw` names BYOK. Everything else — including an empty slot, a
+    /// typo, and a mode from some future shape — reads as [`Self::Managed`].
+    ///
+    /// Unknown-means-managed rather than unknown-is-an-error because this is
+    /// read on the roster path: a hand-edited slot must not be able to take a
+    /// company's Composio tools away, and managed is the route that works
+    /// without anything being stored.
+    ///
+    /// ## Why `direct` is accepted too
+    ///
+    /// Three repos in this org spell this split three ways: OpenHuman says
+    /// `direct` / `backend`, TinyMemory says `direct` / `proxied`, and this one
+    /// says `byok` / `managed`. Only [`BYOK_MODE`] is ever *written* here, so
+    /// the alias is not load-bearing today — it is there because of what the
+    /// fallback above would otherwise do to the one spelling somebody is most
+    /// likely to reach for.
+    ///
+    /// `direct` falling through to managed would be silent and wrong in the
+    /// specific way this whole surface refuses: a company that asked to act
+    /// through its own Composio account would act through the platform's
+    /// instead. (It would not *leak* the key — managed resolution reads
+    /// [`TOKEN_KEY`] and the company key, never [`API_KEY_KEY`], so the stored
+    /// Composio key would simply go unread — but the routing surprise is the
+    /// part that matters.) Nothing is gained by making the org's own other
+    /// spelling of "the company's own account" mean its opposite here.
+    ///
+    /// The managed spellings need no aliases: `backend` and `proxied` already
+    /// land on [`Self::Managed`] through the fallback, which is what they mean.
+    pub fn parse(raw: &str) -> Self {
+        let raw = raw.trim();
+        if raw.eq_ignore_ascii_case(BYOK_MODE) || raw.eq_ignore_ascii_case("direct") {
+            Self::Byok
+        } else {
+            Self::Managed
+        }
+    }
+
+    /// Whether this mode talks to Composio directly.
+    pub fn is_byok(self) -> bool {
+        matches!(self, Self::Byok)
+    }
+}
+
+impl std::fmt::Display for ComposioMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// This company's stored routing mode, or [`ComposioMode::Managed`].
+pub async fn load_mode(company: &CompanyId, secrets: &dyn SecretStore) -> Result<ComposioMode> {
+    Ok(secrets
+        .get(company, MODE_KEY)
+        .await?
+        .map(|SecretValue(raw)| ComposioMode::parse(&raw))
+        .unwrap_or_default())
+}
+
+/// Store (or rotate/clear) this company's own Composio API key **and the mode
+/// that goes with it**, returning the resulting mode.
+///
+/// The two are written together on purpose. A mode without a key is a company
+/// with no Composio tools (see [`resolve_access`], which fails closed rather
+/// than borrowing the platform identity), and a key without a mode is a
+/// credential nothing reads — both are states an operator can reach only if
+/// this function lets them. A non-empty value therefore sets the key and
+/// selects [`ComposioMode::Byok`]; an empty one clears the key and returns the
+/// company to [`ComposioMode::Managed`].
+///
+/// The writes are ordered by **direction**, not fixed key-then-mode: whichever
+/// order leaves a failed second write inert, rather than in the outage this
+/// whole function exists to rule out.
+///
+/// Selecting BYOK writes the key first. If the mode write then fails, the
+/// company is still `Managed` holding an unread key — inert, since managed
+/// resolution never looks at [`API_KEY_KEY`].
+///
+/// Clearing writes the mode first. A fixed key-then-mode order would write the
+/// *empty* key first here — and if the mode write then failed, the company
+/// would stay `Byok` (its old mode, unwritten) with an empty key, which
+/// [`resolve_access`] resolves to [`Credential::None`]: the exact "BYOK mode,
+/// no key" outage the key-first rule above exists to avoid, reached from the
+/// other direction. Writing the mode first instead leaves a failed second
+/// write as `Managed` holding a stale-but-present key — inert, for the same
+/// reason as the set direction.
+pub async fn store_api_key(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    api_key: &str,
+) -> Result<ComposioMode> {
+    let api_key = api_key.trim();
+    let mode = if api_key.is_empty() {
+        ComposioMode::Managed
+    } else {
+        ComposioMode::Byok
+    };
+    if mode.is_byok() {
+        secrets
+            .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
+            .await?;
+        secrets
+            .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
+            .await?;
+    } else {
+        secrets
+            .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
+            .await?;
+        secrets
+            .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
+            .await?;
+    }
+    Ok(mode)
+}
+
+/// How a company reaches Composio: the route, and the credential that route
+/// presents.
+///
+/// Returned as a pair rather than resolved twice because the two answers must
+/// agree — a console reporting BYOK while the agents present a platform bearer
+/// is the exact drift [`resolve_credential`]'s own docs exist to prevent.
+pub struct ComposioAccess {
+    /// Which host the calls go to.
+    pub mode: ComposioMode,
+    /// What they authenticate with: a Composio API key under
+    /// [`ComposioMode::Byok`], otherwise whatever [`resolve_credential`]
+    /// resolves.
+    pub credential: Credential,
+}
+
+impl ComposioAccess {
+    /// The non-secret endpoint this access reaches — [`DIRECT_BASE_URL`] for
+    /// BYOK, the resolved backend URL otherwise. Safe to surface on the console
+    /// read plane.
+    pub fn endpoint(&self, backend_url: &str) -> String {
+        match self.mode {
+            ComposioMode::Byok => DIRECT_BASE_URL.to_string(),
+            ComposioMode::Managed => backend_url.to_string(),
+        }
+    }
+}
+
+/// The route and credential this company's Composio calls use.
+///
+/// **Managed** defers wholly to [`resolve_credential`] — the BYO backend token,
+/// then the company's TinyHumans key, then the instance identity — so nothing
+/// about the default path changes by adding this.
+///
+/// **BYOK** reads [`API_KEY_KEY`] and nothing else. It deliberately does *not*
+/// fall back to the managed tiers when the key is missing or blank: a company
+/// that asked to act through its own Composio account and silently acted
+/// through the platform's instead would connect providers into the wrong tenant
+/// and bill the wrong party. [`Credential::None`] here means no tools this
+/// cycle, which is the same fail-closed answer an absent managed credential
+/// gets.
+///
+/// A store read error **propagates**, for the reason it propagates in
+/// [`resolve_credential`]: an unreadable store must not be able to change which
+/// account a call is attributed to.
+pub async fn resolve_access(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    token_source: Option<Arc<TinyhumansTokenSource>>,
+) -> Result<ComposioAccess> {
+    let mode = load_mode(company, secrets).await?;
+    let credential = match mode {
+        ComposioMode::Managed => resolve_credential(company, secrets, token_source).await?,
+        ComposioMode::Byok => match secrets.get(company, API_KEY_KEY).await? {
+            Some(SecretValue(key)) => Credential::from_value(key),
+            None => Credential::None,
+        },
+    };
+    if mode.is_byok() && !credential.configured() {
+        tracing::warn!(
+            company = %company,
+            "[composio] this company is in BYOK mode with no Composio API key stored; \
+             withholding tools rather than presenting the platform identity"
+        );
+    }
+    Ok(ComposioAccess { mode, credential })
+}
+
 /// The [`SecretStore`] key holding this company's per-toolkit default
 /// connections — a JSON object `{"gmail": "ca_123"}` written by the console
 /// (issue #820).
@@ -529,6 +797,283 @@ mod tests {
         assert!(
             load_defaults(&company, &secrets).await.unwrap().is_empty(),
             "a hand-edited blob must fall back to Composio's resolution, not withhold the tools"
+        );
+    }
+    // ── BYOK routing ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_company_that_configured_nothing_is_openhuman_managed() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Managed
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Managed);
+    }
+
+    #[tokio::test]
+    async fn storing_a_key_selects_byok_and_clearing_it_gives_the_managed_route_back() {
+        // The two writes travel together deliberately — a mode without a key is
+        // a company with no Composio tools, and a key without a mode is inert.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+
+        let mode = store_api_key(&company, &secrets, " ak_live ")
+            .await
+            .unwrap();
+        assert_eq!(mode, ComposioMode::Byok);
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Byok);
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("ak_live"),
+            "the key is trimmed on the way in — Composio rejects a padded x-api-key"
+        );
+
+        let mode = store_api_key(&company, &secrets, "").await.unwrap();
+        assert_eq!(mode, ComposioMode::Managed);
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Managed);
+    }
+
+    /// Wraps [`MemSecrets`] and fails every `set` for one chosen key, so a test
+    /// can land a `store_api_key` call exactly at its second write and inspect
+    /// what the first one left behind.
+    struct SecretsFailingToWrite {
+        inner: MemSecrets,
+        blocked_key: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for SecretsFailingToWrite {
+        async fn get(&self, c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+            self.inner.get(c, key).await
+        }
+        async fn set(&self, c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+            if key == self.blocked_key {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "write refused by test".into(),
+                ));
+            }
+            self.inner.set(c, key, value).await
+        }
+    }
+
+    /// A clear that dies on its **first** write (the mode) must leave the
+    /// company exactly as it was: still `Byok`, still holding the key that was
+    /// working a moment ago. This is the direction issue #… — writing the mode
+    /// first for a clear — exists to protect: a fixed key-then-mode order would
+    /// have written the key EMPTY here, before ever reaching the (blocked) mode
+    /// write, stranding a `Byok` company with no key.
+    #[tokio::test]
+    async fn a_clear_that_fails_on_the_mode_write_leaves_byok_intact() {
+        let company = CompanyId::new("acme");
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: MODE_KEY,
+        };
+        // Seeded directly on `inner`, bypassing the wrapper's own blocking
+        // `set()` — the state under test is "already BYOK", not "how it got
+        // there", and going through `store_api_key` here would hit the very
+        // block this test exists to trigger before the test has even started.
+        secrets
+            .inner
+            .set(&company, API_KEY_KEY, SecretValue("ak_live".into()))
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+
+        let err = store_api_key(&company, &secrets, "").await;
+        assert!(
+            err.is_err(),
+            "the blocked write must propagate, not swallow"
+        );
+
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Byok
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("ak_live"),
+            "the key a moment ago worked and must still work — nothing broke"
+        );
+    }
+
+    /// A clear that dies on its **second** write (the key) must still have
+    /// landed the mode: the company reads back as `Managed`, with a stale
+    /// unused key sitting inert in `API_KEY_KEY` — never consulted once the
+    /// mode says managed.
+    #[tokio::test]
+    async fn a_clear_that_fails_on_the_key_write_still_lands_managed() {
+        let company = CompanyId::new("acme");
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: API_KEY_KEY,
+        };
+        // Seeded directly on `inner` for the same reason as the sibling test
+        // above: this test's block is `API_KEY_KEY`, and `store_api_key`'s set
+        // direction writes that key first — routing the initial BYOK selection
+        // through the wrapper would block before there was anything to clear.
+        secrets
+            .inner
+            .set(&company, API_KEY_KEY, SecretValue("ak_live".into()))
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+
+        let err = store_api_key(&company, &secrets, "").await;
+        assert!(err.is_err());
+
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Managed,
+            "the mode write is first for a clear, and it landed before the blocked one"
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            access.mode,
+            ComposioMode::Managed,
+            "a stale key under a managed mode is inert — resolve_access never reads it"
+        );
+    }
+
+    #[tokio::test]
+    async fn byok_never_falls_back_to_a_managed_credential() {
+        // The load-bearing one. A company that asked to act through its own
+        // Composio account must not silently act through the platform's: that
+        // would connect providers into the wrong tenant and bill the wrong
+        // party. No key means no tools.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        // A managed-tier credential that *would* answer, so the test proves the
+        // BYOK arm ignores it rather than that there was nothing to fall back to.
+        secrets
+            .set(&company, TOKEN_KEY, SecretValue("backend-bearer".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Byok);
+        assert!(
+            !access.credential.configured(),
+            "BYOK with no API key resolves to nothing, not to the backend token"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_byok_key_is_never_confused_with_the_backend_token() {
+        // Two different secrets authenticating two different hosts. Selecting
+        // BYOK must present the Composio key, not the bearer stored next to it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, TOKEN_KEY, SecretValue("backend-bearer".into()))
+            .await
+            .unwrap();
+        store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("ak_live")
+        );
+
+        // And clearing the key hands the backend token back untouched — a
+        // switch to BYOK and back must not cost the company its override.
+        store_api_key(&company, &secrets, "").await.unwrap();
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Managed);
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("backend-bearer")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hand_edited_mode_slot_cannot_take_a_company_s_tools_away() {
+        // Read on the roster path: an unrecognised mode must degrade to the
+        // route that works without anything stored, not to no route at all.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, MODE_KEY, SecretValue("nonsense".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Managed,
+            "an unrecognised mode falls back to the route that works without config"
+        );
+
+        // OpenHuman's and TinyMemory's spelling of the same route. Never
+        // written here, but a slot that carried it must not silently mean the
+        // opposite — a company asking for its own account would get the
+        // platform's.
+        secrets
+            .set(&company, MODE_KEY, SecretValue("dirEct".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Byok
+        );
+
+        // …and the managed spellings the other repos use need no alias: they
+        // already mean managed through the fallback.
+        for spelling in ["backend", "proxied"] {
+            secrets
+                .set(&company, MODE_KEY, SecretValue(spelling.into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                load_mode(&company, &secrets).await.unwrap(),
+                ComposioMode::Managed,
+                "`{spelling}` means managed everywhere it is used"
+            );
+        }
+
+        secrets
+            .set(&company, MODE_KEY, SecretValue("  BYOK  ".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Byok,
+            "the one spelling this repo does use is matched case-insensitively"
+        );
+    }
+
+    #[test]
+    fn the_endpoint_reported_is_the_host_the_calls_reach() {
+        let byok = ComposioAccess {
+            mode: ComposioMode::Byok,
+            credential: Credential::from_value("ak_live"),
+        };
+        assert_eq!(byok.endpoint("https://api.tinyhumans.ai"), DIRECT_BASE_URL);
+
+        let managed = ComposioAccess {
+            mode: ComposioMode::Managed,
+            credential: Credential::from_value("bearer"),
+        };
+        assert_eq!(
+            managed.endpoint("https://api.tinyhumans.ai"),
+            "https://api.tinyhumans.ai"
         );
     }
 }
