@@ -2950,11 +2950,19 @@ async fn chat_and_emit(
     // otherwise it falls through to the ordinary turn.
     #[cfg(feature = "openhuman")]
     {
-        let _serialized = runtime.task_writes.lock().await;
-        match runtime
-            .plan_blocker_reply(&desk, parent, &message.text)
-            .await?
-        {
+        // The guard covers the read-and-classify only, and is released before
+        // anything is settled. `apply_blocker_reply` waits on a follow-up that
+        // runs on a spawned task and takes `task_writes` for the board edit its
+        // resume makes, so holding the lock across it would wait forever on a
+        // task that is waiting for this lock. Nothing between the two needs it:
+        // `accept_chat_turn` journals the message and touches no board.
+        let plan = {
+            let _serialized = runtime.task_writes.lock().await;
+            runtime
+                .plan_blocker_reply(&desk, parent, &message.text)
+                .await?
+        };
+        match plan {
             crate::company::runtime::BlockerReplyPlan::Resolve { ids, intent } => {
                 let accepted =
                     accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
@@ -10319,9 +10327,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-9".to_string(),
-                    title: crate::ports::tasks::TaskTitle::authored(
-                        "Draft the launch note",
-                    ),
+                    title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
                     priority: "medium".to_string(),
