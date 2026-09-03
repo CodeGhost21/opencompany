@@ -103,7 +103,9 @@ import {
   dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
+  liveFrameThreadKey,
   liveReplyIdentity,
+  replyVoice,
   MAIN_THREAD_ID,
   makeMessage,
   mergeHistoryInOrder,
@@ -2184,7 +2186,12 @@ export function AppShell({
           ...t,
           [channelId]: [
             ...existing,
-            makeMessage("company", event.text, {
+            // `replyVoice`, not a literal: a host-authored line (the
+            // iteration-cap pause) is projected with `agentId: "system"` and
+            // must render as the same centred row `fromHistory` gives it, or
+            // whoever watched the turn live keeps an agent-style bubble that
+            // hydration will never correct.
+            makeMessage(replyVoice(event.agentId), event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,
@@ -2681,13 +2688,26 @@ export function AppShell({
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
     // when a frame carries no chatId (older host / background turn).
-    const threadId =
+    const frameThreadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
+    // …then through the shared resolver, which normalizes General spellings and
+    // leaves every other id in the host-thread namespace these maps are keyed
+    // in. Its doc carries the reasoning for both halves and for why an
+    // unresolved General alias falls back to `MAIN_THREAD_ID` rather than to
+    // its own spelling.
+    const threadId = frameThreadId
+      ? liveFrameThreadKey(chatChannelByThreadRef.current, frameThreadId)
+      : frameThreadId;
     if (!threadId) {
-      // No chat bubble to fold the frame into. A dispatched card streams
-      // nothing at all — `run_steered_background` runs with `LiveStream::Off` —
-      // so a chat-less frame here is a host emitting a shape this console does
-      // not render, and the Observatory's live re-read is instead driven by the
+      // No chat bubble to fold the frame into. A dispatched card raised from a
+      // conversation now DOES stream — `run_steered_background` derives its
+      // stream from the `origin_chat_id` the card carries — but it streams
+      // *keyed*, so those frames arrive with a `chatId` and take the branch
+      // above. What still reaches here is a card no conversation raised (a
+      // board-raised card, a cron tick): its chat id is absent or empty, the
+      // host resolves that to `LiveStream::Off`, and nothing is published. So a
+      // chat-less frame is a host emitting a shape this console does not
+      // render, and the Observatory's live re-read is instead driven by the
       // workflow node events in `onWorkflowRunEvent`.
       return;
     }

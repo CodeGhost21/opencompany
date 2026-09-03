@@ -27,6 +27,27 @@ interface Props {
   /** The message the thread hangs off. */
   parent: ChatMessage;
   replies: ChatMessage[];
+  /**
+   * The subset of `replies` already laid out inline in the channel, from
+   * {@link inlineReplyIds} — excluded from the count above the list, never
+   * from the list itself.
+   *
+   * The two are different questions and were being answered by one number.
+   * The channel's chip counts what is left to open (`buildTimeline` filters
+   * the promoted reply out of `replies`, deliberately: "a reader seeing the
+   * answer must not be told there is one more thing to open"), while this
+   * panel counted every descendant `repliesInThread` walked to. A capped turn
+   * emits two replies — the agent's write-up and the host's pause notice — so
+   * the chip said "1 reply", the header said "2 replies", and the same thread
+   * reported two sizes on screen at once.
+   *
+   * Counting the same set the chip counts settles that. The promoted reply
+   * still *renders* here, because the notice under it opens "The reply above
+   * is a pause" — drop the reply above and that sentence points at nothing.
+   * Shown but not counted is the honest reading: it is context the reader has
+   * already seen in the channel, not a further thing to open.
+   */
+  inlineReplyIds?: ReadonlySet<string>;
   sending: boolean;
   /**
    * Everything an `@` can name here (issue #1645). Drawn from the parent
@@ -184,6 +205,7 @@ export function ThreadPanel({
   members,
   parent,
   replies,
+  inlineReplyIds,
   sending,
   mentionables,
   channelMemberIds,
@@ -206,6 +228,12 @@ export function ThreadPanel({
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
 }: Props) {
+  // Absent `inlineReplyIds` counts everything, which is what every caller did
+  // before the prop existed: a panel that cannot know what the channel
+  // promoted must not silently under-count.
+  const countedReplies = inlineReplyIds
+    ? replies.reduce((n, r) => (inlineReplyIds.has(r.id) ? n : n + 1), 0)
+    : replies.length;
   return (
     <aside className="flex w-96 shrink-0 flex-col border-l bg-background">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
@@ -232,7 +260,7 @@ export function ThreadPanel({
         />
         <div className="flex items-center gap-2 px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">
-            {replies.length} {replies.length === 1 ? "reply" : "replies"}
+            {countedReplies} {countedReplies === 1 ? "reply" : "replies"}
           </span>
           <span className="h-px flex-1 bg-border" aria-hidden />
         </div>

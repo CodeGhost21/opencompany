@@ -904,6 +904,34 @@ fn refuse_approval_siblings(tool_calls: &[ToolCall]) -> TaResult<()> {
     Ok(())
 }
 
+/// Whether the raw payload asks for an action at all, independent of whether
+/// any of it parsed.
+///
+/// Checked on the *raw* payload and independent of `finish_reason`, so a
+/// genuinely-requested-but-unparseable call can never be promoted as ordinary
+/// prose (Codex review on #1779, comment 3862781739).
+///
+/// Shared with [`probe`] rather than re-derived there: the probe's
+/// reasoning-only tolerance must not swallow a malformed-tool-call failure, and
+/// answering "did this payload request an action?" two different ways is how
+/// the probe drifted from the turn path before (Codex review on #2068).
+fn raw_tool_call_requested(payload: &serde_json::Value) -> bool {
+    payload
+        .pointer("/choices/0/message/tool_calls")
+        .is_some_and(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(arr) => !arr.is_empty(),
+            // A present-but-non-array value (e.g. an object) is not a shape
+            // `parse_tool_calls` or the legacy `function_call` check can
+            // recognize, but it is not an absence either — fail closed
+            // rather than let it read as "nothing requested".
+            _ => true,
+        })
+        || payload
+            .pointer("/choices/0/message/function_call")
+            .is_some_and(|v| !v.is_null())
+}
+
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
 /// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
 /// billing envelope.
@@ -935,7 +963,6 @@ fn model_response_from_payload_offering(
     // Content may be a plain string OR an array of `{type:"text",text:…}`
     // parts; tolerate both.
     let raw_content = payload.pointer("/choices/0/message/content");
-    let content_is_null = raw_content.is_some_and(serde_json::Value::is_null);
     let mut content = extract_content_text(raw_content);
     // Whether a fallback below replaced the model's own visible message. Read
     // by the text-tool-call recovery, which must act on what the model *said*
@@ -954,28 +981,6 @@ fn model_response_from_payload_offering(
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    // Reasoning-model fallback: a reasoning-only turn returns `content: null`
-    // with the visible text under `reasoning` / `reasoning_content` (string or
-    // array-of-parts). Recover it so the turn is not lost to a hard error —
-    // but only when the model actually finished. Any finish reason other than
-    // a true completion (`length` truncation, `content_filter`, `failed` —
-    // the documented HTTP-200-empty-response silent failure, see
-    // docs/spec/runtime/providers.md — or any other/unknown value) means the
-    // chain of thought itself may be unfinished, so promoting it here would
-    // hand downstream consumers a partial or incorrect thought as if it were
-    // the final answer. Allow-list the known-good completions instead of
-    // blocklisting the failures we happened to think of, so an unrecognized
-    // failure reason fails closed. Fall through to the empty-response error
-    // below otherwise.
-    // Only `stop` means "finished, with prose, asking for nothing else".
-    // `tool_calls` and `function_call` were in this list until PR #1779's
-    // review: both assert the model requested an ACTION, so a response
-    // carrying one of them has not produced a final answer at all — whether
-    // or not the call body parses. Promoting a chain of thought over a
-    // requested action is the same class of substitution the truncation
-    // guard below prevents, so they are excluded here rather than handled by
-    // a special case per payload shape.
-    let genuinely_finished = matches!(finish_reason.as_deref(), Some("stop"));
     // `tool_calls` above is the *parsed* result: `parse_tool_calls` requires a
     // `/message/tool_calls` array AND drops any entry missing `function.name`,
     // and it never reads the legacy singular `message.function_call` field at
@@ -987,21 +992,7 @@ fn model_response_from_payload_offering(
     // the *raw* payload for either call shape, independent of finish_reason,
     // so a genuinely-requested-but-unparseable call can never be promoted
     // (Codex review on #1779, comment 3862781739).
-    let raw_tool_call_requested = payload
-        .pointer("/choices/0/message/tool_calls")
-        .is_some_and(|v| match v {
-            serde_json::Value::Null => false,
-            serde_json::Value::Array(arr) => !arr.is_empty(),
-            // A present-but-non-array value (e.g. an object) is not a shape
-            // `parse_tool_calls` or the legacy `function_call` check can
-            // recognize, but it is not an absence either — fail closed
-            // rather than let it read as "nothing requested" and fall
-            // through to the reasoning fallback below.
-            _ => true,
-        })
-        || payload
-            .pointer("/choices/0/message/function_call")
-            .is_some_and(|v| !v.is_null());
+    let raw_tool_call_requested = raw_tool_call_requested(&payload);
     // How many entries the *raw* array actually carried, when it is an
     // array at all (legacy `function_call` and non-array shapes have no
     // raw count to compare against, and are already fully covered by the
@@ -1078,15 +1069,14 @@ fn model_response_from_payload_offering(
         .or_else(|| extract_array_refusal_text(payload.pointer("/choices/0/message/content")));
     if tool_calls.is_empty() && !raw_tool_call_requested {
         if let Some(refusal) = refusal_text {
-            // A refusal is a *completed* decision, not a partial one — unlike
-            // the reasoning fallback below, its precedence must not depend on
-            // `finish_reason`. Gating it on `genuinely_finished` let a
-            // refusal that ends with e.g. `finish_reason: "content_filter"`
-            // (arguably the *more* likely finish reason for an actual
-            // content-policy refusal) fall through untouched, leaving
-            // whatever text or reasoning leaked alongside it to win instead
-            // and silently discard the refusal (Codex review on #1779,
-            // comment 3875167298). It always wins over leaked text/reasoning,
+            // A refusal is a *completed* decision, not a partial one, so its
+            // precedence must not depend on `finish_reason`: a refusal that
+            // ends with e.g. `finish_reason: "content_filter"` (arguably the
+            // *more* likely finish reason for an actual content-policy
+            // refusal) must not fall through untouched, leaving whatever text
+            // or reasoning leaked alongside it to win instead and silently
+            // discard the refusal (Codex review on #1779, comment
+            // 3875167298). It always wins over leaked text/reasoning,
             // independent of how the turn finished.
             content = refusal;
             content_substituted = true;
@@ -1095,45 +1085,41 @@ fn model_response_from_payload_offering(
             // response silent provider failure (docs/spec/runtime/providers.md).
             // It is a *completed* disclaimer that the turn did not succeed —
             // like a refusal, not a partial/unfinished state — so it must not
-            // be overridden by whatever text leaked alongside it, the same
-            // way `genuinely_finished` already keeps a truncated/filtered/
-            // failed *reasoning* stream from being promoted below. That gate
-            // only covers the `reasoning` fallback though: `content` itself is
-            // extracted unconditionally at the top of this function (string OR
-            // array-shaped), so a provider that emits real text — a leaked
-            // lead-in sentence, or a fuller partial reply — before reporting
-            // `failed` had that text returned as a successful answer with no
-            // finish_reason check at all. Discard it here so the response
-            // falls through to the empty-turn error below, naming `failed` for
-            // diagnosis (CodeRabbit review on #1779, comment 3878355364).
+            // be overridden by whatever text leaked alongside it. `content`
+            // itself is extracted unconditionally at the top of this function
+            // (string OR array-shaped), so a provider that emits real text —
+            // a leaked lead-in sentence, or a fuller partial reply — before
+            // reporting `failed` had that text returned as a successful
+            // answer with no finish_reason check at all. Discard it here so
+            // the response falls through to the empty-turn error below,
+            // naming `failed` for diagnosis (CodeRabbit review on #1779,
+            // comment 3878355364).
             content.clear();
             content_substituted = true;
-        } else if genuinely_finished && content_is_null && content.is_empty() {
-            // Reasoning-model fallback: a reasoning-only turn returns
-            // `content: null` with the visible text under `reasoning` /
-            // `reasoning_content` (string or array-of-parts). Only promote it
-            // when the model actually finished — a truncated (`length`),
-            // filtered (`content_filter`), failed, or otherwise-unfinished
-            // chain of thought is not a final answer, and promoting it here
-            // would hand downstream consumers a partial or incorrect thought
-            // as if it were.
-            //
-            // `content.is_empty()` alone is not enough to detect the
-            // reasoning-only shape: it is also true for an explicit
-            // `content: ""` or a non-text content array (e.g. an image-only
-            // part) — both a genuine, visible provider response that
-            // `extract_content_text` simply can't render as text. Requiring
-            // the *raw* field to be absent/null before promoting keeps that
-            // response from being silently swapped for leaked
-            // chain-of-thought (CodeRabbit review on #1779, comment
-            // 3877224319).
-            content = extract_content_text(payload.pointer("/choices/0/message/reasoning"));
-            if content.is_empty() {
-                content =
-                    extract_content_text(payload.pointer("/choices/0/message/reasoning_content"));
-            }
-            content_substituted = true;
         }
+        // Deliberately no `reasoning`/`reasoning_content` fallback here.
+        //
+        // A `content: null` turn with only a populated `reasoning` field is
+        // not a misplaced answer — it is the model finishing (`stop`) having
+        // spent its entire turn on hidden deliberation and writing nothing to
+        // `content` at all. A prior version of this function copied
+        // `reasoning` into `content` in that case, on the premise that
+        // reasoning-only output was the model's real answer landing in the
+        // wrong field. That premise was false: `reasoning` is chain-of-thought,
+        // not a response, and promoting it put raw first-person deliberation —
+        // often truncated mid-sentence — directly in front of operators,
+        // labelled and persisted as the agent's genuine reply. Because a
+        // promoted turn is persisted and replayed as real history
+        // (`wire_message`), a later turn had no actual answer to build on and
+        // fabricated one instead of surfacing the gap.
+        //
+        // Falling through to the empty-turn error below is not a regression:
+        // that error is retryable (`classify_provider_failure` finds no
+        // status/keyword match in `empty_turn_facts`'s text, so it defaults to
+        // `ProviderFailureClass::Retryable`), so the harness retries the same
+        // request automatically rather than requiring operator action. Given
+        // whether a pass reasons at all is adaptive per-call, a retry has a
+        // real chance at a genuine `content`-bearing response.
     }
 
     // The model wrote a tool call into its message body instead of emitting it
@@ -1155,27 +1141,22 @@ fn model_response_from_payload_offering(
     //   * a **refusal** is a completed decision *not* to act, so recovering an
     //     action out of one would invert it;
     //   * `finish_reason: "failed"` cleared `content` precisely because the turn
-    //     did not succeed;
-    //   * promoted **reasoning** is the model deliberating, not answering — a
-    //     planning trace that merely *mentions* a call in JSON shape has not
-    //     requested it, and running it would execute a thought.
+    //     did not succeed.
     //
     // `finished_or_unstated` covers the other half of the same idea. A stop the
     // model did not choose — `length`, `content_filter`, `failed` — leaves a
     // fragment, and a balanced object inside a fragment is not a completed
     // request.
     //
-    // An **allow-list**, matching `genuinely_finished` above and the principle
+    // An **allow-list**, matching the principle
     // `unrecognized_finish_reason_reasoning_only_turn_errors` pins: a blocklist
     // only refuses the failures someone thought of, so a provider answering
     // `finish_reason: "error"` — a value this file's own tests already treat as
     // non-success — would have had a call recovered out of a failed turn
     // (CodeRabbit review on #2011).
     //
-    // It admits one thing `genuinely_finished` does not: an **absent**
-    // finish_reason. That is the difference between the two guards and it is
-    // deliberate. The reasoning fallback substitutes hidden text for an answer,
-    // where saying nothing should fail closed; here the model's own visible
+    // It admits one thing a plain `Some("stop")` check does not: an **absent**
+    // finish_reason. Here the model's own visible
     // message is the evidence, and refusing without a finish_reason would
     // disable the recovery for exactly the non-conforming providers it exists
     // for. Silence is not a failure signal — every named failure still is.
@@ -1256,6 +1237,54 @@ fn model_response_from_payload_offering(
         context_window,
     ));
     Ok(response)
+}
+
+/// Whether a payload the parser rejected as empty still proves the endpoint
+/// **answered** — it deliberated and simply had no budget left to write a
+/// visible reply.
+///
+/// Reachability and usability are different questions, and only [`probe`] asks
+/// the first. A real turn that comes back with nothing but chain-of-thought is
+/// a failed turn: there is no answer to show, and promoting the reasoning is
+/// what this PR removed. A *probe* asking `ping` with `max_tokens: 16` is not
+/// judging the answer at all — it is asking whether the credential, the base
+/// URL and the model name reach a server that completes chat turns. A response
+/// carrying reasoning tokens answers that with a yes.
+///
+/// Without this, the probe re-created the bug #1779 fixed: an endpoint that
+/// every real turn reached fine was reported as a broken connection, and the
+/// setup wizard would not proceed past it. 16 tokens is little enough room that
+/// a well-behaved reasoning model burns it on deliberation routinely — for the
+/// DeepSeek-style models this matters for, it is the *expected* shape, not an
+/// edge case.
+///
+/// Deliberately a **predicate on the payload**, not a second content path. The
+/// probe calls the same [`model_response_from_payload`] the turn path does and
+/// only consults this when that parser has already refused; giving the probe
+/// its own narrower parser is exactly how it drifted from the turn path before
+/// (Codex review on #1779). Nothing here is ever surfaced — the reasoning text
+/// is not read, only its presence.
+fn probe_reachable_despite_empty_turn(payload: &serde_json::Value) -> bool {
+    // Only the *empty-turn* refusal may be tolerated. A payload that asked for
+    // an action and got it wrong — a malformed entry, a missing name, a
+    // `finish_reason` declaring a call that never arrived — fails the parser
+    // for a different reason, and returning `Ok(())` on that would sail past
+    // the unoffered-tool-call guard below and pass an endpoint that cannot
+    // complete a bare `ping` (Codex review on #2068). This probe offers no
+    // tools, so a payload declaring an action is already wrong regardless of
+    // what else it carries.
+    if raw_tool_call_requested(payload)
+        || matches!(
+            payload
+                .pointer("/choices/0/finish_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("tool_calls") | Some("function_call")
+        )
+    {
+        return false;
+    }
+    !extract_content_text(payload.pointer("/choices/0/message/reasoning")).is_empty()
+        || !extract_content_text(payload.pointer("/choices/0/message/reasoning_content")).is_empty()
 }
 
 /// Deterministic offline model for tests and offline harness wiring.
@@ -1988,8 +2017,20 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
     // second, narrower copy of the parsing logic is exactly how it drifted
     // from the turn path the first time; calling the shared function directly
     // means there is only one content path to keep in sync.
-    let response = model_response_from_payload(payload)
-        .map_err(|e| anyhow::anyhow!("probe response carried no usable content: {e}"))?;
+    //
+    // Checked BEFORE the parser takes ownership: a reasoning-only reply fails
+    // the parser's empty-turn check, and for a reachability probe that failure
+    // is still a yes. See [`probe_reachable_despite_empty_turn`].
+    let reachable_despite_empty = probe_reachable_despite_empty_turn(&payload);
+    let response = match model_response_from_payload(payload) {
+        Ok(response) => response,
+        Err(_) if reachable_despite_empty => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "probe response carried no usable content: {e}"
+            ));
+        }
+    };
     // `model_response_from_payload` accepts a tool-call-only reply — correct
     // for a real turn, where the model may have been offered tools and
     // legitimately chose to call one instead of answering in prose. This
@@ -2540,11 +2581,23 @@ mod tests {
     }
 
     /// A reasoning-only turn returns `content: null` with the visible text under
-    /// a `reasoning` field and no tool calls. It must fall back to the reasoning
-    /// text and parse rather than hard-erroring — the managed reasoning brain
-    /// (deepseek/qwen via OpenRouter) is the exact source of the crash.
+    /// a `reasoning` field and no tool calls. This used to fall back to the
+    /// reasoning text and parse as a successful reply — the managed reasoning
+    /// brain (deepseek/qwen via OpenRouter) hits this shape routinely, and the
+    /// fallback's premise was that the model's real answer had landed in the
+    /// wrong field.
+    ///
+    /// That premise was wrong: `reasoning` is chain-of-thought, not a response.
+    /// Promoting it put raw, often mid-sentence deliberation in front of
+    /// operators as the agent's genuine reply, and because it was persisted and
+    /// replayed as real history, later turns had no actual answer to build on
+    /// and fabricated one instead of surfacing the gap (reasoning-leak repro,
+    /// live multi-agent chat). This shape must now error — the same
+    /// diagnosable empty-turn error every other no-real-answer shape returns —
+    /// so the harness retries automatically instead of showing leaked
+    /// deliberation as a final answer.
     #[test]
-    fn reasoning_only_turn_falls_back_to_reasoning_text() {
+    fn reasoning_only_turn_errors_instead_of_promoting_reasoning_text() {
         let payload = serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
@@ -2555,21 +2608,30 @@ mod tests {
                 }
             }]
         });
-        let resp = model_response_from_payload(payload).expect("reasoning-only turn parses");
-        assert_eq!(resp.text(), "The answer is 42.");
-        assert!(resp.message.tool_calls.is_empty());
+        let err = model_response_from_payload(payload)
+            .expect_err("reasoning-only turn must not promote reasoning into content");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("neither"),
+            "must be the diagnosable empty-turn error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("42"),
+            "leaked reasoning text must not appear in the error, got: {msg}"
+        );
     }
 
     /// A reasoning trace that *mentions* a call in JSON shape has not requested
     /// it, and running it would execute a thought rather than an instruction.
     ///
-    /// The promoted-reasoning path replaces `content` wholesale, so without the
-    /// `content == message_content` gate the text-tool-call recovery would read
-    /// a planning trace as an action and dispatch it — on a turn where the model
-    /// emitted no visible message and no structured call at all (Codex review on
-    /// #2011).
+    /// Reasoning is never promoted into `content` at all now, so this payload
+    /// — no visible message, no structured call — errors as an empty turn
+    /// before the text-tool-call recovery ever runs. That is a stronger
+    /// guarantee than the old "recovered but not dispatched" behavior: the
+    /// deliberation, call-shaped JSON included, never reaches the caller in
+    /// any form (Codex review on #2011, superseded by the reasoning-leak fix).
     #[test]
-    fn a_tool_call_shape_inside_promoted_reasoning_is_never_recovered() {
+    fn a_tool_call_shape_inside_reasoning_is_never_recovered_or_leaked() {
         let payload = serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
@@ -2583,17 +2645,16 @@ mod tests {
             }]
         });
         let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
-        let resp = model_response_from_payload_offering(payload, &offered)
-            .expect("the reasoning-only turn still parses");
-
+        let err = model_response_from_payload_offering(payload, &offered)
+            .expect_err("a reasoning-only turn must not parse as success");
+        let msg = err.to_string();
         assert!(
-            resp.message.tool_calls.is_empty(),
-            "a deliberation must never be dispatched as a call"
+            msg.contains("neither"),
+            "must be the diagnosable empty-turn error, got: {msg}"
         );
         assert!(
-            resp.text().contains("read_ledger"),
-            "and the trace reaches the caller unaltered: {}",
-            resp.text()
+            !msg.contains("read_ledger"),
+            "a deliberation must never be dispatched OR leaked into the error: {msg}"
         );
     }
 
@@ -2830,16 +2891,16 @@ mod tests {
 
     /// The mixed-array refusal case above (Codex review comment 3875001349)
     /// only reproduced with `finish_reason: "stop"`. The refusal-precedence
-    /// block was gated on `genuinely_finished`, so the identical payload with
-    /// `finish_reason: "content_filter"` — arguably the *more* likely finish
-    /// reason a real content-policy refusal ends with — skipped the block
-    /// entirely: `content` was already nonempty from the leaked text part,
-    /// so the empty-response check at the bottom accepted it and returned
-    /// the leaked lead-in as if it were the whole answer, silently
+    /// block used to be gated on a `stop`-only check, so the identical
+    /// payload with `finish_reason: "content_filter"` — arguably the *more*
+    /// likely finish reason a real content-policy refusal ends with —
+    /// skipped the block entirely: `content` was already nonempty from the
+    /// leaked text part, so the empty-response check at the bottom accepted
+    /// it and returned the leaked lead-in as if it were the whole answer,
+    /// silently
     /// discarding the refusal. A refusal is a completed decision, not a
-    /// partial one, so its precedence must not depend on `finish_reason` the
-    /// way the reasoning fallback's does (Codex review on #1779, comment
-    /// 3875167298).
+    /// partial one, so its precedence must not depend on `finish_reason`
+    /// (Codex review on #1779, comment 3875167298).
     #[test]
     fn a_refusal_wins_over_leaked_text_regardless_of_finish_reason() {
         let payload = serde_json::json!({
@@ -2861,14 +2922,13 @@ mod tests {
 
     /// The sibling fallback field: some providers emit the reasoning-only
     /// text under `reasoning_content` (array-of-parts shape) instead of
-    /// `reasoning`, with `reasoning` itself absent. `extract_content_text`
-    /// handles the array shape and `model_response_from_payload` only tries
-    /// `reasoning_content` once `reasoning` comes back empty — this test
-    /// exercises that second fallback specifically, which the existing
-    /// `reasoning`-field and `content_filter`-error tests do not cover
-    /// (CodeRabbit nitpick on #1779, comment ed359cf20f434c7f7f83c058).
+    /// `reasoning`, with `reasoning` itself absent. This shape is subject to
+    /// the same fix as the plain `reasoning` field above — `reasoning_content`
+    /// is chain-of-thought too, so it must not be promoted into `content`
+    /// either. Exercises the array-of-parts form specifically, which the
+    /// plain-`reasoning` test above does not cover.
     #[test]
-    fn reasoning_only_turn_falls_back_to_array_shaped_reasoning_content() {
+    fn reasoning_content_only_turn_errors_instead_of_promoting_array_shaped_text() {
         let payload = serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
@@ -2883,10 +2943,17 @@ mod tests {
                 }
             }]
         });
-        let resp =
-            model_response_from_payload(payload).expect("reasoning_content-only turn parses");
-        assert_eq!(resp.text(), "The answer is 42.");
-        assert!(resp.message.tool_calls.is_empty());
+        let err = model_response_from_payload(payload)
+            .expect_err("reasoning_content-only turn must not promote reasoning into content");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("neither"),
+            "must be the diagnosable empty-turn error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("42"),
+            "leaked reasoning text must not appear in the error, got: {msg}"
+        );
     }
 
     /// An explicit `content: ""` (not `null`) is a *visible* empty response,
@@ -3049,8 +3116,7 @@ mod tests {
     /// leaked text lives in the *primary* `content` field (array-shaped, the
     /// form round #8 of this PR taught `extract_content_text` to parse) rather
     /// than `reasoning`. `content` is extracted unconditionally at the top of
-    /// `model_response_from_payload`, with no `finish_reason` check of its
-    /// own — only the `reasoning` fallback is gated on `genuinely_finished`.
+    /// `model_response_from_payload`, with no `finish_reason` check of its own.
     /// Pre-fix, this payload parsed successfully with the leaked lead-in
     /// sentence returned as the answer, silently discarding the provider's own
     /// `failed` disclaimer (CodeRabbit review on #1779, comment 3878355364).
@@ -3084,11 +3150,12 @@ mod tests {
     /// under the singular `message.function_call` field, which
     /// `parse_tool_calls` never reads (it only parses the modern
     /// `message.tool_calls` array). Pre-fix, `finish_reason: "function_call"`
-    /// sat in the `genuinely_finished` allow-list, so with `tool_calls` empty
-    /// (nothing there to parse) and `content: null`, this fell straight into
-    /// the reasoning fallback and silently swapped the requested action for
-    /// prose — the caller never even sees a tool call was dropped. Must error
-    /// instead (Codex follow-up review on #1779, comment 3862781739).
+    /// used to sit in an allow-list gating a reasoning-promotion fallback, so
+    /// with `tool_calls` empty (nothing there to parse) and `content: null`,
+    /// this fell straight into that fallback and silently swapped the
+    /// requested action for prose — the caller never even sees a tool call
+    /// was dropped. Must error instead (Codex follow-up review on #1779,
+    /// comment 3862781739).
     #[test]
     fn legacy_function_call_with_reasoning_errors_instead_of_promoting() {
         let payload = serde_json::json!({
@@ -4227,6 +4294,33 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawns a stub whose whole `choices[0]` object is the given raw JSON —
+    /// `spawn_stub_message` below pins `finish_reason: "stop"`, so this is the
+    /// one that can express a payload *declaring* an action it never delivered.
+    async fn spawn_stub_choice(choice: serde_json::Value) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let choice = choice.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [choice],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
     /// Spawns an in-process OpenAI-compatible stub whose full `message` object
     /// is the given raw JSON value — used to exercise shapes `spawn_stub_content`
     /// cannot, such as a reasoning-only turn (`content: null` with the visible
@@ -4655,19 +4749,85 @@ mod tests {
             .expect("array-shaped content must be recognized as a successful probe");
     }
 
-    /// Codex review on #1779 (comment 3864906472): the array-content fix above
-    /// made `probe` call `extract_content_text` directly instead of the shared
-    /// `model_response_from_payload` — which picked up the array-shaped-content
-    /// case but not the `reasoning`/`reasoning_content` fallback for a
-    /// reasoning-only turn (`content: null`, `finish_reason: "stop"`, visible
-    /// text under `reasoning`) that lives inside `model_response_from_payload`.
-    /// A managed reasoning provider answering with that shape passed every
-    /// real turn while its own connection probe reported the connection
-    /// broken — blocking the setup wizard and the console's "Test" button for
-    /// a valid provider. `probe` must route through the exact same parser the
-    /// turn path calls so the two paths cannot diverge again.
+    /// Reachability and usability are different questions, and `probe` asks
+    /// only the first.
+    ///
+    /// The turn path must not promote `reasoning` into a reply — that is this
+    /// PR — and `probe` shares that parser, so a reasoning-only payload fails
+    /// its empty-turn check. For a *probe* that failure is still a yes: the
+    /// credential, base URL and model name reached a server that completed a
+    /// chat turn. It deliberated and ran out of room, which is a statement
+    /// about the budget, not the connection.
+    ///
+    /// An earlier revision of this branch asserted the opposite, and named the
+    /// risk in its own doc: `probe` sends `ping` with `max_tokens: 16`, little
+    /// enough that a well-behaved reasoning model burns it on deliberation
+    /// routinely. For the DeepSeek-style models this PR exists for that is the
+    /// *expected* shape, so rejecting it re-created the bug #1779 fixed — a
+    /// connection every real turn reached fine, reported as broken, with the
+    /// setup wizard refusing to move past it (Codex review on #2068). The fix
+    /// is the probe-specific tolerance that doc pointed at, not promotion in
+    /// the shared parser.
+    /// The reasoning tolerance covers the empty turn and nothing else.
+    ///
+    /// A payload that asked for an action and got it wrong fails the parser for
+    /// a *different* reason than "carried nothing", and tolerating that would
+    /// return `Ok(())` before the unoffered-tool-call guard below could run —
+    /// passing an endpoint that cannot complete a bare `ping`. This probe
+    /// advertises no tools at all, so a declared action is already wrong no
+    /// matter what else rides alongside it (Codex review on #2068).
+    ///
+    /// Reasoning is present in both payloads here, so the tolerance is what is
+    /// under test rather than the absence of its trigger.
     #[tokio::test]
-    async fn probe_accepts_reasoning_only_content() {
+    async fn the_reasoning_tolerance_does_not_excuse_a_broken_tool_call() {
+        for message in [
+            // Requested an action, and the entry is unparseable.
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning": "42 is the answer.",
+                "tool_calls": [{ "no_name_here": true }]
+            }),
+            // Declared an action that never arrived.
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning": "42 is the answer."
+            }),
+        ] {
+            let declares_only = message.get("tool_calls").is_none();
+            let url = if declares_only {
+                spawn_stub_choice(serde_json::json!({
+                    "message": message,
+                    "finish_reason": "tool_calls"
+                }))
+                .await
+            } else {
+                spawn_stub_message(message).await
+            };
+
+            let company = CompanyId::new("acme");
+            let secrets = MemSecrets::default();
+            let mut manifest = manifest_inference("openai_compatible");
+            manifest.base_url = Some(url);
+            let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let err = probe(&decl, None)
+                .await
+                .expect_err("a broken tool call must fail the probe even with reasoning present");
+            assert!(
+                !err.to_string().contains("42"),
+                "reasoning text must not leak into the probe error, got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_accepts_a_reasoning_only_reply_as_proof_the_endpoint_answers() {
         let url = spawn_stub_message(serde_json::json!({
             "role": "assistant",
             "content": null,
@@ -4684,9 +4844,26 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        probe(&decl, None)
-            .await
-            .expect("reasoning-only content must be recognized as a successful probe");
+        probe(&decl, None).await.expect(
+            "a reply carrying reasoning tokens proves the endpoint completes chat turns, \
+             even with no budget left for a visible answer",
+        );
+
+        // The turn path is unmoved by the probe's tolerance: the same payload
+        // through the same parser is still an error, so nothing promotes the
+        // chain-of-thought into a reply. Reachability is the only thing the
+        // tolerance buys.
+        let err = model_response_from_payload(serde_json::json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": null, "reasoning": "42 is the answer." },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect_err("a real turn carrying only reasoning is still an empty turn");
+        assert!(
+            !err.to_string().contains("42"),
+            "reasoning text must not leak into the turn error either, got: {err}"
+        );
     }
 
     /// CodeRabbit review on #1779 (comment 3877827976): `probe` routes

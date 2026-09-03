@@ -78,15 +78,44 @@ const CARD_VANISHED: &str = "the card was gone by the time its dispatch ran";
 /// rebuilds the agent whenever the roster / skill / MCP fingerprint moves — so
 /// "continue" is an instruction to the operator, phrased as a request to the
 /// agent, never a durability guarantee this layer cannot make.
-pub(crate) const ITERATION_CAP_PAUSE_NOTICE: &str = "\
-The reply above is a pause, not a finished answer: this turn reached the maximum number of steps \
-it may take for a single reply, so it stopped and wrote up where it had got to. Nothing errored — \
-the work so far stands. Reply \"continue\" to ask it to pick up from there.";
+///
+/// # Who it names, and who it is *from*
+///
+/// It **names the responder**, exactly as [`spend_halt_notice`] names the
+/// teammate whose budget ran out. That sibling's docs say naming the teammate
+/// is what makes a stop "attributable in a way a bare cap is not", and the same
+/// applies here: "this turn" told the operator a turn had capped without
+/// saying whose, which on a delegating orchestrator is the one thing they need
+/// to know. The objection recorded there is to quoting a *number* — one bubble
+/// can cover a responder, a desk and a relay turn, so a single cap figure maps
+/// back to nothing — and that objection is about the figure, not the name.
+///
+/// It is **from the system**, not from the agent it names. On the desk path
+/// below this already carried [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR),
+/// because a journalled notice must have an author; the operator path passed
+/// `agent: None` on the reasoning that no teammate said this and attributing it
+/// to the responder would put the platform's words in their mouth. That
+/// reasoning is right and the `None` still defeated it: an authorless reply
+/// journals as `agent_id: "operator"`, which is not a roster member, so the
+/// console fell through to the channel's own voice — the orchestrator's name —
+/// and rendered the platform's words under **"Product Manager"** with the
+/// company mark beside them. Naming the system author is what actually
+/// delivers the intent: `chat.ts` maps it to `from: "system"`, which
+/// `senderOf` renders as "System" and which the timeline's promotion guard
+/// already refuses to lift into the channel.
+pub(crate) fn iteration_cap_pause_notice(agent: &str) -> String {
+    format!(
+        "The reply above is a pause, not a finished answer: {agent}'s turn reached the maximum \
+         number of steps it may take for a single reply, so it stopped and wrote up where it had \
+         got to. Nothing errored — the work so far stands. Reply \"continue\" to ask it to pick up \
+         from there."
+    )
+}
 
 /// The system bubble emitted when a turn was halted by its in-turn spend brake
 /// (issue #1032).
 ///
-/// The sibling of [`ITERATION_CAP_PAUSE_NOTICE`], and deliberately **not**
+/// The sibling of [`iteration_cap_pause_notice`], and deliberately **not**
 /// interchangeable with it. Both say a turn stopped short, but the operator's
 /// next move is opposite:
 ///
@@ -143,7 +172,7 @@ pub(crate) const BUDGET_PAUSE_NOTICE_PREFIX: &str = "⏸ Paused — out of credi
 
 /// The system bubble emitted when a turn paused for lack of inference
 /// budget/credits (issue #1846) — the sibling of
-/// [`ITERATION_CAP_PAUSE_NOTICE`] and [`spend_halt_notice`], and, like both,
+/// [`iteration_cap_pause_notice`] and [`spend_halt_notice`], and, like both,
 /// deliberately unauthored: no teammate said this, the account ran out of
 /// money before the model ever replied.
 ///
@@ -3939,18 +3968,29 @@ impl HarnessBrain {
                     // memory and recall it as something the agent said in a
                     // later turn.
                     //
-                    // Unauthored (`agent: None`) for the same reason: no
+                    // Authored by the **system** for the same reason: no
                     // teammate said this, and attributing it to the responder
-                    // would put the platform's words in its mouth. Empty steps
-                    // — the turn's timeline is already on the bubble above, and
-                    // repeating it would double every row in the console.
+                    // would put the platform's words in its mouth. This was
+                    // `agent: None`, which meant the same thing and did not
+                    // achieve it — an authorless reply journals as
+                    // `agent_id: "operator"`, no roster member matches, and the
+                    // console falls back to the channel's voice, so the
+                    // platform's words appeared under the orchestrator's name.
+                    // `SYSTEM_AUTHOR` is what the desk path below already used
+                    // and what `chat.ts` maps to `from: "system"`. The notice
+                    // names the responder in its text instead, as
+                    // `spend_halt_notice` does — whose turn capped is the part
+                    // the operator needs, and saying it is not the same as
+                    // saying they said it. Empty steps — the turn's timeline is
+                    // already on the bubble above, and repeating it would
+                    // double every row in the console.
                     if turn.hit_iteration_cap {
                         channel_responses.push(OutboundMessage {
                             message_id: None,
                             task_id: None,
                             channel: "operator".to_string(),
-                            agent: None,
-                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: iteration_cap_pause_notice(&responder),
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),
@@ -4108,7 +4148,7 @@ impl HarnessBrain {
                             task_id: None,
                             channel: crate::server::ops::language::DEFAULT_DESK.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
-                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            text: iteration_cap_pause_notice(&responder),
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),
