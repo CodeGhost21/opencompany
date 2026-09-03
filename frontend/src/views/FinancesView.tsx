@@ -143,6 +143,11 @@ export function FinancesView({ client, company }: Props) {
                   ? "Spending is capped at $0.00 this month."
                   : `${usd(data.spentUsd)} of ${usd(budgetUsd)} used · ${usd(budgetUsd - data.spentUsd)} left`}
             </CardDescription>
+            <CardDescription data-testid="monthly-budget-origin">
+              This cap is read from the company manifest's <code>[budget]</code>{" "}
+              section and cannot be changed here. To limit spending from the
+              console, set a daily cap on each teammate's page.
+            </CardDescription>
           </CardHeader>
           {hasBudget && (
             <CardContent className="space-y-2">

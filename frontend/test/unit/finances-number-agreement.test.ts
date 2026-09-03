@@ -128,3 +128,22 @@ describe("Finance overview number agreement", () => {
     expect(budget).toContain("$9.84 left");
   });
 });
+
+describe("Monthly budget card", () => {
+  it("says where the cap comes from, so an absent one does not read as a missing control", async () => {
+    await render(SUB_DOLLAR_SPEND);
+
+    const origin = container.querySelector('[data-testid="monthly-budget-origin"]');
+    expect(origin?.textContent).toContain("company manifest");
+    expect(origin?.textContent).toContain("cannot be changed here");
+    expect(origin?.textContent).toContain("daily cap on each teammate's page");
+  });
+
+  it("keeps saying so once a cap exists, since the console still cannot change it", async () => {
+    await render({ ...SUB_DOLLAR_SPEND, budgetUsd: 10 });
+
+    expect(
+      container.querySelector('[data-testid="monthly-budget-origin"]')?.textContent,
+    ).toContain("company manifest");
+  });
+});
