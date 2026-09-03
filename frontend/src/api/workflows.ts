@@ -375,6 +375,14 @@ export interface WorkflowRunResult {
    * delivery failure, because the nodes really did run.
    */
   verdict?: WorkflowRunVerdict;
+  /**
+   * Whether the operator stopped this run before it settled (Codex review, PR
+   * #2053). The host has sent this on every settled body since before #981;
+   * added to the type now because deriving a legacy fallback verdict — see
+   * {@link legacyRunVerdict} — needs it and a `WorkflowRunVerdict | undefined`
+   * host predating #981 still sends it.
+   */
+  cancelled?: boolean;
 }
 
 /**

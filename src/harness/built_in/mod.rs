@@ -4326,7 +4326,19 @@ impl HarnessPool {
             run_sink.as_ref().map(|s| s.run_id()),
         )
         .await;
-        let outcome = turn_result_after_metering(outcome, metered, company, agent_id)?;
+        // Issue #1846, Codex review (PR #2053): the budget-pause park/retire
+        // side effects below read the turn's OWN outcome, and must run before
+        // `turn_result_after_metering`'s `?` — a ledger write that fails is a
+        // problem with the METER, not with what this turn actually did, and
+        // must not also swallow a genuine pause marker (the operator's only
+        // "add credits and resend" path) or a genuine retirement of a stale
+        // one (leaving a stale CTA that could later re-dispatch a
+        // potentially non-idempotent request a second time). `meter_turn_costs`
+        // itself still runs first and unconditionally, exactly as
+        // `meter_turn_costs`'s own doc requires — this only reorders reading
+        // `outcome` for these two side effects ahead of the point that
+        // `outcome` might get replaced by a metering error.
+        //
         // Issue #1846: park a durable re-issue marker the moment a pause is
         // seen, mirroring the grant-reissue precedent (`crate::runtime::grants`)
         // — mint on the event that needs a later redemption, not on whatever
@@ -4334,131 +4346,134 @@ impl HarnessPool {
         // parked: the operator's own words are what gets re-sent, and
         // retrieve→inject re-runs fresh against whatever memory looks like at
         // redeem time rather than replaying a stale injection.
-        if let Some(pause) = &outcome.budget_paused {
-            let chat_id = match live {
-                LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
-                LiveStream::Workflow { .. } | LiveStream::Off => None,
-            };
-            // Issue #1846 review (Codex #3869193112): whether an operator
-            // was ever addressing this turn AT ALL, not just whether they
-            // named a specific desk — see `BudgetPauseMarker::background`'s
-            // doc for why this is a different question from `chat_id`
-            // above, which is `None` for BOTH an unaddressed interactive
-            // message and a background turn alike.
-            let is_background = matches!(live, LiveStream::Workflow { .. } | LiveStream::Off);
-            // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
-            // the ambient parent/deliverable/mentions the cycle was started
-            // with, so a redeem replays the operator's ORIGINAL
-            // thread/intent/audience instead of the empty defaults
-            // `redeem_budget_pause` used to fall back to.
-            let redeem_context = crate::runtime::grants::current_redeem_context();
-            // Issue #1846 review (Codex #3866418891): `message` here is
-            // whatever this turn actually ran with — for an operator-message
-            // turn that is `composed`, already carrying `with_attachment_refs`
-            // markers baked into the text, which would double up with
-            // `redeem_context.attachments` below once `redeem_budget_pause`
-            // recomposes them fresh. The ambient context's own RAW text (set
-            // once, from the ORIGINAL `OperatorMessage`, before any composing
-            // happened) is preferred whenever one is in scope; falling back to
-            // the local `message` only for a cycle with no `OperatorMessage`
-            // at all (a workflow node's own background turn), which has no
-            // raw/composed split — and no attachments — to begin with.
-            let park_message = redeem_context.text.clone().unwrap_or_else(|| {
-                // Issue #1890 E: the operator's own words, which is what this
-                // fallback has always claimed to hold. `message` here is the
-                // composed turn text, so it carries whatever the cycle appended
-                // — the open-work briefing, the settled-work one, the thread
-                // index — and parking that bakes a machine briefing into the
-                // request a redeem re-sends. It was already reachable through
-                // the #176 briefing whenever the agent had open cards; the
-                // thread index made it reachable on an ordinary channel, which
-                // is how `redeem_replays_the_markers_attachments` caught it.
-                crate::runtime::delegation::operator_words(message).to_string()
-            });
-            let pauses = crate::runtime::grants::budget_pauses_for(company);
-            let marker = if is_background {
-                pauses.park_background(
-                    pause.agent.clone(),
-                    chat_id,
-                    park_message,
-                    pause.summary.clone(),
-                    crate::ports::now_millis(),
-                    redeem_context,
+        if let Ok(turn_outcome) = &outcome {
+            if let Some(pause) = &turn_outcome.budget_paused {
+                let chat_id = match live {
+                    LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
+                    LiveStream::Workflow { .. } | LiveStream::Off => None,
+                };
+                // Issue #1846 review (Codex #3869193112): whether an operator
+                // was ever addressing this turn AT ALL, not just whether they
+                // named a specific desk — see `BudgetPauseMarker::background`'s
+                // doc for why this is a different question from `chat_id`
+                // above, which is `None` for BOTH an unaddressed interactive
+                // message and a background turn alike.
+                let is_background = matches!(live, LiveStream::Workflow { .. } | LiveStream::Off);
+                // Issue #1846 review (Codex #3865812419/#3865812423/#3865812432):
+                // the ambient parent/deliverable/mentions the cycle was started
+                // with, so a redeem replays the operator's ORIGINAL
+                // thread/intent/audience instead of the empty defaults
+                // `redeem_budget_pause` used to fall back to.
+                let redeem_context = crate::runtime::grants::current_redeem_context();
+                // Issue #1846 review (Codex #3866418891): `message` here is
+                // whatever this turn actually ran with — for an operator-message
+                // turn that is `composed`, already carrying `with_attachment_refs`
+                // markers baked into the text, which would double up with
+                // `redeem_context.attachments` below once `redeem_budget_pause`
+                // recomposes them fresh. The ambient context's own RAW text (set
+                // once, from the ORIGINAL `OperatorMessage`, before any composing
+                // happened) is preferred whenever one is in scope; falling back to
+                // the local `message` only for a cycle with no `OperatorMessage`
+                // at all (a workflow node's own background turn), which has no
+                // raw/composed split — and no attachments — to begin with.
+                let park_message = redeem_context.text.clone().unwrap_or_else(|| {
+                    // Issue #1890 E: the operator's own words, which is what this
+                    // fallback has always claimed to hold. `message` here is the
+                    // composed turn text, so it carries whatever the cycle appended
+                    // — the open-work briefing, the settled-work one, the thread
+                    // index — and parking that bakes a machine briefing into the
+                    // request a redeem re-sends. It was already reachable through
+                    // the #176 briefing whenever the agent had open cards; the
+                    // thread index made it reachable on an ordinary channel, which
+                    // is how `redeem_replays_the_markers_attachments` caught it.
+                    crate::runtime::delegation::operator_words(message).to_string()
+                });
+                let pauses = crate::runtime::grants::budget_pauses_for(company);
+                let marker = if is_background {
+                    pauses.park_background(
+                        pause.agent.clone(),
+                        chat_id,
+                        park_message,
+                        pause.summary.clone(),
+                        crate::ports::now_millis(),
+                        redeem_context,
+                    )
+                } else {
+                    pauses.park(
+                        pause.agent.clone(),
+                        chat_id,
+                        park_message,
+                        pause.summary.clone(),
+                        crate::ports::now_millis(),
+                        redeem_context,
+                    )
+                };
+                tracing::info!(
+                    company = %company,
+                    agent = %pause.agent,
+                    marker_id = %marker.id,
+                    "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
+                );
+            } else if let Some(stale) = {
+                // Issue #1846 review (Codex #3869792503, tightened by
+                // #3869968949): match on the SAME saved-request CONTEXT
+                // `park_message`/`park`/`park_background` above parks a marker
+                // under — text, chat thread, parent, deliverable, mentions AND
+                // attachments — not an unconditional `redeem` and not text
+                // alone. An unrelated turn for this agent (an automatic
+                // background task, a second chat message about something else
+                // entirely, or even a coincidentally-identical-text request in a
+                // DIFFERENT thread) succeeding first must not silently drop the
+                // marker for a DIFFERENT, still-unretried original request. A
+                // resend, by construction, runs with the SAME context the
+                // marker parked; an unrelated success does not.
+                let candidate_chat_id = match live {
+                    LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
+                    LiveStream::Workflow { .. } | LiveStream::Off => None,
+                };
+                let candidate_redeem = crate::runtime::grants::current_redeem_context();
+                let candidate_message = candidate_redeem.text.clone().unwrap_or_else(|| {
+                    // Stripped on exactly the terms the park above is, or the
+                    // retire-match would compare a briefing-laden candidate against
+                    // a clean parked marker and never retire it (#1890 E).
+                    crate::runtime::delegation::operator_words(message).to_string()
+                });
+                crate::runtime::grants::budget_pauses_for(company).retire_if_message_matches(
+                    agent_id,
+                    &candidate_message,
+                    candidate_chat_id.as_deref(),
+                    &candidate_redeem,
                 )
-            } else {
-                pauses.park(
-                    pause.agent.clone(),
-                    chat_id,
-                    park_message,
-                    pause.summary.clone(),
-                    crate::ports::now_millis(),
-                    redeem_context,
-                )
-            };
-            tracing::info!(
-                company = %company,
-                agent = %pause.agent,
-                marker_id = %marker.id,
-                "[budget-pause] parked a re-issue marker; the operator can redeem it once credits are added"
-            );
-        } else if let Some(stale) = {
-            // Issue #1846 review (Codex #3869792503, tightened by
-            // #3869968949): match on the SAME saved-request CONTEXT
-            // `park_message`/`park`/`park_background` above parks a marker
-            // under — text, chat thread, parent, deliverable, mentions AND
-            // attachments — not an unconditional `redeem` and not text
-            // alone. An unrelated turn for this agent (an automatic
-            // background task, a second chat message about something else
-            // entirely, or even a coincidentally-identical-text request in a
-            // DIFFERENT thread) succeeding first must not silently drop the
-            // marker for a DIFFERENT, still-unretried original request. A
-            // resend, by construction, runs with the SAME context the
-            // marker parked; an unrelated success does not.
-            let candidate_chat_id = match live {
-                LiveStream::On { chat_id, .. } => chat_id.map(str::to_string),
-                LiveStream::Workflow { .. } | LiveStream::Off => None,
-            };
-            let candidate_redeem = crate::runtime::grants::current_redeem_context();
-            let candidate_message = candidate_redeem.text.clone().unwrap_or_else(|| {
-                // Stripped on exactly the terms the park above is, or the
-                // retire-match would compare a briefing-laden candidate against
-                // a clean parked marker and never retire it (#1890 E).
-                crate::runtime::delegation::operator_words(message).to_string()
-            });
-            crate::runtime::grants::budget_pauses_for(company).retire_if_message_matches(
-                agent_id,
-                &candidate_message,
-                candidate_chat_id.as_deref(),
-                &candidate_redeem,
-            )
-        } {
-            // Issue #1846 review (Codex #3868962381): this turn just
-            // completed WITHOUT pausing, which is proof the account that
-            // blocked the LAST turn now has budget again — whether the
-            // operator got there by clicking "Add credits & resend" (which
-            // already took the marker itself, so this finds nothing) or, as
-            // the notice's own copy also invites, by manually adding credits
-            // and resending the message from the composer, bypassing the
-            // CTA/redeem route entirely. Only the second path used to leave
-            // the marker parked: nothing but a click on THIS specific CTA
-            // ever consumed it, so a manual resend left a stale marker and
-            // its stale CTA sitting on the old notice indefinitely. Clicking
-            // it later would silently re-dispatch the OLD message a second
-            // time — a duplicate, and for a non-idempotent request, a
-            // duplicate side effect the operator never asked for.
-            //
-            // `retire_if_message_matches`, not a peek-then-drop: single
-            // atomic check-and-take, same as every other consumer of this
-            // set, so a concurrent CTA click racing this retire cannot
-            // double-consume the same marker.
-            tracing::info!(
-                company = %company,
-                agent = %agent_id,
-                marker_id = %stale.id,
-                "[budget-pause] retired a stale re-issue marker; this agent's turn succeeded \
-                 without it, so the pause it named is already resolved"
-            );
+            } {
+                // Issue #1846 review (Codex #3868962381): this turn just
+                // completed WITHOUT pausing, which is proof the account that
+                // blocked the LAST turn now has budget again — whether the
+                // operator got there by clicking "Add credits & resend" (which
+                // already took the marker itself, so this finds nothing) or, as
+                // the notice's own copy also invites, by manually adding credits
+                // and resending the message from the composer, bypassing the
+                // CTA/redeem route entirely. Only the second path used to leave
+                // the marker parked: nothing but a click on THIS specific CTA
+                // ever consumed it, so a manual resend left a stale marker and
+                // its stale CTA sitting on the old notice indefinitely. Clicking
+                // it later would silently re-dispatch the OLD message a second
+                // time — a duplicate, and for a non-idempotent request, a
+                // duplicate side effect the operator never asked for.
+                //
+                // `retire_if_message_matches`, not a peek-then-drop: single
+                // atomic check-and-take, same as every other consumer of this
+                // set, so a concurrent CTA click racing this retire cannot
+                // double-consume the same marker.
+                tracing::info!(
+                    company = %company,
+                    agent = %agent_id,
+                    marker_id = %stale.id,
+                    "[budget-pause] retired a stale re-issue marker; this agent's turn succeeded \
+                     without it, so the pause it named is already resolved"
+                );
+            }
         }
+        let outcome = turn_result_after_metering(outcome, metered, company, agent_id)?;
         // Store: persist the outcome (original task + reply) so it compounds
         // into later turns. Without this the harness never writes memory back.
         // SECURITY: the reply **text only** — the scrubbed `outcome.steps` never
@@ -6130,6 +6145,32 @@ mod tests {
         async fn append_ledger(&self, _id: &CompanyId, entry: LedgerEntry) -> crate::Result<()> {
             self.ledger.lock().unwrap().push(entry);
             Ok(())
+        }
+    }
+
+    /// `CompanyStore` whose `append_ledger` always fails — the "ledger write
+    /// that also failed" `turn_result_after_metering`'s own doc names, and
+    /// the fixture `a_metering_failure_does_not_swallow_a_budget_pause_marker`
+    /// needs to force `meter_turn_costs` into its `Err` arm on a turn that
+    /// otherwise succeeded (Codex review, PR #2053).
+    #[derive(Default)]
+    struct FailingLedgerStore;
+
+    #[async_trait]
+    impl CompanyStore for FailingLedgerStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(None)
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Err(OpenCompanyError::Harness(
+                "scripted ledger outage".to_string(),
+            ))
         }
     }
 
@@ -8501,6 +8542,147 @@ description = "Builds the product."
         assert_eq!(marker.agent, "ceo");
         assert_eq!(marker.message, "Please summarize today's standup notes.");
         assert_eq!(marker.summary, pause.summary);
+    }
+
+    /// Codex review (PR #2053) — **the regression.** A ledger write is a
+    /// separate concern from what the turn itself did, and a failure in it
+    /// must not also swallow the OTHER outcome-side-effect this same code
+    /// block performs: retiring a stale re-issue marker once an agent's turn
+    /// succeeds again, proving the account that blocked it now has budget.
+    /// Before this fix, `turn_result_after_metering`'s `?` ran BEFORE this
+    /// retire logic, so a ledger write that failed for an UNRELATED reason
+    /// left the stale marker — and its stale "Add credits & resend" CTA —
+    /// parked indefinitely, able to later re-dispatch the OLD message a
+    /// second time.
+    ///
+    /// Same fixture as `a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent`
+    /// — a stale marker parked directly, then one ordinary successful `run`
+    /// for the same agent in the same thread — except this provider's reply
+    /// carries real usage, so `turn_costs` is nonzero and `meter_turn_costs`
+    /// actually attempts (and, against `FailingLedgerStore`, fails) a ledger
+    /// write. Reverting the reordering in `run_inner` makes the final `peek`
+    /// below find the marker still parked instead of `None`.
+    #[tokio::test]
+    async fn a_metering_failure_does_not_swallow_a_stale_marker_retirement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme-budget-meter-fail-retire-regress");
+        let mut rec = record();
+        rec.id = company.clone();
+        let deps = HarnessDeps {
+            notifications: None,
+            ledgers: None,
+            ledger_registry: Default::default(),
+            // A single, ordinary, non-blank reply — the same shape
+            // `a_successful_turn_retires_a_stale_reissue_marker_for_the_same_agent`
+            // scripts, just with usage attached so this turn's spend is
+            // nonzero and `meter_turn_costs` has something to write.
+            provider: Arc::new(
+                ScriptedProvider::new(vec![Ok("Here's today's standup summary.".to_string()); 4])
+                    .reporting_usage(tinyinference::Usage {
+                        input_tokens: 800,
+                        output_tokens: 200,
+                        total_tokens: 1_000,
+                        ..Default::default()
+                    }),
+            ),
+            provider_slug: "scripted".to_string(),
+            serves: None,
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(FailingLedgerStore),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_runs: None,
+            deep_trace: None,
+            workflow_revisions: None,
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("pool ensures");
+
+        // Park the stale marker directly — standing in for an earlier turn
+        // that genuinely paused, exactly as the sibling retire test does.
+        crate::runtime::grants::budget_pauses_for(&company).park(
+            "ceo",
+            Some("general".to_string()),
+            "Please summarize today's standup notes.",
+            "Paused — ceo's turn ran out of inference budget/credits.",
+            crate::ports::now_millis(),
+            crate::runtime::grants::RedeemContext::default(),
+        );
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_some(),
+            "the stale marker must be parked before the run this test exercises"
+        );
+
+        let result = pool
+            .run(
+                &company,
+                "ceo",
+                "Please summarize today's standup notes.",
+                &deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("general")),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "the turn itself succeeded, so the ledger failure is the only failure there is, \
+             and it still propagates — turn_result_after_metering's own documented contract: \
+             {result:?}"
+        );
+
+        // The retirement must have happened regardless — read off the turn's
+        // OWN outcome, before the metering error ever had a chance to short
+        // circuit it.
+        assert!(
+            crate::runtime::grants::budget_pauses_for(&company)
+                .peek("ceo")
+                .is_none(),
+            "the stale marker must be retired even though the ledger write for THIS turn \
+             failed — the ledger is a separate concern from what the turn itself did, and \
+             leaving it parked would let its stale CTA re-dispatch the old message again"
+        );
     }
 
     /// Issue #1846 review (Codex #3869193105) — **the regression.** A

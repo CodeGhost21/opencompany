@@ -10,6 +10,7 @@
 import type {
   DeliveryReport,
   WorkflowRunOutcome,
+  WorkflowRunResult,
   WorkflowRunVerdict,
 } from "@/api/workflows";
 
@@ -370,6 +371,40 @@ export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
   // Legacy hosts may omit the verdict while still sending node statuses. An
   // error node under continue/route is degraded, not a clean run.
   if (run.nodes?.some((node) => node.status === "error")) return "degraded";
+  return "ok";
+}
+
+/**
+ * A legacy fallback verdict for a **settled run response** — the body
+ * `POST …/workflows/{wid}/run` answers with, not a history row — from a host
+ * predating issue #981 (Codex review, PR #2053): that response still carries
+ * `pendingApprovals`, `deliveries`, `blockedNodes`, `nodes` and `cancelled`,
+ * fields enough to say the run was NOT clean even with no `verdict` key on the
+ * wire. Reading only `res.verdict` maps every one of those non-clean legacy
+ * shapes to the green "Workflow ran." fallback — precisely the contradiction
+ * B-039 exists to close, just for an older host.
+ *
+ * A narrower {@link verdictOf}, because a `WorkflowRunResult` is a narrower
+ * shape than a `WorkflowRunOutcome`: it never carries `running` or `error` (a
+ * settled `200` is by construction neither — a failed run never reaches this
+ * body at all, it throws instead), so those arms are dropped; and it has no
+ * `strandedApprovals` for {@link isStranded} to read, since that reconciliation
+ * is a fact about a run somebody comes back to, not one microseconds old —
+ * the backend's own doc for this response enumerates its possible readings as
+ * exactly `stopped`, `blocked`, `undelivered`, `awaiting-approval`, `degraded`
+ * and `ok`, which is this ladder.
+ */
+export function legacyRunVerdict(res: WorkflowRunResult): WorkflowRunVerdict {
+  if (res.cancelled) return "stopped";
+  if ((res.blockedNodes?.length ?? 0) > 0) return "blocked";
+  if (undeliveredCount(res.deliveries ?? []) > 0) return "undelivered";
+  if (
+    (res.pendingApprovals?.length ?? 0) > 0 ||
+    pendingCount(res.deliveries ?? []) > 0
+  ) {
+    return "awaiting-approval";
+  }
+  if (res.nodes?.some((node) => node.status === "error")) return "degraded";
   return "ok";
 }
 

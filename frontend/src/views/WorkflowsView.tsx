@@ -135,7 +135,11 @@ import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 // Issue #981: which nodes produced a report that never went out, so the canvas
 // card can say so beside the DONE badge instead of leaving it to a banner.
-import { settledRunNotice, undeliveredNodes } from "@/views/workflows/run-health";
+import {
+  legacyRunVerdict,
+  settledRunNotice,
+  undeliveredNodes,
+} from "@/views/workflows/run-health";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
@@ -1563,9 +1567,12 @@ export function WorkflowsView({
           // one, so this used to say "nothing was sent" even over a dry run
           // that failed — the same false green B-039 fixed below for the
           // non-dry-run path, just for this one too. Success only for a
-          // clean run or a legacy host that sent no verdict at all.
-          if (res.verdict && res.verdict !== "ok") {
-            const settled = settledRunNotice(res.verdict);
+          // clean run — a legacy host that sent no verdict at all is read
+          // via `legacyRunVerdict` (Codex review, PR #2053) rather than
+          // assumed clean.
+          const verdict = res.verdict ?? legacyRunVerdict(res);
+          if (verdict !== "ok") {
+            const settled = settledRunNotice(verdict);
             toast[settled.tone](settled.message);
           } else {
             toast.success("Test run complete — nothing was sent.");
@@ -1575,7 +1582,14 @@ export function WorkflowsView({
           // This line used to be an unconditional "Workflow ran.", which a run
           // the operator had just STOPPED got too — so the same screen called
           // one run stopped and ran at the same time.
-          const settled = settledRunNotice(res.verdict);
+          //
+          // Codex review (PR #2053): `res.verdict` alone maps EVERY legacy
+          // host (predating issue #981, no `verdict` key on the wire) to the
+          // green fallback below, even one whose response shows it blocked,
+          // dropped a report, or was stopped — `legacyRunVerdict` derives the
+          // same reading `verdictOf` gives a history row from those other
+          // fields instead of assuming clean.
+          const settled = settledRunNotice(res.verdict ?? legacyRunVerdict(res));
           toast[settled.tone](settled.message);
         }
       }
