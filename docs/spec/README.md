@@ -115,6 +115,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [runtime/desktop-instances.md](runtime/desktop-instances.md) | Several local hosts on one machine: the roster, onboarding, dev runs |
+| [runtime/desktop-updates.md](runtime/desktop-updates.md) | Desktop auto-update: the silent-until-actionable prompt, the signed release artifacts, and the keypair an operator must generate before any of it works |
 | [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, and the switch that turns it off |

@@ -492,3 +492,14 @@ selection, and the Linux session-keyring caveat.
 
 Moved to [desktop-hosts.md](desktop-hosts.md): the stdio harness client and
 the reserved /acp prefix.
+
+## Replacing the application itself
+
+In [desktop-updates.md](desktop-updates.md): the signed manifest on the newest
+release, a prompt that stays silent until there is a restart to authorise, the
+release artifacts that are not the DMG, and the minisign keypair an operator
+must generate before any of it does anything.
+
+It is the one thing a desktop cannot get from the host it is talking to — a
+server upgrade does not reach a `.app` on somebody's laptop — which is why it
+belongs to the shell rather than to the console.
