@@ -4,12 +4,13 @@ import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import type { MessageIntent } from "@/api/tasks";
-import type { AttachmentDto, CognitionState } from "@/api/types";
+import type { AttachmentDto, CognitionState, TurnStep } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { MessageAttachments } from "./MessageAttachments";
+import { StepTimeline } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -48,6 +49,15 @@ interface Props {
    * already seen in the channel, not a further thing to open.
    */
   inlineReplyIds?: ReadonlySet<string>;
+  /**
+   * Live rows per query, keyed by the asking message's id.
+   *
+   * The panel needs its own copy because `buildTimeline` keeps every parented
+   * line out of the channel timeline: a query typed into an open thread renders
+   * here or nowhere. Passing this only to `MessageTimeline` left such a turn
+   * with no render path at all (Codex on #2069).
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
   sending: boolean;
   /**
    * Everything an `@` can name here (issue #1645). Drawn from the parent
@@ -206,6 +216,7 @@ export function ThreadPanel({
   parent,
   replies,
   inlineReplyIds,
+  liveStepsByMessage,
   sending,
   mentionables,
   channelMemberIds,
@@ -251,6 +262,7 @@ export function ThreadPanel({
           channel={channel}
           members={members}
           message={parent}
+          liveSteps={liveStepsByMessage?.[parent.id]}
           youAvatar={youAvatar}
           resolveAttachmentUrl={resolveAttachmentUrl}
           cognition={cognition}
@@ -270,6 +282,7 @@ export function ThreadPanel({
             channel={channel}
             members={members}
             message={r}
+            liveSteps={liveStepsByMessage?.[r.id]}
             youAvatar={youAvatar}
             resolveAttachmentUrl={resolveAttachmentUrl}
             cognition={cognition}
@@ -374,6 +387,7 @@ function Line({
   channel,
   members,
   message,
+  liveSteps,
   youAvatar,
   resolveAttachmentUrl,
   cognition,
@@ -384,6 +398,8 @@ function Line({
   channel: Channel;
   members: TeamMember[];
   message: ChatMessage;
+  /** This message's in-flight turn rows, if one is running (see `MessageRow`). */
+  liveSteps?: readonly TurnStep[];
   youAvatar?: string;
   resolveAttachmentUrl?: (nodeId: string) => Promise<string>;
   cognition?: CognitionState | null;
@@ -452,6 +468,15 @@ function Line({
             resolveUrl={resolveAttachmentUrl}
           />
         )}
+        {/* The same two step blocks `MessageRow` renders, because a message
+            asked or answered inside a thread is not a lesser message.
+            `buildTimeline` keeps every parented line OUT of the channel
+            timeline, so this panel is the only surface a threaded query has —
+            without these, a turn started from an open thread showed no account
+            of itself anywhere, even after the panel was closed (Codex on
+            #2069). */}
+        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
+        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
       </div>
     </div>
   );

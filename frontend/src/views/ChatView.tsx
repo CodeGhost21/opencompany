@@ -247,6 +247,14 @@ interface Props {
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
   /**
+   * Live rows per query, keyed by the asking message's id (see
+   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
+   * nothing here has to resolve a key for it: the message id is the key, so it
+   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
+   * their load order.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
+  /**
    * The live receipt for a synchronous chat turn in flight, keyed by **host
    * thread id** (issue #1934) — resolved to this channel's thread the same way
    * `liveStepsByThread` is. Present between the operator's send and the reply
@@ -413,6 +421,7 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  liveStepsByMessage,
   receiptByThread,
   agentNames,
   unread,
@@ -2310,6 +2319,11 @@ export function ChatView({
               typing={sending || !!openTurn}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
+              // NOT excluded when a thread is open: these rows render inside
+              // their own message rather than as one strip for the channel, so
+              // there is no ambiguity about which turn they describe — which is
+              // the whole reason `liveSteps` above is withheld.
+              liveStepsByMessage={liveStepsByMessage}
               // Thread-panel receipts are out of v1 (issue #1934): excluded here
               // the same way `liveSteps` is when a thread is open.
               receipt={openThreadId ? undefined : receipt}
@@ -2576,6 +2590,10 @@ export function ChatView({
               parent={parent}
               replies={threadReplies}
               inlineReplyIds={threadInlineReplyIds}
+              // A query typed into this panel renders only here — parented
+              // messages never reach the channel timeline — so the panel needs
+              // the per-query rows too, or its turns show nothing at all.
+              liveStepsByMessage={liveStepsByMessage}
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
