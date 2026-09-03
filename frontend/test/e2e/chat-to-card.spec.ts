@@ -30,13 +30,21 @@ import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
  */
 async function dismissWelcome(page: Page) {
   const skip = page.getByRole("button", { name: /Skip for now/ });
-  try {
-    await skip.waitFor({ state: "visible", timeout: 5_000 });
-  } catch {
-    return;
+  // Up to twice: a console opened against a genuinely fresh home stacks two of
+  // these — the first-run gate, then the tour behind it — and both carry this
+  // label. They arrive in sequence, so the second is not in the DOM to be
+  // counted when the first is clicked; the only way to see it is to look again.
+  // A host that shows one leaves the second wait to time out and returns, which
+  // is what makes this cost nothing where only the tour appears.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await skip.first().waitFor({ state: "visible", timeout: attempt === 0 ? 5_000 : 2_000 });
+    } catch {
+      return;
+    }
+    await skip.first().click();
   }
-  await skip.click();
-  await skip.waitFor({ state: "hidden", timeout: 10_000 });
+  await expect(skip).toHaveCount(0, { timeout: 10_000 });
 }
 
 /**
@@ -64,13 +72,37 @@ test("a card raised from a channel line links back to the channel", async ({
   const posted = await request.post(`${API}/chat`, {
     data: { text: prompt, chat: "engineering" },
   });
-  expect(posted.ok() || posted.status() >= 500, await posted.text()).toBeTruthy();
+  expect(posted.ok(), await posted.text()).toBeTruthy();
+
+  // The seq the host journaled the operator's message under — `messageId` is
+  // `seq.value().to_string()` (`operator.rs`), and the same seq comes back on
+  // the card as `originParent`. That pair is this card's identity here.
+  //
+  // Not the title: the card is named by whatever raised it, so matching a
+  // marker inside `title` is an identity claim on a string the model owns.
+  // That is the defect PR #2055 removes from the host's own card adoption, and
+  // it would fail here the day titles stop echoing the request.
+  const messageSeq = Number((await posted.json()).messageId);
+  expect(
+    Number.isInteger(messageSeq),
+    "the host must return the seq it journaled the message under",
+  ).toBeTruthy();
 
   const tasksResponse = await request.get(`${API}/tasks`);
   expect(tasksResponse.ok()).toBeTruthy();
-  const tasks = (await tasksResponse.json()) as Array<{ id: string; title: string }>;
-  const card = tasks.find((t) => t.title.includes(String(marker)));
-  expect(card, `no card opened from "${prompt}": ${JSON.stringify(tasks)}`).toBeTruthy();
+  const tasks = (await tasksResponse.json()) as Array<{
+    id: string;
+    title: string;
+    originChatId?: string;
+    originParent?: number;
+  }>;
+  const card = tasks.find(
+    (t) => t.originParent === messageSeq && t.originChatId === "engineering",
+  );
+  expect(
+    card,
+    `no card opened from seq ${messageSeq} in engineering: ${JSON.stringify(tasks)}`,
+  ).toBeTruthy();
 
   // The card is real and titled from the message. Its *stage* is deliberately
   // not asserted: a triage-raised card is one the company decided is work, and
