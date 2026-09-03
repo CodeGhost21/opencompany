@@ -227,6 +227,44 @@ regex = { version = "1", optional = true }
 # default build links no network crates.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"], optional = true }
 
+# Crash and error reporting (`crash-reporting` feature, `src/observability/`).
+#
+# Pinned to the SAME `0.47.0` the vendored runtime pins
+# (`vendor/openhuman/Cargo.toml`), and that is not cosmetic: `sentry` is a 0.x
+# crate, so 0.47 and 0.49 are semver-incompatible and cargo would link BOTH —
+# two `sentry::Hub` statics, two clients, and `sentry::init` here would leave
+# the embedded runtime's copy uninitialised. One version is one hub, which is
+# the only arrangement where a host and the runtime inside it can report to the
+# same project.
+#
+# `default-features = false` drops two things on purpose. `release-health`
+# (session tracking) is a usage signal, and what this crate does and does not
+# send about its own use is settled in `docs/spec/runtime/analytics.md`; crash
+# reporting is not the place to reopen it. The `transport` default is
+# `reqwest` + `native-tls`, and sentry 0.47 builds on **reqwest 0.13** while
+# this crate is on 0.12 — taking it would add a second HTTP client to the graph
+# and an OpenSSL-linked TLS stack to a tree that is rustls throughout. `ureq` is
+# sentry's other first-party transport (one small blocking client on sentry's
+# own worker thread) and `rustls` points it at the TLS stack already in
+# `Cargo.lock`. The vendored runtime answers the same question by hand-writing a
+# transport over its own reqwest; that is ~230 lines of envelope framing and
+# rate-limit handling to own, and this crate has no reason to.
+#
+# The rest is the reporting surface: `panic` installs the panic hook (so a
+# panic anywhere in the process becomes an event), `tracing` bridges
+# `tracing::error!` to events and `warn!`/`info!` to breadcrumbs,
+# `backtrace` + `debug-images` make those frames symbolicable, and `contexts`
+# attaches OS and runtime metadata.
+sentry = { version = "0.47.0", default-features = false, optional = true, features = [
+    "backtrace",
+    "contexts",
+    "panic",
+    "tracing",
+    "debug-images",
+    "ureq",
+    "rustls",
+] }
+
 # HMAC-SHA256. Two callers: webhook signing (`HttpWebhookSink`, behind
 # `webhooks`) and the analytics tenant identifier (`analytics::types::OpaqueId`,
 # un-gated).
@@ -551,6 +589,36 @@ imap = ["dep:async-imap", "dep:mail-parser", "dep:tokio-rustls", "dep:webpki-roo
 # `reqwest` is the only dependency, and it is already in the DEFAULT set via
 # `oauth`, so enabling this adds nothing to any lane's graph or to Cargo.lock.
 analytics = ["dep:reqwest"]
+# Crash and error reporting to a Sentry project the OPERATOR owns
+# (`docs/spec/runtime/crash-reporting.md`, `src/observability/`).
+#
+# Same dependency-graph argument as `analytics` above, and for the same reason:
+# this crate is GPL-3.0 and self-hostable, so a default build must be
+# *incapable* of reporting rather than merely configured not to. With the
+# feature off there is no type in the tree that owns a Sentry client, which is
+# what keeps `tests/offline_e2e.rs` honest — that lane runs in a network
+# namespace with no routes and `docs/spec/runtime/offline.md` forbids widening
+# it. It is a second gate, not the only one: even with the feature compiled
+# nothing is sent until an operator sets `OPENCOMPANY_SENTRY_DSN`.
+#
+# The difference from `analytics` is who the collector belongs to. Analytics
+# reports to a project THIS project runs, which is why it is hosted-tenant-only
+# and payload-constrained. A crash report goes to the operator's own Sentry
+# organisation, about their own install, so the interesting question is not
+# "who may receive this" but "what must never be in it" — see
+# `observability::redaction`.
+#
+# TYPE CARVE-OUT, in the shape the vendored runtime uses (`crash-reporting`
+# there too, deliberately the same name). `observability::config` and
+# `observability::redaction` are NOT gated: the enable/disable decision and the
+# secret scrubber are the two parts that have to be provably right, they touch
+# no `sentry::` type, and they are therefore tested by the default
+# `cargo test`. Only bodies that name a `sentry::` type are gated, and every
+# signature stays compiled in both builds — so `observability::tracing_layer()`
+# degrades to a no-op `Identity` layer, `observability::scope::*` become the
+# `tracing::debug!` alone, and `opencompany sentry-test` still exists and says
+# which build it is. No stub file, and no `#[cfg]` at a call site.
+crash-reporting = ["dep:sentry"]
 # OAuth connection lifecycle (authorize-url + server-side token exchange). The
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
