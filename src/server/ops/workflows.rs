@@ -1042,6 +1042,14 @@ struct DeleteWorkflowQuery {
 /// the workflow did, and that stays true after it is gone — `GET
 /// …/workflows/runs` keeps serving them. See the module doc.
 ///
+/// **A run still in flight is stopped** (B-121). Delete tore down the schedule
+/// and the revisions and left the run executing — and left it *uncontrollable*,
+/// because the only Stop button in the product lives on the workflow detail page
+/// this request removes. So the run went on calling models and spending with
+/// nothing anywhere able to reach it, while `GET …/workflows/runs` kept
+/// reporting it `running: true` under a workflow that no longer existed. See
+/// [`stop_runs_of_workflow`](crate::company::runtime::CompanyRuntime::stop_runs_of_workflow).
+///
 /// `expectedVersion` is **required** (issue #1013), for the same reason it is on
 /// `PUT`: an absent token used to mean an unconditional delete, so a console
 /// holding a stale graph could remove a workflow that changed underneath it. A
@@ -1082,6 +1090,11 @@ async fn delete_workflow(
     )
     .await
     .map_err(ApiError)?;
+    // B-121: after the durable delete, never before. The workflow has to be gone
+    // first, or a run cancelled here could be replaced by one racing in behind
+    // it through a route that still resolves the graph — the same ordering
+    // Pause's sweep takes for the same reason.
+    company.runtime.stop_runs_of_workflow(&wid);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -10705,6 +10718,25 @@ label = "ok"
                 .unwrap()
         }
 
+        fn get_workflow_request() -> Request<Body> {
+            Request::builder()
+                .uri("/api/v1/company/workflows/demo")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        fn delete_workflow_request(version: &str) -> Request<Body> {
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/v1/company/workflows/demo?expectedVersion={version}"
+                ))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
         async fn json_body(response: axum::response::Response) -> serde_json::Value {
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
@@ -10955,6 +10987,113 @@ label = "ok"
             assert!(
                 !c.completed.load(Ordering::SeqCst),
                 "the run must not have completed its work"
+            );
+        }
+
+        /// **B-121: deleting a workflow stops the run of it still in flight.**
+        ///
+        /// Delete used to take the schedule and the revisions and leave the run
+        /// executing — and, worse, leave it *uncontrollable*: the only Stop
+        /// button in the product is on the workflow detail page the delete
+        /// removes, so the run went on calling models and spending with nothing
+        /// anywhere able to reach it, still reporting `running: true` under a
+        /// workflow that no longer existed.
+        ///
+        /// The assertion that carries the weight is `completed`: the stalled
+        /// runner finishes its work only when released, so a run that reaches
+        /// its own completion here is one the delete failed to stop.
+        #[tokio::test]
+        async fn deleting_a_workflow_stops_the_run_of_it_still_in_flight() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+
+            let response = c
+                .app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "detach": true })))
+                .await
+                .unwrap();
+            let run_id = json_body(response).await["runId"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            c.entered.notified().await;
+            assert_eq!(
+                c.runtime.run_supervisor().live().len(),
+                1,
+                "the run has to be genuinely live, or this proves nothing"
+            );
+
+            let response = c.app.clone().oneshot(get_workflow_request()).await.unwrap();
+            let version = json_body(response).await["version"]
+                .as_str()
+                .expect("the graph carries its version token")
+                .to_string();
+            let response = c
+                .app
+                .clone()
+                .oneshot(delete_workflow_request(&version))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+            let CompanyEvent::WorkflowRunFinished {
+                cancelled,
+                error,
+                run_id: journaled_id,
+                ..
+            } = await_finished(&c.runtime)
+                .await
+                .expect("the deleted workflow's run settles rather than running on")
+            else {
+                unreachable!()
+            };
+            assert!(
+                cancelled,
+                "the run of a deleted workflow settles stopped, on the Stop button's own path"
+            );
+            assert!(
+                error.is_none(),
+                "a stop that follows from a delete is not a failure: {error:?}"
+            );
+            assert_eq!(
+                journaled_id.as_deref(),
+                Some(run_id.as_str()),
+                "the same run the run route handed back — no second identifier"
+            );
+            assert!(
+                !c.completed.load(Ordering::SeqCst),
+                "the run must not have gone on to finish the work of a workflow that no \
+                 longer exists"
+            );
+        }
+
+        /// The mirror: a delete with **no** run in flight cancels nothing.
+        /// Without it the sweep above could quietly grow into "delete stops
+        /// something" for a company that had nothing to stop.
+        #[tokio::test]
+        async fn deleting_an_idle_workflow_stops_nothing() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+
+            assert!(c.runtime.run_supervisor().live().is_empty());
+            let response = c.app.clone().oneshot(get_workflow_request()).await.unwrap();
+            let version = json_body(response).await["version"]
+                .as_str()
+                .expect("version")
+                .to_string();
+            let response = c
+                .app
+                .clone()
+                .oneshot(delete_workflow_request(&version))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                c.runtime.stop_runs_of_workflow("demo"),
+                0,
+                "nothing was in flight, so nothing was stopped"
             );
         }
 

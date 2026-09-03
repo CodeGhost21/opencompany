@@ -1683,7 +1683,12 @@ export function WorkflowsView({
   // If it changed underneath us the host refuses with a 409 and removes nothing,
   // and we surface that instead of quietly deleting a graph the operator never
   // saw.
-  const remove = useCallback(async () => {
+  //
+  // `stoppingARun` is what the confirmation just told the operator would
+  // happen (B-121), passed in rather than read here so the sentence they
+  // agreed to and the sentence they get back cannot come from two different
+  // readings of the run state.
+  const remove = useCallback(async (stoppingARun: boolean) => {
     if (!selectedId || !graph) return;
     const removedName = graph.name;
     setDeleting(true);
@@ -1712,7 +1717,16 @@ export function WorkflowsView({
       setResult(null);
       setSelectedNodeId(null);
       setConflict(null);
-      toast.success(`Deleted “${removedName}”.`);
+      // B-121: the run went with it, and saying so is the whole point of having
+      // warned. The host stops every run of a deleted workflow; before that it
+      // left them executing with the only Stop button in the product on the page
+      // this delete just unmounted.
+      setActiveRunId(null);
+      toast.success(
+        stoppingARun
+          ? `Deleted “${removedName}” and stopped the run in flight.`
+          : `Deleted “${removedName}”.`,
+      );
     } catch (e) {
       // A 409 is the one failure the operator can actually act on, and acting
       // on it means reloading — so it gets the persistent banner, not a toast.
@@ -2902,10 +2916,17 @@ export function WorkflowsView({
                         <AlertDialogTitle>Delete “{graph?.name ?? selectedId}”?</AlertDialogTitle>
                         {/* Say exactly what goes and what stays. "Stops its schedule"
                             is the consequence an operator most needs spelled out, and
-                            "past runs stay" stops them hesitating over losing history. */}
-                        <AlertDialogDescription>
-                          This removes the workflow and stops it running on its schedule. Past runs
-                          stay in the run history. This can&apos;t be undone.
+                            "past runs stay" stops them hesitating over losing history.
+
+                            B-121: and when a run is in flight, say THAT — it was
+                            the one consequence this dialog never mentioned, while
+                            being word for word the sentence an idle workflow gets.
+                            Deleting stops that run, which is a bigger thing to
+                            agree to than stopping a schedule. */}
+                        <AlertDialogDescription data-testid="workflow-delete-consequence">
+                          {watchingRun
+                            ? "A run of this workflow is going right now. Deleting it stops that run where it is — the steps it finished stay in the run history — and stops it running on its schedule. This can't be undone."
+                            : "This removes the workflow and stops it running on its schedule. Past runs stay in the run history. This can't be undone."}
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
@@ -2916,7 +2937,7 @@ export function WorkflowsView({
                             // dialog left mounted would re-render its title as
                             // `Delete “”?` over a backdrop nothing can click past.
                             setConfirmOpen(false);
-                            void remove();
+                            void remove(watchingRun);
                           }}
                           className="bg-destructive text-white hover:bg-destructive/90"
                           data-testid="workflow-delete-confirm"
