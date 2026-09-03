@@ -48,6 +48,7 @@ import type { CompanyFeed } from "@/hooks/use-company";
 import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
+import { useCanManage } from "@/hooks/use-can-manage";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { forgetSession } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
@@ -82,6 +83,13 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
   const scope = useLocalScope();
   const { status } = feed;
   const scoped = company ?? client.defaultCompany;
+  // Approvals and Domain are `require_admin` / `AdminScopedCompany` writes.
+  //
+  // Not passed to Lifecycle: `pause` and `resume` take `CompanyAuth` and never
+  // ask for a role, so a member's Pause genuinely stops the company. Hiding it
+  // here would make this page lie in the other direction — the missing guard is
+  // the host's to add, and this gate should follow it rather than lead it.
+  const canManage = useCanManage(client, company);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -111,7 +119,7 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
             because they are drowning in approval cards is here for this. */}
-        <PolicySettings client={client} company={company} />
+        <PolicySettings client={client} company={company} canManage={canManage} />
 
         {/* Connection */}
         <Card>
@@ -193,7 +201,12 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
             remount a company switch would carry a credential typed for one
             company into another company's Save. `SettingsSection` remounts
             `BillingView`/`HostingView` for exactly this reason. */}
-        <DomainSettings key={company ?? "self"} client={client} company={company} />
+        <DomainSettings
+          key={company ?? "self"}
+          client={client}
+          company={company}
+          canManage={canManage}
+        />
 
         {/* Appearance.
 
