@@ -2201,6 +2201,10 @@ export function ChatView({
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
   const threadReplies = parent ? repliesInThread(parent, messages) : [];
+  // Asked of `buildTimeline`'s own rule rather than re-derived, for the reason
+  // the mention map above gives: the panel's count and the channel's chip must
+  // not drift about what is already on screen. See `ThreadPanel`'s prop docs.
+  const threadInlineReplyIds = parent ? inlineReplyIds(messages) : undefined;
   // Every review surface this thread hangs off, newest first — the thread
   // root itself when opened directly on the pill/relay, or one of its
   // replies when the card that produced them was sent inside an
@@ -2546,6 +2550,7 @@ export function ChatView({
               members={members}
               parent={parent}
               replies={threadReplies}
+              inlineReplyIds={threadInlineReplyIds}
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
