@@ -723,6 +723,24 @@ export interface ApprovalSummary {
    * blocker particular to its own step; those group alone.
    */
   group_key?: string | null;
+  /**
+   * Which kind of stopped step this blocker names (#2028) — `"task"` for a
+   * paused board card, `"node"` for a stopped workflow-run node. Mirrors
+   * `ApprovalSummary::blocker_step_kind` in `src/runtime/types.rs`; the
+   * tokens are the wire tokens.
+   *
+   * A `skip` or `cancel` does not do the same thing on both: a card
+   * redispatches on skip and returns to To-do on cancel, while a node
+   * produces nothing on skip and stops the run on cancel — so a caller
+   * wording a verdict's consequence must not describe one path's behaviour
+   * on the other's card.
+   *
+   * Absent for a non-blocker approval, a blocker with no step behind it (a
+   * bare agent question), and a host that predates the field. All three read
+   * as "unknown" — a caller must not assume either kind's behaviour, and
+   * should fall back to wording that is true regardless.
+   */
+  blocker_step_kind?: BlockerStepKind;
 }
 
 /**
@@ -784,6 +802,14 @@ export type Verdict = "approve" | "deny";
  * disagrees.
  */
 export type BlockerVerdict = "retry" | "amend" | "skip" | "cancel";
+
+/**
+ * Which kind of stopped step a parked blocker names — `"task"` for a paused
+ * board card, `"node"` for a stopped workflow-run node. Mirrors
+ * {@link ApprovalSummary.blocker_step_kind}; see there for what "unknown"
+ * (the field absent) means and why a caller must not guess between the two.
+ */
+export type BlockerStepKind = "task" | "node";
 
 /**
  * How every surface hands a decision back: one approval, its two-value verdict,

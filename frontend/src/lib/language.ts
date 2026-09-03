@@ -6,6 +6,7 @@ import { usd } from "./money";
 import type { TaskApprovalStatus } from "../api/tasks";
 import type {
   ApprovalSummary,
+  BlockerStepKind,
   BlockerVerdict,
   FeedbackCategory,
   StandingGrant,
@@ -903,23 +904,59 @@ export function blockerVerdictLabel(verdict: BlockerVerdict): string {
 }
 
 /**
- * What a blocker verdict actually does, in one line.
+ * What a blocker verdict actually does, in one line (#2028).
  *
  * Skip and cancel are opposite outcomes one click apart — one lets the run
  * continue without this step's work, the other ends the run — so neither may
  * rest on its label alone. Every arm says its consequence, so the two that
  * matter are not the only two that look explained.
+ *
+ * **Worded by step kind, not by one shared assumption.** A paused board card
+ * and a stopped workflow-run node do different things on `skip` and `cancel`:
+ * a card redispatches on skip (there is no card-level skip yet) and returns
+ * to To-do on cancel, while a node produces nothing on skip and stops the run
+ * on cancel. Describing the node's behaviour on a card's controls tells an
+ * operator their click will do one thing when it does another. `stepKind`
+ * absent — no step behind the blocker, or a host that predates the field —
+ * falls back to wording that makes no claim either path would contradict.
  */
-export function blockerVerdictConsequence(verdict: BlockerVerdict): string {
+export function blockerVerdictConsequence(
+  verdict: BlockerVerdict,
+  stepKind?: BlockerStepKind,
+): string {
+  if (stepKind === "task") {
+    switch (verdict) {
+      case "retry":
+        return "Puts the card back in progress and runs it again exactly as it was.";
+      case "amend":
+        return "Puts the card back in progress and runs it again with what you write.";
+      case "skip":
+        return "Puts the card back in progress and runs it again — there is no separate skip for a card yet.";
+      case "cancel":
+        return "Moves the card back to To-do without running it. It can be picked up again later.";
+    }
+  }
+  if (stepKind === "node") {
+    switch (verdict) {
+      case "retry":
+        return "Runs this step again exactly as it was.";
+      case "amend":
+        return "Runs this step again with what you write.";
+      case "skip":
+        return "Moves past this step. It produces nothing, and the rest of the run continues without it.";
+      case "cancel":
+        return "Stops the run here. Nothing after this step will run.";
+    }
+  }
   switch (verdict) {
     case "retry":
-      return "Runs this step again exactly as it was.";
+      return "Asks it to run again.";
     case "amend":
-      return "Runs this step again with what you write.";
+      return "Sends what you write and asks it to continue.";
     case "skip":
-      return "Moves past this step. It produces nothing, and the rest of the run continues without it.";
+      return "Moves on without doing it now.";
     case "cancel":
-      return "Stops the run here. Nothing after this step will run.";
+      return "Stops it here.";
   }
 }
 

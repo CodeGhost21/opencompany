@@ -274,7 +274,7 @@ export function BlockerDecide({
             <span className="font-medium text-foreground">
               {blockerVerdictLabel(verdict).replace("\u2026", "")}
             </span>{" "}
-            {blockerVerdictConsequence(verdict)}
+            {blockerVerdictConsequence(verdict, a.blocker_step_kind)}
           </li>
         ))}
       </ul>
@@ -309,7 +309,7 @@ export function BlockerDecide({
         <Button
           variant="destructive"
           size="sm"
-          aria-label={`Cancel run: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("cancel")}`}
+          aria-label={`Cancel run: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("cancel", a.blocker_step_kind)}`}
           disabled={deciding}
           onClick={() => send("cancel")}
         >
@@ -321,7 +321,7 @@ export function BlockerDecide({
         <Button
           variant="outline"
           size="sm"
-          aria-label={`Skip this step: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("skip")}`}
+          aria-label={`Skip this step: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("skip", a.blocker_step_kind)}`}
           disabled={deciding}
           onClick={() => send("skip")}
         >
@@ -334,7 +334,7 @@ export function BlockerDecide({
           variant="outline"
           size="sm"
           aria-pressed={answering}
-          aria-label={`Answer this question: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("amend")}`}
+          aria-label={`Answer this question: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("amend", a.blocker_step_kind)}`}
           disabled={deciding}
           onClick={() => setAnswering((open) => !open)}
         >
@@ -342,7 +342,7 @@ export function BlockerDecide({
         </Button>
         <Button
           size="sm"
-          aria-label={`Retry this step: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("retry")}`}
+          aria-label={`Retry this step: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("retry", a.blocker_step_kind)}`}
           disabled={deciding}
           onClick={() => send("retry")}
         >
