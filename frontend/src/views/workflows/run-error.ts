@@ -21,6 +21,13 @@ import { ApiError } from "@/api/types";
  * host answers that as a `404`, and treating it as a run-refusal would tell the
  * operator to configure a provider the deployment cannot use — issue #514
  * exists precisely to split those two, so re-merging them here would undo it.
+ * `lifecycle_conflict` (issue B-037) is also deliberately absent, for the
+ * opposite reason to `not_wired`: it IS a `409` pre-execution refusal, but it
+ * is not cleared from Settings → Inference, and this set exists to raise a
+ * banner that points there. It classifies as `other`, which opens the failure
+ * panel — and `failureDisposition` gives it a `refusal-lifecycle` arm so the
+ * panel says the run never started and names the real fix.
+ *
  * The set is keyed on the structured `code` ONLY; never string-match the prose.
  */
 export const INFERENCE_RUN_CODES: ReadonlySet<string> = new Set([

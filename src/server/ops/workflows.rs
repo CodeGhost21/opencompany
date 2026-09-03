@@ -1546,6 +1546,33 @@ async fn run_workflow(
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
 ) -> Result<RunWorkflowOk, crate::server::Rejection> {
+    // **A paused company does not take new work, and pressing Run is new work.**
+    //
+    // Every other path already refuses on this: the workflow scheduler
+    // (`workflow_scheduler.rs`), the task scheduler, the mailbox poller, A2A,
+    // chat, and — verified, because the first draft of this comment claimed
+    // otherwise — the approve/resume route, which gates in `run_resolve`
+    // (`operator.rs`) above both `resolve_approval_spawned` and the workflow
+    // resume it forks into. This POST was the single unguarded door, which is
+    // exactly why the report reads "chat correctly refuses with 409, and
+    // pressing Run on a workflow starts a real billed run anyway": the console
+    // promises "Pause stops this company taking new work" on the same screen.
+    //
+    // Pause deliberately does **not** stop a run already executing — `pause`
+    // only writes the lifecycle (`provision.rs` `transition`), and the promise
+    // is about *taking new work*. That is a separate question from this one.
+    //
+    // **Before the runner lookup, not after.** Whether this company is paused
+    // does not depend on whether workflow execution is wired, and a host without
+    // a runner would otherwise answer `not_wired` to a paused company — a true
+    // sentence about the deployment that hides the one the operator needs. The
+    // cheap, always-correct refusal goes first so nothing can mask it.
+    //
+    // Refused with the same `LifecycleConflict` chat answers, so one pause reads
+    // identically wherever it is met, rather than a second rule with a second
+    // error shape.
+    company.runtime.ensure_running().await?;
+
     // No runner wired. THREE very different causes look identical from here —
     // `workflow_runner() == None` — and each points the operator at a different
     // next step (issues #266, #514):
@@ -4936,6 +4963,15 @@ mod tests {
         /// provisioned tenant) but whose persisted record declares an enabled
         /// workflow — the exact hosted-mode gap #70 reports.
         async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
+            state_with_hosted_company_lifecycle(home, "running").await
+        }
+
+        /// The same fixture at a chosen lifecycle, so a paused company is
+        /// reachable without a second copy of the record literal.
+        async fn state_with_hosted_company_lifecycle(
+            home: &std::path::Path,
+            lifecycle: &str,
+        ) -> AppState {
             let store = FsCompanyStore::new(home.to_path_buf());
             let id = CompanyId::new("acme");
             store
@@ -4945,7 +4981,7 @@ mod tests {
                     id: id.clone(),
                     manifest: manifest_with_enabled(),
                     ledger: Vec::new(),
-                    lifecycle: "running".to_string(),
+                    lifecycle: lifecycle.to_string(),
                     overlay_agents: Vec::new(),
                     overlay_desk_members: Vec::new(),
                     overlay_desk_order: Vec::new(),
@@ -4977,6 +5013,56 @@ mod tests {
             state.registry().insert(id, std::sync::Arc::new(runtime));
             crate::server::test_support::seed_fixed_admin(&state, "acme").await;
             state
+        }
+
+        /// **A paused company refuses Run**, the same way chat already refuses.
+        ///
+        /// Every background path gates on `ensure_running` — the workflow
+        /// scheduler, the task scheduler, the mailbox poller, A2A, chat. This
+        /// route did not, so the one surface the operator drives themselves was
+        /// the one that ignored the pause: the console promises "Pause stops
+        /// this company taking new work", and pressing Run started a real billed
+        /// run anyway.
+        #[tokio::test]
+        async fn a_paused_company_refuses_to_start_a_run() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let state = state_with_hosted_company_lifecycle(&home, "paused").await;
+
+            let response = router(state)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/workflows/demo/run")
+                        .header("content-type", "application/json")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Pinned to the exact status AND code, not merely "not 200"
+            // (CodeRabbit on this PR): a runner-gap 404 or an unrelated 409
+            // would satisfy `assert_ne!(.., OK)` while proving nothing about the
+            // lifecycle gate this test exists for — and the gate sits above the
+            // runner lookup precisely so the two cannot be confused.
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "a paused company must refuse the run as a lifecycle conflict"
+            );
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["code"], "lifecycle_conflict",
+                "the console triages on the structured code, never the prose: {body}"
+            );
+            let rendered = body.to_string();
+            assert!(
+                rendered.contains("paused"),
+                "the refusal must name the lifecycle that caused it: {rendered}"
+            );
         }
 
         #[tokio::test]

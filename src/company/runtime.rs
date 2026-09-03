@@ -6165,6 +6165,34 @@ impl CompanyRuntime {
         self.store
             .save_importing(&record, gate_seen_to_persist)
             .await?;
+        // **Stopping the company stops the work already running** (B-037).
+        //
+        // Refusing new runs is only half of "Pause stops this company": a graph
+        // that is twenty nodes into thirty goes on calling models and spending
+        // for as long as it takes to finish, and the operator who pressed Pause
+        // — often *because* of that run — watches it keep going with no control
+        // that bites. `is_busy` already treats a live run as work; pause has to
+        // agree with it.
+        //
+        // Fired **after** the durable write, never before: the lifecycle is what
+        // `ensure_running` reads, so once it says paused nothing new can be
+        // admitted, and a run cancelled before it landed could be replaced by
+        // one racing in behind it.
+        //
+        // This is the Stop button's own path (`run_supervisor().cancel`, issue
+        // #383), not a second stop mechanism: the engine checks the token at the
+        // next node boundary, a node already executing finishes and is
+        // journaled, and a wedged one is hard-aborted after a bounded grace. So
+        // a paused run settles `cancelled` with its partial trail intact, the
+        // same outcome and the same shape as the operator pressing Stop on each
+        // one by hand.
+        //
+        // Best-effort, exactly as cancelling is everywhere else: a run
+        // registered on a superseded runtime (see `RuntimeHandover`) still
+        // finishes and still journals. Nothing here can fail the transition.
+        if to != "running" {
+            self.stop_live_runs(&to);
+        }
         self.events
             .append(
                 &self.id,
@@ -6176,6 +6204,36 @@ impl CompanyRuntime {
             )
             .await?;
         Ok(from)
+    }
+
+    /// Fires the stop signal on every workflow run this company still has in
+    /// flight, for a lifecycle that means "not running" (B-037).
+    ///
+    /// Separate from [`set_lifecycle`](Self::set_lifecycle) so the sweep is
+    /// readable and directly testable, and because the cancel is deliberately
+    /// synchronous: `RunSupervisor` is a `Mutex`-guarded map and firing a token
+    /// does not await, so there is no window between the lifecycle write and the
+    /// stop for another run to slip through.
+    ///
+    /// Deliberately **only** the workflow supervisor. A dispatched card or a
+    /// desk delegation lives in the steer registry and is stopped by its own
+    /// controls; folding them in here would make Pause a silent bulk-cancel of
+    /// work the operator never saw a Stop button for. Workflow runs are what the
+    /// promise on the settings screen is about, and what the report named.
+    fn stop_live_runs(&self, to: &str) {
+        let live = self.run_supervisor.live();
+        if live.is_empty() {
+            return;
+        }
+        tracing::info!(
+            company = %self.id,
+            lifecycle = %to,
+            runs = live.len(),
+            "company stopped: cancelling the workflow runs still in flight"
+        );
+        for (run_id, _workflow_id) in live {
+            self.run_supervisor.cancel(&run_id);
+        }
     }
 
     // -- Emergency stop (issue #86) -----------------------------------------
@@ -6793,6 +6851,75 @@ mod tests {
     /// production. Deliberately outside any feature gate: the steer registry is
     /// only wired under `openhuman`, so a test that relied on it alone would not
     /// run in the default build at all.
+    /// **B-037, the other half.** Pausing a company stops the runs it already
+    /// has in flight, not only the ones it would have started next.
+    ///
+    /// Refusing new runs was the reported symptom; this is the promise on the
+    /// same settings screen. A graph twenty nodes into thirty goes on spending
+    /// until it finishes, and the operator who pressed Pause — usually because
+    /// of that run — had no control that reached it.
+    #[tokio::test]
+    async fn pausing_a_company_stops_the_runs_already_in_flight() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+
+        let (ctx, _guard) = runtime
+            .run_supervisor()
+            .begin("wf-1", false)
+            .expect("begin a workflow run");
+        assert!(
+            !ctx.cancel.is_cancelled(),
+            "the run starts un-cancelled, or this test proves nothing"
+        );
+
+        runtime
+            .set_lifecycle(
+                "paused",
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: "operator".into(),
+                },
+            )
+            .await
+            .expect("pause the company");
+
+        assert!(
+            ctx.cancel.is_cancelled(),
+            "pausing must fire the stop signal on a run already executing"
+        );
+    }
+
+    /// The mirror, so the sweep cannot quietly become "cancel on every
+    /// transition": **resuming** must not stop the work it is resuming into.
+    ///
+    /// A resume runs through the same `set_lifecycle`, so a guard keyed on the
+    /// wrong side of the comparison would kill runs at exactly the moment the
+    /// operator asked for them to continue.
+    #[tokio::test]
+    async fn resuming_a_company_does_not_stop_anything() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+
+        let (ctx, _guard) = runtime
+            .run_supervisor()
+            .begin("wf-1", false)
+            .expect("begin a workflow run");
+
+        runtime
+            .set_lifecycle(
+                "running",
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: "operator".into(),
+                },
+            )
+            .await
+            .expect("resume the company");
+
+        assert!(
+            !ctx.cancel.is_cancelled(),
+            "resuming must leave a live run alone"
+        );
+    }
+
     #[tokio::test]
     async fn is_busy_sees_every_source_of_work() {
         let (runtime, _record, _home) = runtime_and_record().await;
