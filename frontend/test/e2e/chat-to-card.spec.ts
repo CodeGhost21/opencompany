@@ -72,11 +72,23 @@ test("a card raised from a channel line links back to the channel", async ({
   const card = tasks.find((t) => t.title.includes(String(marker)));
   expect(card, `no card opened from "${prompt}": ${JSON.stringify(tasks)}`).toBeTruthy();
 
-  // The card is real, titled from the message, and — the spend gate — did NOT
-  // land in the Working phase, which is what dispatch means now (issue #1512).
+  // The card is real and titled from the message. Its *stage* is deliberately
+  // not asserted: a triage-raised card is one the company decided is work, and
+  // buying it a planning pass is the mechanism doing its job. The spend gate
+  // this file used to carry belonged to the operator-pressed create, which no
+  // longer exists — what a card costs is pinned in `company/runtime.rs`
+  // (`a_prompt_box_card_buys_exactly_one_planning_pass`), a level at which
+  // "exactly one pass, never two" is decidable. It was never decidable here:
+  // `planning`, `in_progress`, `paused` and `in_review` all render the one
+  // word "Working" (`board-columns.ts`), so a page-wide match on it could not
+  // tell a planned card from a dispatched one.
   await page.goto(`/#/tasks/${card!.id}`);
   await dismissWelcome(page);
-  await expect(page.getByText("Working", { exact: true })).toHaveCount(0);
+  // Its own title as the host recorded it — the triage capitalises the lead it
+  // cards, so the message text is not the heading verbatim.
+  await expect(page.getByRole("heading", { name: card!.title, level: 1 })).toBeVisible({
+    timeout: 15_000,
+  });
 
   // …and it knows which conversation opened it.
   const origin = page.getByRole("button", { name: /Opened from chat/ });
