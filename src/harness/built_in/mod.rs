@@ -1353,17 +1353,30 @@ impl CompanyAgent {
                     // total billed a second time onto a turn that made no
                     // metered call at all.
                     //
-                    // The fix does not reset the field — openhuman does not
-                    // expose a way to from here (`take_last_turn_usage_totals`
-                    // is `pub(crate)` to that crate) — it snapshots it before
-                    // each attempt and only trusts the post-attempt read when
-                    // it actually moved. A read that comes back identical to
-                    // the pre-attempt snapshot is treated as zero rather than
-                    // as this attempt's total; see `last_observed_turn_cost`
-                    // just below for the fallback that still recovers a
-                    // genuinely spent-and-failed attempt's tokens from the
-                    // progress stream when this leaves `usages` all zero.
-                    let mut last_seen_usage = read_turn_usage(&agent);
+                    // Codex review (PR #2053): an earlier version of this fix
+                    // compared each read against the value seen before the
+                    // attempt and treated an unchanged read as zero — which
+                    // wrongly zeroed a genuinely NEW finalized total on the
+                    // rare turn whose real spend happened to numerically equal
+                    // the immediately preceding one. `agent.turn()`'s own
+                    // `Result` already says, unambiguously, whether THIS
+                    // attempt finalized: `Ok` only ever returns non-empty text
+                    // (a blank `Ok` is retried inside openhuman's own loop
+                    // before it can reach here — see the `Empty` arm below),
+                    // and finalizing `last_turn_usage_totals` is part of what
+                    // makes a turn return `Ok` at all. So trust `read_turn_usage`
+                    // outright on `Ok`, regardless of its value, and never trust
+                    // it on `Err` (no comparison needed there either — an
+                    // `Err` never finalizes, so any read after one is
+                    // necessarily either `None`'s zero or a stale carry-over,
+                    // and either way is not this attempt's own). The fix does
+                    // not reset the field itself — openhuman does not expose a
+                    // way to from here (`take_last_turn_usage_totals` is
+                    // `pub(crate)` to that crate) — it reads the outcome
+                    // instead. See `last_observed_turn_cost` just below for the
+                    // fallback that still recovers a genuinely spent-and-failed
+                    // attempt's tokens from its own progress-stream segment.
+                    //
                     // Issue #1680: timed PER ATTEMPT, not across the retry. Each
                     // `agent.turn` opens a fresh harness run with a fresh
                     // wall-clock budget, so a duration spanning both attempts
@@ -1374,13 +1387,12 @@ impl CompanyAgent {
                     let started = std::time::Instant::now();
                     let first = agent.turn(message).await;
                     let first_elapsed = started.elapsed();
-                    let first_observed = read_turn_usage(&agent);
-                    usages.push(if first_observed == last_seen_usage {
-                        TurnUsage::default()
+                    let first_finalized = first.is_ok();
+                    usages.push(if first_finalized {
+                        read_turn_usage(&agent)
                     } else {
-                        first_observed
+                        TurnUsage::default()
                     });
-                    last_seen_usage = first_observed;
                     let reply: crate::Result<String> = match self
                         .classify_turn(first, first_elapsed)
                     {
@@ -1514,20 +1526,18 @@ impl CompanyAgent {
                                 let retry_started = std::time::Instant::now();
                                 let second = agent.turn(message).await;
                                 let second_elapsed = retry_started.elapsed();
-                                // Same snapshot-and-compare as the first attempt
-                                // above: an `EmptyProviderResponse` retry leaves
-                                // `last_turn_usage_totals` exactly where the
-                                // first attempt's own read left it, and without
-                                // this, that figure would be counted a second
-                                // time as this attempt's own.
-                                let second_observed = read_turn_usage(&agent);
-                                usages.push(if second_observed == last_seen_usage {
-                                    TurnUsage::default()
+                                // Same outcome-trusts-the-read rule as the first
+                                // attempt above: only `Ok` means openhuman
+                                // actually finalized a fresh total for THIS
+                                // attempt, so only `Ok` earns trusting
+                                // `read_turn_usage` — regardless of what value
+                                // it reads back.
+                                let second_finalized = second.is_ok();
+                                usages.push(if second_finalized {
+                                    read_turn_usage(&agent)
                                 } else {
-                                    second_observed
+                                    TurnUsage::default()
                                 });
-                                // No third attempt to compare against — nothing
-                                // downstream reads `last_seen_usage` again.
                                 match self.classify_turn(second, second_elapsed) {
                                     AttemptOutcome::Reply(reply) => Ok(reply),
                                     AttemptOutcome::Empty => Ok(crate::harness::mcp_probe::scrub(
@@ -7828,6 +7838,51 @@ description = "Builds the product."
             "both attempts genuinely burned 1,000 tokens each — the first attempt's spend must \
              not be dropped just because the retry went on to publish its own (also real) \
              total: {usages:?}"
+        );
+    }
+
+    /// Codex review (PR #2053): an earlier version of the reused-agent fix
+    /// above compared each `read_turn_usage` against the value seen before
+    /// that attempt, and zeroed a read that came back unchanged — which is
+    /// wrong for a genuinely NEW finalized total that happens to numerically
+    /// equal the immediately preceding one. Two separate, single-attempt,
+    /// fully successful calls on the SAME agent, both scripted with the exact
+    /// same usage, must each report their own real spend in full — neither
+    /// one is a retry, neither one errors, and a coincidental value match is
+    /// not evidence that the second call spent nothing.
+    #[tokio::test]
+    async fn a_second_successful_turn_is_trusted_even_when_its_total_matches_the_first() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![Ok("turn one".to_string()), Ok("turn two".to_string())])
+                .reporting_usage(tinyinference::Usage {
+                    input_tokens: 500,
+                    output_tokens: 100,
+                    total_tokens: 600,
+                    ..Default::default()
+                }),
+        );
+
+        let (first_outcome, first_usages) = agent.run("turn one").await;
+        first_outcome.expect("turn one succeeds in a single attempt");
+        let first_tokens: u64 = first_usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            first_tokens, 600,
+            "turn one's own real spend: {first_usages:?}"
+        );
+
+        let (second_outcome, second_usages) = agent.run("turn two").await;
+        second_outcome.expect("turn two also succeeds in a single attempt");
+        let second_tokens: u64 = second_usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            second_tokens, 600,
+            "turn two's finalized total happens to equal turn one's — that coincidence must \
+             not zero it out: {second_usages:?}"
         );
     }
 

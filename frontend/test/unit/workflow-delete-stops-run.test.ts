@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { WorkflowGraph } from "@/api/workflows";
+import { deleteWorkflow, type WorkflowGraph } from "@/api/workflows";
 
 /**
  * B-121: deleting a workflow with a run in flight stops that run, and the
@@ -245,5 +245,34 @@ describe("the confirmation's guess and the toast's truth can disagree", () => {
     // pre-request guess.
     expect(toasts.success).toHaveBeenCalledWith(`Deleted “${GRAPH.name}”.`);
     expect(toasts.success).not.toHaveBeenCalledWith(expect.stringContaining("stopped the run"));
+  });
+});
+
+describe("deleteWorkflow tolerates an older host", () => {
+  it("reads a legacy empty (204) response as stoppedRuns: 0 rather than throwing", async () => {
+    // Codex review (PR #2053): before B-121 this route answered 204 with no
+    // body, and OpenCompanyClient's generic reader turns that into
+    // `undefined`. Destructuring `stoppedRuns` straight off that would throw
+    // — after the host had ALREADY deleted the workflow — misreporting a
+    // successful delete as a failure.
+    const client = {
+      scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+      del: async () => undefined,
+    } as unknown as OpenCompanyClient;
+
+    await expect(deleteWorkflow(client, "acme", "digest", "v1")).resolves.toEqual({
+      stoppedRuns: 0,
+    });
+  });
+
+  it("passes a real host's count straight through", async () => {
+    const client = {
+      scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+      del: async () => ({ stoppedRuns: 1 }),
+    } as unknown as OpenCompanyClient;
+
+    await expect(deleteWorkflow(client, "acme", "digest", "v1")).resolves.toEqual({
+      stoppedRuns: 1,
+    });
   });
 });
