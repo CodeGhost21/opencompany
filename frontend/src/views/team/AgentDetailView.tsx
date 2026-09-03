@@ -1855,9 +1855,17 @@ function Budget({
     >
       <div className="space-y-1 text-sm" data-testid="agent-budget">
         {capped ? (
-          <p className="text-muted-foreground">
-            {usd(cap)}/day · {usd(agent.spentTodayUsd ?? 0)} spent today
-          </p>
+          <>
+            <p className="text-muted-foreground">
+              {usd(cap)}/day · {usd(agent.spentTodayUsd ?? 0)} spent today
+            </p>
+            <p className="text-xs text-muted-foreground" data-testid="agent-budget-scope">
+              Spent today counts everything this teammate has spent since 00:00
+              UTC — chat turns and metered searches included, not only the
+              attempts listed above. This is the total the cap is enforced
+              against.
+            </p>
+          </>
         ) : (
           <p className="text-muted-foreground">No daily cap — this teammate spends freely.</p>
         )}
