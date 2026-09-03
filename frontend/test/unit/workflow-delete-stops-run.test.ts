@@ -77,7 +77,7 @@ const GRAPH: WorkflowGraph = {
  * so `activeRunId` is set the simple way — directly from the response — with
  * no need to fake the run-history polling that would otherwise derive it.
  */
-function fakeClient(): { client: OpenCompanyClient; deletes: string[] } {
+function fakeClient(stoppedRuns = 0): { client: OpenCompanyClient; deletes: string[] } {
   const deletes: string[] = [];
   const client = {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
@@ -93,6 +93,11 @@ function fakeClient(): { client: OpenCompanyClient; deletes: string[] } {
     del: async (path: string) => {
       const id = path.match(/\/workflows\/([^/?]+)/)?.[1];
       if (id) deletes.push(decodeURIComponent(id));
+      // CodeRabbit review (PR #2053): `deleteWorkflow` resolves to the
+      // host's own post-delete sweep count now, not `void` — `stoppedRuns`
+      // here is what each test below configures the sweep to have found,
+      // deliberately independent of client-side `activeRunId` state.
+      return { stoppedRuns };
     },
     // Issue #1845: the week-1 nudge banner polls this on mount; an empty
     // feed keeps it a no-op for every test in this file, which is not about
@@ -145,7 +150,9 @@ function openDeleteConfirm() {
 
 describe("deleting a workflow with a run in flight", () => {
   it("warns about the run in the confirmation, stops it, and says so in the toast", async () => {
-    const { client, deletes } = fakeClient();
+    // The host's sweep actually stops one run — the toast now reads THIS,
+    // not the pre-request `activeRunId` guess (CodeRabbit review, PR #2053).
+    const { client, deletes } = fakeClient(1);
     await mount(client);
 
     // Dispatch a run and let it detach — `activeRunId` is set directly from
@@ -198,6 +205,43 @@ describe("deleting a workflow with no run in flight", () => {
     expect(deletes).toEqual(["digest"]);
     expect(toasts.success).toHaveBeenCalledWith(`Deleted “${GRAPH.name}”.`);
     // Never claims a run was stopped when there was none to stop.
+    expect(toasts.success).not.toHaveBeenCalledWith(expect.stringContaining("stopped the run"));
+  });
+});
+
+describe("the confirmation's guess and the toast's truth can disagree", () => {
+  it("never claims a stop the sweep didn't actually make, even with a run watched at confirm time", async () => {
+    // CodeRabbit review (PR #2053): the dialog's "a run is going right now" is
+    // a pre-request guess (`watchingRun`), and it can be stale by the time the
+    // delete reaches the host — a long run the console was watching can
+    // finish on its own in the seconds between confirming and this request
+    // landing. `stoppedRuns: 0` here is exactly that: the console still
+    // believed a run was in flight when it asked, but the sweep found
+    // nothing to stop.
+    const { client, deletes } = fakeClient(0);
+    await mount(client);
+
+    await act(async () => {
+      button("Run").click();
+    });
+    expect(container.querySelector('[data-testid="workflow-cancel-run"]')).not.toBeNull();
+
+    await act(async () => {
+      openDeleteConfirm();
+    });
+    // The dialog still warns — it can only ever go on what it knew before asking.
+    expect(
+      document.querySelector('[data-testid="workflow-delete-consequence"]')?.textContent,
+    ).toContain("A run of this workflow is going right now");
+
+    await act(async () => {
+      button("Delete workflow", document.body).click();
+    });
+
+    expect(deletes).toEqual(["digest"]);
+    // The toast reads the sweep's truth (nothing stopped), not the dialog's
+    // pre-request guess.
+    expect(toasts.success).toHaveBeenCalledWith(`Deleted “${GRAPH.name}”.`);
     expect(toasts.success).not.toHaveBeenCalledWith(expect.stringContaining("stopped the run"));
   });
 });

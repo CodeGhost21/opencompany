@@ -1298,17 +1298,26 @@ export function updateWorkflow(
  * Follows the same runtime-vs-source contract as `deleteDesk`: a workflow
  * defined by a file in the company source tree cannot be removed from the
  * console and returns `409`; an unknown id is `404`.
+ *
+ * Resolves to how many in-flight runs the host's post-delete sweep actually
+ * stopped (CodeRabbit review, PR #2053) — **not** whether the caller was
+ * watching a run before it asked. Those can disagree with no race required: a
+ * long run can settle on its own in the seconds between the operator
+ * confirming the delete and this request reaching the host, and the sweep
+ * then truthfully stops nothing. `stoppedRuns` is the one place the real
+ * answer lives; the console's delete flow reads it rather than its own
+ * pre-request guess.
  */
 export function deleteWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   expectedVersion?: string | null,
-): Promise<void> {
+): Promise<{ stoppedRuns: number }> {
   const query = expectedVersion
     ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
     : "";
-  return client.del<void>(
+  return client.del<{ stoppedRuns: number }>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}${query}`,
   );
 }

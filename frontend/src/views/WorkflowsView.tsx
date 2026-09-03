@@ -1558,7 +1558,18 @@ export function WorkflowsView({
               "Your test run executed real effects (teammate turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
         } else if (dryRun) {
-          toast.success("Test run complete — nothing was sent.");
+          // CodeRabbit review (PR #2053): a dry run still drives the real
+          // engine (issue #542) and can fail or degrade exactly like a real
+          // one, so this used to say "nothing was sent" even over a dry run
+          // that failed — the same false green B-039 fixed below for the
+          // non-dry-run path, just for this one too. Success only for a
+          // clean run or a legacy host that sent no verdict at all.
+          if (res.verdict && res.verdict !== "ok") {
+            const settled = settledRunNotice(res.verdict);
+            toast[settled.tone](settled.message);
+          } else {
+            toast.success("Test run complete — nothing was sent.");
+          }
         } else {
           // B-039: read the host's verdict rather than asserting a clean run.
           // This line used to be an unconditional "Workflow ran.", which a run
@@ -1683,17 +1694,19 @@ export function WorkflowsView({
   // If it changed underneath us the host refuses with a 409 and removes nothing,
   // and we surface that instead of quietly deleting a graph the operator never
   // saw.
-  //
-  // `stoppingARun` is what the confirmation just told the operator would
-  // happen (B-121), passed in rather than read here so the sentence they
-  // agreed to and the sentence they get back cannot come from two different
-  // readings of the run state.
-  const remove = useCallback(async (stoppingARun: boolean) => {
+  const remove = useCallback(async () => {
     if (!selectedId || !graph) return;
     const removedName = graph.name;
     setDeleting(true);
     try {
-      await deleteWorkflow(client, company, selectedId, graph.version);
+      // CodeRabbit review (PR #2053): the confirmation dialog's "a run is
+      // going right now" is a pre-request guess (`watchingRun`, read where
+      // this is called) and the toast below reads the sweep's own count
+      // instead of that same guess — they can legitimately disagree with no
+      // race at all: a run this view was watching can settle on its own in
+      // the seconds between the operator confirming and this request
+      // reaching the host, and the sweep then truthfully stops nothing.
+      const { stoppedRuns } = await deleteWorkflow(client, company, selectedId, graph.version);
       // Drop it locally rather than re-listing: the host has confirmed, and a
       // re-list would flash an empty picker. A list request already in flight
       // predates this and would put the entry back — hence the bump.
@@ -1723,7 +1736,7 @@ export function WorkflowsView({
       // this delete just unmounted.
       setActiveRunId(null);
       toast.success(
-        stoppingARun
+        stoppedRuns > 0
           ? `Deleted “${removedName}” and stopped the run in flight.`
           : `Deleted “${removedName}”.`,
       );
@@ -2937,7 +2950,7 @@ export function WorkflowsView({
                             // dialog left mounted would re-render its title as
                             // `Delete “”?` over a backdrop nothing can click past.
                             setConfirmOpen(false);
-                            void remove(watchingRun);
+                            void remove();
                           }}
                           className="bg-destructive text-white hover:bg-destructive/90"
                           data-testid="workflow-delete-confirm"

@@ -1055,13 +1055,17 @@ struct DeleteWorkflowQuery {
 /// holding a stale graph could remove a workflow that changed underneath it. A
 /// missing `?expectedVersion=` is now a `400`.
 ///
-/// `204` on success. `400` for a missing `expectedVersion`; `404` for an unknown
-/// id; `409` for a source-defined or body-less id, or a stale `expectedVersion`.
+/// `200` with [`DeleteWorkflowResponse`] on success — **not** `204` (CodeRabbit
+/// review, PR #2053): the sweep's own count is the only truthful source for
+/// "was a run actually stopped", and a `204` has nowhere to carry it. See that
+/// type's doc for why the console cannot derive the same answer itself. `400`
+/// for a missing `expectedVersion`; `404` for an unknown id; `409` for a
+/// source-defined or body-less id, or a stale `expectedVersion`.
 async fn delete_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Query(query): Query<DeleteWorkflowQuery>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<DeleteWorkflowResponse>, ApiError> {
     if !safe_wid(&wid) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "workflow {wid}"
@@ -1094,8 +1098,30 @@ async fn delete_workflow(
     // first, or a run cancelled here could be replaced by one racing in behind
     // it through a route that still resolves the graph — the same ordering
     // Pause's sweep takes for the same reason.
-    company.runtime.stop_runs_of_workflow(&wid);
-    Ok(StatusCode::NO_CONTENT)
+    let stopped_runs = company.runtime.stop_runs_of_workflow(&wid);
+    Ok(Json(DeleteWorkflowResponse { stopped_runs }))
+}
+
+/// The `DELETE …/workflows/{wid}` response body (CodeRabbit review, PR #2053).
+///
+/// The console used to guess "did this delete stop a run" from its own
+/// pre-request state (whether it was watching a run when the operator clicked
+/// Delete) and print that guess in the confirmation toast. That guess and this
+/// count can disagree in the most ordinary way possible, no race required: a
+/// long run the console was watching can finish **on its own**, normally, in
+/// the seconds between the operator clicking the confirm button and this
+/// request reaching the sweep — at which point [`stop_runs_of_workflow`]
+/// truthfully stops nothing, while the console's pre-request guess still says
+/// it did. `stopped_runs` is the sweep's own count, the only place that
+/// answer actually lives.
+///
+/// [`stop_runs_of_workflow`]: crate::company::runtime::CompanyRuntime::stop_runs_of_workflow
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteWorkflowResponse {
+    /// How many in-flight runs of this workflow the sweep fired a stop at.
+    /// Zero is a completely ordinary answer — see the type doc.
+    stopped_runs: usize,
 }
 
 /// The `PUT …/workflows/{wid}/enabled` body.
@@ -10133,7 +10159,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
 
             // Gone from the picker…
             let response = router(state.clone())
@@ -10190,7 +10216,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
 
             let response = router(state)
                 .oneshot(request(
@@ -10327,7 +10353,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         /// A manifest-`enabled` id with no saved graph is listed but NOT
@@ -11036,7 +11062,13 @@ label = "ok"
                 .oneshot(delete_workflow_request(&version))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
+            // CodeRabbit review (PR #2053): the count the console's toast now
+            // reads has to be the sweep's own answer, not a client-side guess —
+            // pin it here so a regression back to "no body" or a miscounted
+            // sweep shows up as a body assertion rather than only as a wrong
+            // toast nobody is testing.
+            assert_eq!(json_body(response).await["stoppedRuns"], 1);
 
             let CompanyEvent::WorkflowRunFinished {
                 cancelled,
@@ -11090,7 +11122,11 @@ label = "ok"
                 .await
                 .unwrap();
 
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
+            // CodeRabbit review (PR #2053): the response body is what the
+            // console's toast now reads, so pin the zero here too — the same
+            // reason the in-flight case above pins its 1.
+            assert_eq!(json_body(response).await["stoppedRuns"], 0);
             assert_eq!(
                 c.runtime.stop_runs_of_workflow("demo"),
                 0,

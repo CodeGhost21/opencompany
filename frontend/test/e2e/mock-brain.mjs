@@ -192,30 +192,40 @@ function slowMillis(messages) {
 const BURN_THEN_FAIL_DIRECTIVE = "__MOCK_BURN_THEN_FAIL__";
 
 /**
- * How many calls carrying [`BURN_THEN_FAIL_DIRECTIVE`] have been served.
- * Per-process, like `servedDirectives`: the first is metered, the rest fail.
+ * How many calls carrying a given [`BURN_THEN_FAIL_DIRECTIVE`] payload have
+ * been served, **keyed by that payload** (CodeRabbit review, PR #2053) — not
+ * a single process-wide count. The mock brain is started once for the whole
+ * Playwright suite, so a bare counter metered only the very first call any
+ * spec anywhere in the run ever made with this directive; every other spec —
+ * or the same spec asking for a different `<in> <out>` pair — would have its
+ * first call refused outright instead of metered, which is the one thing
+ * this directive promises. Unlike `servedDirectives` (a `Set`, since a plan
+ * step either fired or did not), this needs a `Map`: "served" here is a
+ * count, because the *second* call for the same payload is the one meant to
+ * fail.
  */
-let burnThenFailServed = 0;
+const burnThenFailServed = new Map();
 
 /**
  * The `<in> <out>` token pair a message asks to burn, or `null` when none does.
+ * `key` is the exact payload text, and doubles as this call's identity in
+ * {@link burnThenFailServed}.
  *
  * @param {any[]} messages
- * @returns {{ input: number, output: number } | null}
+ * @returns {{ input: number, output: number, key: string } | null}
  */
 function burnThenFail(messages) {
   for (const message of messages) {
     const content = typeof message?.content === "string" ? message.content : "";
     const at = content.indexOf(BURN_THEN_FAIL_DIRECTIVE);
     if (at === -1) continue;
-    const [input, output] = content
-      .slice(at + BURN_THEN_FAIL_DIRECTIVE.length)
-      .trim()
+    const key = content.slice(at + BURN_THEN_FAIL_DIRECTIVE.length).trim();
+    const [input, output] = key
       .split(/\s+/)
       .slice(0, 2)
       .map((word) => Number.parseInt(word, 10));
     if (!Number.isFinite(input) || !Number.isFinite(output)) return null;
-    return { input: Math.max(0, input), output: Math.max(0, output) };
+    return { input: Math.max(0, input), output: Math.max(0, output), key };
   }
   return null;
 }
@@ -1046,9 +1056,10 @@ const server = createServer((request, response) => {
         // answered first would turn the failure this stages into a success.
         const burn = burnThenFail(messages);
         if (burn) {
-          burnThenFailServed += 1;
-          if (burnThenFailServed > 1) {
-            process.stderr.write("[mock brain] refusing the follow-up call\n");
+          const served = (burnThenFailServed.get(burn.key) ?? 0) + 1;
+          burnThenFailServed.set(burn.key, served);
+          if (served > 1) {
+            process.stderr.write(`[mock brain] refusing the follow-up call for <${burn.key}>\n`);
             sendJson(response, 500, {
               error: { message: `${BURN_THEN_FAIL_DIRECTIVE} scripted outage`, type: "server_error" },
             });

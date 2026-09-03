@@ -1337,6 +1337,33 @@ impl CompanyAgent {
                 hooks,
                 Box::pin(async {
                     let mut usages: Vec<TurnUsage> = Vec::new();
+                    // CodeRabbit review (PR #2053): `agent` is the ONE `Agent`
+                    // this pool reuses for every chat of this `(company,
+                    // agent_id)` pair (see `CompanyAgent::agent`'s doc), and
+                    // openhuman's `last_turn_usage_totals` is set only when a
+                    // turn finalizes normally — an attempt that ends in
+                    // `EmptyProviderResponse` returns before that write, so
+                    // `read_turn_usage` reads back whatever the PREVIOUS
+                    // finalized turn left there, not this attempt's (zero) own.
+                    // Left unguarded, that stale figure would ride home in
+                    // `usages` as if this attempt had spent it — for the
+                    // one-shot retry that is the previous ATTEMPT's total
+                    // double-counted; across two separate calls to this method
+                    // on the same reused agent, it is an unrelated PAST TURN's
+                    // total billed a second time onto a turn that made no
+                    // metered call at all.
+                    //
+                    // The fix does not reset the field — openhuman does not
+                    // expose a way to from here (`take_last_turn_usage_totals`
+                    // is `pub(crate)` to that crate) — it snapshots it before
+                    // each attempt and only trusts the post-attempt read when
+                    // it actually moved. A read that comes back identical to
+                    // the pre-attempt snapshot is treated as zero rather than
+                    // as this attempt's total; see `last_observed_turn_cost`
+                    // just below for the fallback that still recovers a
+                    // genuinely spent-and-failed attempt's tokens from the
+                    // progress stream when this leaves `usages` all zero.
+                    let mut last_seen_usage = read_turn_usage(&agent);
                     // Issue #1680: timed PER ATTEMPT, not across the retry. Each
                     // `agent.turn` opens a fresh harness run with a fresh
                     // wall-clock budget, so a duration spanning both attempts
@@ -1347,7 +1374,13 @@ impl CompanyAgent {
                     let started = std::time::Instant::now();
                     let first = agent.turn(message).await;
                     let first_elapsed = started.elapsed();
-                    usages.push(read_turn_usage(&agent));
+                    let first_observed = read_turn_usage(&agent);
+                    usages.push(if first_observed == last_seen_usage {
+                        TurnUsage::default()
+                    } else {
+                        first_observed
+                    });
+                    last_seen_usage = first_observed;
                     let reply: crate::Result<String> = match self
                         .classify_turn(first, first_elapsed)
                     {
@@ -1481,7 +1514,20 @@ impl CompanyAgent {
                                 let retry_started = std::time::Instant::now();
                                 let second = agent.turn(message).await;
                                 let second_elapsed = retry_started.elapsed();
-                                usages.push(read_turn_usage(&agent));
+                                // Same snapshot-and-compare as the first attempt
+                                // above: an `EmptyProviderResponse` retry leaves
+                                // `last_turn_usage_totals` exactly where the
+                                // first attempt's own read left it, and without
+                                // this, that figure would be counted a second
+                                // time as this attempt's own.
+                                let second_observed = read_turn_usage(&agent);
+                                usages.push(if second_observed == last_seen_usage {
+                                    TurnUsage::default()
+                                } else {
+                                    second_observed
+                                });
+                                // No third attempt to compare against — nothing
+                                // downstream reads `last_seen_usage` again.
                                 match self.classify_turn(second, second_elapsed) {
                                     AttemptOutcome::Reply(reply) => Ok(reply),
                                     AttemptOutcome::Empty => Ok(crate::harness::mcp_probe::scrub(
@@ -7599,6 +7645,89 @@ description = "Builds the product."
             tokens, 1_540,
             "a failed turn must carry home the tokens its own model call burned, \
              not report itself as free: {usages:?}"
+        );
+    }
+
+    /// CodeRabbit review (PR #2053): a turn that fails WITHOUT spending
+    /// anything must not inherit an earlier, unrelated turn's totals off the
+    /// **reused** `Agent` — the same "0 tok / $0.000" bug B-120 fixes, in the
+    /// opposite direction: a turn that spent nothing must not be billed for
+    /// what a PAST turn on this same agent already spent and was already
+    /// billed for.
+    ///
+    /// `CompanyAgent` reuses one `Agent` for every chat of a `(company,
+    /// agent_id)` pair, and openhuman finalizes `last_turn_usage_totals` only
+    /// on a turn that completes normally — an attempt that ends in
+    /// `EmptyProviderResponse` never touches it, so a naive read after such an
+    /// attempt reads back whatever the LAST *successful* turn on this agent
+    /// left there, not this attempt's own (zero) spend. Left unguarded, that
+    /// stale figure — already billed once when the first turn settled — would
+    /// be billed a second time on a completely different, later turn that
+    /// made no metered call at all.
+    ///
+    /// Turn 1 succeeds in one attempt and spends 1,540 tokens for real — the
+    /// exact figure `last_turn_usage_totals` is left holding. Turn 2, on the
+    /// SAME agent, scripts an immediate blank (`EmptyProviderResponse`) and
+    /// then a hard failure on the one-shot retry once the script is exhausted
+    /// — the identical shape `a_hard_failed_turn_still_reports_the_tokens_it_burned`
+    /// already pins, just as the SECOND top-level call on this agent rather
+    /// than the first. Because this provider carries usage on every scripted
+    /// reply, turn 2's own first attempt genuinely burns another 1,540 tokens
+    /// before dying, which the live `TurnCostUpdated` tally still recovers
+    /// (`last_observed_turn_cost`) — so the correct total is 1,540 exactly,
+    /// not 3,080 (turn 1's stale total, read back and double-counted across
+    /// turn 2's own two attempts on top of what turn 2 itself burned).
+    #[tokio::test]
+    async fn a_turn_that_burns_nothing_does_not_inherit_a_past_turns_stale_total() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![
+                Ok("turn one finished cleanly".to_string()),
+                Ok(String::new()),
+            ])
+            .reporting_usage(tinyinference::Usage {
+                input_tokens: 1_200,
+                output_tokens: 340,
+                total_tokens: 1_540,
+                ..Default::default()
+            })
+            .failing_when_exhausted(),
+        );
+
+        // Turn one: a real, one-attempt success. Leaves
+        // `last_turn_usage_totals` holding 1,540 tokens.
+        let (outcome, usages) = agent.run("turn one").await;
+        outcome.expect("turn one is a clean, successful reply");
+        assert_eq!(
+            usages
+                .iter()
+                .map(|u| u.input_tokens + u.output_tokens)
+                .sum::<u64>(),
+            1_540,
+            "turn one's own real spend"
+        );
+
+        // Turn two, same agent: attempt 1 consumes the scripted blank
+        // (EmptyProviderResponse), the retry then finds the script exhausted
+        // and hits the permanent failure — both attempts error, neither
+        // finalizes `last_turn_usage_totals`, and without the fix both reads
+        // would instead return turn one's already-billed 1,540 a second AND
+        // third time.
+        let (second_outcome, second_usages) = agent.run("turn two").await;
+        assert!(
+            second_outcome.is_err(),
+            "turn two's provider is permanently down past its first call: {:?}",
+            second_outcome.as_ref().map(|o| o.reply.clone())
+        );
+        let second_tokens: u64 = second_usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            second_tokens, 1_540,
+            "turn two must report its OWN spend — one metered call, recovered via the live \
+             progress-stream tally since its own attempt also errors before finalizing totals \
+             — never turn one's already-billed total read back a second and third time: \
+             {second_usages:?}"
         );
     }
 

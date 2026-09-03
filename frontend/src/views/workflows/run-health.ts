@@ -501,8 +501,20 @@ export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
       // Reachable only from a host that settled a body while still calling the
       // run live. Say the true half rather than either terminal claim.
       return { tone: "info", message: "The workflow is still running." };
-    default:
+    case "ok":
+    case undefined:
+      // `undefined` is a host predating issue #981: it sends nothing to read,
+      // and the old sentence is the only honest one for it. `"ok"` is a real,
+      // checked success.
       return { tone: "success", message: "Workflow ran." };
+    default:
+      // CodeRabbit review (PR #2053): a word this console has never heard of.
+      // Unreachable through the closed `WorkflowRunVerdict` type above, but
+      // `verdict` is host-controlled at runtime — a host can grow an eighth
+      // word this build predates, the same case `verdictOf`'s own `in
+      // VERDICT_TONE` check exists to catch. Never paint an unrecognised word
+      // green; say only that the run is done, not that it went well.
+      return { tone: "info", message: "Workflow ran." };
   }
 }
 
