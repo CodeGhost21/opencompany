@@ -166,4 +166,13 @@ describe("noNodeResultsNotice", () => {
     const notice = noNodeResultsNotice([], { nodes: {} }, undefined);
     expect(notice?.message).toBe("This run produced no step output.");
   });
+
+  it("never claims a failed run finished either (tinysweeper: untested-branch)", () => {
+    // Same wrongness as "stopped" — the old sentence said "The run finished"
+    // for this arm too. A regression back to it would pass every other test
+    // here, since none of them pass `verdict: "failed"` through.
+    const notice = noNodeResultsNotice(parseRunNodes(null, null), null, "failed");
+    expect(notice?.message).toBe("This run failed before any step produced output.");
+    expect(notice?.showRaw).toBe(false);
+  });
 });

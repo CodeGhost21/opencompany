@@ -39,6 +39,32 @@ describe("settledRunNotice", () => {
     }
   });
 
+  it("uses the error tone for an undelivered report, not the info of a merely-parked run", () => {
+    // tinysweeper: untested-branch — the only other arm sharing `info` with
+    // `blocked`/`awaiting-approval` above would have masked a regression that
+    // downgraded this one from `error`; a run whose report failed to send is a
+    // fault, not something waiting on the operator.
+    expect(settledRunNotice("undelivered")).toEqual({
+      tone: "error",
+      message: "The workflow ran, but a report did not go out.",
+    });
+  });
+
+  it("pins the remaining info-toned arms so none of them silently drift", () => {
+    expect(settledRunNotice("stranded")).toEqual({
+      tone: "info",
+      message: "The run stopped for an approval that is no longer in the queue.",
+    });
+    expect(settledRunNotice("degraded")).toEqual({
+      tone: "info",
+      message: "The workflow ran, with a step in error.",
+    });
+    expect(settledRunNotice("running")).toEqual({
+      tone: "info",
+      message: "The workflow is still running.",
+    });
+  });
+
   it("keeps the plain sentence only for a clean run", () => {
     expect(settledRunNotice("ok")).toEqual({ tone: "success", message: "Workflow ran." });
   });
