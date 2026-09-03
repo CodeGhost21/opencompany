@@ -13,15 +13,16 @@ import { deskOfStateKey, hasOtherOpenTurns, turnStateKey, type OpenTurn } from "
  * `receiptByThread` are keyed by it too.
  *
  * Look the **desk** up in that map and the guard answers about a different
- * conversation entirely, in both directions. Both are silent, and both are
- * wrong in a way an operator eventually sees:
+ * conversation: a busy channel makes it say "yes, work remains" for a thread
+ * that has none, so the settled thread's rows and receipt are never cleared and
+ * accumulate for the life of the session.
  *
- *   * a busy channel makes it say "yes, work remains" for a thread that has
- *     none, so the settled thread's rows are never cleared; and
- *   * a quiet channel makes it say "no work here" while the thread is still
- *     running, which erases the rows of a turn that is currently working —
- *     the "teammate that stopped" appearance the guard exists to prevent
- *     (PR #1904 review).
+ * It does NOT erase a running turn's rows, and it is worth being exact about
+ * why, because the opposite is the easy assumption. The desk-addressed version
+ * reads the guard and writes the clear under the *same* key, so it only ever
+ * clears rows belonging to turns it also checked — it is self-consistent, and
+ * fails by omission rather than by over-clearing. What it drops on the floor is
+ * every entry filed under a composite key.
  *
  * The desk is still what `chat/history` is addressed by, which is why the two
  * identities are passed separately rather than one being derived and used for
@@ -36,8 +37,10 @@ describe("open-turn lookups are addressed by the state key, not the desk", () =>
 
     // Addressed correctly: the sibling is found, so the clear is held back.
     expect(hasOtherOpenTurns(open, "engineering#41", "t-settled")).toBe(true);
-    // Addressed by the desk: the thread's list is invisible, so the guard
-    // reports an idle thread and the running sibling's rows get erased.
+    // Addressed by the desk the thread's list is invisible, so the guard reports
+    // an idle thread. The clear that follows is addressed by the desk too, so
+    // what it empties is the channel's (absent) rows and never this thread's —
+    // the running sibling is not harmed, and the settled turn is not cleaned up.
     expect(hasOtherOpenTurns(open, "engineering", "t-settled")).toBe(false);
   });
 
