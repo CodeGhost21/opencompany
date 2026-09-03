@@ -2692,6 +2692,7 @@ impl HarnessAgentRunner {
                         approval_ids: vec![approval_id],
                         unparkable: 0,
                         stranded: 0,
+                        blockers: 1,
                     });
                     // `Blocked`, where #881's sibling says `WaitingApproval`:
                     // both hold the node open for a person, but one is a
@@ -2746,6 +2747,7 @@ impl HarnessAgentRunner {
                 approval_ids: parked.approval_ids.clone(),
                 unparkable: parked.unparkable,
                 stranded: 0,
+                blockers: parked.blockers,
             });
             let diagnosis = blocked_diagnosis(node_id.as_deref(), agent_ref, &parked);
             // `WaitingApproval`, not `Failed`: a person still has to decide, and
@@ -2966,6 +2968,7 @@ impl HarnessAgentRunner {
                                 approval_ids: vec![approval_id],
                                 unparkable: 0,
                                 stranded: 0,
+                                blockers: 1,
                             });
                             self.settle_attempt(
                                 run_sink.as_ref(),
@@ -3006,6 +3009,7 @@ impl HarnessAgentRunner {
                             approval_ids: vec![approval_id],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 1,
                         });
                         self.settle_attempt(
                             run_sink.as_ref(),
@@ -3385,9 +3389,11 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
         ));
     }
     // Gated calls and blocker questions resume differently: a gated call's
-    // approval re-runs the turn, a blocker's approve/deny re-enters or stops
+    // approval re-runs the turn, a blocker's verdict re-enters, waives or stops
     // the step — the sentence below has to name only the verdicts the console
-    // can actually send for whichever shape (or mix) is waiting.
+    // can actually send for whichever shape (or mix) is waiting. Both blocker
+    // arms name them from one fragment, so neither can be reworded alone.
+    let choices = crate::ports::blockers::BLOCKER_VERDICT_CHOICES;
     let resume = if waiting == 0 {
         String::new()
     } else if parked.blockers == 0 {
@@ -3397,7 +3403,7 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     } else if parked.blockers == waiting {
         format!(
             " {} a question the agent raised, not a call waiting to be authorised: answering it \
-             re-enters this step — approving runs it again, and denying stops the run.",
+             re-enters this step — {choices}.",
             if waiting == 1 {
                 "The card is"
             } else {
@@ -3405,10 +3411,11 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
             }
         )
     } else {
-        " Some of these are gated tool calls, which continue this run when approved; the rest \
-         are questions the agent raised, which re-enter the step they stopped — approving runs \
-         it again, and denying stops the run."
-            .to_string()
+        format!(
+            " Some of these are gated tool calls, which continue this run when approved; the \
+             rest are questions the agent raised, which re-enter the step they stopped — \
+             {choices}."
+        )
     };
     format!(
         "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
@@ -6324,8 +6331,8 @@ mod tests {
             "an answered blocker does re-enter the step it stopped: {text}"
         );
         assert!(
-            text.contains("denying stops the run"),
-            "and the one verdict that starts nothing has to be named: {text}"
+            text.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "all four verdicts are reachable, so all four have to be named: {text}"
         );
 
         let mixed = ParkedCalls {
@@ -6345,14 +6352,9 @@ mod tests {
              {text}"
         );
         assert!(
-            text.contains("denying stops the run"),
-            "a mixed node's blocker cards still only resolve by approve or deny, the same \
-             vocabulary the blocker-only branch above uses: {text}"
-        );
-        assert!(
-            !text.contains("retry") && !text.contains("skip") && !text.contains("cancel"),
-            "the console only reaches approve/deny on a workflow-node blocker, so a mixed node \
-             must not promise verdicts it cannot send: {text}"
+            text.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "a mixed node's blocker cards offer the same four verdicts, worded from the same \
+             fragment as the blocker-only branch above: {text}"
         );
 
         // Nothing was parked at all — every call failed to park — so there is
