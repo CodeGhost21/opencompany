@@ -328,6 +328,81 @@ async fn closing_without_a_reason_is_a_400_that_says_so() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// The shape the global `learnings` ledger has: a required prose field and the
+/// check that reports it.
+fn findings() -> Value {
+    json!({
+        "slug": "findings",
+        "title": "Findings",
+        "purpose": "What we found out.",
+        "derived": "derived/findings.md",
+        "fields": [
+            { "name": "id", "role": "id", "required": true },
+            { "name": "finding", "role": "title", "required": true },
+            { "name": "status", "role": "status", "required": true },
+            { "name": "evidence", "role": "prose", "required": true },
+            { "name": "reason", "role": "prose" }
+        ],
+        "statuses": [
+            { "name": "noted" },
+            { "name": "adopted", "closed": true, "needs_reason": true }
+        ],
+        "checks": ["required-field", "known-status", "closed-needs-reason"]
+    })
+}
+
+/// The route half of the write/read contract: a row the ledger would report as
+/// unreadable is refused with a 400 that names the field, rather than accepted
+/// with a 200 and then listed under the read's faults.
+#[tokio::test]
+async fn a_row_missing_a_required_field_is_a_400_rather_than_a_fault_on_read() {
+    let (state, _home) = state().await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(findings())).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/findings/entries",
+        Some(json!({
+            "id": "L-BAD-1",
+            "status": "noted",
+            "fields": { "finding": "a row with no evidence field" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        format!("{body}").contains("evidence"),
+        "the refusal must name the field: {body}"
+    );
+
+    // Refused means nothing landed — so the read has neither the row nor a
+    // fault about it, which is the contradiction this closes.
+    let (status, body) = send(
+        &state,
+        "GET",
+        "/api/v1/company/ledgers/findings/entries",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entries"].as_array().map(Vec::len), Some(0), "{body}");
+    assert!(body["faults"].is_null(), "{body}");
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/findings/entries",
+        Some(json!({
+            "id": "L-BAD-1",
+            "status": "noted",
+            "fields": { "finding": "a row with evidence", "evidence": "it happened three times" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// The board is readable through the surface and not writable by it.
 #[tokio::test]
 async fn the_board_cannot_be_written_through_the_ledger_routes() {
