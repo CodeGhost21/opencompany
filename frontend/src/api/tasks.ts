@@ -368,7 +368,8 @@ export interface CreateTask {
   assignee?: string;
   /**
    * The chat thread this card is being opened from (issue #246). Set by the
-   * transcript's "Add to board" action; the board's `+` button omits it.
+   * host when a turn raises a card out of a conversation; the board's `+`
+   * button omits it.
    *
    * Note what is deliberately NOT sent alongside it: `column`. Entering
    * Working is what spends money, so the server's intake default decides where

@@ -317,8 +317,8 @@ struct CreateTask {
     parent_task_id: Option<String>,
     /// The chat thread this card is being opened from (issue #246).
     ///
-    /// Set by the transcript's "Add to board" action, which is the one creation
-    /// entry point that *has* an originating conversation; the board's `+`
+    /// Set on the card a turn raises out of a conversation, which is the one
+    /// creation path that *has* an originating conversation; the board's `+`
     /// button omits it. Absent is the previous behaviour and stays the default,
     /// so no existing caller changes.
     #[serde(default)]

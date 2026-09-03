@@ -75,7 +75,6 @@ import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import {
   mentionCountsByChannel,
   mentionsToClear,
-  threadViewAdvancesChannel,
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
 import {
@@ -100,7 +99,6 @@ import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
 import {
-  type ChatMessage,
   dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
@@ -118,7 +116,7 @@ import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
-import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
+import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue, type PendingReRead } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
@@ -139,7 +137,6 @@ import {
   type HistoryStatus,
   type Transcripts,
 } from "@/views/chat/model";
-import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
@@ -656,8 +653,6 @@ export function AppShell({
   // duplicate cannot leave a badge behind for a line that was never added.
   const [lastViewedChannel, setLastViewedChannel] = useState<Record<string, number>>({});
   const [unreadSince, setUnreadSince] = useState(() => Date.now());
-  const [threads, setThreads] = useState(defaultThreads);
-  const [activeThreadId, setActiveThreadId] = useState("main");
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) and the board itself
   // (issue #464) refetch live.
@@ -1186,14 +1181,13 @@ export function AppShell({
         return { ...h, byChannel: { ...h.byChannel, [channelId]: status } };
       });
 
-    // One history fetch per thread, fanned into both transcript stores. The
-    // Chat workspace keeps `transcripts` keyed by channel id, and the parked
-    // Conversation keeps `threads` keyed by thread id; a desk's channel id *is*
-    // its thread id, and a DM's channel id is the console-local `dmChannelId`
-    // while its thread id is the roster agent id (see `ChatView`'s `send`).
-    // Fetching per unique thread instead of per store means a thread that
-    // renders as both a thread and a channel is read once, not twice, on every
-    // tick (issue #1690).
+    // One history fetch per thread, fanned into the channels that render it.
+    // `transcripts` is keyed by channel id while history is addressed by thread
+    // id: a desk's channel id *is* its thread id, and a DM's channel id is the
+    // console-local `dmChannelId` while its thread id is the roster agent id
+    // (see `ChatView`'s `send`). Fetching per unique thread means a thread
+    // rendered by more than one channel is read once, not twice, on every tick
+    // (issue #1690).
     const hydrateThread = (threadId: string, channels: readonly { channelId: string }[]) => {
       // Serialize: a tick that fires while the cold read is still in flight
       // does not fire a second request for the same thread (issue #1690).
@@ -1208,20 +1202,12 @@ export function AppShell({
           if (cancelled || requestCompany !== company) return;
           const hydrated = fromHistory(entries);
           if (hydrated.length > 0) {
-            // Both folds use the same rule: persisted rows take the history's
-            // own oldest-first order, and local rows the host has not
-            // persisted yet stay at the tail — so a row the live SSE path
-            // missed lands where the host says it belongs, gap or tail
-            // (issue #1690). Durable rows outside the newest page remain in
-            // their existing prefix, while only browser-local rows are tail
-            // optimistic sends.
-            setThreads((ts) =>
-              ts.map((t) => {
-                if (t.id !== threadId) return t;
-                const messages = mergeHistoryInOrder(t.messages, hydrated);
-                return messages === t.messages ? t : { ...t, messages };
-              }),
-            );
+            // Persisted rows take the history's own oldest-first order, and
+            // local rows the host has not persisted yet stay at the tail — so
+            // a row the live SSE path missed lands where the host says it
+            // belongs, gap or tail (issue #1690). Durable rows outside the
+            // newest page remain in their existing prefix, while only
+            // browser-local rows are tail optimistic sends.
             channels.forEach(({ channelId }) => {
               setTranscripts((t) => {
                 const merged = mergeHistoryInOrder(t[channelId] ?? [], hydrated);
@@ -1301,20 +1287,7 @@ export function AppShell({
             team,
             deskThreads.map((t) => t.id),
           ),
-          // The legacy `#/conversation` route's own copy of the pinned
-          // Operator row — Chat's channel model gets it through
-          // `operatorSection`, but `Conversation` reads this thread list
-          // directly and never received one, so its `readOnly` plumbing had
-          // nothing to gate (issue #1781 review, Codex P2).
-          ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
         ];
-        setThreads((prev) => {
-          const byId = new Map(prev.map((t) => [t.id, t]));
-          return resolved.map((t) => {
-            const existing = byId.get(t.id);
-            return existing ? { ...t, messages: existing.messages } : t;
-          });
-        });
         // The host answered, so this is the company's desk list — empty
         // included. `defaultDesks()` stands in only when `listDesks` itself
         // failed (`desks === null`, from the `.catch(() => null)` above); a
@@ -1634,20 +1607,12 @@ export function AppShell({
               return next;
             });
           }
-          setThreads((ts) =>
-            ts.map((t) => {
-              if (t.id !== threadId) return t;
-              const known = new Set(t.messages.map((m) => m.id));
-              const fresh = hydrated.filter((m) => !known.has(m.id));
-              return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
-            }),
-          );
           const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
-          // (issue #1701). The `threads` fold above still ran; park the id so
-          // the drain effect replays the transcript fold once the map lands,
-          // rather than dropping it and leaving the Chat panel stale.
+          // (issue #1701). Park the id so the drain effect replays the
+          // transcript fold once the map lands, rather than dropping it and
+          // leaving the Chat panel stale.
           if (!channelId) {
             // Both identities, not just the desk: the replay re-runs the
             // cleanup above, and that cleanup is filed under the state key. A
@@ -2111,57 +2076,8 @@ export function AppShell({
   );
 
   /**
-   * The Conversation surface's own view report, mapped onto the Chat rail.
-   *
-   * Conversation renders the `main` thread (and every desk thread) that the
-   * rail maps to a channel, but it is a different store with its own view
-   * lifecycle — ChatView's `onChannelViewed` never fires for it. For a company
-   * with real desks the `main` conversation lives *only* here, so a mention
-   * whose subject sits in that thread could never clear: the rail channel it
-   * badges hydrates the first desk's own thread, whose loaded messages can
-   * never contain the main-thread subject. Reporting the view through the same
-   * channel id, gated by the *thread's* loaded ids, gives the badge its read
-   * path while keeping the clear honest — it still only fires once the named
-   * message is actually on screen.
-   *
-   * The mention clear is not the whole of `onChannelViewed`, though. A desk or
-   * DM thread view maps to the channel that owns that same transcript, so its
-   * ordinary channel-view side effects (advancing the unread floor and the
-   * persisted read marker) are correct. The `main` view is different: `main`
-   * aliases the first desk's channel for *badging*, but its transcript is the
-   * legacy General conversation, not the desk's own — so marking that desk read
-   * would permanently un-badge unread lines the operator never saw. That view
-   * reports the mention clear only ([`threadViewAdvancesChannel`]).
-   */
-  const onThreadViewed = useCallback(
-    (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
-      if (!channelId) return;
-      onChannelViewed(
-        channelId,
-        false,
-        mentionFeedVersion,
-        undefined,
-        null,
-        loadedMessageIds,
-        threadViewAdvancesChannel(threadId, channelId),
-      );
-    },
-    [onChannelViewed, mentionFeedVersion],
-  );
-
-  const setThreadMessages = (
-    threadId: string,
-    updater: (m: ChatMessage[]) => ChatMessage[],
-  ) =>
-    setThreads((ts) =>
-      ts.map((t) => (t.id === threadId ? { ...t, messages: updater(t.messages) } : t)),
-    );
-
-  /**
    * Approval decisions and other unaddressed lines land in a transcript rather
-   * than vanishing. Both chat surfaces get the line: Chat appends it to a
-   * channel, and the parked Conversation to its active thread. The shell owns
+   * than vanishing: Chat appends the line to a channel. The shell owns
    * `transcripts`, not `ChatView`, so the write survives that view unmounting —
    * which it always has, because these lines are written from Approvals.
    *
@@ -2189,7 +2105,6 @@ export function AppShell({
         [target]: [...(t[target] ?? []), makeMessage("system", line)],
       }));
     }
-    setThreadMessages(activeThreadId, (m) => [...m, makeMessage("system", line)]);
   };
 
   /**
@@ -2217,52 +2132,16 @@ export function AppShell({
     }));
   };
 
-  // Render one `AgentReply` (issue #66) into its desk thread's transcript.
-  // Dedupe against our own optimistic echo: the backend journals an
-  // `AgentReply` for the operator's own chat turn too, and Conversation
-  // already rendered that reply locally. Local message ids are ephemeral
-  // counters (not content-addressed), so we key the dedupe on an identical
-  // company line already present in the thread's recent tail. Only desks that
-  // exist as a thread receive an injection; an unmatched chatId is a no-op
-  // rather than polluting the wrong thread.
+  // Render one `AgentReply` (issue #66) into the Chat workspace's transcripts.
   //
   // Split out from {@link injectAgentReply} so a frame `PendingSyncPosts` held
   // back (issue #983) can be rendered from the same code once its thread's POST
   // resolves, instead of the shell needing a second copy of this logic.
   const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
-      setThreads((ts) =>
-        ts.map((t) => {
-          if (t.id !== event.chatId) return t;
-          const dup = t.messages
-            .slice(-8)
-            .some((m) => m.from === "company" && m.text === event.text);
-          if (dup) return t;
-          return {
-            ...t,
-            messages: [
-              ...t.messages,
-              makeMessage("company", event.text, {
-                channel: event.agentId,
-                taskId: event.taskId,
-                mentions: event.mentions,
-                // Issue #483 — see `liveReplyIdentity`.
-                ...liveReplyIdentity(event),
-              }),
-            ],
-          };
-        }),
-      );
-
-      // …and into the Chat workspace's transcripts, which is a *different*
-      // store (issue #367). Chat became the nav-listed surface in #361 while
-      // this injection kept writing only to the parked Conversation's threads,
-      // so anything the console did not POST for — an inbound channel turn, a
-      // background desk turn — reached Chat only on a page reload.
-      //
       // The event names a thread; `chatChannelByThread` is the only thing that
-      // knows which channel renders it. An id no channel owns is a no-op, the
-      // same as the thread store above: better silent than in the wrong place.
+      // knows which channel renders it. An id no channel owns is a no-op:
+      // better silent than in the wrong place.
       //
       // `channelForThread`, for the reason `noteInChannel` gives: the map holds
       // four literal General spellings and the host echoes whatever casing the
@@ -2398,31 +2277,18 @@ export function AppShell({
    * reload recognise its own twin (#483/#498) — lives in
    * `dispatchMarkerPlacement`, so each stays assertable. This callback is only
    * the write.
-   *
-   * Written into **both** stores for the same reason `injectAgentReply` is: the
-   * parked Conversation reads `threads`, the Chat workspace reads
-   * `transcripts`, and a line written to one alone is invisible on the other
-   * until a reload.
    */
   const injectDispatchMarker = useCallback(
     (event: CompanyStreamEvent) => {
       if (event.type !== "desk_task_completed") return;
       const placement = dispatchMarkerPlacement(event, chatChannelByThread);
       if (!placement) return;
-      const { threadId, channelId, message } = placement;
-
-      setThreads((ts) =>
-        ts.map((t) => {
-          if (t.id !== threadId) return t;
-          // The same id guard hydration runs. A marker cannot arrive twice off
-          // one stream, but a reconnecting `EventSource` can replay a frame,
-          // and the id is what makes that harmless.
-          if (t.messages.some((m) => m.id === message.id)) return t;
-          return { ...t, messages: [...t.messages, message] };
-        }),
-      );
+      const { channelId, message } = placement;
 
       if (!channelId) return;
+      // The same id guard hydration runs. A marker cannot arrive twice off one
+      // stream, but a reconnecting `EventSource` can replay a frame, and the id
+      // is what makes that harmless.
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
         if (existing.some((m) => m.id === message.id)) return t;
@@ -3610,27 +3476,6 @@ export function AppShell({
               failedApprovals={failedApprovals}
               budgetProximity={budgetProximity}
               onDismissBudgetProximity={() => setBudgetProximity(null)}
-            />
-          )}
-          {view === "conversation" && (
-            <Conversation
-              client={client}
-              company={company}
-              threads={threads}
-              activeId={activeThreadId}
-              onSelect={setActiveThreadId}
-              onThreadViewed={onThreadViewed}
-              setMessages={setThreadMessages}
-              onReply={() => void feed.refresh()}
-              taskEventTick={taskEventTick}
-              liveStepsByThread={liveStepsByThread}
-              receiptByThread={receiptByThread}
-              agentNames={agentNames}
-              onSendStart={onSendStart}
-              onSendEnd={onSendEnd}
-              onSendDetached={onSendDetached}
-              onSendFailed={onSendFailed}
-              openTurns={openTurns}
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
