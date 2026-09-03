@@ -11,18 +11,9 @@ import type { InflightRun } from "@/api/tasks";
 /**
  * Cancelling a run that has no card.
  *
- * A `kind: "delegation"` run carries `taskId: null` — it is a sub-agent turn,
- * not a dispatched board card — and the only console surface that could stop
- * one was a strip on the retired `#/conversation` route. Every other control
- * over a run is reached through a card: the task detail screen resolves its
- * run with `runs.find((r) => r.taskId === taskId)`, which a null taskId can
- * never match, and it is only addressable at `#/tasks/<id>` in the first place.
- *
- * So the affordance was attached to the card while the steer API was already
- * keyed on the run: `POST …/tasks/{key}/steer` resolves `key` against the
- * in-flight registry, where a delegation's key is a synthetic run id. These
- * tests pin the control to that key, because reaching for `taskId` is exactly
- * the mistake that made a delegation uncancellable.
+ * A `kind: "delegation"` run carries `taskId: null`, and `POST …/tasks/{key}/steer`
+ * resolves `key` against the in-flight registry. These tests pin the control to
+ * that key: addressing a run by `taskId` cannot reach a delegation at all.
  */
 
 const toasts = vi.hoisted(() => ({

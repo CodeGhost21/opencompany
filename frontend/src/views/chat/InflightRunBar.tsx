@@ -26,11 +26,11 @@ import { Button } from "@/components/ui/button";
  * stop is the worse of the two. The heading says "company" so the list does not
  * read as "this channel's work".
  *
- * ## Why a delegation is the case that matters
+ * ## Why a row is keyed on `run.key`
  *
- * A dispatched card is reachable at its own detail screen, which offers the
- * same verbs. A delegation has no card, so this is the only place its cancel
- * exists — which is why the row is keyed on `run.key` and never on `taskId`.
+ * Every run in the in-flight read is steerable by its `key`, and a delegation's
+ * `taskId` is null. Keying a row on the card would drop exactly the runs that
+ * have no other control.
  */
 export function InflightRunBar({
   client,
