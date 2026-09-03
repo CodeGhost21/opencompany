@@ -102,6 +102,7 @@ import {
   dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
+  isGeneralChannel,
   liveReplyIdentity,
   MAIN_THREAD_ID,
   makeMessage,
@@ -2670,23 +2671,27 @@ export function AppShell({
     // when a frame carries no chatId (older host / background turn).
     const frameThreadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
-    // …then through `channelForThread`, because the maps written below are keyed
-    // by **channel** while the frame names a **thread** (issue #1743). A bare
-    // index is the bug that doc warns about, and it silently ate every live
-    // step: the host folds the company-wide line under whatever casing the
-    // caller addressed and emits `chatId: "General"`, while `liveStepsByThread`
-    // is read at `GENERAL_CHANNEL` — `"general"`. Rows were written under a key
-    // no render site looks at, so the console showed a bare "Working…" spinner
-    // for the whole turn and the steps appeared only once the durable history
-    // folded them in. `agent_reply` resolves the same id the same way a few
-    // hundred lines up; this surface was simply missed.
+    // …then, for a General spelling ONLY, through `channelForThread`. The host
+    // folds the company-wide line under whatever casing the caller addressed,
+    // so an API client that posts to `General` has its frames emitted under
+    // that spelling while these maps are armed at the console's own General id.
+    // Rows written under a spelling no reader looks at are rows the operator
+    // never sees, which is the #1743 class of bug.
     //
-    // Unresolved ids keep the raw spelling rather than dropping the frame: the
-    // map is built from the desk list, so a frame arriving before that loads
-    // would otherwise be lost outright, which is worse than today's behaviour.
-    const threadId = frameThreadId
-      ? (channelForThread(chatChannelByThreadRef.current, frameThreadId) ?? frameThreadId)
-      : frameThreadId;
+    // Narrow to General **deliberately**. `channelForThread` maps a bare member
+    // id to the DM *channel* id (`dm:<id>`), but `dmThreadId` — what `ChatView`
+    // reads these maps by, and what `onSendStart` arms them under — stays the
+    // bare id for any teammate whose own id is not a General spelling. Routing
+    // every id through the map therefore moves DM live state to a key nothing
+    // reads. Worse, the map is built from the directory: if that loads between
+    // a `tool_call` and its `tool_result` the two resolve differently, the
+    // result lands in another bucket, and the call row stays `running` forever.
+    // So everything that is not a General alias stays in the host-thread
+    // namespace these maps are already keyed in (PR #2068 review).
+    const threadId =
+      frameThreadId && isGeneralChannel(frameThreadId)
+        ? (channelForThread(chatChannelByThreadRef.current, frameThreadId) ?? frameThreadId)
+        : frameThreadId;
     if (!threadId) {
       // No chat bubble to fold the frame into. A dispatched card raised from a
       // conversation now DOES stream — `run_steered_background` derives its
