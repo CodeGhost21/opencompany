@@ -129,6 +129,8 @@ function render(status: TaskStatus) {
         onOpenThread: () => {},
         onReact: () => {},
         onDismissCard: () => {},
+      onAddToBoard: () => {},
+      addingCardId: null,
         dismissingCardId: null,
         taskStatusByTaskId: { "task-7": status },
         now: NOW,

@@ -75,6 +75,8 @@ async function render(deciding: ReadonlyMap<string, Verdict>) {
         onOpenThread: () => {},
         onReact: () => {},
         onDismissCard: () => {},
+        onAddToBoard: () => {},
+        addingCardId: null,
         dismissingCardId: null,
         now: T0 + 60_000,
         askerNames: new Map([["seo", "SEO Specialist"]]),

@@ -61,6 +61,8 @@ function render(channel: Channel) {
         onOpenThread: () => {},
         onReact: () => {},
         onDismissCard: () => {},
+        onAddToBoard: () => {},
+        addingCardId: null,
         dismissingCardId: null,
       }),
     );
