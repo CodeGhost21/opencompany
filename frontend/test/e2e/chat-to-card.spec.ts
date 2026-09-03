@@ -297,6 +297,26 @@ test("a dismissed card's chip goes away and does not come back on reload", async
     })
     .catch(() => undefined);
 
+  // …and *wait for it to land*. A cancel is a request, not an event: the run
+  // leaves the in-flight list when the turn notices, which is the same check
+  // the delete route makes under its write lock. Dismissing before then races
+  // that 409 back, and the chip stays up for a reason the assertion below
+  // cannot name.
+  await expect
+    .poll(
+      async () => {
+        const live = await request.get(`/api/v1/company/tasks/inflight`);
+        if (!live.ok()) return true;
+        const runs = (await live.json()) as Array<{ taskId: string | null }>;
+        return runs.some((run) => run.taskId === taskId);
+      },
+      {
+        timeout: 30_000,
+        message: "the cancelled run must leave the in-flight list before the card can be deleted",
+      },
+    )
+    .toBe(false);
+
   // The control is a confirm, not a bare delete — a card is not something to
   // lose to a stray click. Scoped to the row the chip sits on, so the dialog
   // opened is that card's.
