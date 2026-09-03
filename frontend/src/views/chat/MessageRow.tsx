@@ -1,4 +1,4 @@
-import { Loader2, MessageSquareReply, SquareKanban } from "lucide-react";
+import { MessageSquareReply } from "lucide-react";
 
 import type { TaskStatus } from "@/api/tasks";
 import type { CognitionState } from "@/api/types";
@@ -7,7 +7,7 @@ import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
-import { isHostMessageId, titleFromMessage, type ChatMessage } from "@/lib/chat";
+import { isHostMessageId, type ChatMessage } from "@/lib/chat";
 import { isBudgetPauseNotice } from "@/hooks/use-events";
 import { timeAgo } from "@/lib/language";
 import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
@@ -36,10 +36,6 @@ interface Props {
   onDismissCard: (taskId: string) => void;
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
-  /** Opens a board card from this line (issue #246). */
-  onAddToBoard: (message: ChatMessage) => void;
-  /** The message whose card create is in flight, if any. */
-  addingCardId: string | null;
   /**
    * Settles the in-review dispatch card a settle pill links to: the operator's
    * Approve control on the finished card's pill. Absent when the shell has not
@@ -228,8 +224,6 @@ export function MessageRow({
   onReact,
   onDismissCard,
   dismissingCardId,
-  onAddToBoard,
-  addingCardId,
   onReviewCard,
   reviewingCardIds,
   resolveAttachmentUrl,
@@ -330,7 +324,6 @@ export function MessageRow({
           <div className="flex flex-wrap items-center gap-2">
             <CardChip
               taskId={message.taskId}
-              mine={message.from === "you"}
               busy={dismissingCardId === message.taskId}
               disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
               onDismiss={onDismissCard}
@@ -386,12 +379,6 @@ export function MessageRow({
         reacted={(emoji) => hasReacted(message.reactions, emoji)}
         disabledReason={actionsUnavailable}
         offersReactions={!readOnly}
-        onAddToBoard={
-          message.taskId || !titleFromMessage(message.text)
-            ? undefined
-            : () => onAddToBoard(message)
-        }
-        addingCard={addingCardId === message.id}
       />
     </article>
   );
@@ -580,8 +567,6 @@ function ActionBar({
   reacted,
   disabledReason,
   offersReactions,
-  onAddToBoard,
-  addingCard,
 }: {
   onReply: () => void;
   onReact: (emoji: string) => void;
@@ -606,18 +591,6 @@ function ActionBar({
    * (#1757, #1984), already answered there.
    */
   offersReactions: boolean;
-  /**
-   * Opens a board card from this line (issue #246). `undefined` withdraws the
-   * control rather than disabling it: a line that already has a card must not
-   * offer a second, and a line with no text has no title to open one under.
-   *
-   * Through REST rather than the responder's toolbelt, which only the
-   * orchestrator carries — that is what makes the action true on every channel
-   * and DM rather than only the main line.
-   */
-  onAddToBoard?: () => void;
-  /** Whether this line's card create is in flight. */
-  addingCard: boolean;
 }) {
   const disabled = !!disabledReason;
   return (
@@ -656,23 +629,6 @@ function ActionBar({
       >
         <MessageSquareReply className="size-4" />
       </Button>
-      {onAddToBoard && (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          disabled={disabled || addingCard}
-          onClick={onAddToBoard}
-          aria-label="Add to board"
-          title={disabledReason ?? "Add to board"}
-        >
-          {addingCard ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <SquareKanban className="size-4" />
-          )}
-        </Button>
-      )}
     </div>
   );
 }

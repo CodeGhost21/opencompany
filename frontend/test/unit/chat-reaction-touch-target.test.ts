@@ -48,8 +48,6 @@ describe("reaction chips at a touch viewport", () => {
           onOpenThread: () => {},
           onReact: () => {},
           onDismissCard: () => {},
-          onAddToBoard: () => {},
-          addingCardId: null,
           dismissingCardId: null,
         }),
       );

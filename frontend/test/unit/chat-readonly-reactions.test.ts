@@ -103,8 +103,6 @@ function render(channel: Channel, messages: ChatMessage[]) {
         onOpenThread: () => {},
         onReact: () => {},
         onDismissCard: () => {},
-        onAddToBoard: () => {},
-        addingCardId: null,
         dismissingCardId: null,
       }),
     );

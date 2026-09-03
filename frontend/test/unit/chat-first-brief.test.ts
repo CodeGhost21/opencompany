@@ -40,8 +40,6 @@ function renderTimeline(onStartBrief: () => void) {
         onOpenThread: () => {},
         onReact: () => {},
         onDismissCard: () => {},
-        onAddToBoard: () => {},
-        addingCardId: null,
         dismissingCardId: null,
         onStartBrief,
       }),

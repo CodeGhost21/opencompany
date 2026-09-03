@@ -207,8 +207,6 @@ function render(ch: Channel, rows: TimelineItem[], historyPending = false) {
         onOpenThread: () => {},
         onReact: () => {},
         onDismissCard: () => {},
-      onAddToBoard: () => {},
-      addingCardId: null,
         dismissingCardId: null,
       }),
     );
