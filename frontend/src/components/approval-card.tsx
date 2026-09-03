@@ -253,9 +253,18 @@ export function BlockerDecide({
 }) {
   const [answering, setAnswering] = useState(false);
   const [answer, setAnswer] = useState("");
+  const [pendingVerdict, setPendingVerdict] = useState<BlockerVerdict | null>(null);
   const once: GrantScope = { kind: "once" };
-  const send = (verdict: BlockerVerdict, words?: string) =>
+  const send = (verdict: BlockerVerdict, words?: string) => {
+    setPendingVerdict(verdict);
     onDecide(blockerEventVerdict(verdict), once, { verdict, answer: words });
+  };
+  // `deciding` covers the whole card, not which of the four verdicts it is
+  // for — clear the local pick once the parent says nothing is in flight
+  // any more, on both the resolved and the rejected path.
+  useEffect(() => {
+    if (!deciding) setPendingVerdict(null);
+  }, [deciding]);
 
   return (
     <div data-testid="blocker-decide" className="flex w-full flex-col gap-3">
@@ -288,6 +297,9 @@ export function BlockerDecide({
               aria-label={`Send this answer: ${decisionLabel(a, askerNames, now)}`}
               onClick={() => send("amend", answer)}
             >
+              {deciding && pendingVerdict === "amend" ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : null}{" "}
               Send answer
             </Button>
           </div>
@@ -301,6 +313,9 @@ export function BlockerDecide({
           disabled={deciding}
           onClick={() => send("cancel")}
         >
+          {deciding && pendingVerdict === "cancel" ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : null}{" "}
           {blockerVerdictLabel("cancel")}
         </Button>
         <Button
@@ -310,6 +325,9 @@ export function BlockerDecide({
           disabled={deciding}
           onClick={() => send("skip")}
         >
+          {deciding && pendingVerdict === "skip" ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : null}{" "}
           {blockerVerdictLabel("skip")}
         </Button>
         <Button
@@ -328,7 +346,7 @@ export function BlockerDecide({
           disabled={deciding}
           onClick={() => send("retry")}
         >
-          {deciding ? (
+          {deciding && pendingVerdict === "retry" ? (
             <Loader2 className="size-4 animate-spin" />
           ) : (
             <Check className="size-4" />
