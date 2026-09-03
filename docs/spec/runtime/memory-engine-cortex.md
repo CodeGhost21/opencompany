@@ -358,8 +358,8 @@ Acceptance, against the list this record set before the work started:
   provisioned empty instance probing clean. Note this cannot be expressed
   through `provides()`, which is a fixed-body structural check — the lever is a
   probe or a conformance case (#1968, #1973);
-- **key-exact deletion**, verified — and the `deleted.events: 2` alarm above was
-  ours. Being precise about what was blocked and by whom, since only one of these
+- **key-exact deletion**, verified — and the `deleted.events: 2` alarm (see the
+  [driver notes](memory-engine-cortex-driver.md)) was ours. Being precise about what was blocked and by whom, since only one of these
   is a guardrail:
 
   | Request | Enforced by | Result |

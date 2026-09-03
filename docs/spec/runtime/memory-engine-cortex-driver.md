@@ -60,9 +60,19 @@ wraps records in a JSON envelope inside `content` (`Bound::put` calls
 `encode(record)`), so that is the shape it uses anyway — but a scan-per-read is
 slow and still non-atomic.
 
-Both rest on a `forget` that reported `deleted.events: 2` for a selector naming
-one event id. That is a lot of correctness risk to absorb for something an
-upstream `on_conflict: replace` would remove entirely.
+Only the first rests on `forget`, and that matters, because `forget` is where our
+worst scare came from: a call reporting `deleted.events: 2` for a selector naming
+one event id. That turned out to be our own malformed request rather than an
+engine defect — the record's Phase 1 acceptance notes set out exactly which layer
+refuses what — but an emulation that deletes the previous event on every
+overwrite puts that call on the write path of every store, which is a lot of
+blast radius to accept for something an upstream `on_conflict: replace` would
+remove entirely.
+
+The envelope-and-fold path does not delete anything. It appends the new event and
+lets the fold prefer the newest per key, so the previous version stays on disk and
+is simply not returned. That is the path the shipped driver takes, and it is why
+its `forget` is confined to `delete`, where a caller asked for removal.
 
 The reproduction is recorded at
 [cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3)
