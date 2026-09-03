@@ -120,6 +120,40 @@ test("the row leaves once the run is no longer in flight", async ({ page }) => {
   await expect(page.getByTestId("inflight-run-bar")).toHaveCount(0, { timeout: 30_000 });
 });
 
+test("a double click buys only one steer", async ({ page }) => {
+  const steers: unknown[] = [];
+  let current: readonly unknown[] = [DELEGATION];
+  let reads = 0;
+
+  // The re-read that follows the steer is held open, so the window between the
+  // POST landing and the fresh row arriving is wide enough for a second press
+  // to land in. That window is the whole bug: the host accepts the second
+  // cancel and journals a second `TaskSteered` for one operator intent.
+  await page.route("**/tasks/inflight", async (route) => {
+    reads += 1;
+    if (reads > 1) await new Promise((r) => setTimeout(r, 3000));
+    await route.fulfill({ json: current });
+  });
+  await page.route("**/steer", async (route) => {
+    steers.push(route.request().postDataJSON());
+    current = [];
+    await route.fulfill({ status: 202, body: "" });
+  });
+  page.on("dialog", (dialog) => void dialog.accept());
+
+  await openChannel(page, ENGINEERING);
+  const button = cancelFor(page, "content");
+  await expect(button).toBeVisible({ timeout: 30_000 });
+
+  await button.dblclick();
+  for (let i = 0; i < 3; i++) {
+    await button.click({ force: true, timeout: 1_000 }).catch(() => {});
+  }
+
+  await page.waitForTimeout(6_000);
+  expect(steers).toEqual([{ action: "cancel", confirm: true }]);
+});
+
 test("nothing in flight draws no bar", async ({ page }) => {
   await withInflight(page, []);
   await openChannel(page, ENGINEERING);

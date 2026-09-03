@@ -102,6 +102,20 @@ function click(el: HTMLElement) {
   });
 }
 
+/**
+ * A real activation, which a disabled control refuses.
+ *
+ * {@link click} dispatches the event straight at the element and so reaches the
+ * handler whatever the button's state; that is what most of these tests want.
+ * A test about the control being *held down* has to go through the path a
+ * person does.
+ */
+function press(el: HTMLElement) {
+  act(() => {
+    el.click();
+  });
+}
+
 /** Let the click's async handler settle. */
 async function settle() {
   await act(async () => {
@@ -242,6 +256,74 @@ describe("a run that is already going away", () => {
     render([delegation({ pendingAction: "cancel" })]);
     expect(cancelButton("Research the competitor pricing")).toBeNull();
     expect(host.textContent).toContain("cancelling…");
+  });
+});
+
+describe("one intent buys one steer", () => {
+  beforeEach(() => vi.stubGlobal("confirm", vi.fn(() => true)));
+
+  /** A re-read this test opens and closes, so the window can be stood still in. */
+  function deferredRefresh() {
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { onSteered: vi.fn(() => done), release };
+  }
+
+  it("holds the control down until the re-read settles", async () => {
+    const { onSteered, release } = deferredRefresh();
+    render([delegation()], onSteered);
+
+    press(cancelButton("Research the competitor pricing")!);
+    await settle();
+    expect(steerTask).toHaveBeenCalledTimes(1);
+    expect(onSteered).toHaveBeenCalledTimes(1);
+
+    // The steer has landed, but the row carrying `pendingAction: "cancel"` has
+    // not arrived yet. Nothing but `busy` is holding the button down here, so
+    // a second press in this window is what buys a second accepted cancel —
+    // and a second `TaskSteered` in the journal for one operator intent.
+    press(cancelButton("Research the competitor pricing")!);
+    await settle();
+    expect(steerTask).toHaveBeenCalledTimes(1);
+    expect(cancelButton("Research the competitor pricing")!.disabled).toBe(true);
+
+    release();
+    await settle();
+  });
+
+  it("lets the control back up once the re-read has landed", async () => {
+    const { onSteered, release } = deferredRefresh();
+    render([delegation()], onSteered);
+
+    press(cancelButton("Research the competitor pricing")!);
+    await settle();
+
+    release();
+    await settle();
+
+    // A run the re-read still reports keeps its control: the freeze is the
+    // window, not a one-way door.
+    expect(cancelButton("Research the competitor pricing")!.disabled).toBe(false);
+  });
+
+  it("holds the control down through a refresh that follows a failed steer", async () => {
+    steerTask.mockRejectedValue(new ApiError(500, "internal", "the host fell over", true));
+    const { onSteered, release } = deferredRefresh();
+    render([delegation()], onSteered);
+
+    press(cancelButton("Research the competitor pricing")!);
+    await settle();
+    expect(onSteered).toHaveBeenCalledTimes(1);
+
+    press(cancelButton("Research the competitor pricing")!);
+    await settle();
+    expect(steerTask).toHaveBeenCalledTimes(1);
+    expect(cancelButton("Research the competitor pricing")!.disabled).toBe(true);
+
+    release();
+    await settle();
   });
 });
 
