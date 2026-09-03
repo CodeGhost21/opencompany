@@ -902,6 +902,16 @@ impl CompanyRuntime {
         &self.id
     }
 
+    /// The pass that names the work a card is opened for, when this company's
+    /// brain has a model to name it with.
+    ///
+    /// `None` on an echo brain and in any build without the harness, which
+    /// leaves [`mint_task_title`](crate::ports::tasks::mint_task_title) on the
+    /// shortened request.
+    pub fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
+        self.brain.titler()
+    }
+
     /// This company's secret store (SMTP creds, OAuth tokens, domain config).
     /// Sets the install-wide default MCP servers (issue #527). Called by
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from resolved config.
@@ -6627,6 +6637,7 @@ mod tests {
         CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
         task_enters_planning,
     };
+    use crate::ports::tasks::TaskTitle;
 
     /// Issue #880: which parked approvals name a workflow run, and which must
     /// not.
@@ -7023,7 +7034,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "card-1".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -7038,6 +7049,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             // A stale chip from a dispatch attempt that already bounced.
             bounced: Some("a previous run's dispatch failed".to_string()),
         };
@@ -7101,7 +7113,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "card-2".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -7116,6 +7128,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             // A stale chip from a dispatch attempt that already bounced.
             bounced: Some("a previous run's dispatch failed".to_string()),
         };
@@ -7609,7 +7622,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -7624,6 +7637,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -7703,7 +7717,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -7718,6 +7732,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -7859,7 +7874,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -7876,6 +7891,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -8016,7 +8032,7 @@ mod tests {
         let orchestrator = "ceo";
         let card = |id: &str, origin: &str| TaskRecord {
             id: id.to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -8031,6 +8047,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         let dm_card = card("t-dm", "writer");
@@ -8250,7 +8267,7 @@ mod tests {
 
         let mut card = crate::ports::tasks::TaskRecord {
             id: "t-relay".to_string(),
-            title: "Draft the launch email".to_string(),
+            title: TaskTitle::authored("Draft the launch email"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -8265,6 +8282,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         rt.tasks().upsert(&id, &card).await.unwrap();
@@ -8910,7 +8928,9 @@ mod tests {
     #[cfg(feature = "openhuman")]
     mod review {
         use crate::ports::TaskRecord;
-        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore};
+        use crate::ports::tasks::{
+            COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore, TaskTitle,
+        };
         use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
         use std::sync::Arc;
         use tempfile::TempDir;
@@ -9044,7 +9064,7 @@ mod tests {
         fn card(id: &str, origin: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
-                title: "Ship it".to_string(),
+                title: TaskTitle::authored("Ship it"),
                 note: None,
                 column: column.to_string(),
                 priority: "medium".to_string(),
@@ -9059,6 +9079,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }
@@ -9856,7 +9877,7 @@ mod tests {
         use crate::company::task_intent::BlockerReplyIntent;
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
         use crate::ports::tasks::{
-            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord, TaskTitle,
         };
         use crate::ports::types::CompanyId;
         use std::path::Path;
@@ -9912,7 +9933,7 @@ mod tests {
         fn card(id: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
-                title: "Draft the launch note".to_string(),
+                title: TaskTitle::authored("Draft the launch note"),
                 note: None,
                 column: column.to_string(),
                 priority: "medium".to_string(),
@@ -9927,6 +9948,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }

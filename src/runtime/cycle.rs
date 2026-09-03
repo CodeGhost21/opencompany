@@ -3520,7 +3520,7 @@ impl<'a> CycleHostImpl<'a> {
         };
         let card = TaskRecord {
             id: generate_id(),
-            title: parsed.title.clone(),
+            title: crate::ports::tasks::TaskTitle::system(&parsed.title),
             note: parsed.note,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -3545,6 +3545,7 @@ impl<'a> CycleHostImpl<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
@@ -3643,7 +3644,12 @@ impl<'a> CycleHostImpl<'a> {
         };
         let card = TaskRecord {
             id: generate_id(),
-            title: first_line(&parsed.instruction, 80),
+            title: crate::ports::tasks::mint_task_title(
+                &parsed.instruction,
+                None,
+                self.rt.titler(),
+            )
+            .await,
             note: Some(note),
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -3668,6 +3674,7 @@ impl<'a> CycleHostImpl<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
@@ -4087,6 +4094,7 @@ impl CycleHost for CycleHostImpl<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     /// `single_agent` picks an agent slot only when the batch is one addressed
     /// operator message, and falls back to the whole-company lock otherwise —
@@ -4227,7 +4235,7 @@ mod test {
 
         let card = |id: &str, title: &str, column: &str| TaskRecord {
             id: id.to_string(),
-            title: title.to_string(),
+            title: TaskTitle::authored(title),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -4242,6 +4250,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         rt.tasks()
@@ -4402,7 +4411,7 @@ mod test {
                 rt.id(),
                 &TaskRecord {
                     id: "t-paused".to_string(),
-                    title: "Investigate the flaky nightly job".to_string(),
+                    title: TaskTitle::authored("Investigate the flaky nightly job"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
                     priority: "medium".to_string(),
@@ -4417,6 +4426,7 @@ mod test {
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -4544,7 +4554,7 @@ mod test {
                     rt.id(),
                     &TaskRecord {
                         id: format!("t-{n}"),
-                        title: format!("Card {n}"),
+                        title: TaskTitle::authored(&format!("Card {n}")),
                         note: None,
                         column: COLUMN_TODO.to_string(),
                         priority: "medium".to_string(),
@@ -4559,6 +4569,7 @@ mod test {
                         workflow_proposal: None,
                         origin_run_id: None,
                         origin_workflow_id: None,
+                        origin_message_seq: None,
                         bounced: None,
                     },
                 )
@@ -5438,7 +5449,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Draft the spec".to_string(),
+                    title: TaskTitle::authored("Draft the spec"),
                     note: None,
                     column: COLUMN_IN_PROGRESS.to_string(),
                     priority: "medium".to_string(),
@@ -5455,6 +5466,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -5525,7 +5537,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Draft the spec".to_string(),
+                    title: TaskTitle::authored("Draft the spec"),
                     note: Some("[operator] parked this".to_string()),
                     column: COLUMN_PAUSED.to_string(),
                     priority: "medium".to_string(),
@@ -5542,6 +5554,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -9937,7 +9950,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t1".into(),
-                    title: "Ship invoicing".into(),
+                    title: TaskTitle::authored("Ship invoicing"),
                     note: Some("build the importer".into()),
                     column: COLUMN_TODO.into(),
                     priority: "medium".into(),
@@ -9954,6 +9967,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -10017,7 +10031,7 @@ members = ["writer"]
                 rt.id(),
                 &TaskRecord {
                     id: "t1".into(),
-                    title: "Already finished".into(),
+                    title: TaskTitle::authored("Already finished"),
                     note: None,
                     column: "done".into(),
                     priority: "medium".into(),
@@ -10034,6 +10048,7 @@ members = ["writer"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -11164,7 +11179,7 @@ members = ["writer"]
     fn a_card_has_settled_only_once_its_run_stopped() {
         let card = |column: &str, bounced: Option<&str>| TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship the thing".to_string(),
+            title: TaskTitle::authored("Ship the thing"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -11179,6 +11194,7 @@ members = ["writer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: bounced.map(str::to_string),
         };
         // Stopped, whether or not it succeeded — the misleading case this
@@ -11219,7 +11235,7 @@ members = ["writer"]
     fn a_settled_line_names_the_landing_and_a_bounce_names_its_reason() {
         let mut card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Draft the investor update".to_string(),
+            title: TaskTitle::authored("Draft the investor update"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -11234,6 +11250,7 @@ members = ["writer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         assert_eq!(
@@ -11453,7 +11470,7 @@ timeout)",
     fn settled_card(id: &str, title: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: title.to_string(),
+            title: TaskTitle::authored(title),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -11473,6 +11490,7 @@ timeout)",
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

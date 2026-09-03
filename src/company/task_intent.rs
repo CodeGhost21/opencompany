@@ -47,9 +47,11 @@
 //! ambiguous.
 //!
 //! [`detect_task_intent`] remains as the thin `Track`-only wrapper the card
-//! paths call, so the issue-#463 title contract with
-//! `DelegationRunner::chat_handler_card` — which has to derive byte-for-byte
-//! the same title the handler wrote — is untouched.
+//! paths call to decide **whether** a message is work. What the card is then
+//! *named* is no longer its business: a title is minted through
+//! [`mint_task_title`](crate::ports::tasks::mint_task_title), and the card the
+//! handler wrote is found again by the message's own sequence position rather
+//! than by re-deriving its headline.
 //!
 //! # What this deliberately is not
 //!
@@ -605,10 +607,12 @@ pub fn small_talk(text: &str) -> Option<SmallTalk> {
 /// Returns a cleaned task title when `text` is an actionable request, else
 /// `None` — the [`MessageTriage::Track`]-only view of [`triage_message`].
 ///
-/// Kept as its own function because two card paths depend on it agreeing with
-/// itself byte-for-byte: the REST chat handler writes the title, and
-/// `DelegationRunner::chat_handler_card` re-derives it moments later to find
-/// the card that handler wrote (issue #463).
+/// The title it returns is a *fallback* name, used when no titling pass is
+/// wired or the model could not answer. Nothing re-derives it to find a card
+/// again — adoption is keyed on
+/// [`TaskRecord::origin_message_seq`](crate::ports::tasks::TaskRecord::origin_message_seq) —
+/// so this no longer has to agree with itself byte-for-byte across two call
+/// sites.
 pub fn detect_task_intent(text: &str) -> Option<String> {
     match triage_message(text) {
         MessageTriage::Track(title) => Some(title),

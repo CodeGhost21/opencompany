@@ -360,6 +360,7 @@ pub async fn sweep_stranded_planning(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_PAUSED, TaskRecord};
     use crate::store::FsOps;
     use std::sync::Arc;
@@ -367,7 +368,7 @@ mod test {
     fn card(id: &str, column: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -382,6 +383,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

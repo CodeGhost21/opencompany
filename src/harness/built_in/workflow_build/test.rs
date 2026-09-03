@@ -29,6 +29,7 @@ use super::tools::{
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::openhuman::tools::traits::Tool;
@@ -917,7 +918,7 @@ async fn runtime_with_agent(
 fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Automate the weekly digest".to_string(),
+        title: TaskTitle::authored("Automate the weekly digest"),
         note: Some("It should go out every Monday morning.".to_string()),
         column: COLUMN_IN_PROGRESS.to_string(),
         priority: "medium".to_string(),
@@ -932,6 +933,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     }
 }

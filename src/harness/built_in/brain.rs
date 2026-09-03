@@ -253,6 +253,10 @@ pub struct HarnessBrain {
     /// use (issue #1835). Lazy and `OnceLock` for exactly [`Self::triage`]'s
     /// reasons — it needs the company id, and once built it is immutable.
     selector: std::sync::OnceLock<crate::harness::selector::MeteredSelector>,
+    /// The card-titling pass, built on first use. Lazy and `OnceLock` for
+    /// exactly [`Self::triage`]'s reasons — it needs the company id, and once
+    /// built it is immutable.
+    titler: std::sync::OnceLock<crate::harness::title::MeteredTitler>,
     /// The company's record, **re-read from the store at the top of every
     /// cycle** (issue #707).
     ///
@@ -464,6 +468,7 @@ impl HarnessBrain {
             runs: None,
             triage: std::sync::OnceLock::new(),
             selector: std::sync::OnceLock::new(),
+            titler: std::sync::OnceLock::new(),
         }
     }
 
@@ -1091,7 +1096,7 @@ impl HarnessBrain {
                 key: card.id.clone(),
                 task_id: Some(card.id.clone()),
                 kind: InflightKind::Task,
-                title: card.title.clone(),
+                title: card.title.to_string(),
                 agent_id: responder.clone(),
                 started_at_millis: now_millis(),
                 pending_action: None,
@@ -2706,7 +2711,9 @@ impl HarnessBrain {
 
         let card = TaskRecord {
             id: generate_id(),
-            title: publish::conversation_card_title(&published),
+            title: crate::ports::tasks::TaskTitle::system(&publish::conversation_card_title(
+                &published,
+            )),
             note: Some(publish::conversation_card_note(responder, &published)),
             // Finished agent work a person has not accepted yet — the same
             // landing `column_for_settled_run(Succeeded)` gives a dispatched run.
@@ -2732,6 +2739,7 @@ impl HarnessBrain {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
@@ -3203,6 +3211,17 @@ impl HarnessBrain {
         .with_approvals(&self.deps.approval_requests)
         .with_workflow_refs(&self.deps.workflow_refs)
         .with_triage(self.triage_escalation(&record.id))
+        .with_titler(self.title_pass(&record.id))
+    }
+
+    /// The company's card-titling pass, built once.
+    fn title_pass(
+        &self,
+        company: &crate::ports::types::CompanyId,
+    ) -> &crate::harness::title::MeteredTitler {
+        self.titler.get_or_init(|| {
+            crate::harness::title::MeteredTitler::from_deps(&self.deps, company.clone())
+        })
     }
 
     /// The company's triage escalation, built once (issue #678).
@@ -3379,6 +3398,12 @@ fn settle(card: &mut TaskRecord, end: TaskRunEnd, responder: &str, body: &str) {
 
 #[async_trait]
 impl Brain for HarnessBrain {
+    /// The company's titling pass, so the card-opening paths that compile
+    /// without the harness can still name what they open.
+    fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
+        Some(self.title_pass(&self.record().id))
+    }
+
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
         // Issue #707: re-read the record before anything routes on it, so a desk
         // reorder / new desk / added desk member saved through the console
@@ -4298,6 +4323,7 @@ impl HarnessBrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     use tinyinference::message::Message;
     use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
@@ -5864,7 +5890,7 @@ members = ["engineer"]
     fn card(id: &str, assignee: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Ship the thing".to_string(),
+            title: TaskTitle::authored("Ship the thing"),
             note: None,
             column: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -5879,6 +5905,7 @@ members = ["engineer"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -10116,7 +10143,7 @@ members = ["eng1", "eng2"]
     fn card_in_review(id: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: format!("Work item {id}"),
+            title: TaskTitle::authored(&format!("Work item {id}")),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -10131,6 +10158,7 @@ members = ["eng1", "eng2"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

@@ -1998,7 +1998,7 @@ async fn run_artifacts(
                 latest_version,
                 updated_at_millis: record.updated_at_millis,
                 workspace_node_id,
-                task_title: Some(card.title.clone()),
+                task_title: Some(card.title.to_string()),
             });
         }
     }
@@ -7373,7 +7373,7 @@ mod tests {
         ) -> crate::ports::TaskRecord {
             crate::ports::TaskRecord {
                 id: id.into(),
-                title: title.into(),
+                title: crate::ports::tasks::TaskTitle::authored(title),
                 note: None,
                 column: "in_review".into(),
                 priority: "medium".into(),
@@ -7388,6 +7388,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: origin_run_id.map(str::to_string),
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }

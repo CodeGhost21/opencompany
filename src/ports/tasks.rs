@@ -994,14 +994,338 @@ impl TaskOrigin {
     }
 }
 
+/// How many characters of a card title survive.
+pub const TASK_TITLE_MAX_CHARS: usize = 80;
+
+/// A card's headline: one short line naming the work to be done.
+///
+/// # Why this is a type and not a `String`
+///
+/// The contract — a short imperative name — was documented on the field and
+/// enforced by nothing, so each producer minted its own and three independently
+/// converged on the same shape: take the raw message, cut it at eighty
+/// characters. A board of those reads as a chat log. A bare `String` field gives
+/// the next producer the same freedom, which is why the fix is a type rather
+/// than a patch to the three truncators.
+///
+/// Every way in is a constructor named for **where the text came from**, and all
+/// of them run the same [`normalise`] pass: one line, no wrapping quotes or
+/// backticks, no markdown emphasis, no `Task:`-style preamble, no trailing
+/// sentence punctuation, bounded length. Shape is therefore total — no
+/// `TaskTitle` anywhere in the process can be a paragraph, and no `From<String>`
+/// or `From<&str>` impl exists to smuggle one in.
+///
+/// # What the type does not promise
+///
+/// Shape is checkable; *being a good name for the work* is not. That comes from
+/// the producer picking the right constructor, and the naming is the guardrail:
+/// a raw ask goes through [`summarised`](Self::summarised) with
+/// [`truncated`](Self::truncated) behind it, never through
+/// [`authored`](Self::authored).
+///
+/// # Stored titles are read back verbatim
+///
+/// `Deserialize` is transparent: a board written by an older build loads exactly
+/// as it was stored, raw-message titles included. Normalising on read would
+/// silently rewrite durable records, and re-summarising would cost a model call
+/// per card per load and make the board unstable between refreshes. The
+/// invariant is enforced where new titles enter, which is where the defect
+/// entered.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskTitle(String);
+
+impl TaskTitle {
+    /// A title a person typed for themselves.
+    ///
+    /// Authoritative: the console's create and edit dialogs and a `tasks.toml`
+    /// seed all land here, and nothing may re-word what they carry.
+    #[must_use]
+    pub fn authored(text: &str) -> Self {
+        Self(normalise(text))
+    }
+
+    /// A title that arrived as a structured title *field* rather than as prose
+    /// — a published file's name, a workflow's name, or the `title` argument of
+    /// a `spawn_task` tool call the model filled in deliberately.
+    ///
+    /// Already a name, whoever wrote it, so there is nothing for a summarising
+    /// pass to improve. This is the constructor for text that was **meant as a
+    /// title when it was written**; free text that merely gets used as one goes
+    /// to [`mint_task_title`].
+    #[must_use]
+    pub fn system(text: &str) -> Self {
+        Self(normalise(text))
+    }
+
+    /// A title a model wrote for a request.
+    ///
+    /// `None` when the reply sanitises to nothing — an empty string, pure
+    /// punctuation, a refusal — which is the caller's signal to fall back to
+    /// [`truncated`](Self::truncated) rather than to leave a card unnamed.
+    #[must_use]
+    pub fn summarised(reply: &str) -> Option<Self> {
+        let title = normalise(reply);
+        (!title.is_empty()).then_some(Self(title))
+    }
+
+    /// The deterministic fallback: the request itself, shortened.
+    ///
+    /// What every card was named before, kept because a dull title is better
+    /// than a failed card creation. Reached only when no model is configured or
+    /// the summarising pass could not answer in its budget.
+    #[must_use]
+    pub fn truncated(request: &str) -> Self {
+        Self(normalise(request))
+    }
+
+    /// The headline as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether this names nothing — the empty title an empty request produces.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for TaskTitle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for TaskTitle {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TaskTitle {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for TaskTitle {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for TaskTitle {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for TaskTitle {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<TaskTitle> for str {
+    fn eq(&self, other: &TaskTitle) -> bool {
+        self == other.0
+    }
+}
+
+impl PartialEq<TaskTitle> for &str {
+    fn eq(&self, other: &TaskTitle) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<TaskTitle> for String {
+    fn eq(&self, other: &TaskTitle) -> bool {
+        *self == other.0
+    }
+}
+
+/// Names the work a request asks for.
+///
+/// A port rather than a harness type because three of the four card-opening
+/// paths live outside the `openhuman` build — the REST chat handler, the
+/// desk hand-off tool, and the board's own create route — and every one of them
+/// mints a title from free text. A trait only the harness could name would have
+/// left them on the truncator that caused this.
+///
+/// The only implementation is the harness's metered titling pass. `None` in
+/// place of one — a default build, a company with no inference configured — is
+/// not an error condition: [`mint_task_title`] falls back and the card is named
+/// exactly as it was before.
+#[async_trait]
+pub trait TitleSummariser: Send + Sync {
+    /// Names the work `request` asks for, or `None` to leave the caller on its
+    /// deterministic fallback.
+    async fn title(&self, request: &str) -> Option<TaskTitle>;
+}
+
+/// Turn a free-text request into a card's headline. **The one way in.**
+///
+/// Every path that opens a card from something a person or an agent *said* goes
+/// through here: the REST chat handler, the direct and handed-off cards the
+/// delegation runner opens, and the desk hand-off tool. That is the whole of the
+/// fix — the three truncators those paths used to carry are gone, so there is no
+/// longer a second way to name a card from a message, and a fourth producer
+/// added tomorrow has one obvious function to call.
+///
+/// Titles that are **not** derived from free text do not belong here and must
+/// not be routed through it: a person's own words go to
+/// [`TaskTitle::authored`], and a name the host composes from facts it already
+/// holds goes to [`TaskTitle::system`]. Sending either to a model would re-word
+/// something that was already right.
+///
+/// Degrades in one direction only. No titler, an unreachable or slow model, a
+/// reply that sanitises to nothing — all of them land on `fallback`, which is
+/// the behaviour the caller had before. Card creation cannot fail here, and no
+/// inference error reaches the operator.
+///
+/// `fallback` is the name this caller would have used on its own, for the
+/// callers that have a better one than the request itself: the REST chat
+/// handler's lexical classifier already returns a tidied title, and throwing it
+/// away would make an offline company's cards *worse* than before rather than
+/// merely no better. `None` means "the request, shortened", which is what the
+/// paths with no lexical layer in front of them have always done.
+pub async fn mint_task_title(
+    request: &str,
+    fallback: Option<&str>,
+    titler: Option<&dyn TitleSummariser>,
+) -> TaskTitle {
+    if let Some(titler) = titler
+        && let Some(title) = titler.title(request).await
+    {
+        return title;
+    }
+    TaskTitle::truncated(fallback.unwrap_or(request))
+}
+
+/// Preambles a model reaches for when asked for a title, stripped so the answer
+/// is the name rather than a label plus the name.
+const TITLE_PREAMBLES: &[&str] = &[
+    "task title:",
+    "card title:",
+    "title:",
+    "task:",
+    "todo:",
+    "to-do:",
+    "here is the title:",
+    "here's the title:",
+];
+
+/// Reduce free text to the one bounded line a headline is allowed to be.
+///
+/// Order matters: the line is taken first so a model's chatty second paragraph
+/// cannot survive as content, the wrappers come off before the preamble so a
+/// quoted `"Title: x"` is caught, and the cap runs last so it bounds the final
+/// value rather than a prefix that later steps shorten anyway.
+///
+/// **Casing is left alone.** An earlier pass upper-cased the first character,
+/// which reads well on a sentence and corrupts every title that starts with a
+/// deliberately lower-case token — `iPhone sync is broken` became `IPhone …`,
+/// and a card named after a published `notes.md` became `Notes.md`. The model
+/// is asked for an imperative, which already starts capitalised; a human's own
+/// words and a file's own name are not this function's to restyle.
+fn normalise(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut current = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Wrappers, preambles and sentence punctuation all nest inside each other in
+    // real replies — `Title: "ship it"`, `"Title: ship it"`, `Task: "ship it".`
+    // — so all three come off together until a pass changes nothing. Running any
+    // one of them once, in a fixed order, leaves the others' leftovers behind:
+    // stripping the preamble off `Task: "ship it".` exposes quotes a one-shot
+    // wrapper pass has already been and gone past.
+    loop {
+        let before = current.clone();
+        current = strip_wrappers(&current);
+        let lowered = current.to_lowercase();
+        if let Some(preamble) = TITLE_PREAMBLES
+            .iter()
+            .find(|preamble| lowered.starts_with(**preamble))
+        {
+            current = current[preamble.len()..].trim_start().to_string();
+        }
+        // Sentence punctuation only. A closing bracket or a question mark that
+        // is part of the name (`Ship v2 (phase 1)`, `Why is checkout slow?`) is
+        // content, not decoration.
+        current = current
+            .trim_end_matches(['.', ',', ';', ':', '!', ' '])
+            .trim()
+            .to_string();
+        if current == before {
+            break;
+        }
+    }
+    cap(&current, TASK_TITLE_MAX_CHARS)
+}
+
+/// Peel one layer of quotes, backticks or markdown emphasis off both ends.
+fn strip_wrappers(text: &str) -> String {
+    const PAIRS: &[(&str, &str)] = &[
+        ("\"", "\""),
+        ("'", "'"),
+        ("`", "`"),
+        ("**", "**"),
+        ("__", "__"),
+        ("*", "*"),
+        ("_", "_"),
+        ("“", "”"),
+        ("‘", "’"),
+    ];
+    let mut current = text.trim().trim_start_matches('#').trim().to_string();
+    loop {
+        // `>=`, not `>`: a reply that is *only* a pair — `""`, `**` — has to
+        // strip to nothing, or a model that answered with bare punctuation puts
+        // that punctuation on the board as a title.
+        let Some((open, close)) = PAIRS.iter().find(|(open, close)| {
+            current.len() >= open.len() + close.len()
+                && current.starts_with(*open)
+                && current.ends_with(*close)
+        }) else {
+            return current;
+        };
+        current = current[open.len()..current.len() - close.len()]
+            .trim()
+            .to_string();
+    }
+}
+
+/// Shorten to `max` characters on a character boundary, preferring a whole word.
+///
+/// The ellipsis is budgeted inside `max`, so the result never exceeds the cap it
+/// advertises. Character-wise throughout: a byte slice would panic mid-codepoint
+/// on any title that is not ASCII.
+fn cap(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max - 1).collect();
+    let head = match head.rsplit_once(' ') {
+        Some((whole, _)) if !whole.is_empty() => whole,
+        _ => head.as_str(),
+    };
+    format!("{head}…")
+}
+
 /// One card on the company's task board.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRecord {
     /// Stable id for the task within the company.
     pub id: String,
-    /// The task's title.
-    pub title: String,
+    /// The card's headline. See [`TaskTitle`] for what is enforced and where
+    /// each producer's text is allowed to come from.
+    pub title: TaskTitle,
     /// An optional longer note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -1154,6 +1478,33 @@ pub struct TaskRecord {
     /// like [`Self::parent_task_id`], so no stored board needs migrating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_run_id: Option<String>,
+    /// The operator message this card was opened for, by its position in the
+    /// company's event log.
+    ///
+    /// # Why a card needs to name its message
+    ///
+    /// The REST chat handler opens a card, and the runtime turn that follows has
+    /// to find it again to adopt it — one message, one card. It used to find it
+    /// by re-running the same lexical detector over the same words and matching
+    /// the two titles for byte equality, which made the headline an identity key
+    /// and pinned it to a pure function of the raw message. That is why the
+    /// board read as a chat log and could not be improved: a model-authored
+    /// title is not reproducible, so any better name broke adoption — the "Card
+    /// opened" chip vanished and a turn's workflow stranded its card in To-do,
+    /// all without an error.
+    ///
+    /// A sequence position is the identity that was wanted. It is stable, it is
+    /// unique per message, and it frees the headline to be a name. It also
+    /// settles a case title equality got wrong on its own terms: two messages in
+    /// one thread that happen to read alike are two cards, and the newest-first
+    /// scan adopted whichever came back first.
+    ///
+    /// `None` for a card raised anywhere but a chat handler, and for every card
+    /// written before this field existed — additive on the wire like
+    /// [`origin_run_id`](Self::origin_run_id), so no stored board needs
+    /// migrating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_message_seq: Option<EventSeq>,
     /// The workflow graph whose run opened this card (issue #661 / M5).
     ///
     /// Carried beside [`origin_run_id`](Self::origin_run_id) rather than derived
@@ -1227,6 +1578,276 @@ pub trait TaskStore: Send + Sync {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // ── the card headline's shape invariant ──────────────────────────────────
+
+    /// Every constructor bounds its result, whatever it was handed. This is the
+    /// property a `String` field could not have: a producer that shoved a
+    /// paragraph in used to get a paragraph back.
+    #[test]
+    fn no_constructor_can_produce_an_unbounded_title() {
+        let paragraph = "hey can you take a look at the pricing page, I think the tiers are \
+                         confusing and we should probably reword the middle one because \
+                         nobody I have shown it to can tell me what it is actually for";
+        for title in [
+            TaskTitle::authored(paragraph),
+            TaskTitle::system(paragraph),
+            TaskTitle::truncated(paragraph),
+            TaskTitle::summarised(paragraph).expect("a paragraph still names something"),
+        ] {
+            assert!(
+                title.as_str().chars().count() <= TASK_TITLE_MAX_CHARS,
+                "{title}"
+            );
+            assert!(!title.as_str().contains('\n'));
+        }
+    }
+
+    /// The cap counts characters, not bytes, and budgets the ellipsis inside
+    /// itself. A byte slice here would panic mid-codepoint; an unbudgeted
+    /// ellipsis would return one character more than the type advertises.
+    #[test]
+    fn the_cap_is_utf8_safe_and_includes_its_own_ellipsis() {
+        let long = "價".repeat(TASK_TITLE_MAX_CHARS + 40);
+        let title = TaskTitle::truncated(&long);
+        assert_eq!(title.as_str().chars().count(), TASK_TITLE_MAX_CHARS);
+        assert!(title.as_str().ends_with('…'));
+
+        let exact = "a".repeat(TASK_TITLE_MAX_CHARS);
+        assert_eq!(TaskTitle::truncated(&exact).as_str(), exact);
+    }
+
+    /// A title never breaks mid-word — the truncator prefers the last whole one.
+    #[test]
+    fn a_shortened_title_stops_at_a_word() {
+        let title = TaskTitle::truncated(
+            "Reword the middle pricing tier and also the top one and the bottom one              and everything else on that page",
+        );
+        assert!(title.as_str().ends_with('…'));
+        assert!(!title.as_str().contains("  "));
+    }
+
+    /// Whitespace-only and empty are the same answer: nothing. A caller that
+    /// gets this back is expected to refuse rather than open a blank card.
+    #[test]
+    fn nothing_in_is_nothing_out() {
+        for text in ["", "   ", "\n\t\n", "  \n  \n "] {
+            assert!(TaskTitle::authored(text).is_empty(), "{text:?}");
+            assert!(TaskTitle::truncated(text).is_empty(), "{text:?}");
+            assert!(TaskTitle::summarised(text).is_none(), "{text:?}");
+        }
+    }
+
+    /// A request that is already a good title is not degraded by passing
+    /// through — the commonest input on the board, and the easiest to break.
+    #[test]
+    fn an_already_good_title_survives_unchanged() {
+        for good in [
+            "Fix the login redirect",
+            "Draft the Q3 board update",
+            "Ship v2 (phase 1)",
+            "Why is the pricing page slow?",
+        ] {
+            assert_eq!(TaskTitle::authored(good).as_str(), good, "{good}");
+        }
+    }
+
+    /// A one-word ask is a one-word title, not padding and not an ellipsis.
+    #[test]
+    fn a_one_word_request_is_a_one_word_title() {
+        assert_eq!(TaskTitle::truncated("ship").as_str(), "ship");
+    }
+
+    /// Casing is never touched. Upper-casing the first character reads well on
+    /// a sentence and corrupts every name that starts with a deliberately
+    /// lower-case token — which is most tool names, some brands, and every
+    /// title derived from a file.
+    #[test]
+    fn a_deliberately_lower_case_name_is_not_restyled() {
+        for name in [
+            "iPhone sync is broken",
+            "notes.md",
+            "npm audit is failing",
+            "kubectl context keeps resetting",
+            "eBay listing export",
+        ] {
+            assert_eq!(TaskTitle::system(name).as_str(), name, "{name}");
+            assert_eq!(TaskTitle::authored(name).as_str(), name, "{name}");
+        }
+    }
+
+    /// A multi-paragraph brief is reduced to its first line, so the detail
+    /// cannot ride into the headline — the note is where it belongs.
+    #[test]
+    fn a_multi_paragraph_brief_keeps_only_its_first_line() {
+        let title = TaskTitle::summarised(
+            "Reword the middle pricing tier\n\nBackground: three customers have \
+             asked what it means.\n\nDeadline: Friday.",
+        )
+        .expect("a brief names something");
+        assert_eq!(title.as_str(), "Reword the middle pricing tier");
+    }
+
+    /// The wrappers and preambles a model reaches for come off, including when
+    /// they are nested the other way round.
+    #[test]
+    fn model_decoration_is_stripped_rather_than_trusted() {
+        for decorated in [
+            "\"Reword the middle pricing tier\"",
+            "**Reword the middle pricing tier**",
+            "`Reword the middle pricing tier`",
+            "Title: Reword the middle pricing tier",
+            "Task: \"Reword the middle pricing tier\"",
+            "\"Title: Reword the middle pricing tier\"",
+            // Decoration nested three deep. Each layer hides the next from a
+            // single-pass stripper, which is why the pass runs to a fixed point.
+            "Task: \"Reword the middle pricing tier\".",
+            "**Title: Reword the middle pricing tier.**",
+            "\"**Reword the middle pricing tier**\"",
+            "# Reword the middle pricing tier",
+            "Reword the middle pricing tier.",
+            "_Reword the middle pricing tier_",
+            "“Reword the middle pricing tier”",
+        ] {
+            assert_eq!(
+                TaskTitle::summarised(decorated).expect(decorated).as_str(),
+                "Reword the middle pricing tier",
+                "{decorated}"
+            );
+        }
+    }
+
+    /// Punctuation that is part of the name stays. Only sentence-ending
+    /// decoration is stripped, or `Ship v2 (phase 1)` loses its bracket.
+    #[test]
+    fn punctuation_inside_a_name_is_content_not_decoration() {
+        assert_eq!(
+            TaskTitle::summarised("Ship v2 (phase 1)")
+                .expect("a title")
+                .as_str(),
+            "Ship v2 (phase 1)"
+        );
+        assert_eq!(
+            TaskTitle::summarised("Why is checkout slow?")
+                .expect("a title")
+                .as_str(),
+            "Why is checkout slow?"
+        );
+    }
+
+    /// A reply that is nothing but decoration names nothing, so the caller
+    /// falls back rather than putting punctuation on the board.
+    #[test]
+    fn decoration_with_no_name_in_it_is_no_title() {
+        for junk in ["\"\"", "**", "...", "Title:", "``", "#"] {
+            assert!(TaskTitle::summarised(junk).is_none(), "{junk:?}");
+        }
+    }
+
+    /// Non-Latin scripts are neither mangled nor case-folded — the pass is
+    /// character-wise, and upper-casing is a no-op where a script has no case.
+    #[test]
+    fn a_non_english_title_is_left_intact() {
+        for text in [
+            "価格ページの中段プランを書き直す",
+            "Переписать средний тариф",
+            "إعادة صياغة الفئة الوسطى",
+        ] {
+            assert_eq!(
+                TaskTitle::summarised(text).expect(text).as_str(),
+                text,
+                "{text}"
+            );
+        }
+    }
+
+    /// A stored board loads back exactly as it was written, raw-message titles
+    /// and all. Normalising on read would silently rewrite durable records, and
+    /// re-summarising would make the board unstable between refreshes.
+    #[test]
+    fn a_title_stored_by_an_older_build_round_trips_verbatim() {
+        let legacy = "hey can you take a look at the pricing page, I think the tiers are…";
+        let json = serde_json::to_string(&legacy).expect("serialises");
+        let loaded: TaskTitle = serde_json::from_str(&json).expect("deserialises");
+        assert_eq!(loaded.as_str(), legacy);
+        assert_eq!(serde_json::to_string(&loaded).expect("re-serialises"), json);
+    }
+
+    /// The type is transparent on the wire, so no stored board needs migrating
+    /// and no console field changes shape.
+    #[test]
+    fn a_title_is_a_bare_string_on_the_wire() {
+        let json = serde_json::to_string(&TaskTitle::authored("Ship it")).expect("serialises");
+        assert_eq!(json, "\"Ship it\"");
+    }
+
+    /// No titler wired is the offline company and the default build: the card
+    /// is named exactly as it was before any of this existed.
+    #[tokio::test]
+    async fn without_a_titler_a_card_is_named_by_shortening_the_request() {
+        let request = "hey can you take a look at the pricing page, I think the tiers are \
+                       confusing and we should probably reword the middle one";
+        assert_eq!(
+            mint_task_title(request, None, None).await,
+            TaskTitle::truncated(request)
+        );
+    }
+
+    /// A titler that cannot answer — unreachable, too slow, unreadable — leaves
+    /// the card named, never unnamed and never failed.
+    #[tokio::test]
+    async fn a_titler_that_declines_falls_back_rather_than_failing() {
+        struct Silent;
+
+        #[async_trait]
+        impl TitleSummariser for Silent {
+            async fn title(&self, _request: &str) -> Option<TaskTitle> {
+                None
+            }
+        }
+
+        let request = "reword the middle pricing tier please";
+        assert_eq!(
+            mint_task_title(request, None, Some(&Silent)).await,
+            TaskTitle::truncated(request)
+        );
+        assert!(
+            !mint_task_title(request, None, Some(&Silent))
+                .await
+                .is_empty()
+        );
+    }
+
+    /// The fix itself, at the seam: a rambling ask is named after the **work**,
+    /// and the headline is no longer the message wearing an ellipsis.
+    #[tokio::test]
+    async fn a_rambling_ask_is_named_after_the_work() {
+        struct Names(&'static str);
+
+        #[async_trait]
+        impl TitleSummariser for Names {
+            async fn title(&self, _request: &str) -> Option<TaskTitle> {
+                TaskTitle::summarised(self.0)
+            }
+        }
+
+        let request = "hey can you take a look at the pricing page, I think the tiers are \
+                       confusing and we should probably reword the middle one";
+        let title = mint_task_title(
+            request,
+            None,
+            Some(&Names("Reword the middle pricing tier")),
+        )
+        .await;
+
+        assert_eq!(title.as_str(), "Reword the middle pricing tier");
+        // The property that actually broke: the headline is not the message.
+        assert!(
+            !request.starts_with(title.as_str().trim_end_matches('…')),
+            "the title is still an excerpt of the request: {title}"
+        );
+        assert!(!title.as_str().ends_with('…'));
+    }
 
     /// Pins the **Rust** list's ids and their order against a literal, so a
     /// reorder or a rename is a deliberate two-place edit rather than a
@@ -1623,7 +2244,7 @@ mod test {
     fn plain_card() -> TaskRecord {
         TaskRecord {
             id: "t-1".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -1640,6 +2261,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

@@ -38,7 +38,7 @@ use crate::harness::publish::PUBLISH_ARTIFACT_TOOL;
 use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
 use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::brain::{Brain, CycleHost};
-use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskRecord, TaskStore};
+use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskRecord, TaskStore, TaskTitle};
 use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, ToolCall, ToolResult,
@@ -410,7 +410,7 @@ fn company() -> CompanyId {
 fn card(id: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Draft the launch spec".to_string(),
+        title: TaskTitle::authored("Draft the launch spec"),
         note: None,
         column: COLUMN_IN_PROGRESS.to_string(),
         priority: "medium".to_string(),
@@ -425,6 +425,7 @@ fn card(id: &str) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     }
 }

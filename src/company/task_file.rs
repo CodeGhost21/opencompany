@@ -89,7 +89,7 @@ impl TaskSeed {
     pub fn to_record(&self, at_millis: u64) -> TaskRecord {
         TaskRecord {
             id: self.id.clone(),
-            title: self.title.clone(),
+            title: crate::ports::tasks::TaskTitle::authored(&self.title),
             note: self.note.clone(),
             column: COLUMN_TODO.to_string(),
             priority: self
@@ -107,6 +107,7 @@ impl TaskSeed {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

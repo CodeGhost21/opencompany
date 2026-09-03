@@ -31,7 +31,7 @@ pub fn entries_from_tasks(tasks: &[TaskRecord]) -> Entries {
         .enumerate()
         .map(|(position, task)| {
             let mut fields: BTreeMap<String, String> = BTreeMap::new();
-            fields.insert("title".to_string(), task.title.clone());
+            fields.insert("title".to_string(), task.title.to_string());
             // The row's **status** is the phase, because that is the ledger's
             // declared vocabulary and the console's column list. The stage
             // rides alongside as prose, so a reader still learns that a working
@@ -93,13 +93,13 @@ mod test {
     use crate::ledger::registry::Registry;
     use crate::ports::tasks::{
         COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO,
-        TaskDeliverable,
+        TaskDeliverable, TaskTitle,
     };
 
     fn card(id: &str, column: &str, updated: u64) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: format!("card {id}"),
+            title: TaskTitle::authored(&format!("card {id}")),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -114,6 +114,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

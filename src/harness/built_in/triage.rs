@@ -33,11 +33,8 @@
 //! * Everything else leaves the gate exactly where the abstention left it.
 //!
 //! **It never mints a card.** A verdict does not become
-//! [`MessageTriage::Track`], because the title a card is opened under is pinned
-//! byte-for-byte between the REST handler and `chat_handler_card` (issue #463) —
-//! a model-authored title would desynchronise them and orphan the card. That
-//! also keeps the issue's own tie-breaker intact: a missed card costs one
-//! follow-up message, a spurious card pollutes the board permanently.
+//! [`MessageTriage::Track`], on the issue's own tie-breaker: a missed card costs
+//! one follow-up message, a spurious card pollutes the board permanently.
 //!
 //! # Failure is silence, not an error
 //!

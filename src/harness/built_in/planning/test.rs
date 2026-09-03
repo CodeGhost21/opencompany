@@ -24,6 +24,7 @@ use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::*;
 use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use tempfile;
 
@@ -1756,7 +1757,7 @@ async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<Comp
 fn card(id: &str, assignee: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Ship the changelog".to_string(),
+        title: TaskTitle::authored("Ship the changelog"),
         note: None,
         column: COLUMN_PLANNING.to_string(),
         priority: "medium".to_string(),
@@ -1774,6 +1775,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         output: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     }
 }
