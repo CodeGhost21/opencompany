@@ -10,7 +10,7 @@ use tower::ServiceExt;
 use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
-use crate::ports::tasks::TaskRecord;
+use crate::ports::tasks::{TaskRecord, TaskTitle};
 use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
@@ -203,6 +203,69 @@ async fn send_auth(
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
     (status, value)
+}
+
+/// A headline that normalises away is refused, not persisted (coderabbit on
+/// #2055).
+///
+/// The `"""` bug's sibling, one layer out. That one was a *model* reply peeling
+/// to a lone quote; this is a person typing punctuation into the title field.
+/// The junk test that catches the first deliberately does not apply here — a
+/// person who names a card `🚀` means it — so the boundary that persists the
+/// card is what has to refuse a name with nothing in it, on both routes that
+/// can set one.
+#[tokio::test]
+async fn a_title_that_normalises_to_nothing_is_refused_on_create_and_rename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Non-blank on the wire, and nothing left after the sentence-punctuation
+    // strip — so a length check on the raw input passes it through.
+    for junk in ["...", "!!!", " . . . "] {
+        let (status, _body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/tasks",
+            Some(json!({ "title": junk })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "create accepted {junk:?}");
+    }
+
+    // A symbol a person plainly meant is still a title, and still lands.
+    let (status, rocket) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "🚀" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rocket["title"], "🚀");
+    let id = rocket["id"].as_str().unwrap().to_string();
+
+    // …and the rename route refuses the same junk rather than blanking it.
+    let (status, _body) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({ "title": "..." })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let still = board
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id.as_str());
+    assert_eq!(
+        still.map(|t| &t["title"]),
+        Some(&json!("🚀")),
+        "a refused rename leaves the card named as it was"
+    );
 }
 
 #[tokio::test]
@@ -584,7 +647,7 @@ async fn a_task_detail_response_carries_the_thread_root_of_a_threaded_origin() {
             &company,
             &TaskRecord {
                 id: "threaded".into(),
-                title: "Ship the brief".into(),
+                title: TaskTitle::authored("Ship the brief"),
                 note: None,
                 column: crate::ports::tasks::COLUMN_TODO.into(),
                 priority: "medium".into(),
@@ -602,6 +665,7 @@ async fn a_task_detail_response_carries_the_thread_root_of_a_threaded_origin() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -812,7 +876,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
             &company,
             &TaskRecord {
                 id: "idle".into(),
-                title: "Idle".into(),
+                title: TaskTitle::authored("Idle"),
                 note: None,
                 column: crate::ports::tasks::COLUMN_TODO.into(),
                 priority: "medium".into(),
@@ -827,6 +891,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -4511,7 +4576,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
 
     let card = |id: &str, title: &str, parent: Option<&str>| TaskRecord {
         id: id.into(),
-        title: title.into(),
+        title: TaskTitle::authored(title),
         note: None,
         column: "in_review".into(),
         priority: "medium".into(),
@@ -4526,6 +4591,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     };
     for t in [
@@ -4709,7 +4775,7 @@ async fn inflight_read_is_not_shadowed_by_task_detail() {
 fn discussion_card(id: &str, title: &str) -> TaskRecord {
     TaskRecord {
         id: id.into(),
-        title: title.into(),
+        title: TaskTitle::authored(title),
         note: None,
         column: "todo".into(),
         priority: "medium".into(),
@@ -4724,6 +4790,7 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     }
 }
@@ -5378,7 +5445,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             &company,
             &TaskRecord {
                 id: "t-1".into(),
-                title: "Launch post".into(),
+                title: TaskTitle::authored("Launch post"),
                 note: Some("Write the launch post.".into()),
                 column: "in_review".into(),
                 priority: "high".into(),
@@ -5393,6 +5460,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -5501,7 +5569,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
             &company,
             &TaskRecord {
                 id: "t-1".into(),
-                title: "Ship it".into(),
+                title: TaskTitle::authored("Ship it"),
                 note: None,
                 column: "in_review".into(),
                 priority: "medium".into(),
@@ -5516,6 +5584,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -5609,7 +5678,7 @@ async fn dispatched_task(
             company,
             &TaskRecord {
                 id: "t-1".into(),
-                title: "Ship it".into(),
+                title: TaskTitle::authored("Ship it"),
                 note: None,
                 column: "in_progress".into(),
                 priority: "medium".into(),
@@ -5624,6 +5693,7 @@ async fn dispatched_task(
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -6070,7 +6140,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
             &company,
             &TaskRecord {
                 id: "t-2".into(),
-                title: "Also ship it".into(),
+                title: TaskTitle::authored("Also ship it"),
                 note: None,
                 column: "in_progress".into(),
                 priority: "medium".into(),
@@ -6085,6 +6155,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -7538,7 +7609,7 @@ async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &st
     let id = crate::ports::generate_id();
     let record = TaskRecord {
         id: id.clone(),
-        title: "Automate the weekly digest".to_string(),
+        title: TaskTitle::authored("Automate the weekly digest"),
         note: None,
         column: "in_review".to_string(),
         priority: "medium".to_string(),
@@ -7558,6 +7629,7 @@ async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &st
         }),
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     };
     runtime

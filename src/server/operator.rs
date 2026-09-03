@@ -2244,7 +2244,12 @@ async fn run_chat(
     let not_work = message
         .deliverable
         .is_some_and(crate::ports::types::MessageIntent::is_chat);
-    if let Some(title) = (!confined && !not_work)
+    // The lexical layer answers two questions at once, and only the first is a
+    // decision: whether this message becomes a card, and — for a host with no
+    // model wired — what to call it. The second is now a fallback. Keeping it
+    // matters: the classifier returns a *tidied* title, so discarding it would
+    // make an offline company's cards worse than before rather than no better.
+    let lexical = (!confined && !not_work)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
             crate::company::task_intent::MessageTriage::Track(title) => Some(title),
@@ -2254,12 +2259,19 @@ async fn run_chat(
         .or_else(|| {
             workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
         })
-        .filter(|title| !title.trim().is_empty())
-    {
-        // Keep the full message as the note only when the title was shortened
-        // from it, so a one-line ask doesn't duplicate itself.
-        let note =
-            (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        .filter(|title| !title.trim().is_empty());
+    if let Some(lexical) = lexical {
+        let title = crate::ports::tasks::mint_task_title(
+            message.text.trim(),
+            Some(&lexical),
+            runtime.titler(),
+        )
+        .await;
+        // The full ask, kept as the note whenever the headline is not already
+        // the whole of it — which a named title almost always is not. This is
+        // where the context, the caveats and the operator's own wording live now
+        // that the title is a name rather than an excerpt.
+        let note = (title.as_str() != message.text.trim()).then(|| message.text.clone());
         // Issue #576: the prompt box opens the card **already in Planning**, so
         // the spine epic #183 draws — prompt in, deliverable out — runs without
         // a human dragging the first step. The card is created *directly* in
@@ -2368,6 +2380,10 @@ async fn run_chat(
             // behind a chat turn, and inventing one would be a lie the board
             // then carries forever.
             origin_run_id: accepted.turn_id.clone(),
+            // The message this card was opened for. The runtime turn that
+            // follows finds the card by this and nothing else, so the headline
+            // above is free to be a name rather than an excerpt.
+            origin_message_seq: Some(accepted.message_seq),
             origin_workflow_id: None,
             bounced: None,
         };
@@ -4796,6 +4812,7 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
@@ -8303,7 +8320,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-77".to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
@@ -8318,6 +8335,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13662,7 +13680,7 @@ mode = "full"
                     runtime.id(),
                     &crate::ports::tasks::TaskRecord {
                         id: task_id.to_string(),
-                        title: "Ship it".to_string(),
+                        title: TaskTitle::authored("Ship it"),
                         note: None,
                         column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                         priority: "medium".to_string(),
@@ -13677,6 +13695,7 @@ mode = "full"
                         workflow_proposal: None,
                         origin_run_id: None,
                         origin_workflow_id: None,
+                        origin_message_seq: None,
                         bounced: None,
                     },
                 )
@@ -13738,7 +13757,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-review".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13753,6 +13772,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13799,7 +13819,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: Some("[writer] first draft".to_string()),
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13814,6 +13834,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13874,7 +13895,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13889,6 +13910,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -13984,7 +14006,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -13999,6 +14021,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -14047,7 +14070,7 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-1".to_string(),
-                    title: "Ship it".to_string(),
+                    title: TaskTitle::authored("Ship it"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
                     priority: "medium".to_string(),
@@ -14062,6 +14085,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -14132,7 +14156,7 @@ mode = "full"
     fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::TaskRecord {
         crate::ports::tasks::TaskRecord {
             id: id.to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -14147,6 +14171,7 @@ mode = "full"
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

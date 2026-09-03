@@ -351,7 +351,17 @@ export interface Task {
 
 /** The create body; the host defaults column→`pending`, priority→`medium`. */
 export interface CreateTask {
-  title: string;
+  /**
+   * The card's headline, when a person typed one.
+   *
+   * Omit it and the host names the card from `note`. The board's `+` dialog and
+   * the prompt box both send one and it is taken verbatim; "Add to board" sends
+   * none, because a chat message is not a title and shortening one in the
+   * browser is how a card ended up called `hey can you take a look at the…`.
+   *
+   * Omitting both this and `note` is a 400.
+   */
+  title?: string;
   note?: string;
   column?: string;
   priority?: string;

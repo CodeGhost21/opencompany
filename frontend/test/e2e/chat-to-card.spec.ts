@@ -144,8 +144,15 @@ test("a card raised inside a thread opens that thread on the jump back, not just
 
   const tasksResponse = await request.get(`${API}/tasks`);
   expect(tasksResponse.ok()).toBeTruthy();
-  const tasks = (await tasksResponse.json()) as Array<{ id: string; title: string }>;
-  const card = tasks.find((t) => t.title.includes(String(marker)));
+  const tasks = (await tasksResponse.json()) as Array<{
+    id: string;
+    title: string;
+    note?: string;
+  }>;
+  // Keyed on the NOTE, never the title: the card's headline is named by a
+  // titling pass, so the message that opened it is not in there — the note is
+  // where the operator's own words are kept.
+  const card = tasks.find((t) => (t.note ?? "").includes(String(marker)));
   expect(card, `no card opened from "${replyText}": ${JSON.stringify(tasks)}`).toBeTruthy();
 
   await page.goto(`/#/tasks/${card!.id}`);

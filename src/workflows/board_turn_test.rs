@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 
 use crate::company::parse_workflow;
 use crate::harness::HarnessPool;
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{RunCancel, TaskRecord, TaskStore, WorkflowBoardAction, WorkflowRunContext};
 use crate::store::FsOps;
@@ -228,7 +229,7 @@ async fn a_workflow_node_assigns_an_existing_card_without_moving_it() {
     let dir = tempfile::tempdir().unwrap();
     let seed = TaskRecord {
         id: "card-1".to_string(),
-        title: "Quarterly close".to_string(),
+        title: TaskTitle::authored("Quarterly close"),
         note: None,
         column: crate::ports::tasks::COLUMN_TODO.to_string(),
         priority: "medium".to_string(),
@@ -243,6 +244,7 @@ async fn a_workflow_node_assigns_an_existing_card_without_moving_it() {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     };
     let (run, store, _run_id) = run_with_board(

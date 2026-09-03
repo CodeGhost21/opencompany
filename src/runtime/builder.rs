@@ -6443,7 +6443,7 @@ mod test {
 
         let card = |id: &str, column: &str| crate::ports::tasks::TaskRecord {
             id: id.to_string(),
-            title: "Do the thing".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Do the thing"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -6457,6 +6457,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
             planning_attempts: Vec::new(),
         };
@@ -6819,7 +6820,7 @@ mod test {
         let id = CompanyId::new("acme");
         let card = |task: &str, column: &str| TaskRecord {
             id: task.to_string(),
-            title: "Draft the spec".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Draft the spec"),
             note: Some("[maya] started".to_string()),
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -6834,6 +6835,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -6947,7 +6949,7 @@ mod test {
         let id = CompanyId::new("acme");
         let card = |task: &str, column: &str| TaskRecord {
             id: task.to_string(),
-            title: "Draft the spec".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Draft the spec"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -6962,6 +6964,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 

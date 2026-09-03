@@ -46,9 +46,6 @@ import { ADD_TASK_COLUMN, labelFor } from "@/lib/board-columns";
 import { AssigneeSelect } from "./AssigneeSelect";
 
 
-/** How long a derived title may run before the full prompt moves to the note. */
-const TITLE_CAP = 80;
-
 /** The card priorities the host and its edit dialog support. */
 const PRIORITIES = ["low", "medium", "high"] as const;
 type TaskPriority = (typeof PRIORITIES)[number];
@@ -56,22 +53,21 @@ type TaskPriority = (typeof PRIORITIES)[number];
 /**
  * Splits a prompt into the card's `{title, note}` (issue #301).
  *
- * The dialog asks for one thing — what needs doing — so the card's two text
- * fields are derived rather than collected. The rule mirrors the host's own
- * chat task-intent derivation (`src/server/operator.rs`) and `delegate_to_desk`'s
- * `first_line(…, 80)`: the title is the prompt's first line, capped; the note
- * carries the **full** prompt only when the title was shortened from it, so a
- * one-liner does not duplicate itself onto its own card.
+ * The prompt box asks "what needs doing?", so what it collects is an *ask*, not
+ * a name. It used to cut that ask at its first line and post it as the title —
+ * the same rule the chat handler and `delegate_to_desk` used, and the reason a
+ * board of prompt-box cards read as a list of half-sentences. Now the whole
+ * prompt goes as the note and the host names the card from it.
  *
- * The invariant that matters: the operator's full text always survives on the
- * card, in the title or the note. Epic #183 §4's planner reads it from there.
+ * Returns no title at all rather than a derived one: `title` is optional on the
+ * wire precisely so a caller can say "I have no name for this, name it".
+ *
+ * The invariant that matters is unchanged: the operator's full text always
+ * survives on the card. It is simply always in the note now.
  */
-export function derivePromptCard(prompt: string): { title: string; note?: string } {
+export function derivePromptCard(prompt: string): { title?: string; note?: string } {
   const full = prompt.trim();
-  const firstLine = full.split("\n")[0].trim();
-  const title =
-    firstLine.length > TITLE_CAP ? `${firstLine.slice(0, TITLE_CAP).trimEnd()}…` : firstLine;
-  return { title, note: title === full ? undefined : full };
+  return full ? { note: full } : {};
 }
 
 /**
@@ -100,9 +96,9 @@ export function newTaskBody({
   /** The wire value: `""` (unassigned), a desk id, or a teammate id. */
   assignee: string;
 }): CreateTask | null {
-  const { title, note } = derivePromptCard(prompt);
-  if (!title) return null;
-  const body: CreateTask = { title, note };
+  const { note } = derivePromptCard(prompt);
+  if (!note) return null;
+  const body: CreateTask = { note };
   if (deliverable === "workflow") body.deliverable = "workflow";
   if (priority !== "medium") body.priority = priority;
   // Issue #1106. Sent verbatim — a desk stays a desk, exactly as
@@ -230,7 +226,7 @@ export function CreateTaskDialog({
             className="min-h-32 resize-y"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Describe the work. The first line becomes the card's title."
+            placeholder="Describe the work. The card gets named from it."
           />
         </div>
 

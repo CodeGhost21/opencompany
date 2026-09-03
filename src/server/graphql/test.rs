@@ -9,6 +9,7 @@ use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
@@ -891,7 +892,7 @@ async fn chat_history_projects_the_card_a_reply_opened() {
             runtime.id(),
             &crate::ports::tasks::TaskRecord {
                 id: "t-77".to_string(),
-                title: "Draft the launch note".to_string(),
+                title: TaskTitle::authored("Draft the launch note"),
                 note: None,
                 column: crate::ports::tasks::COLUMN_TODO.to_string(),
                 priority: "medium".to_string(),
@@ -906,6 +907,7 @@ async fn chat_history_projects_the_card_a_reply_opened() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )
@@ -1204,7 +1206,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
             runtime.id(),
             &TaskRecord {
                 id: "t1".into(),
-                title: "Launch".into(),
+                title: TaskTitle::authored("Launch"),
                 note: None,
                 column: "todo".into(),
                 priority: "high".into(),
@@ -1219,6 +1221,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             },
         )

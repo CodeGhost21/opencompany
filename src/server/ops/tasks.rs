@@ -207,7 +207,7 @@ impl From<TaskRecord> for TaskCard {
         };
         Self {
             id: t.id,
-            title: t.title,
+            title: t.title.to_string(),
             note: t.note,
             column: crate::ledger::board::phase_of(&t.column).to_string(),
             stage: stage_of(&t.column),
@@ -233,11 +233,12 @@ impl From<TaskRecord> for TaskCard {
 mod task_card_origin_test {
     use super::*;
     use crate::ports::tasks::TaskOrigin;
+    use crate::ports::tasks::TaskTitle;
 
     fn plain_record() -> TaskRecord {
         TaskRecord {
             id: "t-1".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: "todo".to_string(),
             priority: "medium".to_string(),
@@ -252,6 +253,7 @@ mod task_card_origin_test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -287,7 +289,20 @@ mod task_card_origin_test {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTask {
-    title: String,
+    /// The card's headline, when a person typed one.
+    ///
+    /// Optional since semantic titling. The board's `+` dialog and the prompt
+    /// box both send one and it is taken verbatim — a name a person chose is
+    /// authoritative and is never re-worded. The transcript's "Add to board"
+    /// action sends **no** title and only the message as `note`, and the host
+    /// names the card from it; that action used to shorten the message in the
+    /// browser, which is how a card ended up titled with the first eighty
+    /// characters of somebody's chat.
+    ///
+    /// Absent with no `note` to name the card from is a `400` — a card has to
+    /// be called something.
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     note: Option<String>,
     #[serde(default)]
@@ -508,6 +523,30 @@ async fn create_task(
     company: ScopedCompany,
     Json(body): Json<CreateTask>,
 ) -> Result<Json<TaskCard>, ApiError> {
+    // Named BEFORE the lock. Naming reads nothing off the board and writes
+    // nothing to it, and it can spend the titling pass's whole deadline on a
+    // model — inside the critical section that would queue every concurrent
+    // patch, delete, review and create for this company behind it, and a burst
+    // of creates would serialise those delays cumulatively (codex on #2055).
+    let title = match body.title.as_deref().map(str::trim) {
+        Some(title) if !title.is_empty() => crate::ports::tasks::TaskTitle::authored(title),
+        _ => {
+            let source = body.note.as_deref().map(str::trim).unwrap_or_default();
+            if source.is_empty() {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    "a task needs a title, or a note to name it from".to_string(),
+                )));
+            }
+            crate::ports::tasks::mint_task_title(source, None, company.runtime.titler()).await
+        }
+    };
+    // A headline that normalises away leaves a card with nothing on its face, so
+    // it is refused here rather than persisted blank.
+    if title.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "that title has no name in it".to_string(),
+        )));
+    }
     // Read → validate → write is one critical section. Two concurrent requests
     // that each read the board before either has written would both validate
     // against a snapshot missing the other's edge, and could persist a lineage
@@ -534,7 +573,7 @@ async fn create_task(
     let assignee = resolve_assignee(&company, body.assignee.unwrap_or_default()).await?;
     let record = TaskRecord {
         id: generate_id(),
-        title: body.title,
+        title,
         note: body.note,
         column,
         priority: body.priority.unwrap_or_else(|| "medium".to_string()),
@@ -582,6 +621,7 @@ async fn create_task(
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     };
     company.runtime.upsert_task(&record).await?;
@@ -608,7 +648,13 @@ async fn patch_task(
         .cloned()
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("task {task_id}")))?;
     if let Some(title) = body.title {
-        record.title = title;
+        let renamed = crate::ports::tasks::TaskTitle::authored(&title);
+        if renamed.is_empty() {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "that title has no name in it".to_string(),
+            )));
+        }
+        record.title = renamed;
     }
     if let Some(note) = body.note {
         record.note = Some(note);
@@ -1101,7 +1147,7 @@ impl LineageRef {
     fn from_task(t: &TaskRecord, cost: Option<CostDisplay>) -> Self {
         Self {
             id: t.id.clone(),
-            title: t.title.clone(),
+            title: t.title.to_string(),
             column: crate::ledger::board::phase_of(&t.column).to_string(),
             cost,
         }
@@ -2780,6 +2826,7 @@ mod steer_redirect_test {
     use super::*;
     use crate::company::CompanyManifest;
     use crate::company::steer::InflightKind;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::types::{CompanyId, CompanyRecord, EventSeq};
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
@@ -2881,7 +2928,7 @@ mod steer_redirect_test {
                 &company,
                 &crate::ports::tasks::TaskRecord {
                     id: id.to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
                     priority: "medium".to_string(),
@@ -2896,6 +2943,7 @@ mod steer_redirect_test {
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -3141,7 +3189,7 @@ mod patch_clears_bounced_test {
                 &company,
                 &crate::ports::tasks::TaskRecord {
                     id: id.to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
@@ -3156,6 +3204,7 @@ mod patch_clears_bounced_test {
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: Some("a previous run's dispatch failed".to_string()),
                 },
             )
