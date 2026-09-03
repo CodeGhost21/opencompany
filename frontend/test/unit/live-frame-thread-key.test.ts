@@ -1,58 +1,66 @@
 import { describe, expect, it } from "vitest";
 
-import { isGeneralChannel } from "@/lib/chat";
-import { channelForThread, dmThreadId } from "@/views/chat/model";
+import { liveFrameThreadKey, MAIN_THREAD_ID } from "@/lib/chat";
+import { dmThreadId } from "@/views/chat/model";
 import type { TeamMember } from "@/lib/team";
 
 /**
- * Which spellings a live turn frame's thread id may be rewritten through
- * before it keys `liveStepsByThread` / `receiptByThread`.
+ * Which spellings a live turn frame's thread id is rewritten through before it
+ * keys `liveStepsByThread` / `receiptByThread`.
  *
- * `onTurnEvent` normalizes **General aliases only**. The reason it normalizes
- * at all: the host folds the company-wide line under whatever casing the
- * caller addressed, so a client posting to `General` has its frames emitted
- * under that spelling while the console armed these maps at its own General
- * id — rows written where no reader looks (issue #1743).
- *
- * The reason it stops there is this file. These maps are keyed in the
- * **host-thread** namespace: `ChatView` reads them by `dmThreadId(member)` and
- * `onSendStart` arms them under that same id, which for an ordinary teammate
- * is the bare member id. `channelForThread` answers with the DM *channel* id,
- * `dm:<id>` — a different string. Routing every id through the map moves DM
- * live state to a key nothing reads (PR #2068 review).
+ * Calls the production resolver, not a copy of its conditional — a duplicated
+ * rule here would keep passing through a regression in the one `onTurnEvent`
+ * actually uses (CodeRabbit on #2068).
  */
 
 const ADA: TeamMember = { id: "ada", name: "Ada" } as TeamMember;
 
-/** The shell's thread → channel map, as `channelMap` builds it for one DM. */
-const MAP: Record<string, string> = { ada: "dm:ada", "": "general", main: "general" };
-
-/** The rule `onTurnEvent` applies, isolated from the React shell. */
-const keyFor = (frameThreadId: string): string =>
-  isGeneralChannel(frameThreadId) ? (channelForThread(MAP, frameThreadId) ?? frameThreadId) : frameThreadId;
+/** The shell's thread → channel map once the desk list has landed. */
+const LOADED: Record<string, string> = {
+  ada: "dm:ada",
+  "": MAIN_THREAD_ID,
+  [MAIN_THREAD_ID]: MAIN_THREAD_ID,
+};
 
 describe("a live frame's thread key", () => {
   it("leaves a teammate DM in the host-thread namespace the readers use", () => {
     // The identity `ChatView` reads by and `onSendStart` arms under.
     expect(dmThreadId(ADA)).toBe("ada");
-    // So the frame must key the same way — not `dm:ada`, which the map answers
-    // with and which no reader or receipt lookup ever asks for.
-    expect(keyFor("ada")).toBe("ada");
-    expect(keyFor("ada")).toBe(dmThreadId(ADA));
-    expect(channelForThread(MAP, "ada")).toBe("dm:ada");
+    // So the frame keys the same way — not `dm:ada`, which the map answers with
+    // and which no render or receipt lookup ever asks for.
+    expect(liveFrameThreadKey(LOADED, "ada")).toBe(dmThreadId(ADA));
+    expect(LOADED["ada"]).toBe("dm:ada");
   });
 
-  it("resolves a General alias, whatever casing the caller addressed", () => {
-    expect(keyFor("main")).toBe("general");
-    expect(keyFor("")).toBe("general");
+  it("resolves a General alias whatever casing the caller addressed", () => {
+    // The host echoes the caller's spelling; all of them are the same line, and
+    // the console armed its maps at the built-in channel's id.
+    for (const spelling of ["", "main", "General", "general"]) {
+      expect(liveFrameThreadKey(LOADED, spelling)).toBe(MAIN_THREAD_ID);
+    }
   });
 
-  it("keys a call and its result identically even if the directory loads between them", () => {
-    // The map is built from the directory, so it can fill in mid-turn. A DM id
-    // is never routed through it, so both frames land in one bucket and the
-    // row flips `running → ok` instead of hanging.
-    const beforeDirectory = ((id: string) =>
-      isGeneralChannel(id) ? (channelForThread({}, id) ?? id) : id)("ada");
-    expect(beforeDirectory).toBe(keyFor("ada"));
+  it("keys a General alias identically before and after the desks load", () => {
+    // The regression this pins: the map is empty until `/desks` lands, so a
+    // `tool_call` could key one way and its `tool_result` another. A result
+    // whose call is not in its bucket is dropped, so the call row would stay
+    // `running` for good — in a bucket nothing renders.
+    const beforeDesks = liveFrameThreadKey({}, "General");
+    const afterDesks = liveFrameThreadKey(LOADED, "General");
+
+    expect(beforeDesks).toBe(afterDesks);
+    expect(beforeDesks).toBe(MAIN_THREAD_ID);
+  });
+
+  it("keys a DM identically before and after the desks load, too", () => {
+    expect(liveFrameThreadKey({}, "ada")).toBe(liveFrameThreadKey(LOADED, "ada"));
+  });
+
+  it("honours a blueprint desk that owns the General line", () => {
+    // A company declaring `[[group_chat]] id = "general"` keeps its own desk,
+    // and the map is the only thing that knows. Resolution must defer to it
+    // rather than assume the built-in channel.
+    const blueprint = { ...LOADED, [MAIN_THREAD_ID]: "growth" };
+    expect(liveFrameThreadKey(blueprint, "General")).toBe("growth");
   });
 });

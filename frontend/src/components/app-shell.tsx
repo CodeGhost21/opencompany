@@ -102,7 +102,7 @@ import {
   dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
-  isGeneralChannel,
+  liveFrameThreadKey,
   liveReplyIdentity,
   MAIN_THREAD_ID,
   makeMessage,
@@ -2671,27 +2671,14 @@ export function AppShell({
     // when a frame carries no chatId (older host / background turn).
     const frameThreadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
-    // …then, for a General spelling ONLY, through `channelForThread`. The host
-    // folds the company-wide line under whatever casing the caller addressed,
-    // so an API client that posts to `General` has its frames emitted under
-    // that spelling while these maps are armed at the console's own General id.
-    // Rows written under a spelling no reader looks at are rows the operator
-    // never sees, which is the #1743 class of bug.
-    //
-    // Narrow to General **deliberately**. `channelForThread` maps a bare member
-    // id to the DM *channel* id (`dm:<id>`), but `dmThreadId` — what `ChatView`
-    // reads these maps by, and what `onSendStart` arms them under — stays the
-    // bare id for any teammate whose own id is not a General spelling. Routing
-    // every id through the map therefore moves DM live state to a key nothing
-    // reads. Worse, the map is built from the directory: if that loads between
-    // a `tool_call` and its `tool_result` the two resolve differently, the
-    // result lands in another bucket, and the call row stays `running` forever.
-    // So everything that is not a General alias stays in the host-thread
-    // namespace these maps are already keyed in (PR #2068 review).
-    const threadId =
-      frameThreadId && isGeneralChannel(frameThreadId)
-        ? (channelForThread(chatChannelByThreadRef.current, frameThreadId) ?? frameThreadId)
-        : frameThreadId;
+    // …then through the shared resolver, which normalizes General spellings and
+    // leaves every other id in the host-thread namespace these maps are keyed
+    // in. Its doc carries the reasoning for both halves and for why an
+    // unresolved General alias falls back to `MAIN_THREAD_ID` rather than to
+    // its own spelling.
+    const threadId = frameThreadId
+      ? liveFrameThreadKey(chatChannelByThreadRef.current, frameThreadId)
+      : frameThreadId;
     if (!threadId) {
       // No chat bubble to fold the frame into. A dispatched card raised from a
       // conversation now DOES stream — `run_steered_background` derives its
