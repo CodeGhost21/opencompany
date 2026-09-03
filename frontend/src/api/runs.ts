@@ -91,6 +91,19 @@ export interface RunSummary {
    * whose working indicator it should re-arm.
    */
   chatId?: string;
+  /**
+   * The conversation **thread** this attempt is in, within {@link chatId}.
+   *
+   * `chatId` names the channel, and a channel holds many threads since #1890,
+   * so it cannot say which of them a running turn belongs to. This is the event
+   * seq of the message that started the thread — the same value the console
+   * addresses a thread by, as `h<seq>`.
+   *
+   * Absent for a card dispatch, a workflow node, and any row written before the
+   * host carried it. All three read as "rooted at the channel", which is what
+   * the fallback in `openTurnsFromRuns` does with it.
+   */
+  threadRoot?: number;
   /** The desk/teammate it was dispatched to. */
   agentId: string;
   /** Which attempt at the card this is — **1-based**; the first run is `1`. */

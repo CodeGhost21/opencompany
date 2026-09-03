@@ -2739,7 +2739,21 @@ async fn accept_chat_turn(
         .runs()
         .create_run(
             id,
-            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk),
+            // Which *thread* this turn is in, not just which channel. A
+            // channel holds many threads since #1890 and `chat_id` names only
+            // the channel, so without this the console cannot tell whose turn
+            // is running and suppresses the working indicator for the whole
+            // channel whenever any thread is open — hiding a turn the host is
+            // actively running.
+            //
+            // Only a threaded reply carries a root. A message sent from the
+            // channel composer is left unrooted deliberately: its turn is the
+            // channel's own, it is what the channel timeline shows, and the
+            // console has to arm its indicator optimistically at POST time —
+            // before the host has assigned this message a seq. Rooting it at
+            // its own seq would key the two legs differently and the reload
+            // leg would stop matching the arm.
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk).in_thread(parent),
         )
         .await
     {
