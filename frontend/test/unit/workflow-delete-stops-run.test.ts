@@ -195,7 +195,9 @@ describe("deleting a workflow with no run in flight", () => {
     });
     const consequence = document.querySelector('[data-testid="workflow-delete-consequence"]');
     expect(consequence?.textContent).toBe(
-      "This removes the workflow and stops it running on its schedule. Past runs stay in the run history. This can't be undone.",
+      "This removes the workflow, stops it running on its schedule, and stops any run of it " +
+        "still going that hasn't shown up here yet. Past runs stay in the run history. This " +
+        "can't be undone.",
     );
 
     await act(async () => {

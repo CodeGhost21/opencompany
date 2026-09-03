@@ -2935,11 +2935,22 @@ export function WorkflowsView({
                             the one consequence this dialog never mentioned, while
                             being word for word the sentence an idle workflow gets.
                             Deleting stops that run, which is a bigger thing to
-                            agree to than stopping a schedule. */}
+                            agree to than stopping a schedule.
+
+                            Codex review (PR #2053): `watchingRun` is this VIEW's
+                            own belief, current only as of its last history poll
+                            or SSE frame — a run a scheduler or another operator
+                            just started can be genuinely in flight server-side
+                            with nothing here having heard about it yet. Delete
+                            stops it either way (the host's own sweep, not this
+                            view's knowledge, decides that — see the toast below,
+                            which reads the sweep's real count rather than this
+                            guess), so the "nothing running" branch hedges rather
+                            than promising a fact this view cannot actually see. */}
                         <AlertDialogDescription data-testid="workflow-delete-consequence">
                           {watchingRun
                             ? "A run of this workflow is going right now. Deleting it stops that run where it is — the steps it finished stay in the run history — and stops it running on its schedule. This can't be undone."
-                            : "This removes the workflow and stops it running on its schedule. Past runs stay in the run history. This can't be undone."}
+                            : "This removes the workflow, stops it running on its schedule, and stops any run of it still going that hasn't shown up here yet. Past runs stay in the run history. This can't be undone."}
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>

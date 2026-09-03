@@ -1576,7 +1576,8 @@ impl CompanyAgent {
         let hit_iteration_cap = agent.last_turn_hit_cap();
         drop(agent);
         let events = collector.await.unwrap_or_default();
-        // A hard-failed turn's spend, recovered from the progress stream.
+        // A hard-failed ATTEMPT's spend, recovered from the progress stream —
+        // per attempt, not only when every attempt reported nothing.
         //
         // `read_turn_usage` above reads openhuman's `last_turn_usage_totals`,
         // and `run_single` sets that only AFTER its own `let outcome = outcome?`
@@ -1587,39 +1588,49 @@ impl CompanyAgent {
         // founder most needs the cost of was the one reported as free.
         //
         // The live tally openhuman publishes as it goes — `TurnCostUpdated`,
-        // cumulative across the turn, emitted after each provider response that
-        // carried a usage block — survives the error, because those frames were
-        // already sent down this channel. So a last attempt that reported
-        // nothing takes the last tally the stream carried.
+        // cumulative across ONE `agent.turn`, emitted after each provider
+        // response that carried a usage block — survives the error, because
+        // those frames were already sent down this shared channel before the
+        // attempt failed.
         //
-        // **Only when NO attempt published anything**, which is what makes this
-        // incapable of double-counting. The tally is cumulative per
-        // `agent.turn` — openhuman builds the retry a fresh `TurnCost` starting
-        // back at zero, the same property the spend brake above relies on — so
-        // the last frame belongs to whichever attempt emitted it, and folding it
-        // in beside an attempt that had *also* published its own authoritative
-        // total could charge the same tokens twice. When even one attempt
-        // published, those figures stand alone and this does nothing.
+        // Codex review (PR #2053): the original gate only fired when EVERY
+        // attempt was zero, which recovers at most one attempt — a metered
+        // first attempt that empties, followed by a retry that succeeds and
+        // publishes its OWN authoritative (small) total, left `usages` as
+        // `[zero, retry_total]`. That is not all-zero, so the first attempt's
+        // already-published spend was silently dropped rather than merely
+        // under-reported. Segmenting `events` on `TurnStarted` — emitted
+        // exactly once at the top of each `agent.turn()` call
+        // (`core_turn.rs`), never for a delegated sub-agent's turn, which
+        // uses `SubagentIterationStarted`/`SubagentToolCallStarted` instead —
+        // gives each attempt its own contiguous slice of the stream, so each
+        // zeroed attempt recovers its OWN tally independently.
         //
         // **A lower bound, stated rather than discovered.** `TurnCostUpdated`
         // is suppressed for child scopes (openhuman's `observability`: a
         // sub-agent's spend reaches the parent's `last_turn_usage_totals`
-        // instead), so a failed turn that had delegated under-reports the
-        // delegates. Understating a failed turn is a far smaller wrong than
+        // instead), so an attempt that had delegated under-reports the
+        // delegates. Understating an attempt is a far smaller wrong than
         // reporting it as free, and this seam cannot see more than the stream
         // carries.
-        if usages.iter().all(TurnUsage::is_zero)
-            && let Some(observed) = last_observed_turn_cost(&events)
-            && let Some(last) = usages.last_mut()
-        {
-            tracing::info!(
-                agent = %self.agent_id,
-                input_tokens = observed.input_tokens,
-                output_tokens = observed.output_tokens,
-                cost_usd = observed.cost_usd,
-                "[turn] the attempt published no totals; metering the spend observed on its progress stream"
-            );
-            *last = observed;
+        if usages.iter().any(TurnUsage::is_zero) {
+            let segments = attempt_event_segments(&events, usages.len());
+            for (usage, segment) in usages.iter_mut().zip(segments) {
+                if !usage.is_zero() {
+                    continue;
+                }
+                if let Some(observed) = last_observed_turn_cost(segment) {
+                    tracing::info!(
+                        agent = %self.agent_id,
+                        input_tokens = observed.input_tokens,
+                        output_tokens = observed.output_tokens,
+                        cost_usd = observed.cost_usd,
+                        "[turn] an attempt published no totals; metering the spend observed on \
+                         its own progress-stream segment"
+                    );
+                    *usage = observed;
+                }
+            }
         }
         // The cap openhuman was actually enforcing, for the trace only. Taken
         // from the last `IterationStarted` rather than from config, so the log
@@ -1861,6 +1872,47 @@ fn last_observed_turn_cost(events: &[oh::agent::progress::AgentProgress]) -> Opt
         }),
         _ => None,
     })
+}
+
+/// Splits a turn's flat progress-event stream into one contiguous slice per
+/// attempt, so [`last_observed_turn_cost`] can read a zeroed attempt's own
+/// tally back without crediting it with a DIFFERENT attempt's spend (Codex
+/// review, PR #2053).
+///
+/// [`AgentProgress::TurnStarted`](oh::agent::progress::AgentProgress::TurnStarted)
+/// is emitted exactly once at the very top of every `agent.turn()` call
+/// (`core_turn.rs`, "about to enter the iteration loop") and never for a
+/// delegated sub-agent's turn — those use `SubagentIterationStarted`/
+/// `SubagentToolCallStarted` instead — so each attempt owns exactly one
+/// contiguous run of events starting at its own `TurnStarted` and ending
+/// where the next attempt's begins, or at the stream's end for the last.
+///
+/// `attempts` is `usages.len()` — the number of `agent.turn()` calls the
+/// wrapper actually made (one, or two across the one-shot retry). Always
+/// returns exactly that many slices; an attempt whose `TurnStarted` never
+/// reached this stream (openhuman's collector drops nothing observed in
+/// practice, but the channel is not literally unbounded) gets an empty one,
+/// which is the same "nothing to recover" outcome as before this fix.
+fn attempt_event_segments(
+    events: &[oh::agent::progress::AgentProgress],
+    attempts: usize,
+) -> Vec<&[oh::agent::progress::AgentProgress]> {
+    let starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, event)| {
+            matches!(event, oh::agent::progress::AgentProgress::TurnStarted).then_some(i)
+        })
+        .collect();
+    (0..attempts)
+        .map(|i| match starts.get(i) {
+            Some(&start) => {
+                let end = starts.get(i + 1).copied().unwrap_or(events.len());
+                &events[start..end]
+            }
+            None => &events[0..0],
+        })
+        .collect()
 }
 
 /// Writes every attempt's spend of a **finished** turn to the ledger and the
@@ -7728,6 +7780,54 @@ description = "Builds the product."
              progress-stream tally since its own attempt also errors before finalizing totals \
              — never turn one's already-billed total read back a second and third time: \
              {second_usages:?}"
+        );
+    }
+
+    /// Codex review (PR #2053): the original recovery gate only fired when
+    /// EVERY attempt in `usages` reported zero, so it could recover at most
+    /// one attempt's spend. A metered first attempt that empties, followed by
+    /// a retry that succeeds and publishes its OWN authoritative total, left
+    /// `usages` as `[zero, retry_total]` — not all-zero — so the first
+    /// attempt's already-published `TurnCostUpdated` spend was silently
+    /// dropped rather than merely under-reported.
+    ///
+    /// Both scripted replies carry the SAME usage (1,000 tokens each, via the
+    /// one shared `.reporting_usage(...)` every `ScriptedProvider` reply
+    /// gets), so the only way the total comes out to 2,000 rather than 1,000
+    /// is if the first attempt's spend — recovered from its OWN segment of
+    /// the progress stream, per `attempt_event_segments` — survives instead
+    /// of being discarded the moment the retry's real total makes `usages`
+    /// not-all-zero.
+    #[tokio::test]
+    async fn a_metered_empty_attempt_is_still_recovered_when_the_retry_succeeds() {
+        let (agent, _deps) = scripted_agent_over(
+            ScriptedProvider::new(vec![Ok(String::new()), Ok("recovered".to_string())])
+                .reporting_usage(tinyinference::Usage {
+                    input_tokens: 800,
+                    output_tokens: 200,
+                    total_tokens: 1_000,
+                    ..Default::default()
+                }),
+        );
+
+        let (outcome, usages) = agent.run("hi").await;
+        let outcome = outcome.expect("the retry recovers a real reply");
+        assert!(
+            outcome.reply.contains("recovered"),
+            "got {:?}",
+            outcome.reply
+        );
+        assert_eq!(usages.len(), 2, "both attempts' usage is returned");
+
+        let tokens: u64 = usages
+            .iter()
+            .map(|u| u.input_tokens + u.output_tokens)
+            .sum();
+        assert_eq!(
+            tokens, 2_000,
+            "both attempts genuinely burned 1,000 tokens each — the first attempt's spend must \
+             not be dropped just because the retry went on to publish its own (also real) \
+             total: {usages:?}"
         );
     }
 
