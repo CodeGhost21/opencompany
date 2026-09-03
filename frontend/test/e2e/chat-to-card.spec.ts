@@ -116,11 +116,14 @@ test("a card raised from a channel line links back to the channel", async ({
   // tell a planned card from a dispatched one.
   await page.goto(`/#/tasks/${card!.id}`);
   await dismissWelcome(page);
-  // Its own title as the host recorded it — the triage capitalises the lead it
-  // cards, so the message text is not the heading verbatim.
-  await expect(page.getByRole("heading", { name: card!.title, level: 1 })).toBeVisible({
-    timeout: 15_000,
-  });
+  // On the request text, which the card keeps in its **note**, not on the
+  // heading. Since #2055 a titling pass names the card, so the heading is a
+  // model's words — against the fixture that is the same fixed string for
+  // every card, which would make a heading match prove only that some detail
+  // page rendered. The note is where the operator's own words are kept, so it
+  // is what says *this* is the card that message opened.
+  await expect(page.getByText(prompt).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
   // …and it knows which conversation opened it.
   const origin = page.getByRole("button", { name: /Opened from chat/ });
