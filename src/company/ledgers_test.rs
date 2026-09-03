@@ -1,12 +1,16 @@
 //! The rules only one code path enforces.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
+use tokio::sync::Notify;
 
 use super::*;
 use crate::company::runtime::CompanyRuntime;
 use crate::ledger::LedgerAuthor;
+use crate::ports::ledgers::LedgerStore;
 use crate::ports::types::CompanyId;
 
 /// The context under test, plus the runtime and home it borrows from.
@@ -784,6 +788,141 @@ async fn clearing_a_required_field_is_refused() {
         .await
         .expect_err("cleared");
     assert!(format!("{error}").contains("evidence"), "{error}");
+}
+
+/// A [`LedgerStore`] that pauses inside `events` exactly once, after the read
+/// has already happened, so a test can hold a caller mid-check while another
+/// task mutates the store underneath it.
+struct PausingStore {
+    inner: Arc<dyn LedgerStore>,
+    armed: Arc<AtomicBool>,
+    paused: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl LedgerStore for PausingStore {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<LedgerSpec>> {
+        self.inner.list_specs(company).await
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &LedgerSpec) -> Result<()> {
+        self.inner.put_spec(company, spec).await
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        self.inner.delete_spec(company, slug).await
+    }
+
+    async fn append(&self, company: &CompanyId, event: &LedgerEvent) -> Result<()> {
+        self.inner.append(company, event).await
+    }
+
+    async fn events(&self, company: &CompanyId, ledger: &str) -> Result<Vec<LedgerEvent>> {
+        let read = self.inner.events(company, ledger).await;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.paused.notify_one();
+            self.resume.notified().await;
+        }
+        read
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        self.inner.purge_entry(company, ledger, entry).await
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        self.inner.purge_ledger(company, ledger).await
+    }
+}
+
+/// The required-field check reads the stored row, then the write appends. A
+/// purge landing in that gap used to remove the earlier events the check had
+/// just relied on, so the append that followed recreated the row with only
+/// its own partial fields — reporting success on exactly the row the check
+/// exists to keep out.
+///
+/// [`PausingStore`] holds the amendment inside that exact gap — after its
+/// required-field check has read the row, before it appends — so the purge
+/// gets a deterministic window to land in, rather than relying on real
+/// thread timing to hit a gap this narrow. The lock under test still does
+/// its own real work here: it is what makes the purge task block instead of
+/// running in that window once the fix is in place.
+#[tokio::test]
+async fn a_purge_racing_the_required_field_check_cannot_recreate_a_row_missing_it() {
+    let (runtime, _home) = runtime().await;
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let store: Arc<dyn LedgerStore> = Arc::new(PausingStore {
+        inner: runtime.ledgers().clone(),
+        armed: armed.clone(),
+        paused: paused.clone(),
+        resume: resume.clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let spec = define(&ctx, &findings()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        fields(&[
+            ("finding", "the vendor is slow"),
+            ("status", "noted"),
+            ("evidence", "three late deliveries"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+
+    // Seeding is done: arm the pause for the amendment's own read.
+    armed.store(true, Ordering::SeqCst);
+
+    let amend_ctx = ctx.clone();
+    let amend_spec = spec.clone();
+    let amender = tokio::spawn(async move {
+        record(
+            &amend_ctx,
+            &amend_spec,
+            &agent(),
+            "f1",
+            fields(&[("status", "noted")]),
+        )
+        .await
+    });
+
+    paused.notified().await;
+
+    let purge_ctx = ctx.clone();
+    let purge_spec = spec.clone();
+    let purger =
+        tokio::spawn(async move { delete_entry(&purge_ctx, &purge_spec, &person(), "f1").await });
+
+    // Under the fix the purge blocks on the same lock the amendment is
+    // holding; this just gives it the chance to run first when it is not
+    // blocked, which is the whole bug.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    resume.notify_one();
+
+    let amend_result = tokio::time::timeout(std::time::Duration::from_secs(5), amender)
+        .await
+        .expect("amendment did not finish")
+        .expect("amendment task panicked");
+    let purge_result = tokio::time::timeout(std::time::Duration::from_secs(5), purger)
+        .await
+        .expect("purge did not finish")
+        .expect("purge task panicked");
+    purge_result.expect("purge does not error");
+
+    if let Ok(entry) = amend_result {
+        assert!(
+            !entry.get("evidence").trim().is_empty(),
+            "amendment reported success on a row missing a required field: {entry:?}"
+        );
+    }
 }
 
 /// The write refuses exactly what the read would fault, and no more: a ledger
