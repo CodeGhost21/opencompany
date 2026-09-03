@@ -16,6 +16,13 @@
 //!   written with no reason is refused at the write rather than reported at the
 //!   read, because a row that closed silently is worth nothing to whoever picks
 //!   it up next and by then the person who knew has moved on.
+//! * **A required field is required at the write.** A ledger that declares the
+//!   `required-field` check refuses a row that would land without one, for the
+//!   same reason: the reader already calls such a row unreadable, so accepting
+//!   it stores something every surface then reports as a fault — the row
+//!   rendered twice, once as itself and once under *rows that could not be
+//!   read*. The check runs against the merged row, so amending one that already
+//!   carries the field is not refused for declining to repeat it.
 //! * **The derived file follows the write.** Every mutation re-renders and
 //!   republishes, so `derived/` is never a stale copy of something.
 
@@ -26,8 +33,9 @@ use crate::Result;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ledger::{
-    AuthorKind, Entries, LedgerAuthor, LedgerEvent, LedgerSource, LedgerSpec, MAX_FIELD_CHARS,
-    Order, REASON_FIELD, Registry, budget, derived, engine, native, parse_order,
+    AuthorKind, Check, Entries, Field, FieldRole, LedgerAuthor, LedgerEvent, LedgerSource,
+    LedgerSpec, MAX_FIELD_CHARS, Order, REASON_FIELD, Registry, budget, derived, engine, native,
+    parse_order,
 };
 use crate::ports::now_millis;
 
@@ -271,8 +279,9 @@ pub async fn read(ctx: &Ledgers, spec: &LedgerSpec, query: &Query) -> Result<Rea
 /// Returns [`OpenCompanyError::InvalidRequest`] when the ledger is native (its
 /// rows are written by the surface that owns them), when the author may not
 /// write it, when the event names no entry, when it sets a status the ledger
-/// does not declare, or when it closes a row into a status that demands a
-/// reason without giving one.
+/// does not declare, when it closes a row into a status that demands a reason
+/// without giving one, or when it would leave the row without a field the
+/// ledger requires.
 pub async fn record(
     ctx: &Ledgers,
     spec: &LedgerSpec,
@@ -348,6 +357,15 @@ pub async fn record(
                     )));
                 }
             }
+        }
+    }
+
+    if spec.checks.contains(&Check::RequiredField) {
+        let missing = missing_required(ctx, spec, id, &fields).await?;
+        if !missing.is_empty() {
+            return Err(OpenCompanyError::InvalidRequest(missing_required_message(
+                spec, id, &missing,
+            )));
         }
     }
 
@@ -543,6 +561,70 @@ fn refuse_non_human(author: &LedgerAuthor, what: &str) -> Result<()> {
          can erase the record of what it did is one whose record means nothing. Close the row \
          instead — it keeps the reason."
     )))
+}
+
+/// The fields `spec` requires that would still be empty once this event lands.
+///
+/// Resolved against the **merged** row, not against the event: every write is a
+/// merge, so an amendment that only moves a status must not be refused for
+/// declining to repeat a field the row already carries. The stored row is read
+/// only when the event leaves one of them unfilled, so the common write — one
+/// that carries them — costs nothing extra.
+///
+/// The id is skipped for the reason [`engine::fold`]'s own check skips it: it
+/// lives beside the fields rather than inside them, and is already refused
+/// empty above.
+async fn missing_required(
+    ctx: &Ledgers,
+    spec: &LedgerSpec,
+    id: &str,
+    fields: &BTreeMap<String, Option<String>>,
+) -> Result<Vec<Field>> {
+    let unfilled: Vec<&Field> = spec
+        .fields
+        .iter()
+        .filter(|field| field.required && field.role != FieldRole::Id)
+        .filter(|field| !fields.get(&field.name).is_some_and(Option::is_some))
+        .collect();
+    if unfilled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stored = entries(ctx, spec).await?;
+    let held = stored.find(id);
+    Ok(unfilled
+        .into_iter()
+        // Naming a field with no value clears it, whatever the row held.
+        .filter(|field| {
+            fields.contains_key(&field.name)
+                || held.is_none_or(|entry| entry.get(&field.name).trim().is_empty())
+        })
+        .cloned()
+        .collect())
+}
+
+/// The refusal a missing required field earns.
+///
+/// Worded as the reader's own fault sentence, so the write and the read say the
+/// same thing about the same row, and carrying each field's description — which
+/// is written to tell whoever fills it in what belongs there.
+fn missing_required_message(spec: &LedgerSpec, id: &str, missing: &[Field]) -> String {
+    let named = missing
+        .iter()
+        .map(|field| {
+            if field.description.trim().is_empty() {
+                format!("`{}`", field.name)
+            } else {
+                format!("`{}` ({})", field.name, field.description.trim())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "`{id}` has no {named}, which `{}` requires. Stored without it, the row reads back as one \
+         that could not be read — so it is refused here rather than kept and complained about on \
+         every read.",
+        spec.slug
+    )
 }
 
 /// Trims and caps every value, dropping keys that are only whitespace.
