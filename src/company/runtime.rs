@@ -10907,8 +10907,6 @@ mod tests {
         /// has already consumed the entry, which is the benign interleaving.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn concurrent_resolves_cannot_desync_the_armed_verdict_from_the_settled_one() {
-            use crate::ports::blockers::BlockerVerdict;
-
             for round in 0..15 {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(30),
