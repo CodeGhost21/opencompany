@@ -377,7 +377,7 @@ Acceptance, against the list this record set before the work started:
 
 Two operational notes for whoever registers it. `cortex` is clean as a *driver
 id*, but `OPENCOMPANY_MEMORY=cortex` remains a hard boot refusal as a **mode**
-value, left over from #1568. And the selection recipe below does **not** work
+value, left over from #1568. And the usual selection recipe does **not** work
 today: `SUPPORTED_REMOTE_DRIVERS` holds only `supermemory`, `mem0` and `cognee`,
 and `remote_provider()` rejects every other id, so
 `OPENCOMPANY_MEMORY=remote` plus `OPENCOMPANY_MEMORY_DRIVER=cortex` is a boot
