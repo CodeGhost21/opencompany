@@ -42,6 +42,7 @@ import {
 
 import type { PrereqStatus, Prerequisite, TaskPlan } from "@/api/tasks";
 import { Button } from "@/components/ui/button";
+import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
 
 /**
@@ -409,7 +410,7 @@ function Estimates({ step }: { step: TaskPlan["steps"][number] }) {
     );
   }
   if (typeof step.estimatedCostUsd === "number") {
-    parts.push(`~$${step.estimatedCostUsd.toFixed(2)}`);
+    parts.push(`~${usd(step.estimatedCostUsd)}`);
   }
   if (parts.length === 0) return null;
   return (

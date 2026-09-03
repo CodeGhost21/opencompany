@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PresenceStatus } from "@/lib/awareness";
+import { usd } from "@/lib/money";
 import { roleSubtitle, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { PresenceDot } from "@/views/chat/PresenceDot";
@@ -431,7 +432,6 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
 
   const spent = member.spentTodayUsd ?? 0;
   const overBudget = spent >= cap;
-  const usd = (n: number) => `$${n.toFixed(2)}`;
   return (
     <span className="block">
       <span
