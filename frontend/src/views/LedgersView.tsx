@@ -366,6 +366,26 @@ export function LedgersView({
   );
 
   /**
+   * The open list's summary, preferring the copy that came back with the rows
+   * on screen.
+   *
+   * `useLedgerNav` reads once per company and again only when a list is
+   * declared or retired — never when a row is recorded — so its `open` count
+   * is the number this list held when the screen was first opened. Record a
+   * risk and the row appears while the count beside the title still says zero,
+   * because the two came from different requests.
+   *
+   * The read that fetched the rows carries a summary counted over the very
+   * fold those rows came out of, so it is the one number that cannot disagree
+   * with what is rendered beneath it. The slug guard keeps a read still in
+   * flight for the previous list from being counted against this one.
+   */
+  const counted = useMemo(
+    () => (read?.ledger.slug === ledger?.slug ? (read?.ledger ?? ledger) : ledger),
+    [read, ledger],
+  );
+
+  /**
    * Columns or rows.
    *
    * The task ledger is operated as a board; declared ledgers read as rows
@@ -789,7 +809,7 @@ export function LedgersView({
                         the same ambiguity `filteredEmptyNotice` exists to
                         rule out elsewhere in this file. */}
                     <span className="text-xs text-muted-foreground">
-                      {held.open}
+                      {held.slug === counted?.slug ? counted.open : held.open}
                     </span>
                   </DropdownMenuItem>
                 ))}
@@ -822,12 +842,13 @@ export function LedgersView({
            that changes, and the one the switcher already shows for every
            *other* list while saying nothing about the open one. */
         trailing={
-          ledger && (
+          counted && (
             <span
-              title={`${ledger.open} open`}
+              data-testid="ledger-open-count"
+              title={`${counted.open} open`}
               className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
             >
-              {ledger.open}
+              {counted.open}
             </span>
           )
         }
