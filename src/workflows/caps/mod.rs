@@ -1192,7 +1192,11 @@ impl HarnessAgentRunner {
     ///
     /// The consultation runs inside this run's own delegation and
     /// publish-refusal scopes, and everything it stages there is discarded
-    /// before the next node's drain could execute it.
+    /// before the next node's drain could execute it. Its approval requests get
+    /// a scope of their own instead: unclaimed pushes fall into the bucket the
+    /// chat cycle drains, which would put a card the consulted peer asked for
+    /// in front of the operator as if their own turn had raised it. The claim
+    /// discards that bucket on drop.
     ///
     /// The nested scopes must stay `Box::pin`ed: `TaskLocalFuture` holds its
     /// inner future inline, and an agent turn inside three of them unboxed
@@ -1211,6 +1215,10 @@ impl HarnessAgentRunner {
             record: &self.record,
             exclude_agent: agent_ref,
         };
+        let approval_claim = self
+            .deps
+            .approval_requests
+            .claim(ApprovalScope::Run(format!("{}::consult", self.run_id)));
         let ladder = Box::pin(async {
             let recovered = crate::workflows::judge::ask_around(
                 &self.deps,
@@ -1224,6 +1232,7 @@ impl HarnessAgentRunner {
         });
         let ladder = Box::pin(self.publish_refusal_claim.scoped(ladder));
         let ladder = Box::pin(self.board_claim.scoped(ladder));
+        let ladder = Box::pin(approval_claim.scoped(ladder));
         PEER_CONSULT_ACTIVE.scope((), ladder).await
     }
 
@@ -1241,7 +1250,8 @@ impl HarnessAgentRunner {
             .len();
         let publishes = self.deps.pending_publishes.drain().len();
         let refused_publishes = self.deps.pending_publishes.drain_refusals().len();
-        let total = delegations + refused_delegations + publishes + refused_publishes;
+        let approvals = self.deps.approval_requests.queued();
+        let total = delegations + refused_delegations + publishes + refused_publishes + approvals;
         if total > 0 {
             tracing::info!(
                 company = %self.company,
@@ -1251,6 +1261,7 @@ impl HarnessAgentRunner {
                 refused_delegations,
                 publishes,
                 refused_publishes,
+                approvals,
                 "workflow agent node: discarded the board writes a peer consultation staged; a \
                  consultation carries no authority to act for this run"
             );
@@ -9056,6 +9067,21 @@ mod tests {
                     });
                 deps.pending_publishes
                     .push_refusal("consultation-note.md".to_string());
+                deps.approval_requests
+                    .push(crate::harness::policy::ApprovalRequest {
+                        tool: "send_email".to_string(),
+                        reason: "the consulted peer tried a gated tool".to_string(),
+                        effect: crate::ports::types::Effect {
+                            kind: "email.send".to_string(),
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: json!({ "to": "someone@example.com" }),
+                            agent: Some("cfo".to_string()),
+                            run_id: None,
+                        },
+                    });
             }
             Ok(crate::harness::TurnOutcome {
                 reply: self.peer_reply.to_string(),
@@ -9334,6 +9360,7 @@ mod tests {
             ])
             .await;
         let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let queues = deps.clone();
         let turn = Arc::new(ConsultedPeerTurn::staging(
             "The renewal date is March 1st.",
             deps.clone(),
@@ -9368,6 +9395,12 @@ mod tests {
         assert!(
             notices.take().is_empty(),
             "no operator notice may be raised for work a consultation only staged"
+        );
+        assert_eq!(
+            queues.approval_requests.queued(),
+            0,
+            "a consultation must not leave an approval card for the operator's next chat cycle \
+             to drain as if the operator had asked for it"
         );
     }
 
