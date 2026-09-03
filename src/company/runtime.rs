@@ -5744,6 +5744,21 @@ impl CompanyRuntime {
         }
     }
 
+    /// The root-cause group `id` belongs to, or `None` when `id` is not a
+    /// parked blocker at all.
+    ///
+    /// Kind-checked rather than payload-checked, the same reason
+    /// [`is_blocker_effect`](crate::ports::blockers::is_blocker_effect) is: the
+    /// kind is the part of a park that survives redaction.
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn parked_blocker_group(&self, id: &ApprovalId) -> Option<Vec<ApprovalId>> {
+        let parked = self.journal.pending().into_iter().find(|p| &p.id == id)?;
+        if !crate::ports::blockers::is_blocker_effect(&parked.effect) {
+            return None;
+        }
+        Some(self.blocker_group_of(id))
+    }
+
     /// The parked blockers pending in one DM, folded into root-cause groups
     /// (issue #1862). Oldest-first, the order `pending` already returns.
     #[cfg(feature = "openhuman")]
@@ -5913,7 +5928,7 @@ impl CompanyRuntime {
         by: Option<&Actor>,
     ) -> Result<()> {
         use crate::company::task_intent::BlockerReplyIntent;
-        use crate::ports::blockers::{BlockerPayload, BlockerVerdict};
+        use crate::ports::blockers::BlockerVerdict;
 
         let verdict = match intent {
             BlockerReplyIntent::Retry => BlockerVerdict::Retry,
@@ -5926,10 +5941,50 @@ impl CompanyRuntime {
         // Only an amend carries the operator's words back into the step; the
         // other verdicts need none, so their answer stays empty.
         let answer = if verdict == BlockerVerdict::Amend {
-            text.to_string()
+            text
         } else {
-            String::new()
+            ""
         };
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let (_, follow_up) = self
+            .apply_blocker_reply_spawned(ids, verdict, answer, by)
+            .await?;
+        join_follow_up(follow_up).await?;
+        Ok(())
+    }
+
+    /// [`apply_blocker_reply`](Self::apply_blocker_reply), handing back the
+    /// group's first receipt and a handle to the follow-ups rather than
+    /// awaiting them — the blocker twin of
+    /// [`resolve_approval_spawned`](Self::resolve_approval_spawned), and what
+    /// lets a caller answer as soon as the verdicts are durable.
+    ///
+    /// Takes the four-way verdict and the operator's answer directly, so a
+    /// surface that already knows which of the four was asked for does not have
+    /// to round-trip through the free-text intent classifier.
+    ///
+    /// Every id is banked, armed and settled **inline**, in order, before this
+    /// returns; the returned handle runs each member's follow-up in that same
+    /// order. An error mid-loop leaves the members already settled settled and
+    /// the rest parked, which is the behaviour this inherits.
+    #[cfg(feature = "openhuman")]
+    pub(crate) async fn apply_blocker_reply_spawned(
+        self: &Arc<Self>,
+        ids: &[ApprovalId],
+        verdict: crate::ports::blockers::BlockerVerdict,
+        answer: &str,
+        by: Option<&Actor>,
+    ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
+        use crate::ports::blockers::BlockerPayload;
+
+        self.ensure_accepting()?;
+        if ids.is_empty() {
+            return Err(OpenCompanyError::InvalidRequest(
+                "a blocker reply needs at least one approval to answer".to_string(),
+            ));
+        }
         // The stopped step each blocker re-enters, read off the **still-parked**
         // effect's full payload before any resolve pops it — the journal scrubs
         // that payload the moment the approval leaves the pending set, so it must
@@ -5949,25 +6004,39 @@ impl CompanyRuntime {
             kind: ActorKind::Operator,
             id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
         });
+        let mut receipts: Vec<ResolveReceipt> = Vec::with_capacity(ids.len());
         for id in ids {
             let resolution = crate::ports::blockers::BlockerResolution {
                 verdict,
-                answer: answer.clone(),
+                answer: answer.to_string(),
                 step: step_of(id),
             };
-            // Bank durably, then arm the side-channel, then resolve — the same
+            // Bank durably, then arm the side-channel, then settle — the same
             // journal-before-live ordering `mint_grant` keeps, so a crash
             // between the two replays as "still armed" and re-resumes rather
-            // than losing the operator's decision. `resolve_approval` settles
-            // the event verdict and spawns the follow-up that reads the answer.
+            // than losing the operator's decision.
             self.journal
                 .record_blocker_resolution(id, &resolution)
                 .await?;
-            self.grants.arm_blocker_resolution(id, resolution.clone());
-            self.resolve_approval(id, verdict.event_verdict(), actor.clone())
+            self.grants.arm_blocker_resolution(id, resolution);
+            let receipt = CycleRunner::new(self)
+                .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
                 .await?;
+            self.retire_if_expired(id, &receipt).await?;
+            receipts.push(receipt);
         }
-        Ok(())
+        let head = receipts[0].clone();
+        let rt = Arc::clone(self);
+        // One handle for the whole group: each member's follow-up is spawned and
+        // joined in turn, so the resumes stay in the order the group settled in.
+        let follow_up = tokio::spawn(async move {
+            let mut last = CycleReport::default();
+            for receipt in receipts {
+                last = join_follow_up(rt.spawn_follow_up(receipt)).await?;
+            }
+            Ok(last)
+        });
+        Ok((head, follow_up))
     }
 
     /// Posts the ask-which question back into the DM (issue #1862) as a durable
