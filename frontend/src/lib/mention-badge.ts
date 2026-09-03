@@ -52,29 +52,6 @@ export function renderedChannelIdForContext(
 }
 
 /**
- * Whether viewing `threadId` in Conversation counts as actually viewing the
- * channel it maps to — and therefore may advance that channel's read state.
- *
- * Almost always true: a desk thread's transcript *is* its channel's transcript,
- * and a DM thread's transcript is the DM channel's (different id, same store).
- * The one exception is the `main` thread on a company with real desks. The rail
- * is built from real desk ids and has no `General` row, so `channelMap` aliases
- * `main` onto the first desk's channel *for badging* — but the main thread's
- * transcript is the legacy General conversation, a different store from the
- * first desk's own. Marking that desk read because the operator read `main`
- * would permanently un-badge messages they never saw (Codex P1). The mention
- * clear stays: the thread's loaded ids prove the summoning message is on screen
- * ([`mentionsToClear`] is fed those ids, so the general-chat arm clears only
- * what actually rendered).
- */
-export function threadViewAdvancesChannel(
-  threadId: string,
-  channelId: string,
-): boolean {
-  return !(threadId === MAIN_THREAD_ID && channelId !== MAIN_THREAD_ID);
-}
-
-/**
  * The mention badge: how many unread mentions of **you** sit in each channel.
  *
  * # Why this is not the unread count

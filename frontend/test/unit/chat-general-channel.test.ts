@@ -671,9 +671,14 @@ describe("the shell resolves every thread-to-channel lookup through channelForTh
     expect(shell).toContain("channelForThread(chatChannelByThread, threadId)");
   });
 
-  it("resolves both `chatChannelByThreadRef.current` lookups through the fold", () => {
+  it("resolves every `chatChannelByThreadRef.current` lookup through the fold", () => {
+    // The count is the assertion: a new ref lookup added as a bare index would
+    // leave this at one and pass the negative below only by not existing yet.
+    // It was two while `#/conversation` had its own view-report path; that
+    // surface is retired, and the settled-thread re-read is the one that
+    // remains.
     const matches = shell.match(/channelForThread\(chatChannelByThreadRef\.current, threadId\)/g);
-    expect(matches?.length ?? 0).toBe(2);
+    expect(matches?.length ?? 0).toBe(1);
     expect(shell).not.toContain("chatChannelByThreadRef.current[threadId]");
   });
 

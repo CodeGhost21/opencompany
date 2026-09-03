@@ -12,11 +12,14 @@ import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
  *
  * Three things are asserted that a curl cannot reach:
  *
- * 1. the "Add to board" action exists on a **desk** thread, where no responder
- *    carries the delegation tools and a card was previously unreachable;
- * 2. the chip a spawned card produces survives a **reload**, not merely the
+ * 1. the chip a spawned card produces survives a **reload**, not merely the
  *    live POST response;
+ * 2. a dismissed card's chip does not come back on one;
  * 3. the card links back to the conversation it came from.
+ *
+ * Cards reach chat one way: a turn raises one and the host journals its id onto
+ * the reply (`chat_history.rs`, `task_id`). There is no operator-initiated
+ * per-message action, so every chip here is one the company opened.
  */
 
 /**
@@ -27,65 +30,112 @@ import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
  */
 async function dismissWelcome(page: Page) {
   const skip = page.getByRole("button", { name: /Skip for now/ });
-  try {
-    await skip.waitFor({ state: "visible", timeout: 5_000 });
-  } catch {
-    return;
+  // Up to twice: a console opened against a genuinely fresh home stacks two of
+  // these — the first-run gate, then the tour behind it — and both carry this
+  // label. They arrive in sequence, so the second is not in the DOM to be
+  // counted when the first is clicked; the only way to see it is to look again.
+  // A host that shows one leaves the second wait to time out and returns, which
+  // is what makes this cost nothing where only the tour appears.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await skip.first().waitFor({ state: "visible", timeout: attempt === 0 ? 5_000 : 2_000 });
+    } catch {
+      return;
+    }
+    const openDialogs = await skip.count();
+    await skip.first().click({ timeout: 10_000 });
+    // A dismissed dialog animates out, so it stays visible for a beat after
+    // its click. Waiting for one to actually go is what leaves the next pass
+    // looking at a genuinely second dialog rather than this one on its way out.
+    await expect(skip).toHaveCount(openDialogs - 1, { timeout: 10_000 });
   }
-  await skip.click();
-  await skip.waitFor({ state: "hidden", timeout: 10_000 });
+  await expect(skip).toHaveCount(0, { timeout: 10_000 });
 }
 
 /**
- * Opens the conversation view and selects a thread by its contact name.
+ * Opens one Room channel by id.
  *
- * Scoped to the chat list: the sidebar's company switcher is also a button and
- * also carries the company name, and it precedes the list in the DOM — so an
- * unscoped `.first()` resolves to the switcher and never opens a thread.
+ * The channel comes from the address rather than a rail click, so the spec
+ * cannot proceed against an unselected transcript that still accepts a `fill`.
  */
-async function openThread(page: Page, name: RegExp) {
-  await page.goto("/#/conversation");
+async function openThread(page: Page, channelId: string) {
+  await page.goto(`/#/chat/${channelId}`);
   await dismissWelcome(page);
-  await page.getByRole("complementary").getByRole("button", { name }).first().click();
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
-test("any message on a desk thread can be added to the board", async ({ page }) => {
-  await openThread(page, /Engineering desk/);
+test("a card raised from a channel line links back to the channel", async ({
+  page,
+  request,
+}) => {
+  // The deterministic "Track" triage cards an imperative lead on its own,
+  // independent of whatever the brain answers with — so the round trip below
+  // is provable on a default host, with no scripted backend.
+  const API = "/api/v1/company";
+  const marker = Date.now();
+  const prompt = `build the launch checklist ${marker}`;
+  const posted = await request.post(`${API}/chat`, {
+    data: { text: prompt, chat: "engineering" },
+  });
+  expect(posted.ok(), await posted.text()).toBeTruthy();
 
-  const prompt = `ship the launch checklist ${Date.now()}`;
-  await page.getByPlaceholder(/^Message /).fill(prompt);
-  await page.getByRole("button", { name: "Send", exact: true }).click();
+  // The seq the host journaled the operator's message under — `messageId` is
+  // `seq.value().to_string()` (`operator.rs`), and the same seq comes back on
+  // the card as `originParent`. That pair is this card's identity here.
+  //
+  // Not the title: the card is named by whatever raised it, so matching a
+  // marker inside `title` is an identity claim on a string the model owns.
+  // That is the defect PR #2055 removes from the host's own card adoption, and
+  // it would fail here the day titles stop echoing the request.
+  const messageSeq = Number((await posted.json()).messageId);
+  expect(
+    Number.isInteger(messageSeq),
+    "the host must return the seq it journaled the message under",
+  ).toBeTruthy();
 
-  // The operator's own bubble is the one being turned into a card.
-  const bubble = page.getByText(prompt, { exact: true }).first();
-  await expect(bubble).toBeVisible({ timeout: 60_000 });
+  const tasksResponse = await request.get(`${API}/tasks`);
+  expect(tasksResponse.ok()).toBeTruthy();
+  const tasks = (await tasksResponse.json()) as Array<{
+    id: string;
+    title: string;
+    originChatId?: string;
+    originParent?: number;
+  }>;
+  const card = tasks.find(
+    (t) => t.originParent === messageSeq && t.originChatId === "engineering",
+  );
+  expect(
+    card,
+    `no card opened from seq ${messageSeq} in engineering: ${JSON.stringify(tasks)}`,
+  ).toBeTruthy();
 
-  // The action is hover-revealed but always focusable; hover for realism.
-  await bubble.hover();
-  const row = page.locator("div.group\\/msg", { hasText: prompt }).first();
-  await row.getByRole("button", { name: "Add to board" }).click();
-
-  // The confirmation chip appears on that message and links to the card.
-  const chip = row.getByRole("link", { name: /Added to the board/ });
-  await expect(chip).toBeVisible({ timeout: 30_000 });
-  const href = await chip.getAttribute("href");
-  expect(href).toMatch(/^#\/tasks\/.+/);
-
-  // The card is real, titled from the message, and — the spend gate — did NOT
-  // land in the Working phase, which is what dispatch means now (issue #1512).
-  await page.goto(href!);
+  // The card is real and titled from the message. Its *stage* is deliberately
+  // not asserted: a triage-raised card is one the company decided is work, and
+  // buying it a planning pass is the mechanism doing its job. The spend gate
+  // this file used to carry belonged to the operator-pressed create, which no
+  // longer exists — what a card costs is pinned in `company/runtime.rs`
+  // (`a_prompt_box_card_buys_exactly_one_planning_pass`), a level at which
+  // "exactly one pass, never two" is decidable. It was never decidable here:
+  // `planning`, `in_progress`, `paused` and `in_review` all render the one
+  // word "Working" (`board-columns.ts`), so a page-wide match on it could not
+  // tell a planned card from a dispatched one.
+  await page.goto(`/#/tasks/${card!.id}`);
   await dismissWelcome(page);
-  await expect(page.getByText(prompt).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText("Working", { exact: true })).toHaveCount(0);
+  // On the request text, which the card keeps in its **note**, not on the
+  // heading. Since #2055 a titling pass names the card, so the heading is a
+  // model's words — against the fixture that is the same fixed string for
+  // every card, which would make a heading match prove only that some detail
+  // page rendered. The note is where the operator's own words are kept, so it
+  // is what says *this* is the card that message opened.
+  await expect(page.getByText(prompt).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
   // …and it knows which conversation opened it.
   const origin = page.getByRole("button", { name: /Opened from chat/ });
-  await expect(origin).toBeVisible();
+  await expect(origin).toBeVisible({ timeout: 15_000 });
 
   // The other half of the round trip: the jump lands in Room, on the channel
-  // carrying that conversation. It used to land on `#/conversation` — a
-  // separate surface with its own thread rail down the left — which is the
-  // wireframe issue #2020 was filed against.
+  // carrying that conversation.
   await origin.click();
   // The Engineering desk's own channel, not merely some channel: a regression
   // that landed the jump on the wrong one would still match a bare `/.+/`.
@@ -181,7 +231,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // the skip is per-test rather than per-file.
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
-  await openThread(page, /Your company/);
+  await openThread(page, "");
 
   // `SPAWNONE` is the scripted backend's cue to call `spawn_task` once.
   const prompt = `please track this SPAWNONE ${Date.now()}`;
@@ -197,7 +247,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // After a reload the transcript is rehydrated from `chat/history`, so a chip
   // that only existed on the live POST response would vanish here.
   await page.reload();
-  await openThread(page, /Your company/);
+  await openThread(page, "");
   const rehydrated = page.getByRole("link", { name: /Card opened/ }).last();
   await expect(rehydrated).toBeVisible({ timeout: 30_000 });
   expect(await rehydrated.getAttribute("href")).toBe(href);
@@ -207,11 +257,12 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
  * **The dismissal, end to end, including the reload (issue #984).**
  *
  * The affordance had no coverage at all, and the half that had none was the
- * half that was broken: `clearTaskCard` only touches React state, so a
- * dismissal that looked right in the session came back on the next reload — the
- * console rehydrates from `chat/history`, and the host still had `task_id` on
- * the journaled row. The chip returned pointing at a card that no longer
- * existed, which reads as the delete having failed.
+ * half that was broken: clearing the chip in React state alone meant a
+ * dismissal that looked right in the session came back on the next reload —
+ * the console rehydrates from `chat/history`, and the host still had `task_id`
+ * on the journaled row. The chip returned pointing at a card that no longer
+ * existed, which reads as the delete having failed. `drop_dead_cards` blanking
+ * that field is the half only a reload can see.
  *
  * So the reload is the assertion that matters here, and it is deliberately the
  * mirror image of the reload assertion in the test above: that one proves a
@@ -219,34 +270,77 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
  * not come back*. Neither is safe without the other — a host that dropped every
  * `task_id` would pass this and fail that.
  *
- * Runs on the "Add to board" path rather than the scripted-backend one, so it
- * needs no `LIVE_BRAIN` and runs on every CI.
+ * `LIVE_BRAIN`, like its mirror above, because a chip is something the company
+ * puts there: `task_id` is journaled onto the *reply* a turn writes
+ * (`chat_history.rs`), never onto the operator's own line, so a card the
+ * transcript can draw a chip for needs a turn that actually ran.
  */
-test("a dismissed card's chip goes away and does not come back on reload", async ({ page }) => {
-  await openThread(page, /Engineering desk/);
+test("a dismissed card's chip goes away and does not come back on reload", async ({
+  page,
+  request,
+}) => {
+  test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
-  const prompt = `dismiss this one ${Date.now()}`;
+  await openThread(page, "");
+
+  const prompt = `dismiss this one SPAWNONE ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
 
-  const bubble = page.getByText(prompt, { exact: true }).first();
-  await expect(bubble).toBeVisible({ timeout: 60_000 });
-  await bubble.hover();
-  const row = page.locator("div.group\\/msg", { hasText: prompt }).first();
-  await row.getByRole("button", { name: "Add to board" }).click();
-
-  const chip = row.getByRole("link", { name: /Added to the board/ });
-  await expect(chip).toBeVisible({ timeout: 30_000 });
+  const chip = page.getByRole("link", { name: /Card opened/ }).last();
+  await expect(chip).toBeVisible({ timeout: 60_000 });
   const href = await chip.getAttribute("href");
+  expect(href).toMatch(/^#\/tasks\/.+/);
+  const taskId = decodeURIComponent(href!.replace("#/tasks/", ""));
+
+  // The turn that opened this card also dispatched it, and the host refuses to
+  // delete a card with a run registered against it — `tasks.rs` answers 409
+  // with "cancel it first", because a delete would not stick: the turn writes
+  // the card back when it settles. So cancel, exactly as that message says to.
+  // Tolerated rather than asserted: the run may already have settled, and a
+  // card at rest is the state this test wants either way.
+  await request
+    .post(`/api/v1/company/tasks/${encodeURIComponent(taskId)}/steer`, {
+      data: { action: "cancel", confirm: true },
+    })
+    .catch(() => undefined);
+
+  // …and *wait for it to land*. A cancel is a request, not an event: the run
+  // leaves the in-flight list when the turn notices, which is the same check
+  // the delete route makes under its write lock. Dismissing before then races
+  // that 409 back, and the chip stays up for a reason the assertion below
+  // cannot name.
+  await expect
+    .poll(
+      async () => {
+        const live = await request.get(`/api/v1/company/tasks/inflight`);
+        if (!live.ok()) return true;
+        const runs = (await live.json()) as Array<{ taskId: string | null }>;
+        return runs.some((run) => run.taskId === taskId);
+      },
+      {
+        timeout: 30_000,
+        message: "the cancelled run must leave the in-flight list before the card can be deleted",
+      },
+    )
+    .toBe(false);
 
   // The control is a confirm, not a bare delete — a card is not something to
-  // lose to a stray click.
+  // lose to a stray click. Scoped to the row the chip sits on, so the dialog
+  // opened is that card's.
+  const row = page
+    .locator("article[data-message-id]")
+    .filter({ has: page.locator(`a[href="${href}"]`) });
   await row.getByRole("button", { name: "Dismiss this card" }).click();
   await expect(page.getByText("Dismiss this card?")).toBeVisible();
   await page.getByRole("button", { name: "Dismiss card", exact: true }).click();
 
-  // Gone from the transcript in-session…
-  await expect(chip).toBeHidden({ timeout: 30_000 });
+  // Gone from the transcript in-session… asserted on *this card's* chip, by
+  // href. `chip` is a `.last()` over the channel, and the sibling spec above
+  // leaves its own card's chip in this same conversation — so a bare re-read
+  // can settle on a chip that was never dismissed and is correctly still there.
+  const thisChip = page.locator(`a[href="${href}"]`);
+  await expect(thisChip).toHaveCount(0, { timeout: 30_000 });
 
   // …and gone from the board, which is what makes it a dismissal rather than a
   // hidden chip over a card that is still filling the board.
@@ -256,9 +350,9 @@ test("a dismissed card's chip goes away and does not come back on reload", async
 
   // …and still gone after a reload. This is the regression: the transcript is
   // rehydrated from the host here, not from the React state the click cleared.
-  await openThread(page, /Engineering desk/);
+  await openThread(page, "");
   await page.reload();
-  await openThread(page, /Engineering desk/);
+  await openThread(page, "");
   await expect(page.getByText(prompt, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole("link", { name: /Added to the board/ })).toHaveCount(0);
+  await expect(page.locator(`a[href="${href}"]`)).toHaveCount(0);
 });

@@ -10,7 +10,10 @@ const PAGES = [
   { hash: "feedback", heading: "Feedback" },
   { hash: "inbox", heading: "Inbox" },
   { hash: "finances", heading: "Finances" },
-  { hash: "conversation", heading: "Conversation" },
+  // Retired. Room replaced it, and the address names no channel to rewrite it
+  // onto — so it must reach the explanation, not a blank page and not a silent
+  // landing on whichever channel Room defaults to.
+  { hash: "conversation", heading: "Page not found" },
 ] as const;
 
 test.beforeEach(async ({ page }) => {
