@@ -220,10 +220,9 @@ async fn the_read_count_never_disagrees_with_its_own_rows_under_a_racing_write()
         };
 
         let read_state = state.clone();
-        let reader =
-            tokio::spawn(
-                async move { send(&read_state, "GET", "/api/v1/company/ledgers/hazards", None).await },
-            );
+        let reader = tokio::spawn(async move {
+            send(&read_state, "GET", "/api/v1/company/ledgers/hazards", None).await
+        });
 
         let write_state = state.clone();
         let writer = tokio::spawn(async move {
