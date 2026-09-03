@@ -2892,6 +2892,75 @@ mod test {
         assert_eq!(reloaded.irreversible_effects("t-1").len(), 1);
     }
 
+    /// Issue #2037, the second half of it: what the gate calls irreversible is
+    /// the only thing that ever reaches the retry warning.
+    ///
+    /// [`State::index_executed`] files nothing for a reversible effect, so a
+    /// gate that waves a paid engagement through does not merely skip the
+    /// approval — it erases the engagement from the card's history, and Retry
+    /// re-runs it with no warning at all. The two halves are one bug and this
+    /// pins the join.
+    ///
+    /// The flag is **derived from a real gate** rather than hand-stamped
+    /// `irreversible: true` like [`executed`] does. A hand-stamped fixture
+    /// tests the index and stays green through exactly the regression this is
+    /// here for: the shape under test is an engagement of an established
+    /// counterparty, with no amount stated, in a company that configured no
+    /// cap — the shape that used to read as "under the cap".
+    #[tokio::test]
+    async fn an_engagement_the_gate_calls_irreversible_reaches_the_retry_warning() {
+        use crate::company::Policy;
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = ManifestApprovalGate::new(Policy {
+            mode: "supervised".into(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        });
+
+        let engagement = Effect {
+            kind: "a2a.engage".into(),
+            group: EffectGroup::Hire,
+            ..effect()
+        };
+        assert!(
+            gate.is_irreversible(&engagement),
+            "an engagement of unstated value in a company with no cap is not \
+             something a person can take back",
+        );
+
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .record_executed(
+                "cyc:0",
+                ExecutedEffect {
+                    kind: engagement.kind.clone(),
+                    amount_usd: engagement.amount_usd,
+                    task_id: Some("t-1".into()),
+                    at_millis: now_millis(),
+                    irreversible: gate.is_irreversible(&engagement),
+                },
+            )
+            .await
+            .unwrap();
+
+        let named = journal.irreversible_effects("t-1");
+        assert_eq!(
+            named.len(),
+            1,
+            "the card's retry dialog has nothing to warn about",
+        );
+        assert_eq!(named[0].kind, "a2a.engage");
+
+        // And it survives a restart, which is where the dialog usually reads it.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert_eq!(reloaded.irreversible_effects("t-1").len(), 1);
+    }
+
     /// **Issue #726**: a journal over a non-filesystem store replays exactly
     /// what the same records replay over a file — and survives the loss of the
     /// bundle directory, which is the whole point.
