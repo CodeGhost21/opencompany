@@ -136,6 +136,81 @@ async fn recording_again_amends_the_same_row() {
     assert_eq!(read.entries[0].get("risk"), "second");
 }
 
+/// #2048 review: `read_ledger` used to fold the ledger once for its rows and
+/// again, independently, inside `summary()` for the open/closed count sent
+/// alongside them. A write landing in the gap between those two folds could
+/// flip a row's status after the rows were read but before the count was, so
+/// the response shipped a badge that disagreed with the rows beside it.
+///
+/// This reproduces that gap deterministically — recording a close at exactly
+/// the point the old handler's second, independent fold used to run — rather
+/// than relying on scheduler luck to land a race. It shows two things: a
+/// second fold at that point genuinely disagrees with the rows already
+/// returned (the defect is real, not hypothetical), and `read`'s own
+/// `open`/`closed` — computed from the very fold that produced `entries`,
+/// never a later one — hold steady across the write instead.
+#[tokio::test]
+async fn a_second_independent_fold_would_disagree_with_the_rows_read_already_returned() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "r1",
+        fields(&[("risk", "a"), ("status", "open")]),
+    )
+    .await
+    .expect("recorded");
+
+    // One fold, as the fixed `read` performs it: rows and counts share a
+    // single snapshot, so both describe the ledger as of the same instant.
+    let read = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert_eq!(read.entries.len(), 1);
+    assert_eq!(read.open, 1);
+    assert_eq!(read.closed, 0);
+
+    // The write that used to land in the window between the rows' fold and
+    // the count's second, independent fold.
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "r1",
+        fields(&[("status", "closed"), ("reason", "handled")]),
+    )
+    .await
+    .expect("closed");
+
+    // A second, independent fold taken right here — what `summary()` used to
+    // run after `read()` already returned — now disagrees with the rows
+    // `read` already handed back above: this is the exact mismatch a
+    // two-fold response would have shipped to the console.
+    let refolded = entries(&ctx, &spec).await.expect("entries");
+    assert_eq!(
+        refolded.open_count(&spec),
+        0,
+        "the row already closed by the time a second fold ran"
+    );
+    assert_ne!(
+        refolded.open_count(&spec),
+        read.open,
+        "a second, independent fold disagrees with the snapshot `read` already returned"
+    );
+
+    // `read`'s own numbers, by contrast, are unaffected by the write that
+    // came after it: they were taken from one snapshot and remain
+    // internally consistent with the rows in that same `read`.
+    assert_eq!(
+        read.open,
+        read.entries
+            .iter()
+            .filter(|entry| !spec.is_closed(&entry.status(&spec)))
+            .count()
+    );
+    assert_eq!(read.closed, 0);
+}
+
 /// Refused at the **write**, not reported at the read: by the time somebody
 /// reads it, the person who knew why has moved on.
 #[tokio::test]
