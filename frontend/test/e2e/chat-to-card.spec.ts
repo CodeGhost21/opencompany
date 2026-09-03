@@ -37,20 +37,19 @@ async function dismissWelcome(page: Page) {
 }
 
 /**
- * Opens the conversation view and selects a thread by its contact name.
+ * Opens one Room channel by id.
  *
- * Scoped to the chat list: the sidebar's company switcher is also a button and
- * also carries the company name, and it precedes the list in the DOM — so an
- * unscoped `.first()` resolves to the switcher and never opens a thread.
+ * The channel comes from the address rather than a rail click, so the spec
+ * cannot proceed against an unselected transcript that still accepts a `fill`.
  */
-async function openThread(page: Page, name: RegExp) {
-  await page.goto("/#/conversation");
+async function openThread(page: Page, channelId: string) {
+  await page.goto(`/#/chat/${channelId}`);
   await dismissWelcome(page);
-  await page.getByRole("complementary").getByRole("button", { name }).first().click();
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
 test("any message on a desk thread can be added to the board", async ({ page }) => {
-  await openThread(page, /Engineering desk/);
+  await openThread(page, "engineering");
 
   const prompt = `ship the launch checklist ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
@@ -62,7 +61,7 @@ test("any message on a desk thread can be added to the board", async ({ page }) 
 
   // The action is hover-revealed but always focusable; hover for realism.
   await bubble.hover();
-  const row = page.locator("div.group\\/msg", { hasText: prompt }).first();
+  const row = page.locator("article[data-message-id]", { hasText: prompt }).first();
   await row.getByRole("button", { name: "Add to board" }).click();
 
   // The confirmation chip appears on that message and links to the card.
@@ -181,7 +180,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // the skip is per-test rather than per-file.
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
-  await openThread(page, /Your company/);
+  await openThread(page, "");
 
   // `SPAWNONE` is the scripted backend's cue to call `spawn_task` once.
   const prompt = `please track this SPAWNONE ${Date.now()}`;
@@ -197,7 +196,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // After a reload the transcript is rehydrated from `chat/history`, so a chip
   // that only existed on the live POST response would vanish here.
   await page.reload();
-  await openThread(page, /Your company/);
+  await openThread(page, "");
   const rehydrated = page.getByRole("link", { name: /Card opened/ }).last();
   await expect(rehydrated).toBeVisible({ timeout: 30_000 });
   expect(await rehydrated.getAttribute("href")).toBe(href);
@@ -223,7 +222,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
  * needs no `LIVE_BRAIN` and runs on every CI.
  */
 test("a dismissed card's chip goes away and does not come back on reload", async ({ page }) => {
-  await openThread(page, /Engineering desk/);
+  await openThread(page, "engineering");
 
   const prompt = `dismiss this one ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
@@ -232,7 +231,7 @@ test("a dismissed card's chip goes away and does not come back on reload", async
   const bubble = page.getByText(prompt, { exact: true }).first();
   await expect(bubble).toBeVisible({ timeout: 60_000 });
   await bubble.hover();
-  const row = page.locator("div.group\\/msg", { hasText: prompt }).first();
+  const row = page.locator("article[data-message-id]", { hasText: prompt }).first();
   await row.getByRole("button", { name: "Add to board" }).click();
 
   const chip = row.getByRole("link", { name: /Added to the board/ });
@@ -256,9 +255,9 @@ test("a dismissed card's chip goes away and does not come back on reload", async
 
   // …and still gone after a reload. This is the regression: the transcript is
   // rehydrated from the host here, not from the React state the click cleared.
-  await openThread(page, /Engineering desk/);
+  await openThread(page, "engineering");
   await page.reload();
-  await openThread(page, /Engineering desk/);
+  await openThread(page, "engineering");
   await expect(page.getByText(prompt, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("link", { name: /Added to the board/ })).toHaveCount(0);
 });

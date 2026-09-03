@@ -46,9 +46,8 @@ test("operator console renders a mocked backend reply end to end", async ({
 }) => {
   // Authentication is performed once by global-setup.ts and shared through
   // Playwright storage state so multiple specs do not trip the resend throttle.
-  // Open the conversation view. The default "Your company" thread is
-  //    pre-selected.
-  await page.goto("/#/conversation");
+  // Open Room. A bare address resolves to the company-wide line.
+  await page.goto("/#/chat");
 
   // Send a unique prompt through the operator chat input.
   const prompt = `e2e wiring ping ${Date.now()}`;
