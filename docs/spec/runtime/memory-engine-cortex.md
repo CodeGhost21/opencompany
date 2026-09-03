@@ -25,12 +25,17 @@ question, and the recommendation follows from them.
    **closed-source**, distributed only as prebuilt artifacts (`cortexdbai/cortexdb-releases`,
    Docker Hub `cortexdb/cortexdb`). Whatever we build treats it as an opaque
    upstream binary we cannot patch.
-2. **The self-hosted build cannot issue per-tenant credentials.** Under
-   `CORTEX_DEPLOYMENT_PRESET=cloud_shared_saas` the PASETO minter answers
-   `NOT_CONFIGURED`; its keypair generator is not in the distribution; and the
-   bundled `PRODUCTION_DEPLOYMENT.md` describes `CORTEX_API_KEY` as the
-   bootstrap key for the *default* tenant, with real per-tenant keys coming from
-   Cortex's own hosted key store.
+2. **The server does not issue per-tenant credentials, and the issuer it expects
+   is not obtainable.** Under `CORTEX_DEPLOYMENT_PRESET=cloud_shared_saas` the
+   PASETO minter answers `NOT_CONFIGURED`, its keypair generator is absent, and
+   `PRODUCTION_DEPLOYMENT.md` calls `CORTEX_API_KEY` the bootstrap key for the
+   *default* tenant. By design, not omission: the vendor's [deployment
+   profiles](https://cortexdb.ai/docs/enterprise/deployment-profiles) say every
+   production preset "expect[s] token issuance from an external OIDC provider or
+   the separate `cortex-auth-ref` issuer" — but that issuer is absent from the
+   v0.9.8 assets with no public repository, and no contract is given for the OIDC
+   alternative. Not impossible; unspecified and unobtainable, which for planning
+   is the same place.
 3. **The derived fact and belief tier does not work.** Facts, Beliefs and
    Understanding stay empty with the extraction and enrichment routers enabled
    and reporting healthy; only Events and Episodes hold data. These are Cortex
@@ -40,12 +45,11 @@ question, and the recommendation follows from them.
 4. **Retrieval quality is real, and comes from embeddings alone.** Ranked recall
    over the Events layer is good and needs no LLM lanes at all.
 5. **The contract's upsert has no direct mapping, but a conformant driver is
-   still reachable.** `(namespace, key)` replacement cannot be expressed against
-   an append-only log whose keys are immutable. It can be *reconstructed*: append
-   every write under a fresh idempotency key carrying the logical key in the
-   payload, and fold the log to newest-per-key on read. That driver exists and
-   passes. What it costs is the subject of its own section below — and the cost,
-   not the impossibility, is what should decide this.
+   reachable.** `(namespace, key)` replacement cannot be expressed against an
+   append-only log with immutable keys. It can be *reconstructed*: append every
+   write under a fresh idempotency key carrying the logical key, and fold to
+   newest-per-key on read. That driver exists and passes. Its cost — its own
+   section below — is what should decide this, not impossibility.
 
 ## The isolation choice collapses
 
@@ -57,7 +61,7 @@ removes the middle option:
 |---|---|---|
 | One shared instance, one bootstrap credential | Namespace-only — the **weak** tier | Yes |
 | **One instance per tenant**, own key and own data dir | Credential *and* storage isolation | **Yes** |
-| Shared instance, real per-tenant credentials | Strong | **No** — needs Cortex's hosted key store |
+| Shared instance, real per-tenant credentials | Strong | **Not today** — needs an issuer we cannot obtain (finding 2) |
 
 `memory-engine.md` is unambiguous about why the weak tier is not acceptable as a
 default: with a hosted engine "the namespace string is the only thing separating
@@ -212,22 +216,20 @@ being raised with CortexDB directly instead.
 
 **This was written as blocking Phase 1. It is not.** The driver appends every
 write under a fresh idempotency key — which the engine always accepts — carrying
-the logical key inside the payload, and folds the log down to newest-per-key on
-read. Replacement is reconstructed on the read side rather than performed on the
-write side, and the full conformance suite passes that way against a live
-v0.9.8.
+the logical key inside the payload, and folds to newest-per-key on read.
+Replacement is reconstructed on the read side rather than performed on the write
+side, and the conformance suite passes that way against a live v0.9.8.
 
 The price is paid on every call, and it is the real input to the decision:
 
 - **keyed reads are a scan.** `/v1/events` has no metadata filter, so `get` and
-  `list` fetch the scope and fold it — a walk that grows with everything the
-  namespace has ever held.
+  `list` fetch the scope and fold it — a walk growing with everything the
+  namespace has held.
 - **writes cost seconds, not milliseconds.** `/v1/experience` answers
-  `202 captured` and indexes afterwards, so the driver waits for its own record
-  to become readable: 1–4s to the listing, about a second more to ranked recall.
+  `202 captured` and indexes after, so the driver waits for its own record to be
+  readable: 1–4s to the listing, a second more to ranked recall.
 - **superseded values stay in the ranking corpus.** The fold removes them from
-  keyed reads, not from recall — the one path Cortex was wanted for. A caller can
-  see through `recall` a value `get` would never return.
+  keyed reads, not from recall — the one path Cortex was wanted for.
 
 All three disappear the day the engine grows `on_conflict: "replace"`. None is a
 correctness defect in the driver; each is the cost of emulating replacement on an
@@ -235,30 +237,26 @@ engine that does not offer it.
 
 ## What building it taught us
 
-Five engine behaviours surfaced only against a running instance. Each produced a
-driver that passed every offline test and was wrong in production — the
-conformance double and the driver were written from the same documentation, so
-they agreed with each other rather than with the service. These are properties of
-the engine, not of our adapter; whoever revisits this will meet them again.
+Five engine behaviours surfaced only against a running instance, each producing a
+driver that passed every offline test and was wrong in production — the double
+and the driver were written from the same documentation, so they agreed with each
+other rather than with the service. The three that bear on a decision are below;
+the full list, including the duplicated listing and the silently-ignored query
+parameters, is in `cortex.rs`'s module docs, which is where it stays current.
 
 1. **The two read paths return different bytes for the same event.**
    `/v1/events` returns content as stored; `/v1/recall` renders it with the
    speaker prefixed (`[user] {...}`). A driver storing structured content lists
-   perfectly and **searches to nothing** — every hit fails to parse and is
-   dropped, which looks exactly like an empty index.
-2. **The listing emits every record twice**, and `limit` counts the duplicates,
-   so a page of 200 carries about 100 distinct events.
-3. **Unknown query parameters are ignored, not refused** — a wrong paging
-   parameter re-serves page one instead of erroring.
-4. **No readiness signal exists.** `/v1/experience/status` never advances past
+   perfectly and **searches to nothing** — hits fail to parse and are dropped,
+   which looks exactly like an empty index.
+2. **No readiness signal exists.** `/v1/experience/status` never advances past
    `captured`, and the `lifecycle_stream` URL the write returns connects and
    emits nothing. Read-after-write means polling.
-5. **A namespace segment may contain `:` and a scope id may not.** The contract
+3. **A namespace segment may contain `:` and a scope id may not.** The contract
    addresses a *section* with it (`conversation:thread-8f21`); Cortex's grammar
-   separates `type:id`. Refusing makes whole sections unstorable; collapsing it
+   separates `type:id`. Refusing makes sections unstorable; collapsing it
    re-addresses the namespace out of its section, so `namespaces()` reports a
-   scope nobody enumerating that section can find. The driver encodes it
-   reversibly.
+   scope nobody enumerating it can find. The driver encodes it reversibly.
 
 ## Belief revision is not reachable
 
@@ -346,8 +344,8 @@ host-side, because Cortex does not provide them:
 
 **Deliberately incomplete.** #1936 asked for HA, backup/restore and an upgrade
 path alongside sizing. They are absent by decision, not oversight: they describe
-operating a deployment this record recommends against. They belong with the
-Phase 0 topology decision, if it goes the other way.
+operating a deployment this record recommends against, and belong with the Phase
+0 topology decision if it goes the other way.
 
 Per-instance footprint is the open number. The binary's own config lint projects
 **~18 GiB steady-state RAM** on a 3.9 GiB box, and that estimate did not move
@@ -428,11 +426,10 @@ append-only event log is its own problem rather than a line of glue. What Phase 
 leaves out is Cortex's derived fact and belief tier, which no host port reads and
 which Phase 4 revisits.
 
-Merged as [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128),
-with a live-engine test lane — a double written from the same documentation as
-the driver agrees with the driver, not with the service. It is deliberately not
-registered: `SUPPORTED_REMOTE_DRIVERS` and `remote_provider()` are untouched, so
-nothing here can select it. Registering it is a decision, not a task.
+Merged as [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128)
+with a live-engine test lane, and deliberately not registered:
+`SUPPORTED_REMOTE_DRIVERS` and `remote_provider()` are untouched, so nothing here
+can select it. Registering it is a decision, not a task.
 
 Acceptance, against the list this record set before the work started:
 
@@ -476,6 +473,10 @@ not.
 
 - Does CortexDB agree with our reading of clause 2? Worth confirming in writing
   when we contact them, though the text is not ambiguous.
+- What does a self-hosted deployment use for per-tenant token issuance — is
+  `cortex-auth-ref` published, or is an external OIDC provider expected, against
+  what contract? This is what would unblock the strong isolation tier, though the
+  derived-layer finding is the one that decides adoption.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
