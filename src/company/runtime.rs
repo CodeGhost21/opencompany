@@ -4819,35 +4819,54 @@ impl CompanyRuntime {
     /// it — so after `retire_approval` there is no way back to which run was
     /// waiting, exactly as there is no way back to what was being asked.
     ///
-    /// # Why this resolves rather than settling `Effect::run_id` directly
+    /// # Why the cycle, and not `Effect::run_id` or the effect kind
     ///
-    /// Codex on the B-012 PR. `Effect::run_id` on a workflow gate is the
-    /// **lineage** id — `workflow_resume::workflow_turn_key` mints this run's
-    /// resume key straight from it — while `RunStore` rows are per-node
-    /// *attempts* minted under `generate_id()` and merely *linked* to the
-    /// lineage (`NewRun::for_workflow_node`, `src/workflows/caps/mod.rs`).
-    /// `RunFilter::for_workflow_run` being a filter rather than a key is the
-    /// same fact from the other side. Handing the lineage id to `finish_run`
-    /// therefore names no row at all: it answers `NotFound`, the settle is
-    /// swallowed as best-effort, and the attempt goes on reading
-    /// `WaitingApproval` — which is precisely the bug B-012 is about.
+    /// Two Codex findings, in sequence, both about reaching for the wrong
+    /// handle. `Effect::run_id` on a `workflow.approve` gate is the **lineage**
+    /// id, while `RunStore` rows are per-node *attempts* minted under
+    /// `generate_id()` and merely linked to it (`NewRun::for_workflow_node`), so
+    /// handing it to `finish_run` names no row at all. And the path that
+    /// actually leaves an attempt reading `WaitingApproval` is not that gate: it
+    /// is a **gated tool call** inside a workflow agent node
+    /// (`caps::park_gated_calls` → the `!parked.is_empty()` settle), parked with
+    /// `ApprovalPolicy::effect_for`'s own effect — whose `kind` is the tool name
+    /// and whose `run_id` is `None`. So on the real path neither the kind test
+    /// nor `workflow_run_of` can say anything, and a fix keyed on either is a
+    /// no-op that a fixture combining a gate effect with a hand-made attempt row
+    /// will nonetheless report as working.
     ///
-    /// Narrowed to the parked **node**, not every `WaitingApproval` attempt in
-    /// the lineage: a graph can park two nodes on two gates, and only one of
-    /// them expired. Without a node to match, nothing is settled — a run left
-    /// stale is the bug, but cancelling a sibling node still waiting on a live
-    /// decision would be a worse one.
+    /// The **cycle recorded at park time** is the one correlation that survives
+    /// both shapes, so it is what this reads:
+    ///
+    /// * `workflow-node:{run}:{node}` — a blocked node's gated calls. The real
+    ///   case, and it names the run and the node outright.
+    /// * `workflow-run:{run}` — a run-level gate, whose node is on its own
+    ///   payload (`gate_node_id`).
+    ///
+    /// Narrowed to that node, never "every `WaitingApproval` attempt in the
+    /// lineage": a graph can park two nodes on two gates and only one expired.
+    /// Anything whose node cannot be resolved settles nothing — a stale row is
+    /// the bug, but cancelling a sibling still waiting on a live decision would
+    /// be a worse one.
     async fn parked_workflow_attempts(&self, id: &ApprovalId) -> Vec<String> {
+        use crate::runtime::workflow_resume::{gate_node_id, run_and_node_from_node_turn};
+
         let Some(pending) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
             return Vec::new();
         };
-        let Some(lineage) = workflow_run_of(&pending) else {
+        let cycle = self.journal.approval_cycle(id).flatten();
+        let resolved = cycle
+            .as_deref()
+            .and_then(run_and_node_from_node_turn)
+            .map(|(run, node)| (run.to_string(), node.to_string()))
+            .or_else(|| {
+                let run = workflow_run_of(&pending)?;
+                let node = gate_node_id(&pending.effect)?;
+                Some((run, node.to_string()))
+            });
+        let Some((lineage, node)) = resolved else {
             return Vec::new();
         };
-        let Some(node) = crate::runtime::workflow_resume::gate_node_id(&pending.effect) else {
-            return Vec::new();
-        };
-        let node = node.to_string();
         let filter = crate::ports::runs::RunFilter {
             workflow_run_id: Some(lineage),
             statuses: vec![crate::ports::runs::RunStatus::WaitingApproval],
@@ -8291,26 +8310,28 @@ mod tests {
         }
     }
 
-    /// A workflow gate parked on a node of `lineage`, in the shape production
-    /// actually leaves behind (Codex on the B-012 PR).
+    /// A **gated tool call** parked by a workflow agent node, in the shape
+    /// production actually creates (Codex on the B-012 PR, second round).
     ///
-    /// The two halves that matter are the two that were wrong when this was
-    /// hand-rolled: `Effect::run_id` is the **lineage** id, and the
-    /// `WaitingApproval` row is a separately-minted *attempt* linked to it by
-    /// `NewRun::for_workflow_node`. A fixture that gives the row the lineage's
-    /// own id proves only that the fixture works.
+    /// This is the path that leaves an attempt reading `WaitingApproval`:
+    /// `caps::park_gated_calls` journals `ApprovalPolicy::effect_for`'s effect —
+    /// `kind` is the **tool name**, `run_id` is `None` — under the node's
+    /// `workflow-node:{run}:{node}` cycle, and the node then settles its attempt
+    /// `WaitingApproval`. The earlier fixture here paired a `gate_effect` with a
+    /// hand-made attempt row, a combination no parking path produces, and so
+    /// reported a fix that could not fire in production as working.
     ///
     /// Returns the attempt row's id — the row the expiry has to find.
-    async fn park_workflow_gate(
+    async fn park_gated_node_call(
         rt: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
         approval: &crate::ports::types::ApprovalId,
         lineage: &str,
         node: &str,
         at_millis: u64,
-        cycle: Option<String>,
+        arm_continuation: bool,
     ) -> String {
         use crate::ports::runs::RunStatus;
-        use crate::ports::types::EventSeq;
+        use crate::ports::types::{Effect, EffectGroup, EventSeq};
         use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
         let attempt = crate::ports::generate_id();
@@ -8334,15 +8355,22 @@ mod tests {
             .await
             .unwrap();
 
-        let effect = crate::runtime::workflow_resume::gate_effect(
-            "wf-demo",
-            node,
-            &serde_json::json!({}),
-            lineage,
-            &[],
-            &[],
-            None,
-        );
+        // `effect_for`'s shape, field for field: the tool's own name as the
+        // kind, the agent stamped, and **no** `run_id`.
+        let effect = Effect {
+            kind: "workspace.write".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "path": "README.md" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(lineage, node);
+        if arm_continuation {
+            rt.continuations.arm(&node_turn);
+        }
         rt.approval_gate
             .rehydrate(approval.clone(), effect.clone(), at_millis);
         rt.journal
@@ -8352,7 +8380,7 @@ mod tests {
                 at_millis,
                 TaskLink::Unlinked,
                 ApprovalConversation::default(),
-                cycle,
+                Some(node_turn),
             )
             .await
             .unwrap();
@@ -8411,7 +8439,7 @@ mod tests {
         // `WaitingApproval` and linked to the lineage, plus the gate itself
         // carrying that lineage. Parked at epoch 0 — past any TTL.
         let approval = ApprovalId::new("appr-b012");
-        let attempt = park_workflow_gate(&rt, &approval, "wr-b012", "solve", 0, None).await;
+        let attempt = park_gated_node_call(&rt, &approval, "wr-b012", "solve", 0, false).await;
 
         let expired = rt.sweep_expired_approvals().await.unwrap();
         assert!(
@@ -8452,15 +8480,15 @@ mod tests {
         // parked now (nowhere near it).
         let expiring = ApprovalId::new("appr-expiring");
         let attempt_expiring =
-            park_workflow_gate(&rt, &expiring, "wr-two-gates", "solve", 0, None).await;
+            park_gated_node_call(&rt, &expiring, "wr-two-gates", "solve", 0, false).await;
         let live = ApprovalId::new("appr-live");
-        let attempt_live = park_workflow_gate(
+        let attempt_live = park_gated_node_call(
             &rt,
             &live,
             "wr-two-gates",
             "review",
             crate::ports::now_millis(),
-            None,
+            false,
         )
         .await;
 
@@ -8492,46 +8520,60 @@ mod tests {
     }
 
     /// **The other half of B-012** (CodeRabbit on the B-012 PR). An expiry that
-    /// *releases* the run must not also cancel it.
+    /// *releases* the node must not also cancel its attempt.
     ///
-    /// `retire_approval` deliberately resumes a workflow run whose last
-    /// outstanding gate expired — "a workflow run releases even on an empty
-    /// batch … so its approved siblings are not stranded" (issue #978) — and it
-    /// **spawns** that resume rather than awaiting it. The first cut of B-012
-    /// cancelled the row unconditionally, which both raced the resume and
-    /// cancelled a run that was legitimately continuing with the expiry banked
-    /// as a deny. Suppressing the resume instead would strand the siblings,
+    /// `retire_approval` deliberately continues work whose last outstanding
+    /// decision expired — "a workflow run releases even on an empty batch … so
+    /// its approved siblings are not stranded" (issue #978) — and it **spawns**
+    /// that continuation rather than awaiting it. The first cut of B-012
+    /// cancelled the attempt unconditionally, which both raced the spawn and
+    /// cancelled work that was legitimately continuing with the expiry banked as
+    /// a deny. Suppressing the continuation instead would strand the siblings,
     /// which is the bug #978 exists to prevent; so the cancellation is what
     /// narrows, to the expiries that release nothing.
     ///
+    /// The scenario is the one that makes a node's batch non-empty, because an
+    /// expiry alone never does (`ContinuationQueue::decide` banks no event for
+    /// one): **two** gated calls on one node, one answered by the operator and
+    /// one left to expire. That is also exactly when the siblings #978 protects
+    /// exist at all.
+    ///
     /// Asserted on the **error text**, not the status: only `finish_expiry`
     /// writes that sentence, so the assertion cannot race whatever the spawned
-    /// resume goes on to do to the row.
+    /// continuation goes on to do to the row.
     #[tokio::test]
     async fn an_expiry_that_releases_the_run_does_not_also_cancel_it() {
-        use crate::ports::types::ApprovalId;
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
         use std::sync::Arc;
 
         let (rt, _home) = runtime_with_events().await;
         let rt = Arc::new(rt);
 
-        // The difference from the test above, and the whole point of it: a real
-        // `workflow-run:` continuation, armed and recorded as this approval's
-        // cycle. Expiry is now this turn's last outstanding decision, so
-        // `retire_approval` releases the run instead of leaving it stranded.
-        let turn = crate::runtime::workflow_resume::workflow_turn_key("wr-released");
-        rt.continuations.arm(&turn);
-
         let approval = ApprovalId::new("appr-released");
-        let attempt = park_workflow_gate(
-            &rt,
-            &approval,
-            "wr-released",
-            "solve",
-            0,
-            Some(turn.clone()),
-        )
-        .await;
+        let attempt = park_gated_node_call(&rt, &approval, "wr-released", "solve", 0, true).await;
+
+        // The node's *second* gated call, answered by the operator before the
+        // first expires. Its banked event is what makes the released batch
+        // non-empty, and so what makes this node continue rather than strand.
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key("wr-released", "solve");
+        rt.continuations.arm(&node_turn);
+        assert!(
+            rt.continuations
+                .decide(
+                    &node_turn,
+                    Some(CompanyEvent::ApprovalResolved {
+                        approval_id: ApprovalId::new("appr-answered"),
+                        verdict: Verdict::Approve,
+                        by: Actor {
+                            kind: ActorKind::Operator,
+                            id: "operator".into(),
+                        },
+                    }),
+                )
+                .is_none(),
+            "the node is still blocked on the gate that has not expired yet"
+        );
 
         let expired = rt.sweep_expired_approvals().await.unwrap();
         assert!(
@@ -8548,7 +8590,7 @@ mod tests {
         assert_ne!(
             row.error.as_deref(),
             Some("the approval this run was waiting on expired and defaulted to denied"),
-            "a released run settles through its resume; the expiry must not settle it too"
+            "a released node continues through its own resume; the expiry must not settle it too"
         );
     }
 

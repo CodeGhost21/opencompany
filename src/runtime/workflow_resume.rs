@@ -229,6 +229,28 @@ pub fn is_node_turn(turn: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty())
 }
 
+/// The `(run, node)` behind a key minted by [`workflow_node_turn_key`], or
+/// `None` for any other turn key (B-012, Codex review).
+///
+/// # Why this parses what `is_node_turn` deliberately does not
+///
+/// Routing a released batch only ever needed the prefix test, so nothing pulled
+/// the halves back out. Settling the attempt an *expired* gated call left behind
+/// does need them, and this key is the only place they survive: a gated tool
+/// call is parked with `ApprovalPolicy::effect_for`'s own effect, whose `kind`
+/// is the tool name and whose `run_id` is `None` — so neither the effect kind
+/// nor `Effect::run_id` can name the run or the node, and the cycle recorded at
+/// park time is the durable correlation.
+///
+/// Split on the **first** separator after the prefix: run ids are generated ids
+/// with no `:` in them, while a node id is a graph-authored string that may well
+/// contain one.
+pub fn run_and_node_from_node_turn(turn: &str) -> Option<(&str, &str)> {
+    let rest = turn.strip_prefix(WORKFLOW_NODE_TURN_PREFIX)?;
+    let (run_id, node_id) = rest.split_once(':')?;
+    (!run_id.is_empty() && !node_id.is_empty()).then_some((run_id, node_id))
+}
+
 /// The payload key holding the workflow whose run paused.
 pub const PAYLOAD_WORKFLOW_ID: &str = "workflow_id";
 /// The payload key holding the gate node awaiting sign-off.
