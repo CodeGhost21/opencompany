@@ -8606,7 +8606,7 @@ mod tests {
                 rt.id(),
                 &attempt,
                 RunOutcome::new(RunStatus::WaitingApproval)
-                    .with_usage(usage.clone())
+                    .with_usage(usage)
                     .with_step_count(7),
             )
             .await
