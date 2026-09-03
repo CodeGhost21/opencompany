@@ -2668,13 +2668,35 @@ export function AppShell({
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
     // when a frame carries no chatId (older host / background turn).
-    const threadId =
+    const frameThreadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
+    // …then through `channelForThread`, because the maps written below are keyed
+    // by **channel** while the frame names a **thread** (issue #1743). A bare
+    // index is the bug that doc warns about, and it silently ate every live
+    // step: the host folds the company-wide line under whatever casing the
+    // caller addressed and emits `chatId: "General"`, while `liveStepsByThread`
+    // is read at `GENERAL_CHANNEL` — `"general"`. Rows were written under a key
+    // no render site looks at, so the console showed a bare "Working…" spinner
+    // for the whole turn and the steps appeared only once the durable history
+    // folded them in. `agent_reply` resolves the same id the same way a few
+    // hundred lines up; this surface was simply missed.
+    //
+    // Unresolved ids keep the raw spelling rather than dropping the frame: the
+    // map is built from the desk list, so a frame arriving before that loads
+    // would otherwise be lost outright, which is worse than today's behaviour.
+    const threadId = frameThreadId
+      ? (channelForThread(chatChannelByThreadRef.current, frameThreadId) ?? frameThreadId)
+      : frameThreadId;
     if (!threadId) {
-      // No chat bubble to fold the frame into. A dispatched card streams
-      // nothing at all — `run_steered_background` runs with `LiveStream::Off` —
-      // so a chat-less frame here is a host emitting a shape this console does
-      // not render, and the Observatory's live re-read is instead driven by the
+      // No chat bubble to fold the frame into. A dispatched card raised from a
+      // conversation now DOES stream — `run_steered_background` derives its
+      // stream from the `origin_chat_id` the card carries — but it streams
+      // *keyed*, so those frames arrive with a `chatId` and take the branch
+      // above. What still reaches here is a card no conversation raised (a
+      // board-raised card, a cron tick): its chat id is absent or empty, the
+      // host resolves that to `LiveStream::Off`, and nothing is published. So a
+      // chat-less frame is a host emitting a shape this console does not
+      // render, and the Observatory's live re-read is instead driven by the
       // workflow node events in `onWorkflowRunEvent`.
       return;
     }
