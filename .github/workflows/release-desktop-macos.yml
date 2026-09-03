@@ -29,6 +29,24 @@
 # Tauri names the outputs per-arch (`OpenCompany_<version>_aarch64.dmg` and
 # `..._x64.dmg`), so both legs can attach to one Release without colliding.
 #
+# THE RELEASE ALSO CARRIES THE AUTO-UPDATER'S ARTIFACTS, and they are not the
+# DMGs. A DMG is a fresh install; the updater replaces the installed `.app` out
+# of a signed `.app.tar.gz`, and finds it through a `latest.json` manifest on
+# the newest published release. Three things here produce that, and all of them
+# are gated on `create_release`:
+#
+#   1. `guard` runs `scripts/release/assert-updater-configured.sh`, which
+#      refuses a release whose `tauri.conf.json` still carries the placeholder
+#      signing key, or whose `TAURI_SIGNING_PRIVATE_KEY` secret is missing.
+#   2. each `build` leg packages and signs its `.app.tar.gz` AFTER notarization
+#      — from the stapled bundle, so what an update installs is what Apple
+#      approved — and attaches it to the draft.
+#   3. `updater-manifest` assembles `latest.json` from both, and `publish`
+#      waits for it, because immutable releases freeze the asset list.
+#
+# `docs/spec/runtime/desktop-updates.md` has the whole picture, including the
+# one-time keypair setup an operator has to do before any of this works.
+#
 # FEATURES ARE PASSED AT BUILD TIME, not committed to `src-tauri/Cargo.toml`.
 # See `DESKTOP_RELEASE_FEATURES` on the build job for the whole argument.
 #
@@ -82,6 +100,16 @@ jobs:
     name: Guard dispatch
     runs-on: ubuntu-latest
     steps:
+      # Only for the updater guard below, which runs a script from the tree and
+      # reads the pubkey out of `src-tauri/tauri.conf.json`. Pinned to `tag` for
+      # the same reason the build's checkout is: the config it validates has to
+      # be the config that is about to be built.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
       # A public Release must never carry an unsigned DMG.
       - name: Guard release-requires-signing
         if: inputs.create_release && !inputs.sign
@@ -148,6 +176,22 @@ jobs:
             fi
           done
           [ "$missing" -eq 0 ] || exit 1
+
+      # A release nobody can update FROM is worse than no release: an installed
+      # client polls `latest.json` on the newest published release forever, so a
+      # release published without one — or with artifacts signed by a key the
+      # shipped application does not carry — pins every existing install to
+      # whatever it already has, silently and permanently. Immutable releases
+      # mean it cannot be repaired afterwards either.
+      #
+      # Nothing in Tauri notices any of that: `plugins.updater.pubkey` is an
+      # opaque string until a bundle is verified on somebody else's machine. So
+      # the check is here, in seconds, before two ~60-minute builds.
+      - name: Validate updater prerequisites
+        if: inputs.create_release
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bash scripts/release/assert-updater-configured.sh
 
   build:
     name: "Desktop: ${{ matrix.target }}"
@@ -322,6 +366,50 @@ jobs:
         run: |
           xcrun stapler validate "${{ steps.locate.outputs.dmg_path }}"
 
+      # ---- The auto-updater's own artifact -----------------------------------
+      # The DMG is what a person downloads once. It is NOT what an installed
+      # application updates from: the Tauri updater replaces the `.app` bundle
+      # in place out of a `.app.tar.gz` with a detached minisign signature
+      # beside it, and without those two files on the release, `latest.json`
+      # has nothing to point at.
+      #
+      # AFTER notarization, deliberately. `bundle.createUpdaterArtifacts` would
+      # have the bundler emit this during `tauri build` — from the unsigned
+      # `.app`, because signing happens in the steps above — so every client
+      # that took an update would end up with a bundle Gatekeeper refuses to
+      # launch. Building it here means the updater installs byte-for-byte the
+      # bundle Apple stapled, and the signing key is needed for one `signer
+      # sign` rather than for the whole compile.
+      #
+      # `create_release`, not `sign`: an artifact nothing can reach is not worth
+      # the ~40 seconds, and the `guard` job has already proved both the signing
+      # secret and a real pubkey are present whenever this runs.
+      - name: Package signed update artifact
+        id: updater
+        if: inputs.create_release
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bash scripts/release/package-updater-artifact.sh \
+            "${{ steps.locate.outputs.app_path }}" \
+            "${{ matrix.target }}" \
+            "${{ steps.locate.outputs.bundle_dir }}/updater" >> "$GITHUB_OUTPUT"
+
+      # Into the same DRAFT the DMG goes to, and before it is published:
+      # immutable releases freeze the asset list at publish, so an archive that
+      # misses this window can never be added and every install stays pinned to
+      # the build it already has.
+      - name: Attach update artifact to draft release
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          ARCHIVE: ${{ steps.updater.outputs.archive }}
+          SIGNATURE: ${{ steps.updater.outputs.signature }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$SIGNATURE" -R "$REPO" --clobber
+
       # ---- Publish -----------------------------------------------------------
       # Signed → attach to the GitHub Release. (The `guard` job proves sign=true
       # whenever create_release is true, so this only ever attaches a notarized
@@ -368,6 +456,42 @@ jobs:
           path: ${{ steps.locate.outputs.dmg_path }}
           if-no-files-found: error
 
+  # The manifest every installed application polls.
+  #
+  # Its own job because it is the one thing that cannot be done from inside a
+  # matrix leg: `latest.json` names BOTH architectures, so it can only be
+  # written once both have uploaded their archive and signature. A leg writing
+  # its own half would produce two manifests racing to clobber each other, and
+  # the loser's architecture would silently stop receiving updates.
+  #
+  # Between the builds and the publish, and that ordering is load-bearing: this
+  # repository has immutable releases, so an asset that misses the draft can
+  # never be added. A release published with no `latest.json` pins every
+  # existing install to the build it already has, permanently.
+  updater-manifest:
+    name: Publish updater manifest (latest.json)
+    needs: build
+    if: inputs.create_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `tag` again, not the dispatch ref: the script asserts the manifest's
+      # version against `src-tauri/tauri.conf.json`, and it has to read the
+      # config that was built rather than whatever `main` says today.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Generate and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/release/publish-updater-manifest.sh
+
   # Publish the draft, once BOTH architectures have attached their DMG.
   #
   # This is the step that makes the release immutable, and it is deliberately
@@ -379,9 +503,14 @@ jobs:
   # unpublished rather than shipping a release that silently has one
   # architecture. Fix the leg and re-dispatch; the draft is still there, and
   # `--clobber` on the upload makes the successful leg's re-run harmless.
+  #
+  # `updater-manifest` is in that list for the same reason the DMGs are: a
+  # release whose `latest.json` failed to write is a release nobody can update
+  # from, and freezing the asset list around that mistake is what makes it
+  # permanent.
   publish:
     name: Publish release
-    needs: build
+    needs: [build, updater-manifest]
     if: inputs.create_release
     runs-on: ubuntu-latest
     permissions:
