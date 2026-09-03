@@ -3,6 +3,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
   type ApprovalSummary,
+  type BlockerVerdict,
   type CompanyStatus,
   type GrantScope,
   type NotificationDto,
@@ -113,7 +114,11 @@ import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
-import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
+import {
+  approvedLine,
+  blockerDecidedLine,
+  staleDecisionLine,
+} from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
@@ -2926,6 +2931,7 @@ export function AppShell({
     approval: ApprovalSummary,
     verdict: Verdict,
     scope: GrantScope = { kind: "once" },
+    blocker?: { verdict: BlockerVerdict; answer?: string },
   ) => {
     if (decidingApprovals.has(approval.id)) return;
     ownApprovalDecisionsRef.current.add(approval.id);
@@ -2937,7 +2943,14 @@ export function AppShell({
       const answer = await client.resolveApproval(approval.id, verdict, undefined, company, {
         detach: true,
         scope,
+        blocker,
       });
+      // A blocker answers for its whole root-cause group. Each sibling the host
+      // settled is this tab's decision too, so its SSE echo must not surface as
+      // a second toast for a card the operator decided once (#1211).
+      for (const settled of answer.settledIds ?? []) {
+        ownApprovalDecisionsRef.current.add(settled);
+      }
       // Issue #1449: the same read the Approvals page makes, for the same
       // reason. This card detaches, so it gets a `ResolveReceipt` — which, until
       // #1449, had no shape at all for "the host default-denied this because the
@@ -2967,14 +2980,21 @@ export function AppShell({
       }
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
-        verdict === "approve"
-          ? approvedLine(answer.stillAwaiting)
-          : "Declined — recorded.",
+        blocker
+          ? blockerDecidedLine(blocker.verdict, undefined, answer.settledIds)
+          : verdict === "approve"
+            ? approvedLine(answer.stillAwaiting)
+            : "Declined — recorded.",
       );
       // A decline ends the thread's story, and silence would read as a stall.
       // An approve needs no line: the continuation lands as a real reply, which
       // is the whole point of deciding here.
-      if (verdict === "deny") {
+      if (blocker) {
+        noteInChannel(
+          approval.thread,
+          blockerDecidedLine(blocker.verdict, undefined, answer.settledIds),
+        );
+      } else if (verdict === "deny") {
         noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
       }
     } catch (err) {
@@ -3602,8 +3622,8 @@ export function AppShell({
               chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
               now={feed.now}
-              onDecideApproval={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecideApproval={(approval, verdict, scope, blocker) =>
+                void decideApproval(approval, verdict, scope, blocker)
               }
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
@@ -3657,8 +3677,8 @@ export function AppShell({
               deciding={decidingApprovals}
               decided={decidedApprovals}
               failed={failedApprovals}
-              onDecide={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecide={(approval, verdict, scope, blocker) =>
+                void decideApproval(approval, verdict, scope, blocker)
               }
               // Issue #246: the card → chat half of the round trip. The card
               // carries the host thread it was opened from; the map is what
@@ -3751,8 +3771,8 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
-              onDecideApproval={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecideApproval={(approval, verdict, scope, blocker) =>
+                void decideApproval(approval, verdict, scope, blocker)
               }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
@@ -3901,8 +3921,8 @@ export function AppShell({
                 decidingApprovals={decidingApprovals}
                 decidedApprovals={decidedApprovals}
                 failedApprovals={failedApprovals}
-                onDecideApproval={(approval, verdict, scope) =>
-                  void decideApproval(approval, verdict, scope)
+                onDecideApproval={(approval, verdict, scope, blocker) =>
+                  void decideApproval(approval, verdict, scope, blocker)
                 }
               />
             </Suspense>

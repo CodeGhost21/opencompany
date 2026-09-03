@@ -9,7 +9,7 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import type {
   WorkflowGraph,
   WorkflowRunBoardRow,
@@ -119,7 +119,7 @@ export function RunResultPanel({
    * racing operator on the other surface gets a real approval or a `NotParked`
    * no-op receipt, never a double execution.
    */
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: DecideApproval;
 }) {
   const nodeResults = useMemo(
     () => parseRunNodes(result.output, graph),
@@ -492,7 +492,7 @@ function RunApprovalsSection({
   askerNames: Map<string, string>;
   deciding: ReadonlyMap<string, Verdict>;
   failed: Record<string, string>;
-  onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide: DecideApproval;
 }) {
   const nameById = useMemo(
     () => new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []),

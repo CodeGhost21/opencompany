@@ -42,17 +42,24 @@
 import { Check, Loader2, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type {
+  ApprovalSummary,
+  BlockerVerdict,
+  GrantScope,
+  Verdict,
+} from "@/api/types";
 import {
   ApprovalHeadline,
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
+  BlockerDecide,
   DeclineScopeControl,
   approvalConsequence,
   approvalIcon,
   batchConsequences,
   deadlineToneClass,
+  isBlockerKind,
   type ApprovalThreadLink,
 } from "@/components/approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -236,7 +243,12 @@ export function ApprovalRow({
    * "this one did not take" — the operator would believe they got all three.
    */
   failed: Record<string, string>;
-  onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+    blocker?: { verdict: BlockerVerdict; answer?: string },
+  ) => void;
 }) {
   // Per-card, exactly as on the page: two batches can be parked in one channel
   // and each carries its own decision. Defaults to `once`, so a card decided
@@ -280,6 +292,39 @@ export function ApprovalRow({
    * not part of the one-click authorisation.
    */
   const needsFullReview = condensed && pending.some((a) => payloadLeadTruncated(a));
+  /**
+   * A blocker falls out of this card's batch, and that is the answer to whether
+   * the all-or-nothing model can carry one: it cannot.
+   *
+   * The batch exists because a turn is blocked until every call it parked has
+   * an answer, so one click has to answer all of them — and every one of those
+   * answers is the same word. A blocker is a question with four answers, and
+   * one of them is words the operator types for *that* question. There is no
+   * single click that means four different answers, and sweeping questions into
+   * an Approve would re-run every stopped step at once, which is the
+   * flattening this change exists to remove. A blocker also gates no turn — it
+   * parks with no continuation — so leaving it out holds nothing open.
+   */
+  const pendingBlockers = useMemo(
+    () => pending.filter((a) => isBlockerKind(a.kind)),
+    [pending],
+  );
+  const pendingGated = useMemo(
+    () => pending.filter((a) => !isBlockerKind(a.kind)),
+    [pending],
+  );
+  /**
+   * The one blocker this card answers in place: the full variant only, and only
+   * when it is the card's whole remaining business.
+   *
+   * Condensed rows send the operator to Approvals instead, on `needsFullReview`'s
+   * own rule — a board card or a chat interruption shows a paraphrase, and a
+   * question is not answerable from a paraphrase.
+   */
+  const soleBlocker =
+    !condensed && pendingGated.length === 0 && pendingBlockers.length === 1
+      ? pendingBlockers[0]
+      : null;
 
   /**
    * The decision, applied to every item the card is still asking about.
@@ -298,7 +343,7 @@ export function ApprovalRow({
    * refuses the pairing anyway.
    */
   const decideAll = (verdict: Verdict) => {
-    for (const a of pending) {
+    for (const a of pendingGated) {
       onDecide(a, verdict, verdict === "approve" ? scope : declineScope);
     }
   };
@@ -312,7 +357,27 @@ export function ApprovalRow({
   const declineVariant = compact ? "ghost" : "outline";
   const approveVariant = compact ? "ghost" : "default";
 
-  const actions = done ? undefined : (
+  const actions = done ? undefined : soleBlocker ? (
+    <BlockerDecide
+      approval={soleBlocker}
+      askerNames={askerNames}
+      now={now}
+      deciding={busy}
+      onDecide={(verdict, grantScope, blocker) =>
+        onDecide(soleBlocker, verdict, grantScope, blocker)
+      }
+    />
+  ) : pendingGated.length === 0 ? (
+    // Questions only, and more than one of them — or a surface too condensed to
+    // answer one on. There is no batch verdict that covers them, so the row
+    // sends the operator where each can be answered on its own.
+    <a
+      href={detailsHref}
+      className={cn(buttonVariants({ variant: "outline", size: "sm" }), actionClass)}
+    >
+      Answer in Approvals
+    </a>
+  ) : (
     <>
       <Button
         variant={declineVariant}

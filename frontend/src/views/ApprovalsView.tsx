@@ -8,6 +8,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
   type ApprovalSummary,
+  type BlockerVerdict,
   GRANT_DURATIONS,
   type GrantScope,
   type StandingGrant,
@@ -19,6 +20,8 @@ import {
   ApprovalMeta,
   ApprovalPayload,
   ApprovalScopeControl,
+  BlockerDecide,
+  isBlockerKind,
   useAskerNames,
   useApprovalThreadLinks,
 } from "@/components/approval-card";
@@ -32,6 +35,7 @@ import {
   approvedByRuntimeLine,
   approvedLine,
   batchPositions,
+  blockerDecidedLine,
   staleDecisionLine,
 } from "@/lib/approval-wording";
 import { approvalsByDeadline } from "@/lib/approval-order";
@@ -269,6 +273,7 @@ export function ApprovalsView({
     a: ApprovalSummary,
     verdict: Verdict,
     scope: GrantScope,
+    blocker?: { verdict: BlockerVerdict; answer?: string },
   ) {
     // Per-row guard: only a double-press on THIS card is ignored. The global
     // early return that used to live here made every other card inert too.
@@ -282,8 +287,16 @@ export function ApprovalsView({
         verdict,
         undefined,
         company,
-        { scope },
+        { scope, blocker },
       );
+      // A blocker answers for its whole root-cause group, so the host names
+      // every id it settled. Each one is this tab's decision too: without
+      // claiming them the SSE echo of a sibling's resolution arrives as a
+      // second toast for a card the operator only decided once (#1211).
+      const settledIds = "settledIds" in answer ? answer.settledIds : undefined;
+      for (const settled of settledIds ?? []) {
+        if (settled !== a.id) onDecideStart?.(settled);
+      }
       // Issue #243: approving no longer just records a verdict — it hands the
       // agent a single-use grant and re-dispatches it to make the call. The old
       // "Approved: …" read as "done", which was the exact lie that made the
@@ -331,8 +344,9 @@ export function ApprovalsView({
         void feed.refresh();
         return;
       }
-      const line =
-        verdict !== "approve"
+      const line = blocker
+        ? blockerDecidedLine(blocker.verdict, approvalSummary(a), settledIds)
+        : verdict !== "approve"
           ? `Declined: ${approvalSummary(a)}`
           : scope.kind === "tool"
             ? `Approved — ${toolAction(a.kind).toLowerCase()} won't ask again until this permission expires. Take it back under Standing permissions.`
@@ -436,10 +450,18 @@ export function ApprovalsView({
   // at once starts several follow-up turns. Hence the confirm copy. Decline is
   // terminal and lighter.
   const [bulkInFlight, setBulkInFlight] = useState(false);
+  // Blockers are excluded from bulk, and that is the point of the exclusion: a
+  // bulk approve can only send the two-value verdict, so sweeping a question
+  // into it would silently re-run every stopped step — the flattening this page
+  // just stopped doing one card at a time.
+  const bulkRows = useMemo(
+    () => rows.filter((a) => !isBlockerKind(a.kind)),
+    [rows],
+  );
 
   async function decideAll(verdict: Verdict) {
-    if (bulkInFlight || rows.length === 0) return;
-    const n = rows.length;
+    if (bulkInFlight || bulkRows.length === 0) return;
+    const n = bulkRows.length;
     const question =
       verdict === "approve"
         ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the teammate, so this may start several tasks at once.`
@@ -447,7 +469,7 @@ export function ApprovalsView({
     if (!window.confirm(question)) return;
     setBulkInFlight(true);
     try {
-      for (const a of [...rows]) {
+      for (const a of [...bulkRows]) {
         if (inFlight.has(a.id)) continue;
         await decide(a, verdict, { kind: "once" });
       }
@@ -546,7 +568,7 @@ export function ApprovalsView({
                       ? "1 thing needs your approval"
                       : `${rows.length} things need your approval`}
                   </h2>
-                  {rows.length > 1 && (
+                  {bulkRows.length > 1 && (
                     <div className="flex shrink-0 items-center gap-2 self-center">
                       <Button
                         variant="outline"
@@ -596,8 +618,8 @@ export function ApprovalsView({
                     deciding={inFlight.get(a.id) ?? null}
                     batchIndex={batchPos.get(a.id)?.index ?? 1}
                     batchTotal={batchPos.get(a.id)?.total ?? 1}
-                    onDecide={(verdict, scope) =>
-                      void decide(a, verdict, scope)
+                    onDecide={(verdict, scope, blocker) =>
+                      void decide(a, verdict, scope, blocker)
                     }
                     extending={extending.has(a.id)}
                     onExtend={() => void extendDeadline(a)}
@@ -917,7 +939,11 @@ export function ApprovalCard({
    * (#842). `1` — the default for an approval with no batch — says nothing.
    */
   batchTotal: number;
-  onDecide: (verdict: Verdict, scope: GrantScope) => void;
+  onDecide: (
+    verdict: Verdict,
+    scope: GrantScope,
+    blocker?: { verdict: BlockerVerdict; answer?: string },
+  ) => void;
   /** Whether this card's deadline extension is in flight (#1805). */
   extending?: boolean;
   /** Push this approval's deadline out to a fresh window (#1805). Absent in
@@ -932,6 +958,10 @@ export function ApprovalCard({
   const [declineScope, setDeclineScope] = useState<GrantScope>({
     kind: "once",
   });
+  // A blocker is answered with one of four verdicts, none of which buys a
+  // standing permission — the host refuses that pairing — so neither scope
+  // control is offered on one.
+  const blocker = isBlockerKind(a.kind);
 
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
@@ -957,19 +987,23 @@ export function ApprovalCard({
 
         <ApprovalPayload approval={a} />
 
-        <ApprovalScopeControl
-          approval={a}
-          askerNames={askerNames}
-          scope={scope}
-          onChange={setScope}
-          disabled={deciding !== null}
-        />
-        <DeclineScopeControl
-          approval={a}
-          scope={declineScope}
-          onChange={setDeclineScope}
-          disabled={deciding !== null}
-        />
+        {!blocker && (
+          <>
+            <ApprovalScopeControl
+              approval={a}
+              askerNames={askerNames}
+              scope={scope}
+              onChange={setScope}
+              disabled={deciding !== null}
+            />
+            <DeclineScopeControl
+              approval={a}
+              scope={declineScope}
+              onChange={setDeclineScope}
+              disabled={deciding !== null}
+            />
+          </>
+        )}
 
         <ApprovalMeta
           approval={a}
@@ -1024,6 +1058,16 @@ export function ApprovalCard({
               Extend
             </Button>
           )}
+          {blocker ? (
+            <BlockerDecide
+              approval={a}
+              askerNames={askerNames}
+              now={now}
+              deciding={deciding !== null}
+              onDecide={onDecide}
+            />
+          ) : (
+            <>
           <Button
             variant="outline"
             size="sm"
@@ -1076,6 +1120,8 @@ export function ApprovalCard({
             )}{" "}
             Approve
           </Button>
+            </>
+          )}
         </div>
       </CardContent>
     </Card>
