@@ -4742,13 +4742,21 @@ async fn resolve_blocker(
     settled_ids: &mut Vec<String>,
 ) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
     let Some(group) = runtime.parked_blocker_group(id) else {
+        // Already settled — by another tab, a double-click, or this very
+        // request racing a sibling's group fan-out. Ordinary approvals return
+        // 200 in this race (issue #243); a blocker must too, or a decision
+        // that landed successfully reports as a failure.
+        if let Some(answer) = runtime.already_resolved_blocker_receipt(id) {
+            *settled_ids = Vec::new();
+            return Ok(answer);
+        }
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "approval {id} is not a parked blocker, so it has no blocker_verdict to answer"
         ))));
     };
     *settled_ids = group.iter().map(ToString::to_string).collect();
     Ok(runtime
-        .apply_blocker_reply_spawned(&group, verdict, answer, Some(&actor))
+        .apply_blocker_reply_spawned(&group, id, verdict, answer, Some(&actor))
         .await?)
 }
 

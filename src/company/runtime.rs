@@ -437,6 +437,23 @@ pub struct CompanyRuntime {
     /// `Arc`-shared for the same reason as [`serial`](Self::serial): a rebuild
     /// inherits it rather than minting a second one.
     pub(crate) task_writes: Arc<TokioMutex<()>>,
+    /// Held across a blocker group's whole bank-arm-settle sequence (issue
+    /// #2028), so two operators resolving members of the same group
+    /// concurrently cannot interleave.
+    ///
+    /// Without it, two requests racing on one id each write
+    /// `record_blocker_resolution` and `arm_blocker_resolution` before either
+    /// calls `settle_approval` — the actual claim — so the side-channel data
+    /// the eventual resume reads is whichever request wrote last, not
+    /// whichever request's verdict the durable approval event actually
+    /// records. Serializing the whole sequence makes the second request's
+    /// `settle_approval` observe the first's claim before it ever writes its
+    /// own (losing) resolution, the same "claim before you write" fix
+    /// [`task_writes`](Self::task_writes) gives board edits.
+    ///
+    /// `Arc`-shared for the same reason as [`serial`](Self::serial): a rebuild
+    /// inherits it rather than minting a second one.
+    pub(crate) blocker_resolutions: Arc<TokioMutex<()>>,
     /// Set while this runtime is being replaced (issue #290). Once set, every
     /// cycle entry point refuses with [`OpenCompanyError::Quiescing`] so the
     /// in-flight turn can drain and the successor takes over at a point with no
@@ -581,6 +598,7 @@ impl CompanyRuntime {
             serial: Arc::new(TokioMutex::new(())),
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
             task_writes: Arc::new(TokioMutex::new(())),
+            blocker_resolutions: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
             replay_continuations_on_register: AtomicBool::new(false),
             #[cfg(feature = "openhuman")]
@@ -1867,8 +1885,8 @@ impl CompanyRuntime {
     }
 
     /// Adopts the serialising mutexes of the runtime this one replaces
-    /// (issue #290), so the cycle and board-write invariants span the swap
-    /// instead of lapsing at it.
+    /// (issue #290), so the cycle, board-write and blocker-resolution
+    /// invariants span the swap instead of lapsing at it.
     ///
     /// Called by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) on a
     /// rebuild, before the successor is registered and therefore before anything
@@ -1878,10 +1896,12 @@ impl CompanyRuntime {
         serial: Arc<TokioMutex<()>>,
         per_agent: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
         task_writes: Arc<TokioMutex<()>>,
+        blocker_resolutions: Arc<TokioMutex<()>>,
     ) {
         self.serial = serial;
         self.per_agent = per_agent;
         self.task_writes = task_writes;
+        self.blocker_resolutions = blocker_resolutions;
     }
 
     /// Installs the continuation queue the builder prepared (issue #469) —
@@ -5762,6 +5782,37 @@ impl CompanyRuntime {
         Some(self.blocker_group_of(id))
     }
 
+    /// An idempotent "nothing left to resolve" answer for an id that WAS a
+    /// parked blocker and no longer is (issue #2028) — settled by another
+    /// tab, a plain double-click, or this very request racing a sibling's
+    /// group fan-out. `None` when `id` was never a blocker at all, which the
+    /// caller must still refuse: a `blocker_verdict` names an answer such an
+    /// id never had a question for.
+    ///
+    /// [`parked_blocker_group`](Self::parked_blocker_group) cannot tell these
+    /// two "not currently parked" cases apart by itself — it only kind-checks
+    /// the *still-parked* effect, which is gone the instant the id resolves.
+    /// This reads [`RuntimeJournal::approval_origin`] instead: an unbounded,
+    /// never-pruned record of what every approval ever parked *was*, kind
+    /// included, which survives resolution the live queue does not.
+    #[cfg(feature = "openhuman")]
+    pub(crate) fn already_resolved_blocker_receipt(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+    ) -> Option<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
+        let origin = self.journal.approval_origin(id)?;
+        if !origin.kind.starts_with(&format!(
+            "{}.",
+            crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+        )) {
+            return None;
+        }
+        let rt = Arc::clone(self);
+        let handle =
+            tokio::spawn(async move { Ok(CycleRunner::new(&rt).already_resolved_report()) });
+        Some((ResolveReceipt::AlreadyResolved, handle))
+    }
+
     /// The parked blockers pending in one DM, folded into root-cause groups
     /// (issue #1862). Oldest-first, the order `pending` already returns.
     #[cfg(feature = "openhuman")]
@@ -5951,16 +6002,19 @@ impl CompanyRuntime {
         if ids.is_empty() {
             return Ok(());
         }
+        // No single "addressed" id here — a DM reply answers the whole group
+        // at once, and the receipt is discarded rather than reported to a
+        // particular request, so which member's receipt `head` names is moot.
         let (_, follow_up) = self
-            .apply_blocker_reply_spawned(ids, verdict, answer, by)
+            .apply_blocker_reply_spawned(ids, &ids[0], verdict, answer, by)
             .await?;
         join_follow_up(follow_up).await?;
         Ok(())
     }
 
     /// [`apply_blocker_reply`](Self::apply_blocker_reply), handing back the
-    /// group's first receipt and a handle to the follow-ups rather than
-    /// awaiting them — the blocker twin of
+    /// addressed member's own receipt and a handle to the group's follow-ups
+    /// rather than awaiting them — the blocker twin of
     /// [`resolve_approval_spawned`](Self::resolve_approval_spawned), and what
     /// lets a caller answer as soon as the verdicts are durable.
     ///
@@ -5968,15 +6022,41 @@ impl CompanyRuntime {
     /// surface that already knows which of the four was asked for does not have
     /// to round-trip through the free-text intent classifier.
     ///
+    /// `addressed` names which member of `ids` the caller actually asked
+    /// about — the id the operator clicked, not necessarily `ids[0]`.
+    /// [`blocker_group_members`](Self::blocker_group_members) orders a group
+    /// oldest-first, which need not be the id the request named: an older
+    /// sibling can expire mid-loop while the clicked blocker settles the
+    /// requested verdict just fine, and reporting the oldest member's outcome
+    /// in that case would tell the operator their own decision failed when it
+    /// did not. The returned receipt is always `addressed`'s own. Must be a
+    /// member of `ids`, or the head receipt falls back to `ids[0]`'s — every
+    /// caller passes an id it already sourced `ids` from, so this is a
+    /// defensive fallback rather than a case any caller should hit.
+    ///
     /// Every id is banked, armed and settled **inline**, in order, before this
     /// returns; the returned handle runs each member's follow-up in that same
     /// order. A follow-up failing does not stop the rest from running — every
     /// member still gets its resume attempt, and the handle surfaces the first
     /// error once all of them have run.
+    ///
+    /// **Serialized against every other blocker resolve on this company**
+    /// (issue #2028) by [`blocker_resolutions`](Self::blocker_resolutions),
+    /// held for the whole bank-arm-settle loop below. Without it, two
+    /// operators resolving members of the same group concurrently with
+    /// different verdicts can each write `record_blocker_resolution` and
+    /// `arm_blocker_resolution` for an id before either calls
+    /// `settle_approval` — the actual claim — so the side-channel resolution a
+    /// resume reads back is whichever request wrote last rather than
+    /// whichever request's verdict the durable approval event names. Holding
+    /// the lock across the whole sequence means the losing request's
+    /// `settle_approval` observes `NotParked` before it can overwrite the
+    /// winner's arming.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn apply_blocker_reply_spawned(
         self: &Arc<Self>,
         ids: &[ApprovalId],
+        addressed: &ApprovalId,
         verdict: crate::ports::blockers::BlockerVerdict,
         answer: &str,
         by: Option<&Actor>,
@@ -5989,6 +6069,7 @@ impl CompanyRuntime {
                 "a blocker reply needs at least one approval to answer".to_string(),
             ));
         }
+        let _resolving = self.blocker_resolutions.lock().await;
         // The stopped step each blocker re-enters, read off the **still-parked**
         // effect's full payload before any resolve pops it — the journal scrubs
         // that payload the moment the approval leaves the pending set, so it must
@@ -6008,7 +6089,17 @@ impl CompanyRuntime {
             kind: ActorKind::Operator,
             id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
         });
-        let mut receipts: Vec<ResolveReceipt> = Vec::with_capacity(ids.len());
+        let mut head: Option<ResolveReceipt> = None;
+        // Each member's follow-up is spawned the moment ITS settle lands, not
+        // batched until every member in the group has settled. A later
+        // member's `record_blocker_resolution`, `settle_approval` or
+        // `retire_if_expired` can still fail and return via `?` below; when it
+        // does, every earlier member is already durably settled AND its
+        // follow-up is already running on its own task rather than sitting in
+        // a `Vec` this early return would drop — the receipt would otherwise
+        // be settled with nothing left to consume it, and retrying that id
+        // would only find `AlreadyResolved` and never resume it.
+        let mut handles: Vec<JoinHandle<Result<CycleReport>>> = Vec::with_capacity(ids.len());
         for id in ids {
             let resolution = crate::ports::blockers::BlockerResolution {
                 verdict,
@@ -6027,17 +6118,24 @@ impl CompanyRuntime {
                 .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
                 .await?;
             self.retire_if_expired(id, &receipt).await?;
-            receipts.push(receipt);
+            // The addressed member's own receipt, not the first one settled —
+            // `ids` is oldest-first, and the id this request named need not be
+            // the oldest. Falls back to the first receipt only if `addressed`
+            // is somehow not a member of `ids` at all.
+            if id == addressed || head.is_none() {
+                head = Some(receipt.clone());
+            }
+            handles.push(self.spawn_follow_up(receipt));
         }
-        let head = receipts[0].clone();
-        let rt = Arc::clone(self);
-        // One handle for the whole group: each member's follow-up is spawned and
-        // joined in turn, so the resumes stay in the order the group settled in.
+        let head = head.expect("ids is non-empty, so the loop above ran at least once");
+        // One handle for the whole group: each member's follow-up was spawned
+        // as it settled (above), so this only joins them, in that same order,
+        // rather than deciding when they start.
         let follow_up = tokio::spawn(async move {
             let mut last = CycleReport::default();
             let mut first_err = None;
-            for receipt in receipts {
-                match join_follow_up(rt.spawn_follow_up(receipt)).await {
+            for handle in handles {
+                match join_follow_up(handle).await {
                     Ok(report) => last = report,
                     Err(err) => {
                         first_err.get_or_insert(err);
@@ -10468,6 +10566,307 @@ mod tests {
             assert!(
                 matches!(cross, BlockerReplyPlan::NotBlocker),
                 "the same verdict from another conversation settles nothing"
+            );
+        }
+
+        /// Manually parks a blocker with an arbitrary `at_millis` (and
+        /// therefore an arbitrary deadline), bypassing `park_blocker`'s
+        /// always-now stamp — the same technique `seed_parked` uses elsewhere
+        /// in this file, adapted to a real blocker payload so the group it
+        /// joins is genuine.
+        async fn park_blocker_at(
+            runtime: &Arc<CompanyRuntime>,
+            id: &str,
+            payload: &BlockerPayload,
+            at_millis: u64,
+        ) -> crate::ports::types::ApprovalId {
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+            let approval = crate::ports::types::ApprovalId::new(id);
+            let effect = crate::ports::types::Effect {
+                kind: payload.effect_kind(),
+                group: crate::ports::types::EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+                agent: None,
+                run_id: None,
+            };
+            runtime
+                .approval_gate
+                .rehydrate(approval.clone(), effect.clone(), at_millis);
+            runtime
+                .journal
+                .record_parked(
+                    &approval,
+                    &effect,
+                    at_millis,
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("seed parked blocker");
+            approval
+        }
+
+        /// **Issue #2028 (P2 review finding).** `blocker_group_members` is
+        /// oldest-first, so the group's first receipt need not belong to the
+        /// id the request addressed. An older sibling can expire mid-loop
+        /// while the addressed blocker settles the requested verdict just
+        /// fine; the returned receipt must describe the ADDRESSED blocker,
+        /// not whichever member happens to be oldest.
+        #[tokio::test]
+        async fn the_addressed_members_own_outcome_is_reported_not_the_oldest_siblings() {
+            let (runtime, _home) = runtime().await;
+            let group = Some("connection:slack");
+            // Ancient: already past its deadline against real wall-clock time.
+            let old = park_blocker_at(&runtime, "old", &blocker("t-old", group), 1).await;
+            // Fresh: parked now, nowhere near its deadline.
+            let addressed = runtime
+                .park_blocker(&blocker("t-new", group), "t-new", assignee("eng"))
+                .await
+                .expect("parks the addressed blocker");
+
+            let (receipt, follow_up) = runtime
+                .apply_blocker_reply_spawned(
+                    &[old.clone(), addressed.clone()],
+                    &addressed,
+                    crate::ports::blockers::BlockerVerdict::Retry,
+                    "",
+                    None,
+                )
+                .await
+                .expect("resolves the group");
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("follow-ups run");
+
+            assert_eq!(
+                receipt.outcome(),
+                "settled",
+                "the addressed blocker settled the requested verdict just fine — reporting \
+                 anything else (e.g. the oldest sibling's \"expired\") tells the operator \
+                 their own decision failed when it did not: {receipt:?}"
+            );
+
+            // Sanity on the test's own premise: the older sibling really did
+            // expire in this same call, so a naive "receipts[0]" implementation
+            // would have reported exactly that outcome instead.
+            assert!(
+                runtime.pending_approvals().is_empty(),
+                "both members left the pending queue — one settled, one expired"
+            );
+        }
+
+        /// **Issue #2028 (P2 review finding).** `parked_blocker_group` returns
+        /// `None` for BOTH "never a blocker" and "was a blocker, already
+        /// resolved" — `resolve_blocker` used to 400 either way. A blocker
+        /// that just settled (another tab, a double-click, a sibling's fan-out
+        /// beating this request) must answer the same idempotent
+        /// `AlreadyResolved` an ordinary approval's double-submit gets, not a
+        /// refusal that tells the operator their successful decision failed.
+        #[tokio::test]
+        async fn a_settled_blockers_late_request_is_already_resolved_not_refused() {
+            let (runtime, _home) = runtime().await;
+            let id = runtime
+                .park_blocker(&blocker("t-1", None), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            runtime
+                .apply_blocker_reply(
+                    std::slice::from_ref(&id),
+                    BlockerReplyIntent::Retry,
+                    "go ahead",
+                    None,
+                )
+                .await
+                .expect("resolves");
+            assert!(
+                runtime.parked_blocker_group(&id).is_none(),
+                "test setup: the blocker is no longer parked"
+            );
+
+            let (receipt, follow_up) = runtime.already_resolved_blocker_receipt(&id).expect(
+                "an id that WAS a blocker must get an idempotent answer once it has \
+                     resolved, not None (which the caller reads as \"never a blocker\" and \
+                     refuses)",
+            );
+            assert!(
+                matches!(
+                    receipt,
+                    crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+                ),
+                "a settled blocker's late request is AlreadyResolved, not an error: {receipt:?}"
+            );
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("the synthetic already-resolved follow-up completes cleanly");
+        }
+
+        /// The other half of the same guard: an id that was never a blocker at
+        /// all — an unknown id, or an ordinary (non-blocker) approval — must
+        /// still be refused. Only "was a blocker, now resolved" gets the
+        /// idempotent answer.
+        #[tokio::test]
+        async fn an_id_that_was_never_a_blocker_gets_no_idempotent_answer() {
+            let (runtime, _home) = runtime().await;
+            assert!(
+                runtime
+                    .already_resolved_blocker_receipt(&crate::ports::types::ApprovalId::new(
+                        "never-existed"
+                    ))
+                    .is_none(),
+                "an unknown id must not be answered as a settled blocker"
+            );
+        }
+
+        /// **Issue #2028 (P1 review finding) — the concurrency race, proven by
+        /// actually interleaving two resolves rather than asserting a lock
+        /// exists.** Two operators resolve the same blocker with different
+        /// verdicts back to back, on the SAME company (so both cross
+        /// `blocker_resolutions`). Whichever verdict the durable approval
+        /// event names must be the SAME verdict the resume actually acts on —
+        /// before the fix, the side-channel arming was a plain last-write-wins
+        /// map insertion, so the resume could carry out the LOSING request's
+        /// verdict while the receipt reported the winner's.
+        #[tokio::test]
+        async fn concurrent_resolves_cannot_desync_the_armed_verdict_from_the_settled_one() {
+            use crate::ports::blockers::BlockerVerdict;
+
+            let (runtime, _home) = runtime().await;
+            // Deliberately a bare question (`step: None`), not the module's
+            // `blocker()` helper — that one is a Task-step blocker, and with
+            // no board card seeded here both retry and cancel would resume as
+            // "card not found", which cannot tell the two verdicts apart. A
+            // step-less blocker's resume note differs by verdict regardless of
+            // any card, which is exactly the observable this test needs.
+            let payload = BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::AgentQuestion,
+                step: None,
+                reason: "which cluster should this deploy to?".to_string(),
+                needed: "the cluster name".to_string(),
+                group_key: None,
+            };
+            let id = runtime
+                .park_blocker(&payload, "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+
+            // Two concurrent requests naming different verdicts for the SAME
+            // id. `apply_blocker_reply_spawned` serializes internally, so this
+            // is a real race on the lock, not a hand-arranged interleaving.
+            let a = {
+                let rt = Arc::clone(&runtime);
+                let id = id.clone();
+                tokio::spawn(async move {
+                    rt.apply_blocker_reply_spawned(
+                        std::slice::from_ref(&id),
+                        &id,
+                        BlockerVerdict::Retry,
+                        "",
+                        None,
+                    )
+                    .await
+                })
+            };
+            let b = {
+                let rt = Arc::clone(&runtime);
+                let id = id.clone();
+                tokio::spawn(async move {
+                    rt.apply_blocker_reply_spawned(
+                        std::slice::from_ref(&id),
+                        &id,
+                        BlockerVerdict::Cancel,
+                        "",
+                        None,
+                    )
+                    .await
+                })
+            };
+            let (a, b) = tokio::join!(a, b);
+            let a = a.expect("task a joins");
+            let b = b.expect("task b joins");
+
+            // Exactly one of the two racing requests actually claims the
+            // approval (`settle_approval`'s atomic `resolve_outcome`); the
+            // loser reads `AlreadyResolved`. Whichever wins, its verdict is
+            // what both the durable event AND the armed resume must agree on.
+            #[allow(clippy::type_complexity)]
+            let settled = |r: &crate::Result<(
+                crate::runtime::cycle::ResolveReceipt,
+                tokio::task::JoinHandle<crate::Result<crate::runtime::types::CycleReport>>,
+            )>| {
+                matches!(
+                    r,
+                    Ok((crate::runtime::cycle::ResolveReceipt::Settled(_), _))
+                )
+            };
+            let winner_verdict = match (settled(&a), settled(&b)) {
+                (true, false) => BlockerVerdict::Retry,
+                (false, true) => BlockerVerdict::Cancel,
+                (won_a, won_b) => panic!(
+                    "exactly one request must settle the approval: a settled={won_a} \
+                     b settled={won_b}"
+                ),
+            };
+
+            for outcome in [a, b] {
+                let (_, follow_up) = outcome.expect("resolves or is already-resolved");
+                crate::company::runtime::join_follow_up(follow_up)
+                    .await
+                    .expect("follow-up runs");
+            }
+
+            // The mechanism under test: for a step-less blocker, the resume
+            // posts a DIFFERENT acknowledgement into the DM depending on which
+            // verdict it reads off the armed side-channel — "Got it — picking
+            // that back up now." for retry, "Okay — cancelled." for cancel
+            // (`blocker_resume_note`). Exactly one resume runs (the loser's
+            // settle is `AlreadyResolved`, which owes no follow-up), so
+            // whichever note landed must match the winner — a
+            // last-write-wins race could instead post the LOSER's note under
+            // the WINNER's durable verdict.
+            let notes: Vec<String> = runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
+                        if chat_id == "dm:eng" =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            let (expected, contradicting) = match winner_verdict {
+                BlockerVerdict::Retry => {
+                    ("Got it — picking that back up now.", "Okay — cancelled.")
+                }
+                BlockerVerdict::Cancel => {
+                    ("Okay — cancelled.", "Got it — picking that back up now.")
+                }
+                _ => unreachable!(),
+            };
+            assert!(
+                notes.iter().any(|n| n.as_str() == expected),
+                "the resume must post the WINNING verdict's note ({expected:?}); posted: \
+                 {notes:?}"
+            );
+            assert!(
+                !notes.iter().any(|n| n.as_str() == contradicting),
+                "the resume must never carry out the LOSING request's verdict — found its \
+                 note ({contradicting:?}) even though the durable event named {winner_verdict:?}: \
+                 {notes:?}"
             );
         }
     }
