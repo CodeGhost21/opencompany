@@ -235,7 +235,10 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
  * (`chat_history.rs`), never onto the operator's own line, so a card the
  * transcript can draw a chip for needs a turn that actually ran.
  */
-test("a dismissed card's chip goes away and does not come back on reload", async ({ page }) => {
+test("a dismissed card's chip goes away and does not come back on reload", async ({
+  page,
+  request,
+}) => {
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
   await openThread(page, "");
@@ -248,17 +251,36 @@ test("a dismissed card's chip goes away and does not come back on reload", async
   await expect(chip).toBeVisible({ timeout: 60_000 });
   const href = await chip.getAttribute("href");
   expect(href).toMatch(/^#\/tasks\/.+/);
+  const taskId = decodeURIComponent(href!.replace("#/tasks/", ""));
+
+  // The turn that opened this card also dispatched it, and the host refuses to
+  // delete a card with a run registered against it — `tasks.rs` answers 409
+  // with "cancel it first", because a delete would not stick: the turn writes
+  // the card back when it settles. So cancel, exactly as that message says to.
+  // Tolerated rather than asserted: the run may already have settled, and a
+  // card at rest is the state this test wants either way.
+  await request
+    .post(`/api/v1/company/tasks/${encodeURIComponent(taskId)}/steer`, {
+      data: { action: "cancel", confirm: true },
+    })
+    .catch(() => undefined);
 
   // The control is a confirm, not a bare delete — a card is not something to
   // lose to a stray click. Scoped to the row the chip sits on, so the dialog
   // opened is that card's.
-  const row = page.locator("article[data-message-id]").filter({ has: chip });
+  const row = page
+    .locator("article[data-message-id]")
+    .filter({ has: page.locator(`a[href="${href}"]`) });
   await row.getByRole("button", { name: "Dismiss this card" }).click();
   await expect(page.getByText("Dismiss this card?")).toBeVisible();
   await page.getByRole("button", { name: "Dismiss card", exact: true }).click();
 
-  // Gone from the transcript in-session…
-  await expect(chip).toBeHidden({ timeout: 30_000 });
+  // Gone from the transcript in-session… asserted on *this card's* chip, by
+  // href. `chip` is a `.last()` over the channel, and the sibling spec above
+  // leaves its own card's chip in this same conversation — so a bare re-read
+  // can settle on a chip that was never dismissed and is correctly still there.
+  const thisChip = page.locator(`a[href="${href}"]`);
+  await expect(thisChip).toHaveCount(0, { timeout: 30_000 });
 
   // …and gone from the board, which is what makes it a dismissal rather than a
   // hidden chip over a card that is still filling the board.
@@ -272,5 +294,5 @@ test("a dismissed card's chip goes away and does not come back on reload", async
   await page.reload();
   await openThread(page, "");
   await expect(page.getByText(prompt, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole("link", { name: /Card opened/ })).toHaveCount(0);
+  await expect(page.locator(`a[href="${href}"]`)).toHaveCount(0);
 });
