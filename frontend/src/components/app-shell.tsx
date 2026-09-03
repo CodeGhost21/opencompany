@@ -1571,7 +1571,19 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string, settledTurnId?: string) => {
+    (threadId: string, settledTurnId?: string, stateKey?: string) => {
+      // Two identities, and after #2042 they are no longer the same string.
+      // `threadId` is the **desk** — what `chat/history`, the `threads` fold and
+      // `channelForThread` are addressed by. `liveKey` is the **open-turn state
+      // key**, which is what `openTurns`, `liveStepsByThread` and
+      // `receiptByThread` are keyed by, because `ChatView` hands `onSendStart`
+      // its `stateKey` and that key is `engineering#41` for a threaded send.
+      //
+      // Conflating them breaks one side or the other: reading the desk out of
+      // the map misses a queued sibling and leaves a threaded turn's receipt
+      // ticking forever, and asking the host about the composite recovers no
+      // history at all (Codex review on #2044).
+      const liveKey = stateKey ?? threadId;
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1606,9 +1618,9 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+          if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {
             setLiveStepsByThread((prev) =>
-              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+              prev[liveKey]?.length ? { ...prev, [liveKey]: [] } : prev,
             );
             // The receipt the detached turn carried through its queued/working
             // window (issue #2021) is cleared on the same terminal transition
@@ -1617,9 +1629,9 @@ export function AppShell({
             // above confirm the settle belongs to the company on screen — so a
             // late cross-company settle cannot delete a newer company's receipt.
             setReceiptByThread((prev) => {
-              if (!(threadId in prev)) return prev;
+              if (!(liveKey in prev)) return prev;
               const next = { ...prev };
-              delete next[threadId];
+              delete next[liveKey];
               return next;
             });
           }
@@ -1725,7 +1737,7 @@ export function AppShell({
       // knows, so `getChatHistory` would return nothing and the durable reply
       // would never be rehydrated — the poll-based recovery path, which is the
       // one that matters when SSE is unavailable.
-      reReadSettledThread(chatId ?? deskOfStateKey(stateKey), turnId);
+      reReadSettledThread(chatId ?? deskOfStateKey(stateKey), turnId, stateKey);
     };
 
     const poll = () => {
