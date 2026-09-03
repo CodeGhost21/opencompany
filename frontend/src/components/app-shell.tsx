@@ -104,6 +104,7 @@ import {
   hostMessageId,
   liveFrameThreadKey,
   liveReplyIdentity,
+  replyVoice,
   MAIN_THREAD_ID,
   makeMessage,
   mergeHistoryInOrder,
@@ -2172,7 +2173,12 @@ export function AppShell({
           ...t,
           [channelId]: [
             ...existing,
-            makeMessage("company", event.text, {
+            // `replyVoice`, not a literal: a host-authored line (the
+            // iteration-cap pause) is projected with `agentId: "system"` and
+            // must render as the same centred row `fromHistory` gives it, or
+            // whoever watched the turn live keeps an agent-style bubble that
+            // hydration will never correct.
+            makeMessage(replyVoice(event.agentId), event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,

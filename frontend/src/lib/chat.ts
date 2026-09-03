@@ -135,6 +135,35 @@ export function liveFrameThreadKey(
   return generalAwareChannel(map, frameThreadId) ?? MAIN_THREAD_ID;
 }
 
+/**
+ * The author the host projects for a line it wrote itself, rather than one an
+ * agent spoke. Mirrors `crate::ports::SYSTEM_AUTHOR`.
+ */
+export const SYSTEM_AUTHOR = "system";
+
+/**
+ * Whose voice a company-side reply is in, from the author the host attributed
+ * it to.
+ *
+ * A host-authored line — the iteration-cap pause, a spend halt — is neither
+ * yours nor an agent's, and renders as a centred pill instead of a bubble.
+ * {@link fromHistory} has always applied that rule, but the **live** renderers
+ * did not: both built a `company` message unconditionally and used the author
+ * only as the channel. So a host line rendered as an agent bubble while the
+ * turn was watched, and as a system row for anyone who loaded the transcript
+ * afterwards — and `mergeHistoryInOrder` keeps the existing live object for a
+ * matching durable id, so hydration never corrected the first view. Two
+ * operators, two different readings of one settled turn, permanently (Codex
+ * review on #2068).
+ *
+ * Exported so the live path, the synchronous POST path and history all decide
+ * it the same way; the divergence existed because each of them decided it
+ * separately.
+ */
+export function replyVoice(author: string | undefined | null): "company" | "system" {
+  return author === SYSTEM_AUTHOR ? "system" : "company";
+}
+
 /** One person's reaction on one line. Mirrors `ChatReactionDto` on the host. */
 export interface Reaction {
   emoji: string;
@@ -483,7 +512,7 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
     // so without this check a rehydrated marker came back as a company message
     // and a settle read like something an agent had said.
     const from: ChatMessage["from"] =
-      entry.author === "system" ? "system" : entry.mine ? "you" : "company";
+      entry.author === SYSTEM_AUTHOR ? "system" : entry.mine ? "you" : "company";
     return {
       id: hostMessageId(entry.id),
       from,

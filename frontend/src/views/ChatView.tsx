@@ -41,6 +41,7 @@ import {
   isGeneralChannel,
   makeMessage,
   reconcileIds,
+  replyVoice,
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
@@ -1755,7 +1756,9 @@ export function ChatView({
       const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
-            makeMessage("company", r.text, {
+            // Same rule as the live path and `fromHistory`: a host-authored
+            // response renders as a centred row, not an agent bubble.
+            makeMessage(replyVoice(r.channel), r.text, {
               channel: r.channel,
               parentId,
               steps: r.steps,
