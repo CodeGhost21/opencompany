@@ -25,9 +25,19 @@
 //!   carries the field is not refused for declining to repeat it.
 //! * **The derived file follows the write.** Every mutation re-renders and
 //!   republishes, so `derived/` is never a stale copy of something.
+//! * **A write and a purge on the same ledger never interleave.** Checking a
+//!   required field or a close reason reads the stored row first and only
+//!   then appends; a purge landing in that gap would remove the very events
+//!   the check just relied on, so the append that follows would recreate the
+//!   row without them and still report success. [`record`], [`delete_entry`]
+//!   and [`retire`] all take [`ledger_lock`] for one company's one ledger
+//!   before touching the store, so the two paths queue behind each other
+//!   instead of racing.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::Result;
 use crate::company::runtime::CompanyRuntime;
@@ -38,6 +48,49 @@ use crate::ledger::{
     parse_order,
 };
 use crate::ports::now_millis;
+use crate::ports::types::CompanyId;
+
+/// One company's one ledger, by slug — the key a write lock is scoped to.
+type LedgerKey = (CompanyId, String);
+
+/// A registry of per-[`LedgerKey`] async locks, one per every distinct ledger
+/// a write has touched.
+struct LedgerLocks {
+    inner: StdMutex<HashMap<LedgerKey, Arc<AsyncMutex<()>>>>,
+}
+
+impl LedgerLocks {
+    fn get(&self, company: &CompanyId, slug: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.inner.lock().expect("ledger-write-lock map poisoned");
+        locks
+            .entry((company.clone(), slug.to_string()))
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+}
+
+/// Every write's lock, shared by every [`Ledgers`] instance in the process.
+///
+/// A `static` rather than a field: two `Ledgers` built over the same company
+/// (one per request, per the routes) must meet on the same lock, which only
+/// something the process shares — not something each instance constructs —
+/// can guarantee. Mirrors the precedent `FS_WRITE_LOCKS` set for the
+/// filesystem store, deliberately including its scope: in-process only, so a
+/// second process over the same data directory is outside its reach and
+/// relies on the store's own write atomicity instead.
+static LEDGER_WRITE_LOCKS: LazyLock<LedgerLocks> = LazyLock::new(|| LedgerLocks {
+    inner: StdMutex::new(HashMap::new()),
+});
+
+/// The write lock for one company's one ledger.
+///
+/// Held across a check-then-append (or a purge) so the two never observe each
+/// other's half-done state. Scoped to `(company, slug)` rather than to the
+/// whole store, so writes to unrelated ledgers — or unrelated companies —
+/// never queue behind each other.
+fn ledger_lock(company: &CompanyId, slug: &str) -> Arc<AsyncMutex<()>> {
+    LEDGER_WRITE_LOCKS.get(company, slug)
+}
 
 /// Everything a ledger operation needs, without a whole [`CompanyRuntime`].
 ///
@@ -322,6 +375,9 @@ pub async fn record(
         ));
     }
 
+    let lock = ledger_lock(&ctx.company, &spec.slug);
+    let _guard = lock.lock().await;
+
     let fields = normalize_fields(fields);
     if let Some(field) = spec.status_field()
         && let Some(Some(status)) = fields.get(&field.name)
@@ -499,6 +555,8 @@ pub async fn retire(ctx: &Ledgers, author: &LedgerAuthor, slug: &str, purge: boo
     }
     ctx.ledgers.delete_spec(&ctx.company, &spec.slug).await?;
     if purge {
+        let lock = ledger_lock(&ctx.company, &spec.slug);
+        let _guard = lock.lock().await;
         ctx.ledgers.purge_ledger(&ctx.company, &spec.slug).await?;
     }
     Ok(())
@@ -527,6 +585,8 @@ pub async fn delete_entry(
             spec.slug, spec.written_by
         )));
     }
+    let lock = ledger_lock(&ctx.company, &spec.slug);
+    let _guard = lock.lock().await;
     let removed = ctx
         .ledgers
         .purge_entry(&ctx.company, &spec.slug, id.trim())
