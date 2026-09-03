@@ -195,7 +195,7 @@ interface Props {
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -1519,20 +1519,25 @@ export function ChatView({
   const threadTurn = threadTurnKey ? openTurns?.[threadTurnKey]?.[0] : undefined;
   const openTurn = (() => {
     if (!activeThreadId) return undefined;
-    const heads = Object.entries(openTurns ?? {})
+    const candidates = Object.entries(openTurns ?? {})
       .filter(
         ([key, turns]) =>
           key !== threadTurnKey &&
           (key === activeThreadId || key.startsWith(`${activeThreadId}#`)) &&
           turns.length > 0,
       )
-      .map(([, turns]) => turns[0]);
+      // Every turn, not each list's head. `mergeOpenTurns` appends rather than
+      // re-sorts, so a reload re-arm racing a detached POST can leave a running
+      // row *behind* a queued one in the same list — and a search over heads
+      // alone would never see it, which is the same "Queued…" over live work
+      // this is here to prevent (Codex review on #2044).
+      .flatMap(([, turns]) => turns);
     // A running turn outranks a queued one. Taking the first match instead
     // would let map order decide the wording, and map order follows `/runs`,
     // which is newest-first — so the ordinary serialized case (an older turn
     // working while a newer one waits on the company lock) rendered "Queued…"
     // over live work (Codex review on #2042).
-    return heads.find((t) => !t.queued) ?? heads[0];
+    return candidates.find((t) => !t.queued) ?? candidates[0];
   })();
   /**
    * The count beside the channel title.
@@ -1741,7 +1746,9 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen);
+        // The desk goes with the state key: the key can be composite and the
+        // shell's settle poll has to ask the host about a real desk.
+        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen, chatId);
         return true;
       }
       const reply = answer;

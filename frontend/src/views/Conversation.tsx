@@ -88,7 +88,7 @@ interface Props {
    * the POST, so the parent keeps the working row up and stops suppressing the
    * live reply frame, which in this mode is the delivery path.
    */
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /**
    * The chat POST **threw** (issue #1000). The third outcome, and not
    * `onSendEnd`: that one promises the parent the reply is already on screen,
@@ -207,7 +207,7 @@ function ChatPane({
   agentNames?: Record<string, string>;
   onSendStart?: (threadId: string) => number | undefined;
   onSendEnd?: (threadId: string, gen?: number) => void;
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   onSendFailed?: (threadId: string, gen?: number) => void;
   /** This thread's turn, when one is accepted but not settled (#983). */
   openTurn?: OpenTurn;

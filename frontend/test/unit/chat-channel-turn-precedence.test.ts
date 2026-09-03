@@ -23,8 +23,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
 
 describe("the channel's working row prefers a running turn", () => {
-  it("selects a non-queued head before falling back to a queued one", () => {
-    expect(chatView).toMatch(/heads\.find\(\(t\) => !t\.queued\) \?\? heads\[0\]/);
+  it("selects a non-queued turn before falling back to a queued one", () => {
+    expect(chatView).toMatch(/candidates\.find\(\(t\) => !t\.queued\) \?\? candidates\[0\]/);
+  });
+
+  it("searches every turn in each list, not just its head", () => {
+    // `mergeOpenTurns` appends rather than re-sorting, so a reload re-arm
+    // racing a detached POST can leave a running row *behind* a queued one in
+    // the same list. A search over `turns[0]` alone would never see it and the
+    // channel would still read "Queued…" over live work (Codex on #2044).
+    expect(chatView).toMatch(/\.flatMap\(\(\[, turns\]\) => turns\)/);
+    expect(chatView).not.toMatch(/\.map\(\(\[, turns\]\) => turns\[0\]\)/);
   });
 
   it("no longer takes whichever entry the map happens to yield first", () => {

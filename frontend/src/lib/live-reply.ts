@@ -246,8 +246,15 @@ export type OpenTurn = {
    * settle poll re-reads a desk's history — must use this, because there is no
    * desk called `engineering#41` and asking for one silently recovers nothing
    * (Codex review on #2042).
+   *
+   * **Required, so the compiler proves every insertion site carries it.** It was
+   * optional for one commit, with the desk recovered from the key by stripping a
+   * trailing `#<digits>`. That parser is lossy in exactly the case it claimed to
+   * handle — a desk genuinely named `c#4` parses to `c` — and a fallback that is
+   * usually right is worse than none here, because the failure is a silent
+   * history read against a desk that does not exist (CodeRabbit on #2044).
    */
-  chatId?: string;
+  chatId: string;
 };
 
 /** The per-thread rows the fold produces — the same shape as {@link OpenTurn}. */
@@ -283,22 +290,6 @@ export function turnStateKey(chatId: string, threadRoot?: number): string {
   return threadRoot === undefined ? chatId : `${chatId}#${threadRoot}`;
 }
 
-/**
- * The desk a state key belongs to — the inverse of {@link turnStateKey}.
- *
- * A row's `chatId` is the authority when it has one, but not every row does:
- * `onSendDetached` mints its entry from the 202 alone, and rows written before
- * the field existed have none either. Since the key is either the desk or the
- * desk plus a numeric root, the desk is recoverable from the key itself, which
- * is what keeps the settle re-read total rather than conditional on every
- * insert site having remembered to carry the field.
- *
- * Anchored on a **numeric** suffix rather than the last `#`, so a desk id that
- * happens to contain one keeps its whole name.
- */
-export function deskOfStateKey(stateKey: string): string {
-  return stateKey.replace(/#\d+$/, "");
-}
 
 /**
  * Folds the open run rows into the per-thread turn lists the working indicator

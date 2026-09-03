@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { deskOfStateKey, hasOtherOpenTurns, turnStateKey, type OpenTurn } from "@/lib/live-reply";
+import { hasOtherOpenTurns, turnStateKey, type OpenTurn } from "@/lib/live-reply";
 
 /**
  * Why a settled turn's cleanup must be addressed by the **state key** and not
@@ -63,10 +63,10 @@ describe("open-turn lookups are addressed by the state key, not the desk", () =>
     // and every existing test and spec passes either way. The threaded case is
     // the only one that can tell them apart.
     const key = turnStateKey("engineering", undefined);
-    expect(key).toBe(deskOfStateKey(key));
+    expect(key).toBe("engineering");
     const open = { [key]: [settled, running] };
     expect(hasOtherOpenTurns(open, key, "t-settled")).toBe(
-      hasOtherOpenTurns(open, deskOfStateKey(key), "t-settled"),
+      hasOtherOpenTurns(open, "engineering", "t-settled"),
     );
   });
 });

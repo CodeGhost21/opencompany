@@ -51,7 +51,7 @@ export interface ConversationRuntimeOptions {
   /** Clears the in-flight mark + live timeline once the POST resolves. */
   onSendEnd?: (threadId: string, gen?: number) => void;
   /** The host answered `202` and the turn continues on the stream (#983). */
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /** The chat POST threw and the turn probably outlived it (#1000). */
   onSendFailed?: (threadId: string, gen?: number) => void;
   /** Whether a turn is open on this thread — a live POST or a detached one. */
