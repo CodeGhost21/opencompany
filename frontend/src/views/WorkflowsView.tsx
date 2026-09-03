@@ -1730,14 +1730,18 @@ export function WorkflowsView({
       setResult(null);
       setSelectedNodeId(null);
       setConflict(null);
-      // B-121: the run went with it, and saying so is the whole point of having
-      // warned. The host stops every run of a deleted workflow; before that it
-      // left them executing with the only Stop button in the product on the page
-      // this delete just unmounted.
+      // B-121: the run(s) went with it, and saying so is the whole point of
+      // having warned. The host stops EVERY run of a deleted workflow still
+      // in flight, not just the one this view happened to be watching — a
+      // manual run overlapping a scheduled one, or several manual triggers,
+      // are all live at once up to the company's concurrency ceiling (Codex
+      // review, PR #2053) — before that they were left executing with the
+      // only Stop button in the product on the page this delete just
+      // unmounted.
       setActiveRunId(null);
       toast.success(
         stoppedRuns > 0
-          ? `Deleted “${removedName}” and stopped the run in flight.`
+          ? `Deleted “${removedName}” and stopped ${stoppedRuns === 1 ? "the run" : `${stoppedRuns} runs`} in flight.`
           : `Deleted “${removedName}”.`,
       );
     } catch (e) {
@@ -2946,10 +2950,19 @@ export function WorkflowsView({
                             view's knowledge, decides that — see the toast below,
                             which reads the sweep's real count rather than this
                             guess), so the "nothing running" branch hedges rather
-                            than promising a fact this view cannot actually see. */}
+                            than promising a fact this view cannot actually see.
+
+                            Codex review (PR #2053), second round: manual and
+                            scheduled runs of the SAME workflow can overlap —
+                            the host admits several at once up to the company's
+                            concurrency ceiling — and the sweep stops every one
+                            of them, not just the one this view happens to be
+                            watching. "that run" (singular) undersold it; say
+                            "every run … still going" so the warning is accurate
+                            whether one is in flight or several. */}
                         <AlertDialogDescription data-testid="workflow-delete-consequence">
                           {watchingRun
-                            ? "A run of this workflow is going right now. Deleting it stops that run where it is — the steps it finished stay in the run history — and stops it running on its schedule. This can't be undone."
+                            ? "A run of this workflow is going right now. Deleting it stops every run of it still going — the steps each one finished stay in the run history — and stops it running on its schedule. This can't be undone."
                             : "This removes the workflow, stops it running on its schedule, and stops any run of it still going that hasn't shown up here yet. Past runs stay in the run history. This can't be undone."}
                         </AlertDialogDescription>
                       </AlertDialogHeader>

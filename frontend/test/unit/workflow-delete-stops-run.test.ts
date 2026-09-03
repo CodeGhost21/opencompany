@@ -167,7 +167,10 @@ describe("deleting a workflow with a run in flight", () => {
     });
     const consequence = document.querySelector('[data-testid="workflow-delete-consequence"]');
     expect(consequence?.textContent).toContain("A run of this workflow is going right now");
-    expect(consequence?.textContent).toContain("stops that run where it is");
+    // Codex review (PR #2053): "every run … still going", not "that run" —
+    // several manual/scheduled runs of the same workflow can overlap, and
+    // the sweep stops all of them, not just the one this view is watching.
+    expect(consequence?.textContent).toContain("stops every run of it still going");
 
     await act(async () => {
       button("Delete workflow", document.body).click();
@@ -182,6 +185,26 @@ describe("deleting a workflow with a run in flight", () => {
     // workflow it belonged to — asserted by the DOM, since that state is not
     // otherwise observable from outside the view.
     expect(container.querySelector('[data-testid="workflow-cancel-run"]')).toBeNull();
+  });
+
+  it("pluralizes the toast when the sweep stopped more than one overlapping run", async () => {
+    // Codex review (PR #2053): manual and scheduled runs of the same
+    // workflow can overlap up to the company's concurrency ceiling, and the
+    // sweep stops every one it finds — the toast must say how many, not
+    // always "the run" as if exactly one were ever possible.
+    const { client } = fakeClient(3);
+    await mount(client);
+
+    await act(async () => {
+      openDeleteConfirm();
+    });
+    await act(async () => {
+      button("Delete workflow", document.body).click();
+    });
+
+    expect(toasts.success).toHaveBeenCalledWith(
+      expect.stringContaining("and stopped 3 runs in flight."),
+    );
   });
 });
 
