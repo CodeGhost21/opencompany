@@ -50,8 +50,9 @@ question, and the recommendation follows from them.
    reachable.** `(namespace, key)` replacement cannot be expressed against an
    append-only log with immutable keys. It can be *reconstructed*: append every
    write under a fresh idempotency key carrying the logical key, and fold to
-   newest-per-key on read. That driver exists and passes. Its cost — its own
-   section below — is what should decide this, not impossibility.
+   newest-per-key on read. That driver exists and passes. Its cost — set out in
+   [the driver notes](memory-engine-cortex-driver.md) — is what should decide
+   this, not impossibility.
 
 ## The isolation choice collapses
 
@@ -159,98 +160,21 @@ claim against a structure. Tracked as
 probe of the mandatory families is proposed in
 [#1973](https://github.com/tinyhumansai/opencompany/pull/1973).
 
-## The upsert gap, and what it costs to work around
+## The upsert gap, and the driver mechanics
 
-This is the finding that decides the phasing, and it is not about capability
-breadth — it is that the two data models disagree.
+The contract's `(namespace, key)` upsert has no direct mapping onto an
+append-only log, and reconstructing it is most of what a driver does. That
+argument, the measured table of failed direct mappings, what the workaround costs
+at every call, and the engine behaviours that only appear against a running
+instance are in
+[`memory-engine-cortex-driver.md`](memory-engine-cortex-driver.md).
 
-`Memory::store` is an **idempotent upsert keyed by `(namespace, key)`**: storing
-twice at one key replaces the previous content "rather than erroring or creating
-a duplicate". The conformance suite asserts it directly
-(`assert_upsert_replaces_rather_than_duplicates`) — write `first`, write
-`second`, expect one row holding `second`. `memory-engine.md` makes that suite
-the thing that retired the unproven-remote flag, so passing it is not optional.
-
-CortexDB is an append-only event log. Measured against the deployment:
-
-| Attempt | Result |
-|---|---|
-| Same key, different content | `409 IDEMPOTENCY_CONFLICT` — "idempotency key reused with a different body" |
-| Same key, identical content | `202`, `replayed_from_idempotency: true` |
-| Update route | none — `/v1/events` and `/v1/events/{id}` are GET-only, `/v1/experience` POST-only |
-| Forget, then rewrite the key | forget succeeds, rewrite still `409` — **and the scope is left holding nothing** |
-| Carry our own key in the envelope | `422` — closed schema, and `/v1/events` has no metadata filter regardless |
-
-The idempotency ledger is independent of the event store and survives
-`/v1/forget`, so delete-then-rewrite loses the original *and* refuses the
-replacement. It is strictly worse than not attempting it.
-
-**The engine can already do this; the HTTP surface cannot express it.** The
-embedded adapter that #1568 removed (`tinymemory-tinycortex`) forwards `store`
-straight through to the engine's own implementation, and that crate runs the
-*full* conformance suite over `TinycortexProvider`
-(`tests/full_provider_conformance.rs`) — including
-`assert_upsert_replaces_rather_than_duplicates`. The engine core therefore
-passes the exact assertion the hosted API fails.
-
-That makes the upstream ask narrow and concrete: expose over HTTP what the
-engine already implements and is already conformance-tested against, rather than
-add a capability. It also suggests the gap is an API-surface oversight rather
-than a deliberate design position.
-
-Two emulations exist, and neither is comfortable. A driver can keep an
-**external index** of `(namespace, key) → event_id`, writing with fresh
-idempotency keys and forgetting the prior event on overwrite — which makes the
-driver stateful, carrying a database of its own. Or it can put the key in an
-**in-content envelope** and resolve it with a client-side scan; the host already
-wraps records in a JSON envelope inside `content` (`Bound::put` calls
-`encode(record)`), so that is the shape it uses anyway — but a scan-per-read is
-slow and still non-atomic.
-
-Both rest on a `forget` that reported `deleted.events: 2` for a selector naming
-one event id. That is a lot of correctness risk to absorb for something an
-upstream `on_conflict: replace` would remove entirely.
-
-The reproduction is recorded at
-[cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3)
-— closed there, like #1 and #2, because that tracker is scoped to packaging, and
-being raised with CortexDB directly instead.
-
-**This was written as blocking Phase 1. It is not.** The driver appends every
-write under a fresh idempotency key — which the engine always accepts — carrying
-the logical key inside the payload, and folds to newest-per-key on read.
-Replacement is reconstructed on the read side rather than performed on the write
-side, and the conformance suite passes that way against a live v0.9.8.
-
-The price is paid on every call, and it is the real input to the decision:
-
-- **keyed reads are a scan.** `/v1/events` has no metadata filter, so `get` and
-  `list` fetch the scope and fold it — a walk growing with everything the
-  namespace has held.
-- **writes cost seconds, not milliseconds.** `/v1/experience` answers
-  `202 captured` and indexes after, so the driver waits for its own record to be
-  readable: 1–4s to the listing, a second more to ranked recall.
-- **superseded values stay in the ranking corpus.** The fold removes them from
-  keyed reads, not from recall — the one path Cortex was wanted for.
-
-All three disappear the day the engine grows `on_conflict: "replace"`. None is a
-correctness defect in the driver; each is the cost of emulating replacement on an
-engine that does not offer it.
-
-## What building it taught us
-
-Five engine behaviours surfaced only against a running instance, and each one
-produced a driver that passed every offline test and was wrong in production —
-the conformance double and the driver were written from the same documentation,
-so they agreed with each other rather than with the service. The catalogue lives
-in `cortex.rs`'s module docs, beside the code that has to cope with each one,
-which is where it stays current.
-
-The generalisable part belongs here: **a double written from a vendor's
-documentation cannot tell you the vendor's documentation is wrong.** The lane
-that found these runs the same conformance suite against a live engine
-(`tests/live_remote_engines.rs`), and it is worth pointing at every hosted engine
-we bind, not just this one — which is the argument #1968 was opened to settle.
+Two conclusions from it are load-bearing here. **A conformant driver is
+reachable** — appending under a fresh idempotency key and folding to
+newest-per-key on read passes the suite against a live engine. And **an upsert
+alone would not make Cortex cheap**: keyed reads would still scan and writes
+would still wait, because those need a metadata filter and a readiness signal
+that are separate asks.
 
 ## Belief revision is not reachable
 
@@ -435,18 +359,30 @@ Acceptance, against the list this record set before the work started:
   through `provides()`, which is a fixed-body structural check — the lever is a
   probe or a conformance case (#1968, #1973);
 - **key-exact deletion**, verified — and the `deleted.events: 2` alarm above was
-  ours, not the engine's. That request named `selector.event_ids`, which is not a
-  schema field, alongside `confirm_all: true`; an unrecognised selector field
-  deserialises as an *empty* selector, meaning the whole scope, which
-  `confirm_all` then authorises. The real field is `selector.memory_ids`, and
-  deletion with it is exact (`requested: 1, matched: 1, deleted: 1`). Two
-  interlocks refuse the mistake on its own, which is why it was never destructive
-  in practice. The driver names `memory_ids` and never sends `confirm_all`.
+  ours. Being precise about what was blocked and by whom, since only one of these
+  is a guardrail:
 
-One operational note for whoever starts Phase 1: `cortex` is clean as a *driver
-id* in the registry, but `OPENCOMPANY_MEMORY=cortex` remains a hard boot refusal
-as a **mode** value, left over from #1568. The driver is selected with
-`OPENCOMPANY_MEMORY=remote` plus `OPENCOMPANY_MEMORY_DRIVER=cortex`.
+  | Request | Enforced by | Result |
+  |---|---|---|
+  | `event_ids` (not a schema field) **+ `confirm_all: true`** | nothing | **the scope was wiped** — observed, not simulated |
+  | `event_ids` alone | engine | `422 EMPTY_SELECTOR_WITHOUT_CONFIRMATION` |
+  | `memory_ids` + `confirm_all: true` | engine | `400 AMBIGUOUS_SELECTOR_CONFIRM_ALL` |
+  | `memory_ids` alone | — | exact: `requested: 1, matched: 1, deleted: 1` |
+
+  An unrecognised selector field deserialises as an *empty* selector, meaning the
+  whole scope. The engine refuses that on its own, but it cannot refuse it when
+  `confirm_all` is also present, because that combination is a valid wipe request.
+  So the only thing standing between a typo and a destroyed tenant is driver-side:
+  it names `memory_ids` and never sends `confirm_all` anywhere.
+
+Two operational notes for whoever registers it. `cortex` is clean as a *driver
+id*, but `OPENCOMPANY_MEMORY=cortex` remains a hard boot refusal as a **mode**
+value, left over from #1568. And the selection recipe below does **not** work
+today: `SUPPORTED_REMOTE_DRIVERS` holds only `supermemory`, `mem0` and `cognee`,
+and `remote_provider()` rejects every other id, so
+`OPENCOMPANY_MEMORY=remote` plus `OPENCOMPANY_MEMORY_DRIVER=cortex` is a boot
+refusal until registration lands. It is the target configuration, not a usable
+one.
 
 **Phase 2 — provisioning.** Per-tenant instance lifecycle through
 opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existing
