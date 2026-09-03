@@ -23,6 +23,7 @@ import {
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
+import { AppUpdatePrompt } from "@/components/app-update-prompt";
 import { ConsoleChrome } from "@/components/host-switcher";
 import { ManageHostsPage } from "@/components/manage-hosts";
 import { RouteLoading } from "@/components/route-loading";
@@ -696,6 +697,14 @@ function Console() {
           host on screen selects another one, which remounts the console. A page
           mounted within would unmount itself mid-edit. */}
       <ManageHostsPage />
+
+      {/* Mounted for the whole session rather than inside the console: the
+          desktop shell is one application however many hosts it is holding,
+          and an operator who has not picked one yet — or whose only local host
+          will not start — is exactly the person a fixed build should be able to
+          reach. Renders nothing in a browser, and nothing on the desktop until
+          an update has been downloaded and is waiting on a restart. */}
+      <AppUpdatePrompt />
     </HostsProvider>
   );
 }

@@ -142,6 +142,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tempfile = "3"
+tauri-plugin-updater = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
