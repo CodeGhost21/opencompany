@@ -188,6 +188,74 @@ async fn a_ledger_round_trips_under_both_scope_forms() {
     assert_eq!(read["entries"][0]["id"], "vendor-slip");
 }
 
+/// `read_ledger` used to build `ledger.open`/`ledger.closed` from a second,
+/// independent fold (inside `summary`) after already folding once for the
+/// rows. A write landing between the two could flip a row's status after the
+/// first fold but before the second, so the count disagreed with the rows it
+/// was displayed beside — an open row on screen while the badge already
+/// counted it closed, until the next refresh.
+///
+/// Racing a read against a status flip, every response's `open`/`closed`
+/// must equal what the rows in that same response actually say — not merely
+/// most of the time. This does not assert the fix's code shape; it holds the
+/// invariant a two-fold response can violate under a real race.
+#[tokio::test]
+async fn the_read_count_never_disagrees_with_its_own_rows_under_a_racing_write() {
+    let (state, _home) = state().await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/hazards/entries",
+        Some(json!({ "id": "r1", "fields": { "risk": "a" }, "status": "open" })),
+    )
+    .await;
+
+    for round in 0..40 {
+        // Alternate direction so the race is attempted flipping each way.
+        let write_body = if round % 2 == 0 {
+            json!({ "id": "r1", "status": "closed", "reason": "handled" })
+        } else {
+            json!({ "id": "r1", "status": "open" })
+        };
+
+        let read_state = state.clone();
+        let reader =
+            tokio::spawn(
+                async move { send(&read_state, "GET", "/api/v1/company/ledgers/hazards", None).await },
+            );
+
+        let write_state = state.clone();
+        let writer = tokio::spawn(async move {
+            send(
+                &write_state,
+                "POST",
+                "/api/v1/company/ledgers/hazards/entries",
+                Some(write_body),
+            )
+            .await
+        });
+
+        let (read_result, write_result) = tokio::join!(reader, writer);
+        let (read_status, read_body) = read_result.unwrap();
+        assert_eq!(read_status, StatusCode::OK, "round {round}: {read_body}");
+        let (write_status, write_body) = write_result.unwrap();
+        assert_eq!(write_status, StatusCode::OK, "round {round}: {write_body}");
+
+        let rows = read_body["entries"].as_array().expect("entries array");
+        let open_rows = rows.iter().filter(|row| row["closed"] == false).count();
+        let closed_rows = rows.iter().filter(|row| row["closed"] == true).count();
+        assert_eq!(
+            read_body["ledger"]["open"], open_rows,
+            "round {round}: open count disagrees with the rows beside it: {read_body}"
+        );
+        assert_eq!(
+            read_body["ledger"]["closed"], closed_rows,
+            "round {round}: closed count disagrees with the rows beside it: {read_body}"
+        );
+    }
+}
+
 /// **The wire regression, pinned.** `StatusSpec::needs_reason` used to
 /// serialize snake_case like every other declaration field, but the console
 /// reads `LedgerStatus.needsReason` — camelCase, matching `LedgerSummary`'s
