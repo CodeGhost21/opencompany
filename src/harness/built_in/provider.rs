@@ -904,6 +904,34 @@ fn refuse_approval_siblings(tool_calls: &[ToolCall]) -> TaResult<()> {
     Ok(())
 }
 
+/// Whether the raw payload asks for an action at all, independent of whether
+/// any of it parsed.
+///
+/// Checked on the *raw* payload and independent of `finish_reason`, so a
+/// genuinely-requested-but-unparseable call can never be promoted as ordinary
+/// prose (Codex review on #1779, comment 3862781739).
+///
+/// Shared with [`probe`] rather than re-derived there: the probe's
+/// reasoning-only tolerance must not swallow a malformed-tool-call failure, and
+/// answering "did this payload request an action?" two different ways is how
+/// the probe drifted from the turn path before (Codex review on #2068).
+fn raw_tool_call_requested(payload: &serde_json::Value) -> bool {
+    payload
+        .pointer("/choices/0/message/tool_calls")
+        .is_some_and(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(arr) => !arr.is_empty(),
+            // A present-but-non-array value (e.g. an object) is not a shape
+            // `parse_tool_calls` or the legacy `function_call` check can
+            // recognize, but it is not an absence either — fail closed
+            // rather than let it read as "nothing requested".
+            _ => true,
+        })
+        || payload
+            .pointer("/choices/0/message/function_call")
+            .is_some_and(|v| !v.is_null())
+}
+
 /// Parse an OpenAI-compatible chat-completion payload into a tinyagents
 /// [`ModelResponse`], preserving token usage, native tool calls, AND the managed
 /// billing envelope.
@@ -964,21 +992,7 @@ fn model_response_from_payload_offering(
     // the *raw* payload for either call shape, independent of finish_reason,
     // so a genuinely-requested-but-unparseable call can never be promoted
     // (Codex review on #1779, comment 3862781739).
-    let raw_tool_call_requested = payload
-        .pointer("/choices/0/message/tool_calls")
-        .is_some_and(|v| match v {
-            serde_json::Value::Null => false,
-            serde_json::Value::Array(arr) => !arr.is_empty(),
-            // A present-but-non-array value (e.g. an object) is not a shape
-            // `parse_tool_calls` or the legacy `function_call` check can
-            // recognize, but it is not an absence either — fail closed
-            // rather than let it read as "nothing requested" and fall
-            // through to the reasoning fallback below.
-            _ => true,
-        })
-        || payload
-            .pointer("/choices/0/message/function_call")
-            .is_some_and(|v| !v.is_null());
+    let raw_tool_call_requested = raw_tool_call_requested(&payload);
     // How many entries the *raw* array actually carried, when it is an
     // array at all (legacy `function_call` and non-array shapes have no
     // raw count to compare against, and are already fully covered by the
@@ -1251,6 +1265,24 @@ fn model_response_from_payload_offering(
 /// (Codex review on #1779). Nothing here is ever surfaced — the reasoning text
 /// is not read, only its presence.
 fn probe_reachable_despite_empty_turn(payload: &serde_json::Value) -> bool {
+    // Only the *empty-turn* refusal may be tolerated. A payload that asked for
+    // an action and got it wrong — a malformed entry, a missing name, a
+    // `finish_reason` declaring a call that never arrived — fails the parser
+    // for a different reason, and returning `Ok(())` on that would sail past
+    // the unoffered-tool-call guard below and pass an endpoint that cannot
+    // complete a bare `ping` (Codex review on #2068). This probe offers no
+    // tools, so a payload declaring an action is already wrong regardless of
+    // what else it carries.
+    if raw_tool_call_requested(payload)
+        || matches!(
+            payload
+                .pointer("/choices/0/finish_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("tool_calls") | Some("function_call")
+        )
+    {
+        return false;
+    }
     !extract_content_text(payload.pointer("/choices/0/message/reasoning")).is_empty()
         || !extract_content_text(payload.pointer("/choices/0/message/reasoning_content")).is_empty()
 }
@@ -4262,6 +4294,33 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawns a stub whose whole `choices[0]` object is the given raw JSON —
+    /// `spawn_stub_message` below pins `finish_reason: "stop"`, so this is the
+    /// one that can express a payload *declaring* an action it never delivered.
+    async fn spawn_stub_choice(choice: serde_json::Value) -> String {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let choice = choice.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [choice],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
     /// Spawns an in-process OpenAI-compatible stub whose full `message` object
     /// is the given raw JSON value — used to exercise shapes `spawn_stub_content`
     /// cannot, such as a reasoning-only turn (`content: null` with the visible
@@ -4709,6 +4768,64 @@ mod tests {
     /// setup wizard refusing to move past it (Codex review on #2068). The fix
     /// is the probe-specific tolerance that doc pointed at, not promotion in
     /// the shared parser.
+    /// The reasoning tolerance covers the empty turn and nothing else.
+    ///
+    /// A payload that asked for an action and got it wrong fails the parser for
+    /// a *different* reason than "carried nothing", and tolerating that would
+    /// return `Ok(())` before the unoffered-tool-call guard below could run —
+    /// passing an endpoint that cannot complete a bare `ping`. This probe
+    /// advertises no tools at all, so a declared action is already wrong no
+    /// matter what else rides alongside it (Codex review on #2068).
+    ///
+    /// Reasoning is present in both payloads here, so the tolerance is what is
+    /// under test rather than the absence of its trigger.
+    #[tokio::test]
+    async fn the_reasoning_tolerance_does_not_excuse_a_broken_tool_call() {
+        for message in [
+            // Requested an action, and the entry is unparseable.
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning": "42 is the answer.",
+                "tool_calls": [{ "no_name_here": true }]
+            }),
+            // Declared an action that never arrived.
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning": "42 is the answer."
+            }),
+        ] {
+            let declares_only = message.get("tool_calls").is_none();
+            let url = if declares_only {
+                spawn_stub_choice(serde_json::json!({
+                    "message": message,
+                    "finish_reason": "tool_calls"
+                }))
+                .await
+            } else {
+                spawn_stub_message(message).await
+            };
+
+            let company = CompanyId::new("acme");
+            let secrets = MemSecrets::default();
+            let mut manifest = manifest_inference("openai_compatible");
+            manifest.base_url = Some(url);
+            let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let err = probe(&decl, None)
+                .await
+                .expect_err("a broken tool call must fail the probe even with reasoning present");
+            assert!(
+                !err.to_string().contains("42"),
+                "reasoning text must not leak into the probe error, got: {err}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn probe_accepts_a_reasoning_only_reply_as_proof_the_endpoint_answers() {
         let url = spawn_stub_message(serde_json::json!({
