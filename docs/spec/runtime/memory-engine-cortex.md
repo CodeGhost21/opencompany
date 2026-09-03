@@ -25,17 +25,19 @@ question, and the recommendation follows from them.
    **closed-source**, distributed only as prebuilt artifacts (`cortexdbai/cortexdb-releases`,
    Docker Hub `cortexdb/cortexdb`). Whatever we build treats it as an opaque
    upstream binary we cannot patch.
-2. **The server does not issue per-tenant credentials, and the issuer it expects
-   is not obtainable.** Under `CORTEX_DEPLOYMENT_PRESET=cloud_shared_saas` the
-   PASETO minter answers `NOT_CONFIGURED`, its keypair generator is absent, and
-   `PRODUCTION_DEPLOYMENT.md` calls `CORTEX_API_KEY` the bootstrap key for the
-   *default* tenant. By design, not omission: the vendor's [deployment
-   profiles](https://cortexdb.ai/docs/enterprise/deployment-profiles) say every
-   production preset "expect[s] token issuance from an external OIDC provider or
-   the separate `cortex-auth-ref` issuer" — but that issuer is absent from the
-   v0.9.8 assets with no public repository, and no contract is given for the OIDC
-   alternative. Not impossible; unspecified and unobtainable, which for planning
-   is the same place.
+2. **The one token minter a self-hosted operator can reach does not confine a
+   token to its scope.** `POST /v1/auth/tokens` answers `NOT_CONFIGURED` by
+   default, but `CORTEX_V1_MINTER_ENABLE=1` turns it on and it mints correctly
+   — `subject`, `scope`, TTL, capability narrowing, and working revocation. The
+   scope does not hold. A token minted *for* scope A, pointed at scope B: `POST
+   /v1/recall` is refused `403 POLICY_DENIED`, but `GET /v1/events?scope=B`
+   returns B's records and `POST /v1/experience` into B is accepted. Reproduced
+   three times, including with narrowed `capabilities`. The vendor documents
+   this minter as dev-only (a minted token reports `tenant: dev`) and says
+   production presets expect an external OIDC provider or the separate
+   `cortex-auth-ref` issuer — which is absent from the v0.9.8 assets, has no
+   public repository, and no published contract. So the reachable minter does
+   not isolate, and the isolating one is not reachable.
 3. **The derived fact and belief tier does not work.** Facts, Beliefs and
    Understanding stay empty with the extraction and enrichment routers enabled
    and reporting healthy; only Events and Episodes hold data. These are Cortex
@@ -61,7 +63,7 @@ removes the middle option:
 |---|---|---|
 | One shared instance, one bootstrap credential | Namespace-only — the **weak** tier | Yes |
 | **One instance per tenant**, own key and own data dir | Credential *and* storage isolation | **Yes** |
-| Shared instance, real per-tenant credentials | Strong | **Not today** — needs an issuer we cannot obtain (finding 2) |
+| Shared instance, real per-tenant credentials | Strong | **No** — the reachable minter does not confine a token to its scope (finding 2) |
 
 `memory-engine.md` is unambiguous about why the weak tier is not acceptable as a
 default: with a hosted engine "the namespace string is the only thing separating
@@ -237,26 +239,18 @@ engine that does not offer it.
 
 ## What building it taught us
 
-Five engine behaviours surfaced only against a running instance, each producing a
-driver that passed every offline test and was wrong in production — the double
-and the driver were written from the same documentation, so they agreed with each
-other rather than with the service. The three that bear on a decision are below;
-the full list, including the duplicated listing and the silently-ignored query
-parameters, is in `cortex.rs`'s module docs, which is where it stays current.
+Five engine behaviours surfaced only against a running instance, and each one
+produced a driver that passed every offline test and was wrong in production —
+the conformance double and the driver were written from the same documentation,
+so they agreed with each other rather than with the service. The catalogue lives
+in `cortex.rs`'s module docs, beside the code that has to cope with each one,
+which is where it stays current.
 
-1. **The two read paths return different bytes for the same event.**
-   `/v1/events` returns content as stored; `/v1/recall` renders it with the
-   speaker prefixed (`[user] {...}`). A driver storing structured content lists
-   perfectly and **searches to nothing** — hits fail to parse and are dropped,
-   which looks exactly like an empty index.
-2. **No readiness signal exists.** `/v1/experience/status` never advances past
-   `captured`, and the `lifecycle_stream` URL the write returns connects and
-   emits nothing. Read-after-write means polling.
-3. **A namespace segment may contain `:` and a scope id may not.** The contract
-   addresses a *section* with it (`conversation:thread-8f21`); Cortex's grammar
-   separates `type:id`. Refusing makes sections unstorable; collapsing it
-   re-addresses the namespace out of its section, so `namespaces()` reports a
-   scope nobody enumerating it can find. The driver encodes it reversibly.
+The generalisable part belongs here: **a double written from a vendor's
+documentation cannot tell you the vendor's documentation is wrong.** The lane
+that found these runs the same conformance suite against a live engine
+(`tests/live_remote_engines.rs`), and it is worth pointing at every hosted engine
+we bind, not just this one — which is the argument #1968 was opened to settle.
 
 ## Belief revision is not reachable
 
@@ -472,10 +466,11 @@ not.
 
 - Does CortexDB agree with our reading of clause 2? Worth confirming in writing
   when we contact them, though the text is not ambiguous.
-- What does a self-hosted deployment use for per-tenant token issuance — is
-  `cortex-auth-ref` published, or is an external OIDC provider expected, against
-  what contract? This is what would unblock the strong isolation tier, though the
-  derived-layer finding is the one that decides adoption.
+- Is the v1 minter's `scope` advisory rather than enforcing, or is the gap in
+  finding 2 a defect? And what should a self-hosted multi-tenant deployment use
+  instead — is `cortex-auth-ref` published, or is an external OIDC provider
+  expected, against what contract? This decides whether the strong isolation tier
+  is reachable at all, though the derived-layer finding still decides adoption.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
