@@ -5036,16 +5036,22 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Not 200, and not the 404/409 a missing runner gives — the refusal
-            // is the lifecycle's, so a paused company reads the same here as it
-            // does in chat.
-            assert_ne!(
+            // Pinned to the exact status AND code, not merely "not 200"
+            // (CodeRabbit on this PR): a runner-gap 404 or an unrelated 409
+            // would satisfy `assert_ne!(.., OK)` while proving nothing about the
+            // lifecycle gate this test exists for — and the gate sits above the
+            // runner lookup precisely so the two cannot be confused.
+            assert_eq!(
                 response.status(),
-                StatusCode::OK,
-                "a paused company must not start a run"
+                StatusCode::CONFLICT,
+                "a paused company must refuse the run as a lifecycle conflict"
             );
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["code"], "lifecycle_conflict",
+                "the console triages on the structured code, never the prose: {body}"
+            );
             let rendered = body.to_string();
             assert!(
                 rendered.contains("paused"),
