@@ -2147,24 +2147,6 @@ enum LiveStream<'a> {
     },
 }
 
-/// The stream a chat-raised background turn publishes to, from the chat id its
-/// [`ChatTarget`](crate::runtime::delegation::ChatTarget) carries.
-///
-/// Split out of [`HarnessPool::run_steered_background`] so the routing rule can
-/// be asserted without standing up a turn. The empty-string case is the one
-/// worth pinning: `TaskRecord::origin_chat_id` is a `String` upstream, so a card
-/// that no conversation raised arrives here as `Some("")`, not `None`. Streaming
-/// to `""` would be exactly the unkeyed publish #125 rejected — frames with no
-/// thread to attribute to — so absent and empty must land on the same answer.
-fn live_stream_for_chat(chat_id: Option<&str>) -> LiveStream<'_> {
-    match chat_id.filter(|id| !id.is_empty()) {
-        Some(chat_id) => LiveStream::On {
-            chat_id: Some(chat_id),
-        },
-        None => LiveStream::Off,
-    }
-}
-
 /// Per-company serialization of the roster's policy-axis decision through its
 /// publish ([`HarnessPool::ensure_impl`]), mirroring
 /// [`company_write_lock`](crate::ports::store::company_write_lock).
@@ -3465,46 +3447,13 @@ impl HarnessPool {
         chat: crate::runtime::delegation::ChatTarget<'_>,
         run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
-        // Stream when the turn has a conversation to stream *to*, and only then.
-        //
-        // This was a flat `LiveStream::Off`, on `run_background`'s reasoning
-        // that "a dispatched card's own turn answers no conversation... nothing
-        // binds to a thread". That is true of a board-raised card, a cron tick
-        // and a workflow node. It is not true here: this entry point already
-        // takes a `ChatTarget`, and a card delegated out of chat carries the
-        // conversation it came from (`TaskRecord::origin_chat_id`). The turn
-        // therefore had a key the whole time and published nothing with it, so
-        // an operator watching the thread they delegated from saw a spinner for
-        // minutes while the teammate worked.
-        //
-        // #125's objection is answered by the key, not by silence — the same
-        // way `LiveStream::Workflow` answers it. Its doc says routing by
-        // run + node "is what makes a node's tool calls appear live without
-        // misattributing to whatever thread most recently sent"; a `chat_id` is
-        // that same guarantee for a chat turn, and the console keys its live
-        // timeline on it precisely "so concurrent turns on different threads
-        // never cross-attribute their frames" (`use-events.ts`). With no
-        // `chat_id` there is nothing to key on, so this still falls back to
-        // `Off` and the misattribution guard is unchanged.
-        //
-        // Deliberately NOT a reversal of #1890 I. That issue split identity
-        // (`ChatTarget`) from stream (`LiveStream`) so a turn *could* have a
-        // conversation and stream nothing — an approval's re-issued call still
-        // does, because it passes its `ChatTarget` through `run_inner` on a
-        // path that never reaches here. The split stays; this only stops one
-        // caller from discarding a key it was already holding.
-        //
-        // Empty is absent: `origin_chat_id` is a `String` upstream, so a card
-        // with no conversation arrives as `Some("")` rather than `None`, and
-        // streaming to `""` would be the unkeyed publish this guards against.
-        let live = live_stream_for_chat(chat.chat_id);
         self.run_inner(
             company,
             agent_id,
             message,
             deps,
             Some(control),
-            live,
+            LiveStream::Off,
             chat,
             run_sink,
         )
@@ -12071,36 +12020,6 @@ budget_usd_daily = 0.0
             // it, both arrived at the binding as "no stream, therefore no
             // conversation".
             assert_ne!(reissued, card);
-        }
-
-        /// The routing rule behind a delegated card's live frames.
-        ///
-        /// `run_steered_background` used to pass a flat `LiveStream::Off`, so an
-        /// operator who delegated out of a thread watched a spinner for minutes
-        /// while the teammate worked — the turn was holding the very key it
-        /// needed (`TaskRecord::origin_chat_id`) and publishing nothing with it.
-        /// Streaming is now derived from that key, and all three inputs matter:
-        ///
-        ///   * a real chat id streams, keyed to that thread;
-        ///   * `None` — a board-raised card, a cron tick — stays silent, which is
-        ///     the #125 guarantee this must not weaken;
-        ///   * `Some("")` must be read as absent, not as a thread named `""`.
-        ///     `origin_chat_id` is a `String`, so "no conversation raised this"
-        ///     reaches here as the empty string. Dropping the filter would
-        ///     publish frames keyed to nothing at all — the misattribution #125
-        ///     rejected, reintroduced through the back door.
-        #[test]
-        fn a_delegated_turn_streams_only_when_it_has_a_thread_to_stream_to() {
-            use super::super::{LiveStream, live_stream_for_chat};
-
-            assert!(matches!(
-                live_stream_for_chat(Some("growth")),
-                LiveStream::On {
-                    chat_id: Some("growth")
-                }
-            ));
-            assert!(matches!(live_stream_for_chat(None), LiveStream::Off));
-            assert!(matches!(live_stream_for_chat(Some("")), LiveStream::Off));
         }
 
         /// A codex review on #1896 read `run_with_steer`'s `if let Some(incoming)
