@@ -2586,11 +2586,22 @@ async fn async_main() -> Result<()> {
                 // An error, not a warning. "I could not send anything" and "I
                 // sent something" must not both exit zero, or a CI step that
                 // runs this proves nothing.
+                //
+                // The reason is quoted rather than a fix prescribed, because
+                // the fix differs per reason and the wrong one is worse than
+                // none: "set OPENCOMPANY_SENTRY_DSN" is actively misleading to
+                // the operator who already set it and is running a build
+                // without the feature.
                 return Err(opencompany::error::OpenCompanyError::Config(format!(
-                    "crash reporting is not active in this process, so there is nothing to test. \
-                     Set {} and try again ({}).",
-                    opencompany::observability::config::DSN_ENV,
-                    crash_reporting.describe()
+                    "crash reporting is not active in this process, so there is nothing to \
+                     test — {}. See docs/spec/runtime/crash-reporting.md.",
+                    match &crash_reporting {
+                        opencompany::observability::Decision::Silent(reason) => reason.as_str(),
+                        // Unreachable: a `Report` decision installs a client,
+                        // and `capture_test_event` only declines without one.
+                        opencompany::observability::Decision::Report { .. } =>
+                            "no client was installed",
+                    }
                 )));
             };
             // A flush that times out means the round trip is unconfirmed.
