@@ -11537,6 +11537,124 @@ mod tests {
                 "a console Deny abandons the work rather than re-dispatching it"
             );
         }
+
+        /// **Issue #2028 (finding 2).** The resume's board edit is a
+        /// read-modify-write — list the card, check it is still paused, write it
+        /// back — so it must serialize against every other board writer. Same
+        /// shape as `review_card_serializes_against_the_task_writes_lock`: hold
+        /// `task_writes` from the test and the resume must not move the card;
+        /// release it and the resume must complete.
+        #[tokio::test]
+        async fn a_resume_waits_for_the_board_write_lock() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            let guard = runtime.task_writes.lock().await;
+
+            let rt = Arc::clone(&runtime);
+            let mut task = tokio::spawn(async move {
+                rt.apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "go ahead", None)
+                    .await
+            });
+
+            let raced_ahead =
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+                    .await
+                    .is_ok();
+            assert!(
+                !raced_ahead,
+                "a resume moved the card while task_writes was held elsewhere — its \
+                 read-modify-write is not serializing against concurrent board writers"
+            );
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_PAUSED,
+                "the card must not move while another writer holds the lock"
+            );
+
+            drop(guard);
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .expect("the resume never continued after task_writes was released")
+                .expect("the resume task panicked")
+                .expect("the resume completes once the lock is free");
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_IN_PROGRESS,
+                "and it re-dispatches once it has the lock"
+            );
+        }
+
+        /// The operator-visible half of the same finding: a resume parked on
+        /// `task_writes` must re-read the board when it resumes, not act on the
+        /// snapshot it took before it blocked. An operator who drags the card
+        /// out of `paused` in that window has decided where it goes, and a retry
+        /// that yanks it back to In Progress overrides a person's own edit.
+        #[tokio::test]
+        async fn a_resume_leaves_a_card_an_operator_moved_while_it_waited() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            let guard = runtime.task_writes.lock().await;
+
+            let rt = Arc::clone(&runtime);
+            let mut task = tokio::spawn(async move {
+                rt.apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "go ahead", None)
+                    .await
+            });
+
+            // The premise this test rests on: the resume really is still parked
+            // on the lock when the operator's edit lands. Without that it would
+            // pass trivially — the resume would have finished before the move,
+            // and the final column would be the operator's either way.
+            let raced_ahead =
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+                    .await
+                    .is_ok();
+            assert!(
+                !raced_ahead,
+                "the resume finished before the operator's edit, so this test would prove \
+                 nothing about what it does with a card that moved under it"
+            );
+
+            // The operator moves the card themselves while the resume is parked
+            // on the lock — the write the resume must notice.
+            let mut moved = stored(&runtime, "t-1").await;
+            moved.column = COLUMN_TODO.to_string();
+            seed(&runtime, &moved).await;
+
+            drop(guard);
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .expect("the resume never continued after task_writes was released")
+                .expect("the resume task panicked")
+                .expect("the resume completes");
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_TODO,
+                "a resume must re-read the board after waiting: the card is where the \
+                 operator put it, and yanking it back to In Progress overrides their edit"
+            );
+        }
     }
 
     /// Issue #2005: the workflow-NODE half of the blocker resume — the answer
