@@ -1266,6 +1266,14 @@ fn normalise(text: &str) -> String {
             break;
         }
     }
+    // A result with nothing nameable left in it is not a title. Stripping
+    // pairs cannot catch every shape a model produces — `"""` peels to a lone
+    // `"`, `-` and `#` never paired at all — and each of those becomes a card
+    // headline that is one punctuation mark. Asking whether anything survived
+    // is the check that does not have to enumerate the ways it can fail.
+    if !current.chars().any(char::is_alphanumeric) {
+        return String::new();
+    }
     cap(&current, TASK_TITLE_MAX_CHARS)
 }
 
@@ -1739,7 +1747,24 @@ mod test {
     /// falls back rather than putting punctuation on the board.
     #[test]
     fn decoration_with_no_name_in_it_is_no_title() {
-        for junk in ["\"\"", "**", "...", "Title:", "``", "#"] {
+        for junk in [
+            "\"\"",
+            "**",
+            "...",
+            "Title:",
+            "``",
+            "#",
+            // Odd counts and unpaired marks: these do not peel to nothing, they
+            // peel to ONE punctuation character, which a length check passes.
+            "\"\"\"",
+            "*",
+            "-",
+            "—",
+            "?!",
+            "'",
+            "\"\"\"\"\"",
+            "   \"\"\"   ",
+        ] {
             assert!(TaskTitle::summarised(junk).is_none(), "{junk:?}");
         }
     }
