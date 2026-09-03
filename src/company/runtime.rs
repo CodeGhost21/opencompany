@@ -5706,6 +5706,9 @@ impl CompanyRuntime {
                 // Issue #1862: the shared root cause, so the console folds every
                 // card stalled on one broken integration into a single question.
                 group_key: blocker_group_key_of(&p.effect),
+                // So the console can word skip/cancel honestly per step kind
+                // instead of promising a workflow node's behaviour on a card.
+                blocker_step_kind: blocker_step_kind_of(&p.effect),
             })
             .collect()
     }
@@ -6649,6 +6652,37 @@ fn blocker_group_key_of(effect: &crate::ports::types::Effect) -> Option<String> 
     serde_json::from_value::<crate::ports::blockers::BlockerPayload>(effect.payload.clone())
         .ok()?
         .group_key
+}
+
+/// Which kind of stopped step a parked blocker names — `"task"` or `"node"`
+/// — or `None` for a non-blocker effect or a blocker with no step behind it.
+///
+/// Reads [`BlockerPayload::step`](crate::ports::blockers::BlockerPayload::step)
+/// the same guarded way [`blocker_group_key_of`] reads `group_key`: gated on
+/// the effect kind so a non-blocker effect that happens to carry a
+/// step-shaped field is never mistaken for one. The console needs this to
+/// word `skip`/`cancel` honestly — those verdicts do not do the same thing to
+/// a paused board card that they do to a stopped workflow node.
+fn blocker_step_kind_of(effect: &crate::ports::types::Effect) -> Option<String> {
+    use crate::ports::blockers::BlockerStep;
+
+    if !effect.kind.starts_with(&format!(
+        "{}.",
+        crate::ports::blockers::BLOCKER_EFFECT_PREFIX
+    )) {
+        return None;
+    }
+    let step =
+        serde_json::from_value::<crate::ports::blockers::BlockerPayload>(effect.payload.clone())
+            .ok()?
+            .step?;
+    Some(
+        match step {
+            BlockerStep::Task { .. } => "task",
+            BlockerStep::Node { .. } => "node",
+        }
+        .to_string(),
+    )
 }
 
 /// One root-cause group of parked blockers pending in a single DM (issue
@@ -10188,6 +10222,50 @@ mod tests {
                 parked.notification.title.contains("eng"),
                 "the title names who is blocked: {}",
                 parked.notification.title
+            );
+        }
+
+        /// The projection names which kind of step a parked blocker stopped
+        /// (issue #2028) — the console needs this to word `skip`/`cancel`
+        /// honestly, since neither does the same thing to a board card that it
+        /// does to a workflow node.
+        #[tokio::test]
+        async fn pending_approvals_names_the_stopped_steps_kind() {
+            let (runtime, _home) = runtime().await;
+            runtime
+                .park_blocker(&blocker("t-1", None), "t-1", assignee("eng"))
+                .await
+                .expect("parks a task-step blocker");
+            let node_payload = BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::Tool,
+                step: Some(BlockerStep::Node {
+                    run_id: "run-1".to_string(),
+                    node_id: "draft".to_string(),
+                }),
+                reason: "needs a model choice".to_string(),
+                needed: "which model to use".to_string(),
+                group_key: None,
+            };
+            runtime
+                .park_blocker(&node_payload, "t-2", assignee("eng"))
+                .await
+                .expect("parks a node-step blocker");
+
+            let pending = runtime.pending_approvals();
+            assert_eq!(pending.len(), 2);
+            let kinds: std::collections::HashSet<_> = pending
+                .iter()
+                .map(|a| a.blocker_step_kind.clone())
+                .collect();
+            assert_eq!(
+                kinds,
+                std::collections::HashSet::from([
+                    Some("task".to_string()),
+                    Some("node".to_string())
+                ]),
+                "a task-step and a node-step blocker must project distinct step kinds, not the \
+                 same value: {pending:?}"
             );
         }
 
