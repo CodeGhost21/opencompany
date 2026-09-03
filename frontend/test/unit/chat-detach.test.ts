@@ -351,7 +351,9 @@ describe("open turns read back from the run store", () => {
       { id: "turn-1", chatId: "main", status: "running" },
     ]);
 
-    expect(open).toEqual({ main: [{ turnId: "turn-1", queued: false }] });
+    // `chatId` rides alongside since #2042's follow-up: the map key can be a
+    // composite (`main#41`), and the settle poll needs the real desk to re-read.
+    expect(open).toEqual({ main: [{ turnId: "turn-1", queued: false, chatId: "main" }] });
   });
 
   it("calls a turn that has not taken the lock queued, not working", () => {
@@ -401,8 +403,8 @@ describe("open turns read back from the run store", () => {
 
     const expected = {
       main: [
-        { turnId: "turn-1", queued: false },
-        { turnId: "turn-2", queued: true },
+        { turnId: "turn-1", queued: false, chatId: "main" },
+        { turnId: "turn-2", queued: true, chatId: "main" },
       ],
     };
     expect(runningFirst).toEqual(expected);

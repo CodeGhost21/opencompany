@@ -1517,14 +1517,23 @@ export function ChatView({
       ? turnStateKey(activeThreadId, threadRootOf(openThreadId))
       : undefined;
   const threadTurn = threadTurnKey ? openTurns?.[threadTurnKey]?.[0] : undefined;
-  const openTurn = activeThreadId
-    ? Object.entries(openTurns ?? {}).find(
+  const openTurn = (() => {
+    if (!activeThreadId) return undefined;
+    const heads = Object.entries(openTurns ?? {})
+      .filter(
         ([key, turns]) =>
           key !== threadTurnKey &&
           (key === activeThreadId || key.startsWith(`${activeThreadId}#`)) &&
           turns.length > 0,
-      )?.[1][0]
-    : undefined;
+      )
+      .map(([, turns]) => turns[0]);
+    // A running turn outranks a queued one. Taking the first match instead
+    // would let map order decide the wording, and map order follows `/runs`,
+    // which is newest-first — so the ordinary serialized case (an older turn
+    // working while a newer one waits on the company lock) rendered "Queued…"
+    // over live work (Codex review on #2042).
+    return heads.find((t) => !t.queued) ?? heads[0];
+  })();
   /**
    * The count beside the channel title.
    *

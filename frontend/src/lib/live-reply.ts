@@ -238,6 +238,16 @@ export type OpenTurn = {
    * lock rather than working. Drives the indicator's wording.
    */
   queued: boolean;
+  /**
+   * The **desk** this turn is in — the host thread id, never the map key.
+   *
+   * The map is keyed per thread (`turnStateKey`), so its key can be a composite
+   * like `engineering#41`. Consumers that need to talk to the *host* — the
+   * settle poll re-reads a desk's history — must use this, because there is no
+   * desk called `engineering#41` and asking for one silently recovers nothing
+   * (Codex review on #2042).
+   */
+  chatId?: string;
 };
 
 /** The per-thread rows the fold produces — the same shape as {@link OpenTurn}. */
@@ -305,8 +315,9 @@ export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, O
     const queued = run.status === "pending";
     const key = turnStateKey(run.chatId, run.threadRoot);
     const list = byThread.get(key);
-    if (list) list.push({ turnId: run.id, queued });
-    else byThread.set(key, [{ turnId: run.id, queued }]);
+    const row = { turnId: run.id, queued, chatId: run.chatId };
+    if (list) list.push(row);
+    else byThread.set(key, [row]);
   }
   const open: Record<string, OpenTurnRow[]> = {};
   for (const [chatId, rows] of byThread) {

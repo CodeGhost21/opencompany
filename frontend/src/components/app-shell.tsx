@@ -1698,16 +1698,20 @@ export function AppShell({
     if (watching.length === 0) return;
     let cancelled = false;
 
-    const settle = (threadId: string, turnId: string) => {
+    // `stateKey` prunes the map; `chatId` is the desk the re-read talks to.
+    // They are different strings for a threaded turn — the map is keyed
+    // `engineering#41` while the desk is `engineering` — and asking the host
+    // for the composite recovers nothing at all (Codex review on #2042).
+    const settle = (stateKey: string, chatId: string | undefined, turnId: string) => {
       setOpenTurns((prev) => {
-        const turns = prev[threadId];
+        const turns = prev[stateKey];
         if (!turns) return prev;
         // Drop just this turn; a queued sibling behind it stays watched, so
         // its reply is still delivered when it settles in turn.
         const rest = turns.filter((t) => t.turnId !== turnId);
         const next = { ...prev };
-        if (rest.length) next[threadId] = rest;
-        else delete next[threadId];
+        if (rest.length) next[stateKey] = rest;
+        else delete next[stateKey];
         return next;
       });
       // Deliberately not awaited here, and deliberately not written inline —
@@ -1716,27 +1720,31 @@ export function AppShell({
       //
       // The turn id goes with it: the re-read's own clear must not be fooled
       // by a ref that has not caught up with the `setOpenTurns` above.
-      reReadSettledThread(threadId, turnId);
+      // The desk, not the map key. A composite key names no desk the host
+      // knows, so `getChatHistory` would return nothing and the durable reply
+      // would never be rehydrated — the poll-based recovery path, which is the
+      // one that matters when SSE is unavailable.
+      if (chatId) reReadSettledThread(chatId, turnId);
     };
 
     const poll = () => {
-      for (const [threadId, turn] of watching) {
+      for (const [stateKey, turn] of watching) {
         if (!turn.turnId) continue;
         getRun(client, company, turn.turnId)
           .then(({ run }) => {
             if (cancelled) return;
             if (run.phase === "terminal") {
-              settle(threadId, turn.turnId!);
+              settle(stateKey, turn.chatId, turn.turnId!);
               return;
             }
             // Still open: keep the queued/working distinction honest. `pending`
             // means it has not taken the per-company lock yet.
             const queued = run.status === "pending";
             setOpenTurns((prev) =>
-              prev[threadId]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
+              prev[stateKey]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
                 ? {
                     ...prev,
-                    [threadId]: prev[threadId].map((t) =>
+                    [stateKey]: prev[stateKey].map((t) =>
                       t.turnId === turn.turnId ? { ...t, queued } : t,
                     ),
                   }
@@ -1753,7 +1761,7 @@ export function AppShell({
             // settles through whatever terminal signal it does answer.
             if (cancelled) return;
             if (err instanceof ApiError && err.status === 404 && turn.turnId)
-              settle(threadId, turn.turnId);
+              settle(stateKey, turn.chatId, turn.turnId);
           });
       }
     };
