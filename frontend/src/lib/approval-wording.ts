@@ -17,7 +17,8 @@
  * next is exactly the kind that drifts when it is written down three times.
  */
 
-import type { ResolveOutcome } from "@/api/types";
+import type { BlockerVerdict, ResolveOutcome } from "@/api/types";
+import { blockerVerdictConsequence, blockerVerdictLabel } from "@/lib/language";
 
 /** How many other decisions a turn is still blocked on, as the host reports it. */
 export type StillAwaiting = number | undefined;
@@ -55,6 +56,34 @@ export function approvedByRuntimeLine(stillAwaiting: StillAwaiting, detail?: str
   return `Approved — waiting on ${stillAwaiting} more sign-off${
     stillAwaiting === 1 ? "" : "s"
   } before it runs${suffix}`;
+}
+
+/**
+ * What an answered blocker did, for the confirmation the operator reads
+ * (#2028).
+ *
+ * Not the approve/decline wording: three of the four verdicts are approves and
+ * would all read "Approved", which is the flattening this exists to undo. The
+ * consequence line is the same one the control carried, so the confirmation
+ * cannot promise something the button did not.
+ *
+ * `settled` is every id the answer settled; when a root-cause group settled
+ * together the operator has to be told, or the siblings vanish unexplained.
+ */
+export function blockerDecidedLine(
+  verdict: BlockerVerdict,
+  detail?: string,
+  settled?: readonly string[],
+): string {
+  const suffix = detail ? `: ${detail}` : "";
+  const others = (settled?.length ?? 0) - 1;
+  const also =
+    others > 0
+      ? ` This answered ${others} other question${others === 1 ? "" : "s"} blocked on the same thing.`
+      : "";
+  return `${blockerVerdictLabel(verdict).replace("\u2026", "")} — ${blockerVerdictConsequence(
+    verdict,
+  ).toLowerCase()}${suffix}${also}`;
 }
 
 /** This card's place in its turn's batch: 1-based `index` of `total` (#1289). */

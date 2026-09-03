@@ -13,6 +13,7 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BlockerVerdict,
   type BoardComment,
   type BoardDetail,
   type BoardItem,
@@ -939,15 +940,34 @@ export class OpenCompanyClient {
     verdict: Verdict,
     _note?: string,
     company?: string | null,
-    options: { detach?: boolean; scope?: GrantScope } = {},
+    options: {
+      detach?: boolean;
+      scope?: GrantScope;
+      /**
+       * The four-way answer to a parked blocker (#2028). It narrows `verdict`
+       * rather than replacing it — the host refuses a pair that disagrees — and
+       * `answer` is mandatory and non-blank on `amend`, refused on the rest.
+       */
+      blocker?: { verdict: BlockerVerdict; answer?: string };
+    } = {},
   ): Promise<ChatResponse | ResolveReceipt> {
     const body: {
       verdict: Verdict;
       detach?: boolean;
       scope?: "once" | "tool";
       expires_in_millis?: number;
+      blocker_verdict?: BlockerVerdict;
+      blocker_answer?: string;
     } = { verdict };
     if (options.detach) body.detach = true;
+    // Sent as nothing at all when absent, for the reason `once` is: the
+    // omitted-field form is what a host predating the field understands.
+    if (options.blocker) {
+      body.blocker_verdict = options.blocker.verdict;
+      if (options.blocker.verdict === "amend") {
+        body.blocker_answer = options.blocker.answer ?? "";
+      }
+    }
     // Issue #374. The `once` scope is sent as *nothing at all*, not as
     // `scope: "once"`: the omitted-field form is what an old host understands,
     // so a new console against an old host keeps working instead of 400ing on a
