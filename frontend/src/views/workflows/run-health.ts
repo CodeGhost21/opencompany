@@ -480,9 +480,15 @@ export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
       };
     case "blocked":
     case "awaiting-approval":
+      // Not "before it can finish" (PR #2053 review): this run has already
+      // settled — the synchronous body only arrives once it has. Approving
+      // spawns a NEW run with no link back to this one (see `stranded`'s own
+      // comment above), so promising THIS run will finish is a claim the host
+      // never makes. "Parked" is the same word `parkedApprovalCount` and the
+      // card badges already use for the same state.
       return {
         tone: "info",
-        message: "The run is waiting on your approval before it can finish.",
+        message: "The run parked, waiting on your approval.",
       };
     case "stranded":
       return {
