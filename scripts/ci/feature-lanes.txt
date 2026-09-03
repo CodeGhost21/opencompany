@@ -68,6 +68,7 @@ chargebee      | partial      | openhuman,chargebee,paypal,composio | chargebee 
 paypal         | partial      | openhuman,chargebee,paypal,composio | paypal server::ops::finance
 sidecar        | partial      | sidecar                         | brain::sidecar
 analytics      | partial      | analytics                       | analytics
+crash-reporting | partial     | crash-reporting                 | observability
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
 #

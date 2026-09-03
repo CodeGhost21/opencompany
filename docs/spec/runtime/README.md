@@ -42,6 +42,10 @@ Supporting docs:
   - [analytics.md](analytics.md) — what the product reports about its own use:
     hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
     structurally carry content, and how to turn it off
+  - [crash-reporting.md](crash-reporting.md) — errors and panics sent to a
+    Sentry project the **operator** owns: the two DSNs, what a report carries,
+    the credential scrubber that runs in every build (not only in a reporting
+    one), and the two ways to prove it is working
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
