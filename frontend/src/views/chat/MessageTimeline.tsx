@@ -5,6 +5,7 @@ import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } f
 import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
+import type { ChatMessage } from "@/lib/chat";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
@@ -64,6 +65,10 @@ interface Props {
   onReact: (messageId: string, emoji: string) => void;
   /** Deletes the board card a line opened, and drops its chip (issue #984). */
   onDismissCard: (taskId: string) => void;
+  /** Opens a board card from a line (issue #246). */
+  onAddToBoard: (message: ChatMessage) => void;
+  /** The message whose card create is in flight, if any. */
+  addingCardId: string | null;
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
   /**
@@ -172,6 +177,8 @@ export function MessageTimeline({
   onOpenThread,
   onReact,
   onDismissCard,
+  onAddToBoard,
+  addingCardId,
   dismissingCardId,
   onReviewCard,
   reviewingCardIds,
@@ -388,6 +395,8 @@ export function MessageTimeline({
                 onOpenThread={onOpenThread}
                 onReact={onReact}
                 onDismissCard={onDismissCard}
+                onAddToBoard={onAddToBoard}
+                addingCardId={addingCardId}
                 dismissingCardId={dismissingCardId}
                 onReviewCard={onReviewCard}
                 reviewingCardIds={reviewingCardIds}

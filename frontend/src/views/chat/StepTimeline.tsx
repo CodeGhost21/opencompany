@@ -203,11 +203,18 @@ function formatElapsed(ms: number | undefined, status: TurnStep["status"]): stri
  */
 export function CardChip({
   taskId,
+  mine = false,
   busy = false,
   disabled = false,
   onDismiss,
 }: {
   taskId: string;
+  /**
+   * Whether the card was opened from this message by the operator pressing
+   * "Add to board", rather than by the turn that answered it. Two provenances,
+   * one render — the wording is the only thing that separates them.
+   */
+  mine?: boolean;
   busy?: boolean;
   disabled?: boolean;
   onDismiss?: (taskId: string) => void;
@@ -221,7 +228,7 @@ export function CardChip({
       )}
     >
       <SquareKanban className="size-3 shrink-0" />
-      Card opened
+      {mine ? "Added to the board" : "Card opened"}
     </a>
   );
   return (

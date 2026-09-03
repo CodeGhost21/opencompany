@@ -15,7 +15,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
+import { createTask, deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -41,6 +41,7 @@ import {
   isGeneralChannel,
   makeMessage,
   reconcileIds,
+  titleFromMessage,
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
@@ -485,6 +486,7 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  const [addingCardId, setAddingCardId] = useState<string | null>(null);
   /** Every card whose review verdict is currently in flight — one entry per
    * task, not a single global slot, so a click on one card's Approve/Revise
    * control never gets silently dropped by a DIFFERENT card's in-flight
@@ -1945,6 +1947,54 @@ export function ChatView({
   }
 
   /**
+   * Open a board card from one chat line (issue #246).
+   *
+   * Through the REST create rather than asking the responder to call
+   * `spawn_task`: only the orchestrator carries the delegation tools, so a
+   * toolbelt route would work on the main line and silently do nothing in a
+   * desk channel or a DM. REST is what makes the action true everywhere
+   * without widening the depth-1 delegation design.
+   *
+   * `originChatId` is the host thread this channel is addressed under, not the
+   * console-local channel id — that is what lets the card's origin row resolve
+   * back through `chatChannelByThread` and offer the jump to Room.
+   *
+   * `column` and `assignee` are both omitted on purpose. Dropping a card into
+   * `in_progress` is what dispatches a turn, so leaving the server's intake
+   * default in place keeps the human drag as the only thing that spends money,
+   * and an unassigned card asks nothing of anyone.
+   */
+  async function addToBoard(message: ChatMessage) {
+    const title = titleFromMessage(message.text);
+    if (!title || addingCardId || activeThreadId === undefined) return;
+    setAddingCardId(message.id);
+    const target = active.id;
+    try {
+      const created = await createTask(client, company, {
+        title,
+        // The full text as the note, so nothing is lost to the title's cap.
+        note: message.text,
+        originChatId: activeThreadId,
+      });
+      setTranscripts((t) => ({
+        ...t,
+        [target]: (t[target] ?? []).map((m) =>
+          m.id === message.id ? { ...m, taskId: created.id } : m,
+        ),
+      }));
+      toast.success(`Added to the board — ${created.title}`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : "Couldn't add that to the board.",
+      );
+    } finally {
+      setAddingCardId(null);
+    }
+  }
+
+  /**
    * Settle the in-review dispatch card a finished card's settle pill links to.
    * Approve finishes it; Revise re-runs it with a note — though the console
    * reaches Revise through a thread reply, not this button.
@@ -2300,6 +2350,8 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onAddToBoard={(message) => void addToBoard(message)}
+              addingCardId={addingCardId}
               onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
               reviewingCardIds={reviewingCardIds}
               resolveAttachmentUrl={resolveAttachmentUrl}
