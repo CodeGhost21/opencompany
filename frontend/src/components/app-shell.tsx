@@ -53,6 +53,7 @@ import {
   listInflight,
   listTasks,
   taskStatusesById,
+  type InflightRun,
   type TaskStatus,
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -670,6 +671,12 @@ export function AppShell({
   const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
     Record<string, TaskStatus>
   >({});
+  /**
+   * The same in-flight read, kept whole rather than only as the card-keyed map
+   * above. A delegation has no card, so `taskStatusByTaskId` cannot hold it and
+   * a surface offering a control over a run needs the rows themselves.
+   */
+  const [inflightRuns, setInflightRuns] = useState<readonly InflightRun[]>([]);
   const taskStatusRead = useRef(0);
   // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
   // sees an attempt move rather than waiting up to four seconds for its poll —
@@ -967,11 +974,17 @@ export function AppShell({
         inflight.status === "fulfilled" ? inflight.value : [],
       ),
     );
+    // Only on a read that actually landed. A failed inflight poll must not empty
+    // the bar and take a still-running delegation's cancel with it.
+    if (inflight.status === "fulfilled") setInflightRuns(inflight.value);
   }, [client, company]);
 
   useEffect(() => {
     taskStatusRead.current += 1;
     setTaskStatusByTaskId({});
+    // A steer key is company-scoped, so a row held across a company switch
+    // would address the previous company's registry.
+    setInflightRuns([]);
   }, [client, company]);
 
   // Ride the existing visible-tab company poll, and also re-read immediately
@@ -3467,6 +3480,8 @@ export function AppShell({
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
+              inflightRuns={inflightRuns}
+              onInflightSteered={refreshTaskStatuses}
               now={feed.now}
               onDecideApproval={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
