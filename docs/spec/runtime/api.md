@@ -36,7 +36,15 @@ GET    /api/v1/companies/{id}/approvals        pending approvals
 GET    /api/v1/companies/{id}/notifications  unread notifications for the signed-in person
 PUT    /api/v1/companies/{id}/notifications  mark notifications read (`{ "ids": [...] }`; empty body or null ids marks all)
 POST   /api/v1/companies/{id}/approvals/{aid}  { "verdict": "approve"|"deny", "note": "…",
-                                               "detach": false }
+                                               "detach": false,
+                                               // a parked blocker only: which of the four
+                                               // things the stopped step should do. Narrows
+                                               // `verdict` (retry/amend/skip approve, cancel
+                                               // denies) — a pair that disagrees is a 400.
+                                               // `blocker_answer` is mandatory and non-blank
+                                               // with "amend", refused with the rest.
+                                               "blocker_verdict": "retry"|"amend"|"skip"|"cancel",
+                                               "blocker_answer": "…" }
 POST   /api/v1/companies/{id}/feedback         submit feedback (see feedback-loop/)
 GET    /api/v1/companies/{id}/feedback         past reports (no operator words)
 GET    /api/v1/companies/{id}/feedback/board   the shared board, one page
