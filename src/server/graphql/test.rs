@@ -385,7 +385,7 @@ async fn policy_field_reports_the_selectable_tiers_and_when_a_change_takes_effec
     assert_eq!(readonly["label"], "Read-only", "{value}");
     assert_eq!(
         readonly["description"],
-        "The agents can look at things but change nothing and spend nothing.",
+        "The agents can look at things but change nothing, contact nobody, and use no connected account. Billed tool calls are refused too — but the agents still think, and the company is billed for that.",
         "{value}"
     );
 
