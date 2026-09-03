@@ -727,11 +727,7 @@ impl GrantSet {
     /// removes together. First write wins, so arming *is* the claim: a caller
     /// that loses learns it before it has written anything, rather than after
     /// overwriting the winner's answer.
-    pub fn claim_blocker_resolution(
-        &self,
-        id: &ApprovalId,
-        resolution: BlockerResolution,
-    ) -> bool {
+    pub fn claim_blocker_resolution(&self, id: &ApprovalId, resolution: BlockerResolution) -> bool {
         match self
             .inner
             .lock()
