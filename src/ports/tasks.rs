@@ -1060,13 +1060,25 @@ impl TaskTitle {
 
     /// A title a model wrote for a request.
     ///
-    /// `None` when the reply sanitises to nothing — an empty string, pure
+    /// `None` when the reply has nothing nameable in it — an empty string, pure
     /// punctuation, a refusal — which is the caller's signal to fall back to
     /// [`truncated`](Self::truncated) rather than to leave a card unnamed.
+    ///
+    /// # Why this test lives here and not in [`normalise`]
+    ///
+    /// It was in `normalise` for one commit, which put it on every constructor
+    /// — and a person who titles a card `🚀` or `---` means it. Those are not
+    /// junk, they are somebody's title, and blanking them persisted a card with
+    /// no headline at all: worse than the punctuation title this check exists
+    /// to prevent. Only a *model's* reply is guessed at, so only a model's
+    /// reply can be rejected as unusable (codex on #2055).
     #[must_use]
     pub fn summarised(reply: &str) -> Option<Self> {
         let title = normalise(reply);
-        (!title.is_empty()).then_some(Self(title))
+        title
+            .chars()
+            .any(char::is_alphanumeric)
+            .then_some(Self(title))
     }
 
     /// The deterministic fallback: the request itself, shortened.
@@ -1266,14 +1278,6 @@ fn normalise(text: &str) -> String {
             break;
         }
     }
-    // A result with nothing nameable left in it is not a title. Stripping
-    // pairs cannot catch every shape a model produces — `"""` peels to a lone
-    // `"`, `-` and `#` never paired at all — and each of those becomes a card
-    // headline that is one punctuation mark. Asking whether anything survived
-    // is the check that does not have to enumerate the ways it can fail.
-    if !current.chars().any(char::is_alphanumeric) {
-        return String::new();
-    }
     cap(&current, TASK_TITLE_MAX_CHARS)
 }
 
@@ -1290,7 +1294,16 @@ fn strip_wrappers(text: &str) -> String {
         ("“", "”"),
         ("‘", "’"),
     ];
-    let mut current = text.trim().trim_start_matches('#').trim().to_string();
+    // Markdown heading syntax is `#` followed by a space, and only that is
+    // decoration: `#1` and `#launch` are somebody's title, and eating the hash
+    // silently renames their card.
+    let trimmed = text.trim();
+    let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+    let after = &trimmed[hashes..];
+    let mut current = match hashes > 0 && after.starts_with(char::is_whitespace) {
+        true => after.trim_start().to_string(),
+        false => trimmed.to_string(),
+    };
     loop {
         // `>=`, not `>`: a reply that is *only* a pair — `""`, `**` — has to
         // strip to nothing, or a model that answered with bare punctuation puts
@@ -1713,6 +1726,7 @@ mod test {
             "**Title: Reword the middle pricing tier.**",
             "\"**Reword the middle pricing tier**\"",
             "# Reword the middle pricing tier",
+            "### Reword the middle pricing tier",
             "Reword the middle pricing tier.",
             "_Reword the middle pricing tier_",
             "“Reword the middle pricing tier”",
@@ -1767,6 +1781,23 @@ mod test {
         ] {
             assert!(TaskTitle::summarised(junk).is_none(), "{junk:?}");
         }
+    }
+
+    /// A person's own title is kept whatever it is made of. The junk test that
+    /// rejects an unusable *model reply* must never reach these constructors:
+    /// somebody who names a card `🚀` means it, and blanking it persists a card
+    /// with no headline — worse than the punctuation title the test prevents.
+    #[test]
+    fn a_symbol_only_title_a_person_chose_is_kept() {
+        for chosen in ["🚀", "✅", "---", "???", "42", "#1"] {
+            assert_eq!(TaskTitle::authored(chosen).as_str(), chosen, "{chosen}");
+            assert_eq!(TaskTitle::system(chosen).as_str(), chosen, "{chosen}");
+            assert!(!TaskTitle::truncated(chosen).is_empty(), "{chosen}");
+        }
+        // …and the same text from a model is still refused, because that is a
+        // guess at a name rather than somebody's choice of one.
+        assert!(TaskTitle::summarised("---").is_none());
+        assert!(TaskTitle::summarised("🚀").is_none());
     }
 
     /// Non-Latin scripts are neither mangled nor case-folded — the pass is
