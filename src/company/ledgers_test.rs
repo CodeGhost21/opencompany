@@ -1,12 +1,16 @@
 //! The rules only one code path enforces.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
+use tokio::sync::Notify;
 
 use super::*;
 use crate::company::runtime::CompanyRuntime;
 use crate::ledger::LedgerAuthor;
+use crate::ports::ledgers::LedgerStore;
 use crate::ports::types::CompanyId;
 
 /// The context under test, plus the runtime and home it borrows from.
@@ -134,6 +138,81 @@ async fn recording_again_amends_the_same_row() {
     let read = read(&ctx, &spec, &Query::default()).await.expect("read");
     assert_eq!(read.entries.len(), 1);
     assert_eq!(read.entries[0].get("risk"), "second");
+}
+
+/// #2048 review: `read_ledger` used to fold the ledger once for its rows and
+/// again, independently, inside `summary()` for the open/closed count sent
+/// alongside them. A write landing in the gap between those two folds could
+/// flip a row's status after the rows were read but before the count was, so
+/// the response shipped a badge that disagreed with the rows beside it.
+///
+/// This reproduces that gap deterministically — recording a close at exactly
+/// the point the old handler's second, independent fold used to run — rather
+/// than relying on scheduler luck to land a race. It shows two things: a
+/// second fold at that point genuinely disagrees with the rows already
+/// returned (the defect is real, not hypothetical), and `read`'s own
+/// `open`/`closed` — computed from the very fold that produced `entries`,
+/// never a later one — hold steady across the write instead.
+#[tokio::test]
+async fn a_second_independent_fold_would_disagree_with_the_rows_read_already_returned() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "r1",
+        fields(&[("risk", "a"), ("status", "open")]),
+    )
+    .await
+    .expect("recorded");
+
+    // One fold, as the fixed `read` performs it: rows and counts share a
+    // single snapshot, so both describe the ledger as of the same instant.
+    let read = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert_eq!(read.entries.len(), 1);
+    assert_eq!(read.open, 1);
+    assert_eq!(read.closed, 0);
+
+    // The write that used to land in the window between the rows' fold and
+    // the count's second, independent fold.
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "r1",
+        fields(&[("status", "closed"), ("reason", "handled")]),
+    )
+    .await
+    .expect("closed");
+
+    // A second, independent fold taken right here — what `summary()` used to
+    // run after `read()` already returned — now disagrees with the rows
+    // `read` already handed back above: this is the exact mismatch a
+    // two-fold response would have shipped to the console.
+    let refolded = entries(&ctx, &spec).await.expect("entries");
+    assert_eq!(
+        refolded.open_count(&spec),
+        0,
+        "the row already closed by the time a second fold ran"
+    );
+    assert_ne!(
+        refolded.open_count(&spec),
+        read.open,
+        "a second, independent fold disagrees with the snapshot `read` already returned"
+    );
+
+    // `read`'s own numbers, by contrast, are unaffected by the write that
+    // came after it: they were taken from one snapshot and remain
+    // internally consistent with the rows in that same `read`.
+    assert_eq!(
+        read.open,
+        read.entries
+            .iter()
+            .filter(|entry| !spec.is_closed(&entry.status(&spec)))
+            .count()
+    );
+    assert_eq!(read.closed, 0);
 }
 
 /// Refused at the **write**, not reported at the read: by the time somebody
@@ -567,6 +646,298 @@ async fn a_blank_value_clears_the_field() {
         .await
         .expect("recorded");
     assert_eq!(cleared.get("risk"), "");
+}
+
+/// A ledger shaped like the global `learnings`: it declares the check *and*
+/// marks a prose field required, which is the pair `hazards` deliberately
+/// lacks.
+fn findings() -> serde_json::Value {
+    json!({
+        "slug": "findings",
+        "title": "Findings",
+        "purpose": "What we found out.",
+        "derived": "derived/findings.md",
+        "fields": [
+            { "name": "id", "role": "id", "required": true },
+            { "name": "finding", "role": "title", "required": true },
+            { "name": "status", "role": "status", "required": true },
+            { "name": "evidence", "role": "prose", "required": true,
+              "description": "What actually happened, concretely." },
+            { "name": "reason", "role": "prose" }
+        ],
+        "statuses": [
+            { "name": "noted" },
+            { "name": "adopted", "closed": true, "needs_reason": true }
+        ],
+        "sections": [
+            { "heading": "Noted", "statuses": ["noted"], "order": "recent" }
+        ],
+        "checks": ["required-field", "known-status", "closed-needs-reason"]
+    })
+}
+
+/// The write half of the contract the read half already stated. A row landing
+/// without a field the ledger requires is refused, rather than stored and then
+/// reported unreadable by every surface that opens the ledger.
+#[tokio::test]
+async fn a_row_missing_a_required_field_is_refused_at_the_write() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &findings()).await.expect("declared");
+    let error = record(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        fields(&[("finding", "a row with no evidence"), ("status", "noted")]),
+    )
+    .await
+    .expect_err("no evidence");
+    let message = format!("{error}");
+    assert!(message.contains("evidence"), "{message}");
+    assert!(message.contains("f1"), "{message}");
+    // The description is what tells whoever filled it in wrong what belongs
+    // there, so the refusal carries it.
+    assert!(message.contains("What actually happened"), "{message}");
+
+    // Nothing was stored: a refused write must not leave the row behind.
+    let read = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert!(read.entries.is_empty(), "{:?}", read.entries);
+}
+
+/// The whole point, stated as one assertion: what the write accepts, the read
+/// reads back clean. Before this, a row could be recorded and then reported by
+/// the same ledger as one that could not be read.
+#[tokio::test]
+async fn what_the_write_accepts_the_read_reports_no_fault_on() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &findings()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        fields(&[
+            ("finding", "the vendor is slow"),
+            ("status", "noted"),
+            ("evidence", "three late deliveries in a row"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+    let read = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert_eq!(read.entries.len(), 1);
+    assert!(read.faults.is_empty(), "{:?}", read.faults);
+}
+
+/// Every write is a merge, so the check runs against the merged row. Moving a
+/// row's status must not be refused for declining to repeat what it holds.
+#[tokio::test]
+async fn an_amendment_need_not_repeat_a_required_field_the_row_holds() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &findings()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        fields(&[
+            ("finding", "the vendor is slow"),
+            ("status", "noted"),
+            ("evidence", "three late deliveries"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+    let amended = record(&ctx, &spec, &agent(), "f1", fields(&[("status", "noted")]))
+        .await
+        .expect("an amendment carries only what changes");
+    assert_eq!(amended.events, 2);
+
+    close(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        "adopted",
+        "folded into the standard",
+    )
+    .await
+    .expect("closing carries neither the title nor the evidence again");
+}
+
+/// Clearing one is the same loss as never writing it, and a merge is the only
+/// way to express a clear — so it is refused on the same ground.
+#[tokio::test]
+async fn clearing_a_required_field_is_refused() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &findings()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        fields(&[
+            ("finding", "the vendor is slow"),
+            ("status", "noted"),
+            ("evidence", "three late deliveries"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+    let error = record(&ctx, &spec, &agent(), "f1", fields(&[("evidence", "  ")]))
+        .await
+        .expect_err("cleared");
+    assert!(format!("{error}").contains("evidence"), "{error}");
+}
+
+/// A [`LedgerStore`] that pauses inside `events` exactly once, after the read
+/// has already happened, so a test can hold a caller mid-check while another
+/// task mutates the store underneath it.
+struct PausingStore {
+    inner: Arc<dyn LedgerStore>,
+    armed: Arc<AtomicBool>,
+    paused: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl LedgerStore for PausingStore {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<LedgerSpec>> {
+        self.inner.list_specs(company).await
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &LedgerSpec) -> Result<()> {
+        self.inner.put_spec(company, spec).await
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        self.inner.delete_spec(company, slug).await
+    }
+
+    async fn append(&self, company: &CompanyId, event: &LedgerEvent) -> Result<()> {
+        self.inner.append(company, event).await
+    }
+
+    async fn events(&self, company: &CompanyId, ledger: &str) -> Result<Vec<LedgerEvent>> {
+        let read = self.inner.events(company, ledger).await;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.paused.notify_one();
+            self.resume.notified().await;
+        }
+        read
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        self.inner.purge_entry(company, ledger, entry).await
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        self.inner.purge_ledger(company, ledger).await
+    }
+}
+
+/// The required-field check reads the stored row, then the write appends. A
+/// purge landing in that gap used to remove the earlier events the check had
+/// just relied on, so the append that followed recreated the row with only
+/// its own partial fields — reporting success on exactly the row the check
+/// exists to keep out.
+///
+/// [`PausingStore`] holds the amendment inside that exact gap — after its
+/// required-field check has read the row, before it appends — so the purge
+/// gets a deterministic window to land in, rather than relying on real
+/// thread timing to hit a gap this narrow. The lock under test still does
+/// its own real work here: it is what makes the purge task block instead of
+/// running in that window once the fix is in place.
+#[tokio::test]
+async fn a_purge_racing_the_required_field_check_cannot_recreate_a_row_missing_it() {
+    let (runtime, _home) = runtime().await;
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let store: Arc<dyn LedgerStore> = Arc::new(PausingStore {
+        inner: runtime.ledgers().clone(),
+        armed: armed.clone(),
+        paused: paused.clone(),
+        resume: resume.clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let spec = define(&ctx, &findings()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "f1",
+        fields(&[
+            ("finding", "the vendor is slow"),
+            ("status", "noted"),
+            ("evidence", "three late deliveries"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+
+    // Seeding is done: arm the pause for the amendment's own read.
+    armed.store(true, Ordering::SeqCst);
+
+    let amend_ctx = ctx.clone();
+    let amend_spec = spec.clone();
+    let amender = tokio::spawn(async move {
+        record(
+            &amend_ctx,
+            &amend_spec,
+            &agent(),
+            "f1",
+            fields(&[("status", "noted")]),
+        )
+        .await
+    });
+
+    paused.notified().await;
+
+    let purge_ctx = ctx.clone();
+    let purge_spec = spec.clone();
+    let purger =
+        tokio::spawn(async move { delete_entry(&purge_ctx, &purge_spec, &person(), "f1").await });
+
+    // Under the fix the purge blocks on the same lock the amendment is
+    // holding; this just gives it the chance to run first when it is not
+    // blocked, which is the whole bug.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    resume.notify_one();
+
+    let amend_result = tokio::time::timeout(std::time::Duration::from_secs(5), amender)
+        .await
+        .expect("amendment did not finish")
+        .expect("amendment task panicked");
+    let purge_result = tokio::time::timeout(std::time::Duration::from_secs(5), purger)
+        .await
+        .expect("purge did not finish")
+        .expect("purge task panicked");
+    purge_result.expect("purge does not error");
+
+    if let Ok(entry) = amend_result {
+        assert!(
+            !entry.get("evidence").trim().is_empty(),
+            "amendment reported success on a row missing a required field: {entry:?}"
+        );
+    }
+}
+
+/// The write refuses exactly what the read would fault, and no more: a ledger
+/// that does not declare the check is not silently held to it.
+#[tokio::test]
+async fn a_ledger_that_does_not_declare_the_check_is_not_held_to_it() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let mut document = findings();
+    document["slug"] = json!("loose");
+    document["derived"] = json!("derived/loose.md");
+    document["checks"] = json!(["known-status"]);
+    let spec = define(&ctx, &document).await.expect("declared");
+    record(&ctx, &spec, &agent(), "f1", fields(&[("status", "noted")]))
+        .await
+        .expect("no required-field check, so nothing to enforce");
 }
 
 /// The briefing is what a turn carries: every ledger named, every open row
