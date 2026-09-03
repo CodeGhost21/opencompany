@@ -59,11 +59,11 @@ describe("sidebar navigation", () => {
     expect(isNavigationActive("chat", "workflows")).toBe(false);
   });
 
-  it("keeps a teammate under Agents and a desk transcript under Room", () => {
+  it("keeps a card under Work and a teammate under Agents", () => {
     // Both are Rule-6 deep-link destinations with no row of their own. Without
     // this the whole section collapses the moment one is opened.
+    expect(isNavigationActive("ledgers", "tasks")).toBe(true);
     expect(isNavigationActive("company", "team")).toBe(true);
-    expect(isNavigationActive("chat", "conversation")).toBe(true);
   });
 });
 
@@ -139,6 +139,20 @@ describe("resolving an address", () => {
     await visit("#/nope");
     expect(seen).toEqual(["not-found", "nope"]);
     expect(window.location.hash).toBe("#/not-found/nope");
+  });
+
+  it("404s the retired #/conversation instead of rewriting it onto Room", async () => {
+    // Room replaced the desk transcript, but `#/conversation` names no channel,
+    // so there is no address to rewrite it onto: a bare redirect would drop an
+    // operator on whichever channel Room defaults to and read as a link that
+    // worked. It is retired by removal from the `View` union, which is what
+    // takes it out of `VIEWS` and lands it on the same explanation any other
+    // unrecognized head gets.
+    rewrite = REWRITE_RETIRED;
+    expect(VIEWS).not.toContain("conversation");
+    await visit("#/conversation");
+    expect(seen).toEqual(["not-found", "conversation"]);
+    expect(window.location.hash).toBe("#/not-found/conversation");
   });
 
   // Retired top-level addresses keep working through `REWRITE_RETIRED`. Each

@@ -13,12 +13,11 @@ const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf
  * every hook, the same reason `task-detail-no-op-plumbing` and
  * `chat-task-origin-visibility` check their contracts this way.
  *
- * The row used to select a thread with `setActiveThreadId` and land on
- * `#/conversation` — the legacy two-pane surface with its own thread rail, and
- * a selection the address could not carry. Chats are Room now, and the channel
- * is the whole destination.
+ * The row used to select a thread through shell state and land on a separate
+ * two-pane surface, a selection the address could not carry. Chats are Room
+ * now, and the channel is the whole destination.
  */
-describe("a card's origin row opens Room, not the legacy Conversation view", () => {
+describe("a card's origin row opens Room", () => {
   const shell = read("components/app-shell.tsx");
 
   it("routes the origin channel through the address", () => {
@@ -32,11 +31,13 @@ describe("a card's origin row opens Room, not the legacy Conversation view", () 
     );
   });
 
-  it("no longer sends a card's origin to the legacy Conversation surface", () => {
-    // `#/conversation` stays routable (`ROUTABLE.conversation`) and the view
-    // stays mounted for it; what must not come back is a card's origin row
-    // selecting a thread in it through state the address knows nothing about.
-    expect(shell).not.toContain("setActiveThreadId(threadId);");
+  it("keeps the retired transcript surface out of the shell entirely", () => {
+    // The destination has to stay an address. A card's origin row selecting a
+    // thread through shell state is what this forbids, and the surface that
+    // read that state is gone — so the whole view goes with it.
+    expect(shell).not.toContain("setActiveThreadId");
     expect(shell).not.toContain('setView("conversation")');
+    expect(shell).not.toContain("<Conversation");
+    expect(shell).not.toContain('view === "conversation"');
   });
 });
