@@ -10277,6 +10277,139 @@ mode = "full"
         assert!(banked_resolutions(&home, &company).await.is_empty());
     }
 
+    /// **A documented limitation, pinned rather than left incidental.**
+    ///
+    /// A blocker raised by `escalate_to_human` carries no
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep), and every resume
+    /// reads the verdict's step and nothing else — so its card is never
+    /// re-dispatched however it is answered, on this route and on the
+    /// two-value one that predates it. The resume posts a note into the
+    /// blocker's thread and stops there.
+    ///
+    /// The route lets the verdict through rather than refusing it: the answer
+    /// is banked durably and correctly, so the resume that reads the approval's
+    /// own task link inherits a right answer rather than a discarded one, and
+    /// refusing only `skip`/`amend` would leave `approve` no-opping in exactly
+    /// the same way while looking supported. Tracked as its own defect; when it
+    /// is fixed this test's final assertion is what changes.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_agent_question_banks_its_verdict_but_re_dispatches_no_card() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-9".to_string(),
+                    title: "Draft the launch note".to_string(),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "eng".to_string(),
+                    updated_at_millis: 1,
+                    origin: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Information,
+            source: BlockerSource::AgentQuestion,
+            step: None,
+            reason: "which of the two briefs is current?".to_string(),
+            needed: "an answer from you".to_string(),
+            group_key: None,
+        };
+        let approval = ApprovalId::new("question-1");
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: None,
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::from_task_id(Some("t-9")),
+                ApprovalConversation {
+                    thread: Some("dm:eng".to_string()),
+                    parent: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (status, answer) = post_resolve(
+            &app,
+            &approval,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer["settledIds"],
+            serde_json::json!(["question-1"]),
+            "the non-detached body names what it settled too: {answer}"
+        );
+
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "skip",
+            "the operator's verdict is banked whatever the resume can do with it"
+        );
+        assert!(
+            banked[0]["resolution"].get("step").is_none(),
+            "an agent question is parked with no step, which is the defect: {}",
+            banked[0]
+        );
+        let card = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-9")
+            .expect("the card still exists");
+        assert_eq!(
+            card.column,
+            crate::ports::tasks::COLUMN_PAUSED,
+            "the stepless resume moves no card — the limitation this pins"
+        );
+    }
+
     /// A build with no blocker resume refuses the field outright. Accepting and
     /// ignoring it would answer `200` to a skip that silently became a retry —
     /// the exact defect, reintroduced by a feature flag.
@@ -12402,6 +12535,7 @@ mode = "full"
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
