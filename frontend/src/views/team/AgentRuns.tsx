@@ -511,9 +511,14 @@ function RunTotals({ runs }: { runs: RunSummary[] }) {
       {/* Cost is settled-only, like the token figures it sits beside — a live
           attempt contributes nothing until it settles. Rendered as "—" rather
           than "$0.00" when the whole page is unsettled, because a zero here
-          would read as free work rather than as unbilled-so-far. */}
+          would read as free work rather than as unbilled-so-far.
+
+          The label names the page because this is not the teammate's spend:
+          it counts only attempts listed here, and only ones that ran as a
+          tracked attempt. The daily cap is enforced against a different, wider
+          total — see the Budget section. */}
       <Stat
-        label="Cost"
+        label="Cost on this page"
         value={
           totals.costUsd > 0
             ? (formatUsdCost({ amountUsd: totals.costUsd }, "total") ?? "—")

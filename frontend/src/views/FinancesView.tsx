@@ -1,7 +1,3 @@
-// Issue #302: unmounted from the console — hidden, not retired. The host's
-// finances routes, economy state and tests are unchanged; re-listing "finances"
-// in `app-shell.tsx`'s `View`/`NAV` (behind a `lazy()` import, as it was)
-// brings this surface back. Do not delete it as dead code.
 import { useEffect, useState } from "react";
 import { Bar, BarChart, LabelList, XAxis, YAxis } from "recharts";
 import { ArrowDownLeft, ArrowUpRight, CircleAlert, Coins, PiggyBank, TrendingUp, Wallet } from "lucide-react";
@@ -21,16 +17,9 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { usd, usdMagnitude } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
-
-function usd(n: number, maxFrac = 2): string {
-  return (n === 0 ? 0 : n).toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: maxFrac,
-  });
-}
 
 /* The brand leads slot 1, and the token already themes itself — see the note
    in UsageView on why the hex pair this replaced was a liability. */
@@ -132,12 +121,12 @@ export function FinancesView({ client, company }: Props) {
         {/* KPIs */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Kpi icon={Wallet} label="Wallet balance" value={usd(data.balanceUsd)} hint="Ledger balance" />
-          <Kpi icon={TrendingUp} label="Revenue" value={usd(data.revenueUsd, 0)} hint="This month" />
-          <Kpi icon={Coins} label="Spend" value={usd(data.spentUsd, 0)} hint={budgetUsd === null ? "This month" : `of ${usd(budgetUsd, 0)} budget`} />
+          <Kpi icon={TrendingUp} label="Revenue" value={usd(data.revenueUsd)} hint="This month" />
+          <Kpi icon={Coins} label="Spend" value={usd(data.spentUsd)} hint={budgetUsd === null ? "This month" : `of ${usd(budgetUsd)} budget`} />
           <Kpi
             icon={PiggyBank}
             label="Net"
-            value={`${netSign}${usd(Math.abs(data.netUsd), 0)}`}
+            value={`${netSign}${usdMagnitude(data.netUsd)}`}
             hint="Revenue − spend"
             valueClass={data.netUsd > 0 ? "text-status-done-text" : data.netUsd < 0 ? "text-status-failed-text" : undefined}
           />
@@ -152,7 +141,12 @@ export function FinancesView({ client, company }: Props) {
                 ? "No monthly budget is set."
                 : budgetUsd === 0
                   ? "Spending is capped at $0.00 this month."
-                  : `${usd(data.spentUsd, 0)} of ${usd(budgetUsd, 0)} used · ${usd(budgetUsd - data.spentUsd, 0)} left`}
+                  : `${usd(data.spentUsd)} of ${usd(budgetUsd)} used · ${usd(budgetUsd - data.spentUsd)} left`}
+            </CardDescription>
+            <CardDescription data-testid="monthly-budget-origin">
+              This cap is read from the company manifest's <code>[budget]</code>{" "}
+              section and cannot be changed here. To limit spending from the
+              console, set a daily cap on each teammate's page.
             </CardDescription>
           </CardHeader>
           {hasBudget && (
@@ -183,9 +177,9 @@ export function FinancesView({ client, company }: Props) {
                   <BarChart data={data.byCategory} layout="vertical" margin={{ left: 8, right: 48 }}>
                     <XAxis type="number" dataKey="amount" hide />
                     <YAxis type="category" dataKey="category" tickLine={false} axisLine={false} width={110} />
-                    <ChartTooltip content={<ChartTooltipContent formatter={(v) => usd(Number(v), 0)} />} />
+                    <ChartTooltip content={<ChartTooltipContent formatter={(v) => usd(Number(v))} />} />
                     <Bar dataKey="amount" fill="var(--color-amount)" radius={4}>
-                      <LabelList dataKey="amount" position="right" className="fill-muted-foreground" formatter={(v) => usd(Number(v ?? 0), 0)} />
+                      <LabelList dataKey="amount" position="right" className="fill-muted-foreground" formatter={(v) => usd(Number(v ?? 0))} />
                     </Bar>
                   </BarChart>
                 </ChartContainer>
@@ -224,7 +218,7 @@ export function FinancesView({ client, company }: Props) {
                         </div>
                         <span className={cn("shrink-0 text-sm font-medium tabular-nums", inflow ? "text-status-done-text" : "text-foreground")}>
                           {inflow ? "+" : "−"}
-                          {usd(t.amountUsd)}
+                          {usdMagnitude(t.amountUsd)}
                         </span>
                       </li>
                     );

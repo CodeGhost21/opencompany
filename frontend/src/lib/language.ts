@@ -2,6 +2,7 @@
 // never exposes runtime internals ("agent graph", "tier", "dispatch", "cycle",
 // "checkpoint", "A2A"). Everything a person sees goes through this layer.
 
+import { usd } from "./money";
 import type { TaskApprovalStatus } from "../api/tasks";
 import type {
   ApprovalSummary,
@@ -870,8 +871,9 @@ function renderValue(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
 }
 
-export function money(usd: number): string {
-  return usd.toLocaleString(undefined, { style: "currency", currency: "USD" });
+/** An effect's dollar amount, rendered like every other real-money figure. */
+export function money(amountUsd: number): string {
+  return usd(amountUsd);
 }
 
 /** Feedback categories, phrased the way an operator would think about them. */
