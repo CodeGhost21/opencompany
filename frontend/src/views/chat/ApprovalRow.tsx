@@ -379,6 +379,17 @@ export function ApprovalRow({
     </a>
   ) : (
     <>
+      {pendingBlockers.length > 0 ? (
+        // A mixed batch: `decideAll` below only ever touches `pendingGated`,
+        // so a blocker riding the same batch has no verdict this row can
+        // apply for it. Keep it reachable rather than silently unanswerable.
+        <a
+          href={detailsHref}
+          className={cn(buttonVariants({ variant: "outline", size: "sm" }), actionClass)}
+        >
+          Answer in Approvals
+        </a>
+      ) : null}
       <Button
         variant={declineVariant}
         size="sm"
