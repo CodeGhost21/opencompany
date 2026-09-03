@@ -444,6 +444,63 @@ export function runSummaryLine(
 }
 
 /**
+ * What to tell the operator the instant a run they pressed Run on settles
+ * (B-039).
+ *
+ * The console used to answer this with one line — `toast.success("Workflow
+ * ran.")` — for every run whose body came back, which is every run that did not
+ * throw. A run the operator had just **stopped** got it, so one screen said
+ * "stopped", "Workflow ran." and an output-shape error about a single run at
+ * once. So did a run that failed at its first node, and one parked on an
+ * approval.
+ *
+ * The reading comes from the host's `verdict` (issue #981), like every other
+ * reader of a run's outcome. `tone` is the sonner method to call, so a caller
+ * cannot pair a green tick with a red word.
+ *
+ * `undefined` — a host predating #981 — keeps the old sentence, deliberately.
+ * That host sends nothing to read, and the alternative is inventing a reading
+ * for it, which is the habit this exists to remove.
+ */
+export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
+  tone: "success" | "info" | "error";
+  message: string;
+} {
+  switch (verdict) {
+    case "stopped":
+      // Idle, not red: a stop somebody asked for is not a fault — the same
+      // reading `VERDICT_TONE` gives it.
+      return { tone: "info", message: "Run stopped." };
+    case "failed":
+      return { tone: "error", message: "The workflow run failed." };
+    case "undelivered":
+      return {
+        tone: "error",
+        message: "The workflow ran, but a report did not go out.",
+      };
+    case "blocked":
+    case "awaiting-approval":
+      return {
+        tone: "info",
+        message: "The run is waiting on your approval before it can finish.",
+      };
+    case "stranded":
+      return {
+        tone: "info",
+        message: "The run stopped for an approval that is no longer in the queue.",
+      };
+    case "degraded":
+      return { tone: "info", message: "The workflow ran, with a step in error." };
+    case "running":
+      // Reachable only from a host that settled a body while still calling the
+      // run live. Say the true half rather than either terminal claim.
+      return { tone: "info", message: "The workflow is still running." };
+    default:
+      return { tone: "success", message: "Workflow ran." };
+  }
+}
+
+/**
  * A run that is still walking its graph.
  *
  * Its own reading, ahead of {@link runTone}: an in-flight run has not failed and

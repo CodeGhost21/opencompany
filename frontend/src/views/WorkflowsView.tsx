@@ -135,7 +135,7 @@ import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 // Issue #981: which nodes produced a report that never went out, so the canvas
 // card can say so beside the DONE badge instead of leaving it to a banner.
-import { undeliveredNodes } from "@/views/workflows/run-health";
+import { settledRunNotice, undeliveredNodes } from "@/views/workflows/run-health";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
@@ -1557,8 +1557,15 @@ export function WorkflowsView({
             description:
               "Your test run executed real effects (teammate turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
+        } else if (dryRun) {
+          toast.success("Test run complete — nothing was sent.");
         } else {
-          toast.success(dryRun ? "Test run complete — nothing was sent." : "Workflow ran.");
+          // B-039: read the host's verdict rather than asserting a clean run.
+          // This line used to be an unconditional "Workflow ran.", which a run
+          // the operator had just STOPPED got too — so the same screen called
+          // one run stopped and ran at the same time.
+          const settled = settledRunNotice(res.verdict);
+          toast[settled.tone](settled.message);
         }
       }
       // A dry run journals NOTHING (#542), so there is no history row to pull
