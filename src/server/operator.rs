@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::blockers::BlockerVerdict;
 use crate::ports::events::EventStreamItem;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{
@@ -38,6 +39,7 @@ use crate::ports::types::{
     OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
     TurnStep, Verdict,
 };
+use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
@@ -2022,6 +2024,12 @@ struct ChatResponse {
     /// this field is indistinguishable from one that never took this branch.
     #[serde(skip_serializing_if = "Option::is_none")]
     review_feedback_applied: Option<bool>,
+    /// The same list [`ResolveReceiptDto::settled_ids`] carries, for the
+    /// non-detached resolve the Approvals page makes: a blocker answered there
+    /// settles its whole root-cause group, and the page owes those siblings the
+    /// same removal it gives the card that was clicked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settled_ids: Option<Vec<String>>,
 }
 
 /// The `detach: true` response (issue #983): the turn's id and the durable id of
@@ -2928,6 +2936,7 @@ async fn chat_and_emit(
                 turn_id,
                 outcome: None,
                 review_feedback_applied: Some(true),
+                settled_ids: None,
             })));
         }
     }
@@ -2964,6 +2973,7 @@ async fn chat_and_emit(
                     turn_id,
                     outcome: None,
                     review_feedback_applied: Some(true),
+                    settled_ids: None,
                 })));
             }
             crate::company::runtime::BlockerReplyPlan::AskWhich { prompt } => {
@@ -2984,6 +2994,7 @@ async fn chat_and_emit(
                     turn_id,
                     outcome: None,
                     review_feedback_applied: Some(true),
+                    settled_ids: None,
                 })));
             }
             crate::company::runtime::BlockerReplyPlan::NotBlocker => {}
@@ -3090,6 +3101,7 @@ async fn chat_and_emit(
         // …and it resolves nothing, so there is no resolve outcome to report.
         outcome: None,
         review_feedback_applied: None,
+        settled_ids: None,
     })))
 }
 
@@ -4372,6 +4384,28 @@ struct ResolveApproval {
     /// live when it lapsed days earlier.
     #[serde(default)]
     expires_in_millis: Option<u64>,
+    /// Which of the four things the operator asked a parked **blocker** to do:
+    /// `retry`, `amend`, `skip` or `cancel`.
+    ///
+    /// It **narrows** the mandatory two-value `verdict` rather than replacing
+    /// it, the same shape [`amended_payload`](Self::amended_payload) uses: the
+    /// approve/deny it must be paired with is the one
+    /// [`BlockerVerdict::event_verdict`](crate::ports::blockers::BlockerVerdict::event_verdict)
+    /// lowers it onto, and a pair that disagrees is a 400. Absent leaves the
+    /// resolve exactly as it was.
+    ///
+    /// A `String` rather than the enum so an unrecognised token is an explicit
+    /// 400 naming the four it could have been, instead of a serde failure.
+    #[serde(default)]
+    blocker_verdict: Option<String>,
+    /// The words an `amend` re-enters the stopped step carrying.
+    ///
+    /// Mandatory and non-blank with `blocker_verdict: "amend"`, refused with
+    /// any other verdict. A blank amend is a 400 rather than a downgrade to a
+    /// retry: the step stopped for want of these words, so re-running it
+    /// without them repeats the failure the operator thought they had answered.
+    #[serde(default)]
+    blocker_answer: Option<String>,
 }
 
 /// The wire form of [`GrantScope`].
@@ -4444,6 +4478,93 @@ fn grant_scope(body: &ResolveApproval) -> Result<GrantScope, ApiError> {
                 expires_at_millis: crate::ports::now_millis().saturating_add(duration),
             })
         }
+    }
+}
+
+/// Validates the four-way blocker verdict a resolve carries, if any.
+///
+/// Every refusal here happens **before** the runtime is touched, so a bad
+/// request leaves the blocker parked and journals no verdict. What is refused:
+///
+/// * an unrecognised token — named, rather than a serde failure;
+/// * a `verdict`/`blocker_verdict` pair that disagree, judged by
+///   [`BlockerVerdict::event_verdict`];
+/// * `amend` with a blank or absent answer, and an answer sent with any other
+///   verdict;
+/// * `blocker_answer` with no `blocker_verdict` at all;
+/// * pairing with `amended_payload` — one edits a gated call's arguments, the
+///   other answers a question, and no approval is both;
+/// * pairing with `scope: "tool"` — a blocker is a question, and answering one
+///   grants no standing permission.
+///
+/// A build without the `openhuman` feature has no blocker resume to reach, so
+/// it refuses the field outright rather than accepting and ignoring it.
+fn blocker_verdict(body: &ResolveApproval) -> Result<Option<BlockerVerdict>, ApiError> {
+    let bad = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
+    let answer = body.blocker_answer.as_deref();
+    let Some(word) = body.blocker_verdict.as_deref() else {
+        if answer.is_some() {
+            return Err(bad(
+                "blocker_answer needs a blocker_verdict: words with no verdict do not say what \
+                 the stopped step should do"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    #[cfg(not(feature = "openhuman"))]
+    return Err(bad(format!(
+        "blocker_verdict {word:?} is not supported by this build: it has no blocker resume to \
+         answer"
+    )));
+    #[cfg(feature = "openhuman")]
+    {
+        let Some(verdict) = BlockerVerdict::from_wire(word) else {
+            return Err(bad(format!(
+                "unknown blocker_verdict {word:?}; expected \"retry\", \"amend\", \"skip\" or \
+                 \"cancel\""
+            )));
+        };
+        let owed = verdict.event_verdict();
+        if owed != body.verdict {
+            return Err(bad(format!(
+                "blocker_verdict {:?} is a {:?}, so it cannot accompany verdict {:?}",
+                verdict.as_str(),
+                owed,
+                body.verdict
+            )));
+        }
+        if verdict == BlockerVerdict::Amend {
+            if !answer.is_some_and(|words| !words.trim().is_empty()) {
+                return Err(bad(
+                    "blocker_verdict \"amend\" needs a non-empty blocker_answer: the step \
+                     stopped for want of an answer, so re-entering it without one repeats the \
+                     failure"
+                        .to_string(),
+                ));
+            }
+        } else if answer.is_some() {
+            return Err(bad(format!(
+                "blocker_answer only accompanies blocker_verdict \"amend\"; {:?} carries no \
+                 words back into the step",
+                verdict.as_str()
+            )));
+        }
+        if body.amended_payload.is_some() {
+            return Err(bad(
+                "blocker_verdict cannot accompany amended_payload: one answers a question, the \
+                 other edits a gated call's arguments"
+                    .to_string(),
+            ));
+        }
+        if body.scope == Some(ResolveScope::Tool) {
+            return Err(bad(
+                "blocker_verdict cannot accompany scope \"tool\": answering a blocker grants no \
+                 standing permission"
+                    .to_string(),
+            ));
+        }
+        Ok(Some(verdict))
     }
 }
 
@@ -4592,6 +4713,59 @@ struct ResolveReceiptDto {
     /// exclusive: two booleans can spell combinations that cannot happen, and
     /// every reader would have to know which ones are real.
     outcome: &'static str,
+    /// Every approval this one resolve settled, when it settled more than the
+    /// one addressed.
+    ///
+    /// A blocker answered here fans its verdict to its whole root-cause group,
+    /// exactly as answering it in a DM does, so the console has to drop the
+    /// siblings too rather than leave cards for questions the host has already
+    /// retired. Skipped when empty, which is every non-blocker resolve.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    settled_ids: Vec<String>,
+}
+
+/// Answers a parked blocker with the operator's four-way verdict, fanning it to
+/// the blocker's whole root-cause group and naming what it settled.
+///
+/// Reaches the same bank-arm-settle primitive a DM answer reaches, so a blocker
+/// answered on two surfaces cannot settle differently. A `blocker_verdict` on an
+/// approval that is not a parked blocker is a 400 here, not a resolve: it would
+/// otherwise silently fall back to the two-value path and lose the operator's
+/// verdict.
+#[cfg(feature = "openhuman")]
+async fn resolve_blocker(
+    runtime: &Arc<CompanyRuntime>,
+    id: &ApprovalId,
+    verdict: BlockerVerdict,
+    answer: &str,
+    actor: Actor,
+    settled_ids: &mut Vec<String>,
+) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
+    let Some(group) = runtime.parked_blocker_group(id) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "approval {id} is not a parked blocker, so it has no blocker_verdict to answer"
+        ))));
+    };
+    *settled_ids = group.iter().map(ToString::to_string).collect();
+    Ok(runtime
+        .apply_blocker_reply_spawned(&group, verdict, answer, Some(&actor))
+        .await?)
+}
+
+/// The refusal a build with no blocker resume owes: `blocker_verdict` has
+/// already been rejected by [`blocker_verdict`], so nothing reaches here.
+#[cfg(not(feature = "openhuman"))]
+async fn resolve_blocker(
+    _runtime: &Arc<CompanyRuntime>,
+    _id: &ApprovalId,
+    _verdict: BlockerVerdict,
+    _answer: &str,
+    _actor: Actor,
+    _settled_ids: &mut Vec<String>,
+) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
+    Err(ApiError(OpenCompanyError::InvalidRequest(
+        "blocker_verdict is not supported by this build".to_string(),
+    )))
 }
 
 async fn run_resolve(
@@ -4604,28 +4778,46 @@ async fn run_resolve(
 ) -> Result<Response, ApiError> {
     runtime.ensure_running().await?;
     // Issue #374: validated before the runtime is touched, so a refused scope
-    // leaves the approval parked with no verdict journaled.
+    // leaves the approval parked with no verdict journaled. The blocker verdict
+    // is validated on the same terms and for the same reason.
+    let blocker = blocker_verdict(&body)?;
     let scope = grant_scope(&body)?;
     let id = ApprovalId::new(approval_id);
+    // Every approval this resolve settled, when it settled more than the one
+    // addressed — a blocker fans to its root-cause group.
+    let mut settled_ids: Vec<String> = Vec::new();
     // The verdict is settled inline; only the follow-up cycle is on the handle.
     // So by the time this returns — in either mode — the decision is journaled
     // and any grant is minted.
-    let (receipt, follow_up) = match (body.verdict, body.amended_payload) {
-        (Verdict::Approve, Some(payload)) => {
-            runtime
-                .resolve_approval_amended_spawned(&id, payload, actor)
-                .await?
+    let (receipt, follow_up) = match blocker {
+        Some(verdict) => {
+            resolve_blocker(
+                &runtime,
+                &id,
+                verdict,
+                body.blocker_answer.as_deref().unwrap_or_default(),
+                actor,
+                &mut settled_ids,
+            )
+            .await?
         }
-        (Verdict::Deny, Some(_)) => {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(
-                "amended_payload cannot accompany a deny verdict".to_string(),
-            )));
-        }
-        (verdict, None) => {
-            runtime
-                .resolve_approval_spawned(&id, verdict, actor, scope)
-                .await?
-        }
+        None => match (body.verdict, body.amended_payload) {
+            (Verdict::Approve, Some(payload)) => {
+                runtime
+                    .resolve_approval_amended_spawned(&id, payload, actor)
+                    .await?
+            }
+            (Verdict::Deny, Some(_)) => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    "amended_payload cannot accompany a deny verdict".to_string(),
+                )));
+            }
+            (verdict, None) => {
+                runtime
+                    .resolve_approval_spawned(&id, verdict, actor, scope)
+                    .await?
+            }
+        },
     };
 
     // Read once, here: the verdict is durable and the follow-up cycle — which is
@@ -4659,6 +4851,7 @@ async fn run_resolve(
             already_resolved: receipt.already_resolved(),
             still_awaiting,
             outcome,
+            settled_ids,
         })
         .into_response());
     }
@@ -4671,6 +4864,7 @@ async fn run_resolve(
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
         review_feedback_applied: None,
+        settled_ids: (!settled_ids.is_empty()).then_some(settled_ids),
         // A resolve runs a follow-up cycle, not an operator turn, so it opens no
         // turn row of its own.
         turn_id: None,
@@ -9662,6 +9856,455 @@ mode = "full"
 
     fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value) -> Request<Body> {
         resolve_request_scoped("/api/v1/company", approval_id, body)
+    }
+
+    // -- A blocker answered from the Approvals page (issue #2028) -------------
+
+    /// Parks a workflow-node blocker: `TaskLink::Unlinked` with no
+    /// conversation, which is the shape a node blocker takes and the reason the
+    /// chat blocker path — which filters on the thread — can never reach one.
+    #[cfg(feature = "openhuman")]
+    async fn park_node_blocker(
+        runtime: &Arc<CompanyRuntime>,
+        id: &str,
+        group_key: Option<&str>,
+    ) -> ApprovalId {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Provider,
+            step: Some(BlockerStep::Node {
+                run_id: "run-1".to_string(),
+                node_id: "draft".to_string(),
+            }),
+            reason: "the model id `gpt-nope` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: group_key.map(str::to_string),
+        };
+        let approval = ApprovalId::new(id);
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: Some("run-1".to_string()),
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        approval
+    }
+
+    /// Every `BlockerResolved` line the durable journal holds, in append order —
+    /// what the operator's answer actually banked, read off disk rather than off
+    /// the in-memory map the resume consumes.
+    #[cfg(feature = "openhuman")]
+    async fn banked_resolutions(
+        home: &std::path::Path,
+        company: &CompanyId,
+    ) -> Vec<serde_json::Value> {
+        let path = crate::store::paths::Bundle::new(home, company).journal_jsonl();
+        let raw = tokio::fs::read_to_string(path).await.unwrap_or_default();
+        raw.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["record"] == "BlockerResolved")
+            .collect()
+    }
+
+    /// A company with one parked workflow-node blocker, and the pieces a resolve
+    /// test needs to read back what its click banked.
+    #[cfg(feature = "openhuman")]
+    struct BlockedCompany {
+        app: axum::Router,
+        runtime: Arc<CompanyRuntime>,
+        home: std::path::PathBuf,
+        company: CompanyId,
+        approval_id: ApprovalId,
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn blocked_company(home: &std::path::Path) -> BlockedCompany {
+        let home = home.to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let approval_id = park_node_blocker(&runtime, "blocker-1", None).await;
+        BlockedCompany {
+            app,
+            runtime,
+            home,
+            company,
+            approval_id,
+        }
+    }
+
+    /// Posts a resolve and returns its status and parsed body.
+    #[cfg(feature = "openhuman")]
+    async fn post_resolve(
+        app: &axum::Router,
+        id: &ApprovalId,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(resolve_request(id, body))
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// Every refusal owes the same two things beyond its 400: the blocker is
+    /// still parked, and nothing was banked. A validation that answered 400
+    /// after journaling a verdict would have spent the operator's question.
+    #[cfg(feature = "openhuman")]
+    async fn assert_refused(body: serde_json::Value, expect_in_error: &str) {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(&c.app, &c.approval_id, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        let message = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expect_in_error),
+            "the refusal must say why; got {message:?}"
+        );
+        assert!(
+            c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|p| p.id == c.approval_id),
+            "a refused request must leave the blocker parked"
+        );
+        assert!(
+            banked_resolutions(&c.home, &c.company).await.is_empty(),
+            "a refused request must journal no verdict"
+        );
+    }
+
+    /// **Issue #2028 — the bug.** An Approvals click that says `skip` banks a
+    /// skip. Before the route arm existed the same request banked a `retry`,
+    /// because `verdict: approve` was the only thing the host read.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_skip_from_the_approvals_page_banks_a_skip() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1, "one answer, one banked resolution");
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "skip",
+            "the operator asked to skip the node, not to run it again"
+        );
+    }
+
+    /// The amend twin: the words the operator typed reach the banked resolution
+    /// verbatim, which is what the re-entered step reads.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_amend_from_the_approvals_page_carries_the_answer_verbatim() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "amend",
+                "blocker_answer": "use gpt-4o-mini instead",
+                "detach": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0]["resolution"]["verdict"], "amend");
+        assert_eq!(
+            banked[0]["resolution"]["answer"], "use gpt-4o-mini instead",
+            "the correction must reach the step, or the re-run repeats the failure"
+        );
+    }
+
+    /// A cancel still denies, and is still the only verdict that does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_cancel_from_the_approvals_page_banks_a_cancel() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "deny", "blocker_verdict": "cancel", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0]["resolution"]["verdict"], "cancel");
+    }
+
+    /// Answering one member of a root-cause group answers all of them — the
+    /// same fan-out a DM answer performs — and the receipt names every id it
+    /// settled so the console can drop the siblings' cards too.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_group_settles_together_and_the_receipt_names_every_member() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let first = park_node_blocker(&runtime, "grouped-1", Some("connection:slack")).await;
+        let second = park_node_blocker(&runtime, "grouped-2", Some("connection:slack")).await;
+
+        let (status, answer) = post_resolve(
+            &app,
+            &first,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer["settledIds"],
+            serde_json::json!(["grouped-1", "grouped-2"]),
+            "the receipt must name the siblings the answer settled: {answer}"
+        );
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "one answer to a root-cause group retires every member of it"
+        );
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 2, "both members banked the same verdict");
+        for line in &banked {
+            assert_eq!(line["resolution"]["verdict"], "skip");
+        }
+        let _ = second;
+    }
+
+    /// An ordinary resolve is unchanged: no `settledIds` key at all, so a
+    /// console predating the field reads the same body it always did.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_ordinary_resolve_names_no_settled_ids() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "approve", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(
+            answer.get("settledIds").is_none(),
+            "a resolve that fanned to nothing must carry no list: {answer}"
+        );
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_disagreeing_verdict_pair_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "deny", "blocker_verdict": "skip" }),
+            "cannot accompany verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blank_amend_is_refused_rather_than_downgraded() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "amend",
+                "blocker_answer": "   \n\t ",
+            }),
+            "needs a non-empty blocker_answer",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_amend_with_no_answer_at_all_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "amend" }),
+            "needs a non-empty blocker_answer",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_answer_with_no_verdict_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_answer": "use gpt-4o-mini" }),
+            "blocker_answer needs a blocker_verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_answer_on_a_wordless_verdict_is_refused() {
+        for verdict in ["retry", "skip", "cancel"] {
+            let event = if verdict == "cancel" {
+                "deny"
+            } else {
+                "approve"
+            };
+            assert_refused(
+                serde_json::json!({
+                    "verdict": event,
+                    "blocker_verdict": verdict,
+                    "blocker_answer": "words this verdict cannot carry",
+                }),
+                "only accompanies blocker_verdict",
+            )
+            .await;
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_unknown_blocker_verdict_is_refused_by_name() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "ignore" }),
+            "unknown blocker_verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_with_an_amended_payload_is_refused() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "skip",
+                "amended_payload": { "text": "edited" },
+            }),
+            "cannot accompany amended_payload",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_with_a_tool_scope_is_refused() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "skip",
+                "scope": "tool",
+                "expires_in_millis": 3_600_000,
+            }),
+            "cannot accompany scope",
+        )
+        .await;
+    }
+
+    /// A `blocker_verdict` on an approval that is not a parked blocker is a 400,
+    /// not a quiet fall-through to the two-value path — which would lose the
+    /// operator's verdict without telling anyone.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_on_an_ordinary_approval_is_refused() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let ordinary = park_for_extend(&runtime, "ordinary-1", crate::ports::now_millis()).await;
+
+        let (status, answer) = post_resolve(
+            &app,
+            &ordinary,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is not a parked blocker"),
+            "{answer}"
+        );
+        assert!(
+            runtime.pending_approvals().iter().any(|p| p.id == ordinary),
+            "a refused request must leave the approval parked"
+        );
+        assert!(banked_resolutions(&home, &company).await.is_empty());
+    }
+
+    /// A build with no blocker resume refuses the field outright. Accepting and
+    /// ignoring it would answer `200` to a skip that silently became a retry —
+    /// the exact defect, reintroduced by a feature flag.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn a_build_without_the_resume_refuses_a_blocker_verdict() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+
+        let response = app
+            .oneshot(resolve_request(
+                &ApprovalId::new("missing"),
+                serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not supported by this build"),
+            "{value}"
+        );
     }
 
     // -- Extend the deadline (issue #1805) -----------------------------------
