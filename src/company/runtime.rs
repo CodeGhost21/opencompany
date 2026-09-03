@@ -2267,7 +2267,7 @@ impl CompanyRuntime {
         // the same badge behind.
         let unanswered = self.unanswered_blocker(id);
         let is_blocker = self.is_blocker(id);
-        let waiting_run = self.parked_workflow_run(id);
+        let waiting_runs = self.parked_workflow_attempts(id).await;
         let released = self
             .retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
@@ -2275,7 +2275,7 @@ impl CompanyRuntime {
             id,
             is_blocker,
             unanswered,
-            waiting_run.filter(|_| !released),
+            if released { Vec::new() } else { waiting_runs },
         )
         .await;
         Ok(())
@@ -4657,13 +4657,13 @@ impl CompanyRuntime {
             let is_blocker = self.is_blocker(id);
             // Issue B-012: and which workflow run was waiting on it, for the
             // same before-the-retirement reason as the two above.
-            let waiting_run = self.parked_workflow_run(id);
+            let waiting_runs = self.parked_workflow_attempts(id).await;
             let released = self.retire_approval(id, ExpiryReason::Ttl, now).await?;
             self.finish_expiry(
                 id,
                 is_blocker,
                 unanswered,
-                waiting_run.filter(|_| !released),
+                if released { Vec::new() } else { waiting_runs },
             )
             .await;
         }
@@ -4697,7 +4697,7 @@ impl CompanyRuntime {
         id: &ApprovalId,
         was_blocker: bool,
         unanswered: Option<(String, String)>,
-        waiting_run: Option<String>,
+        waiting_runs: Vec<String>,
     ) {
         // **The run that was waiting stops claiming it still is** (issue B-012).
         //
@@ -4727,7 +4727,7 @@ impl CompanyRuntime {
         //
         // Best-effort and last, like everything else here: a row that cannot be
         // written must not undo a default-deny that already happened.
-        if let Some(run_id) = waiting_run {
+        for run_id in waiting_runs {
             let outcome =
                 crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
                     .with_error(
@@ -4812,15 +4812,63 @@ impl CompanyRuntime {
         pending.effect.kind.starts_with(&prefix)
     }
 
-    /// The workflow run this approval parked, read **before** the retirement
-    /// for the reason its two siblings are (issue B-012).
+    /// The **attempt rows** this approval left recorded `WaitingApproval`, read
+    /// **before** the retirement for the reason its two siblings are (B-012).
     ///
     /// `workflow_run_of` needs the pending entry, and retiring is what removes
     /// it — so after `retire_approval` there is no way back to which run was
     /// waiting, exactly as there is no way back to what was being asked.
-    fn parked_workflow_run(&self, id: &ApprovalId) -> Option<String> {
-        let pending = self.journal.pending().into_iter().find(|p| &p.id == id)?;
-        workflow_run_of(&pending)
+    ///
+    /// # Why this resolves rather than settling `Effect::run_id` directly
+    ///
+    /// Codex on the B-012 PR. `Effect::run_id` on a workflow gate is the
+    /// **lineage** id — `workflow_resume::workflow_turn_key` mints this run's
+    /// resume key straight from it — while `RunStore` rows are per-node
+    /// *attempts* minted under `generate_id()` and merely *linked* to the
+    /// lineage (`NewRun::for_workflow_node`, `src/workflows/caps/mod.rs`).
+    /// `RunFilter::for_workflow_run` being a filter rather than a key is the
+    /// same fact from the other side. Handing the lineage id to `finish_run`
+    /// therefore names no row at all: it answers `NotFound`, the settle is
+    /// swallowed as best-effort, and the attempt goes on reading
+    /// `WaitingApproval` — which is precisely the bug B-012 is about.
+    ///
+    /// Narrowed to the parked **node**, not every `WaitingApproval` attempt in
+    /// the lineage: a graph can park two nodes on two gates, and only one of
+    /// them expired. Without a node to match, nothing is settled — a run left
+    /// stale is the bug, but cancelling a sibling node still waiting on a live
+    /// decision would be a worse one.
+    async fn parked_workflow_attempts(&self, id: &ApprovalId) -> Vec<String> {
+        let Some(pending) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
+            return Vec::new();
+        };
+        let Some(lineage) = workflow_run_of(&pending) else {
+            return Vec::new();
+        };
+        let Some(node) = crate::runtime::workflow_resume::gate_node_id(&pending.effect) else {
+            return Vec::new();
+        };
+        let node = node.to_string();
+        let filter = crate::ports::runs::RunFilter {
+            workflow_run_id: Some(lineage),
+            statuses: vec![crate::ports::runs::RunStatus::WaitingApproval],
+            ..Default::default()
+        };
+        match self.runs().list_runs(&self.id, &filter).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| row.node_id.as_deref() == Some(node.as_str()))
+                .map(|row| row.id)
+                .collect(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    %err,
+                    "[approval] could not resolve the attempts waiting on an expiring approval"
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
@@ -8243,6 +8291,74 @@ mod tests {
         }
     }
 
+    /// A workflow gate parked on a node of `lineage`, in the shape production
+    /// actually leaves behind (Codex on the B-012 PR).
+    ///
+    /// The two halves that matter are the two that were wrong when this was
+    /// hand-rolled: `Effect::run_id` is the **lineage** id, and the
+    /// `WaitingApproval` row is a separately-minted *attempt* linked to it by
+    /// `NewRun::for_workflow_node`. A fixture that gives the row the lineage's
+    /// own id proves only that the fixture works.
+    ///
+    /// Returns the attempt row's id — the row the expiry has to find.
+    async fn park_workflow_gate(
+        rt: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
+        approval: &crate::ports::types::ApprovalId,
+        lineage: &str,
+        node: &str,
+        at_millis: u64,
+        cycle: Option<String>,
+    ) -> String {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::EventSeq;
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let attempt = crate::ports::generate_id();
+        rt.runs()
+            .create_run(
+                rt.id(),
+                crate::ports::NewRun::for_workflow_node(attempt.clone(), lineage, node, "ceo"),
+            )
+            .await
+            .unwrap();
+        rt.runs()
+            .begin_run(rt.id(), &attempt, EventSeq::new(1))
+            .await
+            .unwrap();
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                &attempt,
+                crate::ports::runs::RunOutcome::new(RunStatus::WaitingApproval),
+            )
+            .await
+            .unwrap();
+
+        let effect = crate::runtime::workflow_resume::gate_effect(
+            "wf-demo",
+            node,
+            &serde_json::json!({}),
+            lineage,
+            &[],
+            &[],
+            None,
+        );
+        rt.approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at_millis);
+        rt.journal
+            .record_parked(
+                approval,
+                &effect,
+                at_millis,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                cycle,
+            )
+            .await
+            .unwrap();
+        attempt
+    }
+
     /// Seeds one parked approval into BOTH the live gate and the durable journal
     /// under a fixed id at `at_millis`, exactly as a real park leaves them — the
     /// gate answers "is this live?" for extend/sweep, the journal projects the
@@ -8285,56 +8401,18 @@ mod tests {
     #[tokio::test]
     async fn an_expired_approval_settles_the_workflow_run_that_was_waiting_on_it() {
         use crate::ports::runs::RunStatus;
-        use crate::ports::types::{ApprovalId, EventSeq};
-        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        use crate::ports::types::ApprovalId;
         use std::sync::Arc;
 
         let (rt, _home) = runtime_with_events().await;
         let rt = Arc::new(rt);
 
-        // A run parked on a gate: begun, then settled as `WaitingApproval` —
-        // exactly the shape `finish_run` leaves behind for a workflow park.
-        rt.runs()
-            .create_run(
-                rt.id(),
-                crate::ports::runs::NewRun::for_task("run-parked", "t-parked", "ceo"),
-            )
-            .await
-            .unwrap();
-        rt.runs()
-            .begin_run(rt.id(), "run-parked", EventSeq::new(1))
-            .await
-            .unwrap();
-        rt.runs()
-            .finish_run(
-                rt.id(),
-                "run-parked",
-                crate::ports::runs::RunOutcome::new(RunStatus::WaitingApproval),
-            )
-            .await
-            .unwrap();
-
-        // The approval that run is waiting on. `Unlinked` + a `run_id` is what
-        // `workflow_run_of` requires to call this a workflow park rather than a
-        // task attempt — the two share an id space, so both terms are needed.
+        // A workflow node parked on a gate: an attempt row settled
+        // `WaitingApproval` and linked to the lineage, plus the gate itself
+        // carrying that lineage. Parked at epoch 0 — past any TTL.
         let approval = ApprovalId::new("appr-b012");
-        let mut effect = extend_test_effect();
-        effect.run_id = Some("run-parked".to_string());
-        rt.approval_gate
-            .rehydrate(approval.clone(), effect.clone(), 0);
-        rt.journal
-            .record_parked(
-                &approval,
-                &effect,
-                0,
-                TaskLink::Unlinked,
-                ApprovalConversation::default(),
-                None,
-            )
-            .await
-            .unwrap();
+        let attempt = park_workflow_gate(&rt, &approval, "wr-b012", "solve", 0, None).await;
 
-        // Parked at epoch 0 — unambiguously past any TTL.
         let expired = rt.sweep_expired_approvals().await.unwrap();
         assert!(
             expired.contains(&approval),
@@ -8343,14 +8421,73 @@ mod tests {
 
         let row = rt
             .runs()
-            .get_run(rt.id(), "run-parked")
+            .get_run(rt.id(), &attempt)
             .await
             .unwrap()
-            .expect("the run row survives the sweep");
+            .expect("the attempt row survives the sweep");
         assert_eq!(
             row.status,
             RunStatus::Cancelled,
-            "a default-denied gate leaves the run cancelled, not still waiting"
+            "a default-denied gate leaves the attempt cancelled, not still waiting"
+        );
+    }
+
+    /// **The narrowing** the settle above is scoped by. One expiry must not
+    /// cancel a *sibling* node still waiting on a live decision.
+    ///
+    /// A graph can park two nodes on two gates, and `RunFilter` can only ask
+    /// for the lineage — so "every `WaitingApproval` attempt of this run" is
+    /// the obvious query and the wrong one. The node is read off the gate's own
+    /// payload (`gate_node_id`) to close that gap.
+    #[tokio::test]
+    async fn an_expiry_leaves_a_sibling_node_still_waiting_on_a_live_gate() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::ApprovalId;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        // Same lineage, two nodes: one parked at epoch 0 (past any TTL), one
+        // parked now (nowhere near it).
+        let expiring = ApprovalId::new("appr-expiring");
+        let attempt_expiring =
+            park_workflow_gate(&rt, &expiring, "wr-two-gates", "solve", 0, None).await;
+        let live = ApprovalId::new("appr-live");
+        let attempt_live = park_workflow_gate(
+            &rt,
+            &live,
+            "wr-two-gates",
+            "review",
+            crate::ports::now_millis(),
+            None,
+        )
+        .await;
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&expiring) && !expired.contains(&live),
+            "only the epoch-0 park expires: {expired:?}"
+        );
+
+        let settled = rt
+            .runs()
+            .get_run(rt.id(), &attempt_expiring)
+            .await
+            .unwrap()
+            .expect("the expired node's attempt survives");
+        assert_eq!(settled.status, RunStatus::Cancelled);
+
+        let sibling = rt
+            .runs()
+            .get_run(rt.id(), &attempt_live)
+            .await
+            .unwrap()
+            .expect("the sibling's attempt survives");
+        assert_eq!(
+            sibling.status,
+            RunStatus::WaitingApproval,
+            "the sibling node is still waiting on a decision nobody has made"
         );
     }
 
@@ -8372,57 +8509,29 @@ mod tests {
     /// resume goes on to do to the row.
     #[tokio::test]
     async fn an_expiry_that_releases_the_run_does_not_also_cancel_it() {
-        use crate::ports::runs::RunStatus;
-        use crate::ports::types::{ApprovalId, EventSeq};
-        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        use crate::ports::types::ApprovalId;
         use std::sync::Arc;
 
         let (rt, _home) = runtime_with_events().await;
         let rt = Arc::new(rt);
 
-        rt.runs()
-            .create_run(
-                rt.id(),
-                crate::ports::runs::NewRun::for_task("run-released", "t-released", "ceo"),
-            )
-            .await
-            .unwrap();
-        rt.runs()
-            .begin_run(rt.id(), "run-released", EventSeq::new(1))
-            .await
-            .unwrap();
-        rt.runs()
-            .finish_run(
-                rt.id(),
-                "run-released",
-                crate::ports::runs::RunOutcome::new(RunStatus::WaitingApproval),
-            )
-            .await
-            .unwrap();
-
         // The difference from the test above, and the whole point of it: a real
         // `workflow-run:` continuation, armed and recorded as this approval's
         // cycle. Expiry is now this turn's last outstanding decision, so
         // `retire_approval` releases the run instead of leaving it stranded.
-        let turn = crate::runtime::workflow_resume::workflow_turn_key("run-released");
+        let turn = crate::runtime::workflow_resume::workflow_turn_key("wr-released");
         rt.continuations.arm(&turn);
 
         let approval = ApprovalId::new("appr-released");
-        let mut effect = extend_test_effect();
-        effect.run_id = Some("run-released".to_string());
-        rt.approval_gate
-            .rehydrate(approval.clone(), effect.clone(), 0);
-        rt.journal
-            .record_parked(
-                &approval,
-                &effect,
-                0,
-                TaskLink::Unlinked,
-                ApprovalConversation::default(),
-                Some(turn.clone()),
-            )
-            .await
-            .unwrap();
+        let attempt = park_workflow_gate(
+            &rt,
+            &approval,
+            "wr-released",
+            "solve",
+            0,
+            Some(turn.clone()),
+        )
+        .await;
 
         let expired = rt.sweep_expired_approvals().await.unwrap();
         assert!(
@@ -8432,10 +8541,10 @@ mod tests {
 
         let row = rt
             .runs()
-            .get_run(rt.id(), "run-released")
+            .get_run(rt.id(), &attempt)
             .await
             .unwrap()
-            .expect("the run row survives the sweep");
+            .expect("the attempt row survives the sweep");
         assert_ne!(
             row.error.as_deref(),
             Some("the approval this run was waiting on expired and defaulted to denied"),
