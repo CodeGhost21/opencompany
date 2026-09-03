@@ -220,3 +220,108 @@ test("the open count follows a row recorded after the screen was opened", async 
     await request.delete(`${API}/ledgers/${slug}?purge=true`);
   }
 });
+
+/**
+ * The count beside the list's name describes the rows rendered under it.
+ *
+ * `read_ledger` used to answer with a count from a second, independent fold
+ * of the ledger — taken separately from the one that produced the rows in
+ * the same response. A write landing between the two could flip a row's
+ * status after the rows were read but before the count was, so the badge
+ * disagreed with what the screen actually showed beside it. This checks the
+ * agreement against the DOM itself — counting the rows Playwright can see,
+ * not a second value pulled from another request — after a write and after
+ * a close, which is where a stale or independently-folded count would show.
+ */
+test("the open count agrees with the rows the screen actually shows", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(120_000);
+
+  const marker = Date.now();
+  const slug = `e2e-count-agree-${marker}`;
+  const declared = await request.post(`${API}/ledgers`, {
+    data: {
+      slug,
+      title: `E2E count agree ${marker}`,
+      purpose: "A list used to check the badge against the rows it counts.",
+      derived: `derived/${slug}.md`,
+      fields: [
+        { name: "id", role: "id" },
+        { name: "risk", role: "title" },
+        { name: "status", role: "status" },
+        { name: "reason", role: "prose" },
+      ],
+      statuses: [
+        { name: "open" },
+        { name: "closed", closed: true, needs_reason: true },
+      ],
+    },
+  });
+  expect(declared.ok()).toBeTruthy();
+
+  try {
+    const recordRow = (id: string, risk: string) =>
+      request.post(`${API}/ledgers/${slug}/entries`, {
+        data: { id, status: "open", fields: { risk } },
+      });
+    expect((await recordRow("r1", "first")).ok()).toBeTruthy();
+    expect((await recordRow("r2", "second")).ok()).toBeTruthy();
+
+    await page.goto(`/#/ledgers/${slug}`);
+    // A company that has not yet cleared the first-run activation funnel
+    // gates the whole shell behind it (`OnboardingGate`); dismiss the same
+    // way an operator would, if it is showing.
+    const gateSkip = page.getByTestId("gate-skip");
+    try {
+      await gateSkip.waitFor({ state: "visible", timeout: 5_000 });
+      await gateSkip.click();
+    } catch {
+      // Not showing — the company already cleared activation.
+    }
+
+    const count = page.getByTestId("ledger-open-count");
+    await expect(page.getByTestId("ledger-entry-r2")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // The invariant: the badge equals however many rows the DOM itself
+    // renders as not-closed — never a fixed number asserted independently
+    // of what is actually on screen.
+    const assertBadgeMatchesRows = async () => {
+      const statuses = await page
+        .getByTestId("ledger-entry-status")
+        .allTextContents();
+      const openRows = statuses.filter(
+        (text) => !text.trim().startsWith("Closed"),
+      ).length;
+      await expect(count).toHaveText(String(openRows));
+    };
+    await assertBadgeMatchesRows();
+    await expect(count).toHaveText("2");
+
+    // Record a third row live: the badge must move with the rows.
+    expect((await recordRow("r3", "third")).ok()).toBeTruthy();
+    await page.getByRole("button", { name: /refresh/i }).first().click();
+    await expect(page.getByTestId("ledger-entry-r3")).toBeVisible({
+      timeout: 15_000,
+    });
+    await assertBadgeMatchesRows();
+    await expect(count).toHaveText("3");
+
+    // Close one: the badge must drop with the row, not lag behind it.
+    const closed = await request.post(`${API}/ledgers/${slug}/entries`, {
+      data: { id: "r1", status: "closed", reason: "resolved" },
+    });
+    expect(closed.ok()).toBeTruthy();
+    await page.getByRole("button", { name: /refresh/i }).first().click();
+    await expect(
+      page.getByTestId("ledger-entry-r1").getByTestId("ledger-entry-status"),
+    ).toHaveText("Closed", { timeout: 15_000 });
+    await assertBadgeMatchesRows();
+    await expect(count).toHaveText("2");
+  } finally {
+    await request.delete(`${API}/ledgers/${slug}?purge=true`);
+  }
+});
