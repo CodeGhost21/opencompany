@@ -68,7 +68,8 @@
 //      agent call a named MCP tool without a model that might decide not to.
 //   5. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
 //      `chat-to-card.spec.ts` needs an orchestrator to do.
-//   6. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
+//   6. a **card-titling pass** — answer with a short fixed name.
+//   7. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
 //
 // # Why the plain reply quotes nothing
 //
@@ -667,6 +668,45 @@ function isPlanningRequest(messages) {
 }
 
 /**
+ * A card-titling pass, recognised by its own system prompt.
+ *
+ * Beside the triage and planning arms and for their reasons: it runs with no
+ * tools and is not an agent turn, so it must not reach the directive arms — a
+ * request whose text happened to carry `SPAWNONE` would otherwise burn that
+ * directive here and leave the real turn without it.
+ *
+ * @param {any[]} messages
+ * @returns {boolean}
+ */
+function isTitleRequest(messages) {
+  const first = messages[0];
+  return typeof textOf(first) === "string" && textOf(first).includes("You name tasks");
+}
+
+/**
+ * The name this lane gives every card it is asked to title.
+ *
+ * # Why it does not echo the request
+ *
+ * Echoing the first few words back would make every card's headline a prefix
+ * of the message that opened it — which is the exact defect the titling pass
+ * exists to remove, reproduced inside the fixture. A spec that keyed a request
+ * against a title would then pass here and be wrong against any real model, so
+ * the coupling would be hidden rather than gone. A card is identified by its
+ * `note`, which carries the operator's words verbatim; nothing needs the title
+ * to carry them too.
+ *
+ * # Why it carries no `__MOCK_LLM__`
+ *
+ * Every other reply here carries the marker so a spec can prove the reply is
+ * ours. A title is different: it is rendered as a card's headline all over the
+ * console, and specs assert that raw mock text does NOT leak into the UI
+ * (`orchestration-live.spec.ts`). A marker in a title would put it on the board
+ * by construction.
+ */
+const MOCK_TITLE = "Mock titled task";
+
+/**
  * The plan this lane answers every planning pass with (issue #1106).
  *
  * Deliberately **ambiguous**: it names two teammates the `e2e_harness` roster
@@ -745,6 +785,15 @@ function chatCompletion(body) {
   if (isPlanningRequest(messages)) {
     process.stderr.write("[mock brain] planning pass (ambiguous plan, no directive consumed)\n");
     return completion(model, { role: "assistant", content: AMBIGUOUS_PLAN }, "stop");
+  }
+
+  // Third of the not-a-turn arms. Without it a titling pass fell through to the
+  // turn arms and every card in this lane was headlined with the canned reply —
+  // marker and all — which is both unlike anything a real titler returns and a
+  // way for `__MOCK_LLM__` to reach the board.
+  if (isTitleRequest(messages)) {
+    process.stderr.write("[mock brain] card titling pass (no directive consumed)\n");
+    return completion(model, { role: "assistant", content: MOCK_TITLE }, "stop");
   }
 
   // Ahead of the directive arms, and only when the instruction is the LAST

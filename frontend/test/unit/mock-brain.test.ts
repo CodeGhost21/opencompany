@@ -359,6 +359,60 @@ describe("the mock inference backend", () => {
     expect(orchestrator.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
   });
 
+  it("answers a card-titling pass with a short name, not the canned reply", async () => {
+    const titling = await chat([
+      { role: "system", content: "You name tasks. You are given one message somebody sent." },
+      {
+        role: "user",
+        content: "can you fix the checkout bug, it has been dropping one in twenty orders",
+      },
+    ]);
+    const title = titling.choices[0].message.content;
+    expect(
+      titling.choices[0].message.tool_calls,
+      "a titling pass must never be answered with a tool call",
+    ).toBeUndefined();
+    // Short and title-shaped, so a card in this lane has a plausible headline.
+    expect(title.length).toBeLessThanOrEqual(80);
+    // No marker: a title is rendered as a card headline all over the console,
+    // and specs assert raw mock text does not reach the UI.
+    expect(title).not.toContain("__MOCK_LLM__");
+    // And deliberately NOT the request echoed back. A fixture that answered
+    // with a prefix of the request would reproduce the very defect the titling
+    // pass removes, and would let a spec key a request against a title and pass
+    // here while being wrong against any real model.
+    expect(title).not.toContain("checkout");
+  });
+
+  it("does not let a card-titling pass consume a directive", async () => {
+    // The hazard the triage and planning arms already close, one prompt later:
+    // a titling pass is handed the operator's RAW message, so it carries any
+    // directive that message carried.
+    //
+    // A payload of its own: `servedDirectives` is per-process, so reusing the
+    // triage test's directive would find it already served and prove nothing.
+    const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
+      name: "mcp_call_tool",
+      arguments: { server: "simple", tool: "echo", arguments: { text: "burned-by-titling?" } },
+    })}`;
+
+    const titling = await chat([
+      { role: "system", content: "You name tasks. You are given one message somebody sent." },
+      { role: "user", content: directive },
+    ]);
+    expect(
+      titling.choices[0].message.tool_calls,
+      "a titling pass must never be answered with a tool call",
+    ).toBeUndefined();
+
+    // The turn that follows must still get its tool call — the whole point.
+    const turn = await chat([
+      { role: "system", content: "You are the CEO of Acme." },
+      { role: "user", content: directive },
+    ]);
+    expect(turn.choices[0].message.tool_calls?.[0]?.function?.name).toBe("mcp_call_tool");
+  });
+
   it("does not let a triage classification consume a plan step", async () => {
     // The same hazard #678 fixed for `__MOCK_TOOL_CALL__`, one directive later.
     const directive = plan("p-303", [
