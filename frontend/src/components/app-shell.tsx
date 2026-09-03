@@ -1609,6 +1609,18 @@ export function AppShell({
             setLiveStepsByThread((prev) =>
               prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
             );
+            // The receipt the detached turn carried through its queued/working
+            // window (issue #2021) is cleared on the same terminal transition
+            // that clears the live rows, under the same guard: a queued sibling
+            // still running keeps it, and this only runs once the scope checks
+            // above confirm the settle belongs to the company on screen — so a
+            // late cross-company settle cannot delete a newer company's receipt.
+            setReceiptByThread((prev) => {
+              if (!(threadId in prev)) return prev;
+              const next = { ...prev };
+              delete next[threadId];
+              return next;
+            });
           }
           setThreads((ts) =>
             ts.map((t) => {
@@ -2492,7 +2504,7 @@ export function AppShell({
    * suppression lose nothing: the frame was never dropped, only queued.
    */
   const onSendDetached = useCallback(
-    (threadId: string, turnId?: string, gen?: number) => {
+    (threadId: string, turnId?: string, _gen?: number) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       // Append, never replace (issue #1000). The serial lock queues a second
       // send behind the running turn, and a replace would stop the poll
@@ -2505,11 +2517,15 @@ export function AppShell({
         return { ...prev, [threadId]: [...turns, { turnId, queued: true }] };
       });
       held.forEach((frame) => renderAgentReply(frame));
-      // The turn is now the openTurns row's job, not the receipt's — from a
-      // 202 the working row is armed above and takes over (issue #1934).
-      clearReceipt(threadId, gen);
+      // The receipt is NOT cleared here (issue #2021). The 202 hands the turn to
+      // the open-turn row, but that row alone is a strict downgrade — bare
+      // "Queued…"/"Working…" with no elapsed clock, no picked-up-by name, no 30s
+      // stall notice. Keeping the receipt alive lets it ride the turn through the
+      // queued/working window with every #1934 affordance intact; its own frames
+      // keep bumping it, and the poll's terminal settle clears it (see
+      // `reReadSettledThread`), so it still never outlives the turn.
     },
-    [renderAgentReply, clearReceipt],
+    [renderAgentReply],
   );
   /**
    * The chat POST **threw** — no body, nothing rendered by the view (#1000).
@@ -2547,21 +2563,27 @@ export function AppShell({
     (threadId: string, gen?: number) => {
       const held = pendingPostThreadsRef.current.failed(threadId);
       held.forEach((frame) => renderAgentReply(frame));
-      // The request died; the view has rendered its `Couldn't send` line. Drop
-      // the receipt so it does not tick on over a dead POST (issue #1934) — any
-      // durable turn re-armed below drives the working row instead.
-      clearReceipt(threadId, gen);
 
       // Discover whether the host kept the turn after the request died. The
       // throw tells us nothing, but the run rows do: a `pending`/`running` row
       // naming this thread means the turn is durable and worth polling to its
       // terminal `chat/history` re-read — the SSE-less recovery path.
+      //
+      // The receipt clear now waits on this answer (issue #2021). A durable turn
+      // survived the dead request, so keeping the receipt alive lets it ride
+      // that turn through the queued/working window with its #1934 affordances
+      // (elapsed, picked-up-by, 30s stall) rather than dropping to the bare
+      // open-turn row — the poll's settle clears it. Only when NO durable turn
+      // exists is the receipt dropped here, so it never ticks on over a POST the
+      // host genuinely never kept, with the view's `Couldn't send` standing alone.
       listRuns(client, company, { status: ["pending", "running"] })
         .then((runs) => {
           if (!mountedRef.current) return;
           // A company switch that happened while the request was in flight
           // invalidates the result: the rows belong to the old company and
-          // would restore a stale turn into the new company's openTurns map.
+          // would restore a stale turn into the new company's openTurns map. The
+          // switch already wholesale-cleared this company's receipts, so leave
+          // the map alone rather than clearing a slot the new company may own.
           if (
             scopeRef.current.company !== company ||
             scopeRef.current.connection !== scope.connection ||
@@ -2573,9 +2595,13 @@ export function AppShell({
           // each has a reply to deliver. The merge appends and collapses by id.
           const durable = open[threadId];
           if (durable) setOpenTurns((prev) => mergeOpenTurns(prev, { [threadId]: durable }));
+          else clearReceipt(threadId, gen);
         })
         .catch(() => {
-          /* host without /runs, or offline — nothing to re-arm */
+          // Host without /runs, or offline — nothing to re-arm, so nothing will
+          // ever settle the receipt. Drop it (generation-guarded) so it does not
+          // tick on over a dead POST.
+          clearReceipt(threadId, gen);
         });
     },
     [client, company, renderAgentReply, clearReceipt],
@@ -3555,6 +3581,8 @@ export function AppShell({
               onReply={() => void feed.refresh()}
               taskEventTick={taskEventTick}
               liveStepsByThread={liveStepsByThread}
+              receiptByThread={receiptByThread}
+              agentNames={agentNames}
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
               onSendDetached={onSendDetached}
@@ -3589,13 +3617,16 @@ export function AppShell({
               onDecide={(approval, verdict, scope) =>
                 void decideApproval(approval, verdict, scope)
               }
-              // Issue #246: the card → chat half of the round trip. A card
-              // opened from a conversation remembers which one, so its detail
-              // screen can put the operator back in that thread.
-              onOpenThread={(threadId) => {
-                setActiveThreadId(threadId);
-                setView("conversation");
-              }}
+              // Issue #246: the card → chat half of the round trip. The card
+              // carries the host thread it was opened from; the map is what
+              // turns that into the Room channel rendering it, which is the
+              // whole address (`#/chat/<channelId>`) — so the destination is
+              // linkable and Back returns to the card. The row states the
+              // origin without offering a jump when no channel carries it.
+              chatChannelByThread={chatChannelByThread}
+              onOpenChannel={(channelId, threadId) =>
+                navigate("chat", channelId, { thread: threadId ?? null })
+              }
               // Back, and a deleted card, go to the board — which is the
               // `tasks` ledger. Through `navigate` so the address follows.
               onLeave={() =>

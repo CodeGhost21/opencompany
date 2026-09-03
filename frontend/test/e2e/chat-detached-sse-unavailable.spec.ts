@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { openChannel, reply, workingRow } from "./chat-helpers";
+import { liveReceipt, openChannel, reply, workingRow } from "./chat-helpers";
 
 import { LIVE_BRAIN } from "./capabilities";
 
@@ -87,8 +87,18 @@ test("with /events unreachable, a detached turn's reply still lands and the work
   await page.keyboard.press("Enter");
 
   // The 202 still comes back over the ordinary POST — that path never touched
-  // `/events` — so the working row arms right away regardless of the stream.
-  await expect(workingRow(page)).toBeVisible({ timeout: 10_000 });
+  // `/events` — so the in-flight indicator arms right away regardless of the
+  // stream. On a same-session send that indicator is the live receipt (issue
+  // #1934), and issue #2021 is that it must RIDE the turn past its 202 into the
+  // detached window rather than being torn down for the bare working row: the
+  // receipt keeps the elapsed clock, the picked-up-by name and the 30s stall
+  // notice the operator would otherwise lose the instant the turn detached.
+  await expect(liveReceipt(page)).toBeVisible({ timeout: 10_000 });
+  // And the downgrade the bug was: the bare working/queued row must NOT be what
+  // the operator is left with once the turn detaches. Pre-#2021 the receipt was
+  // cleared at the 202 and this row took its place; now the receipt supersedes
+  // it for the whole same-session detached turn.
+  await expect(workingRow(page)).toHaveCount(0);
 
   // The reply has exactly one possible source now: `GET {scope}/runs/{id}`
   // going terminal and the resulting `chat/history` re-read (`AppShell`'s poll
@@ -101,13 +111,17 @@ test("with /events unreachable, a detached turn's reply still lands and the work
   // must not double the bubble.
   await expect(reply(page, marker)).toHaveCount(1);
 
-  // And the row comes down. A reply that landed but left the working row
-  // spinning is the same failure users see as a turn that never finished.
-  await expect(workingRow(page)).toHaveCount(0, { timeout: 30_000 });
+  // And the indicator comes down. A reply that landed but left the receipt
+  // ticking is the same failure users see as a turn that never finished — and
+  // the receipt is cleared by the poll's own terminal settle (issue #2021),
+  // the same transition that drains the open-turn row, so neither lingers.
+  await expect(liveReceipt(page)).toHaveCount(0, { timeout: 30_000 });
+  await expect(workingRow(page)).toHaveCount(0);
 
   // Holds a moment past settle: a stray late poll tick re-adding the row, or a
   // duplicate re-hydration, would both be silent otherwise.
   await page.waitForTimeout(5_000);
+  await expect(liveReceipt(page)).toHaveCount(0);
   await expect(workingRow(page)).toHaveCount(0);
   await expect(reply(page, marker)).toHaveCount(1);
 

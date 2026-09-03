@@ -62,6 +62,36 @@ import {
 
 export type LifecycleAction = "pause" | "resume" | "suspend" | "archive";
 
+/** Per-call overrides for a request's deadline and cancellation. */
+export interface RequestOptions {
+  /**
+   * A caller-owned signal — an unmount, a superseded read — that cancels the
+   * request. Its abort surfaces as an `AbortError`, distinct from a timeout, so
+   * the caller can tell "I cancelled this" from "the host went away".
+   */
+  signal?: AbortSignal;
+  /**
+   * How long to wait for the host before giving up, in milliseconds. Omit for
+   * the method default ({@link DEFAULT_REQUEST_TIMEOUT_MS} on a `GET`, none on a
+   * mutation, whose duration is the host's to decide). `null` disables the
+   * bound explicitly for a read that is expected to run long.
+   */
+  timeoutMs?: number | null;
+}
+
+/**
+ * The default deadline for a `GET`.
+ *
+ * Reads are the request the console blocks a view on, and a host that accepts
+ * the connection and then never answers used to leave that view on its skeleton
+ * forever — the browser's `fetch` produces no event for a stalled response, so
+ * no `catch` an already-written load path holds ever runs (issue #2014). This
+ * turns that silence into an ordinary rejection every view's existing error
+ * state can render. Well above any healthy read; mutations opt in per call,
+ * since a chat turn or a company provision is legitimately unbounded.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
@@ -123,21 +153,61 @@ export class OpenCompanyClient {
     path: string,
     body?: unknown,
     extraHeaders?: Record<string, string>,
+    options?: RequestOptions,
   ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
     Object.assign(headers, this.authHeaders(), extraHeaders);
 
+    const timeoutMs =
+      options?.timeoutMs !== undefined
+        ? options.timeoutMs
+        : method === "GET"
+          ? DEFAULT_REQUEST_TIMEOUT_MS
+          : null;
+    const caller = options?.signal;
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort(caller?.reason);
+    if (caller) {
+      if (caller.aborted) controller.abort(caller.reason);
+      else caller.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    let timedOut = false;
+    const timer =
+      timeoutMs === null
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutMs);
+
     let res: TransportResponse;
     try {
-      res = await this.transport.request({
-        method,
-        url: `${this.baseUrl}${path}`,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-    } catch {
+      res = await settleWithin(
+        this.transport.request({
+          method,
+          url: `${this.baseUrl}${path}`,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+        }),
+        controller.signal,
+      );
+    } catch (err) {
+      if (timedOut) {
+        throw new ApiError(
+          0,
+          "timeout",
+          `the company host at ${this.baseUrl || "this origin"} did not respond in time`,
+        );
+      }
+      // The caller tore the request down itself; let its `AbortError` through,
+      // the way `getBlob` does, so it can tell "cancelled" from "unreachable".
+      if (caller?.aborted) throw abortError(err);
       throw new ApiError(0, "network_error", `cannot reach the company host at ${this.baseUrl || "this origin"}`);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      if (caller) caller.removeEventListener("abort", onCallerAbort);
     }
 
     const text = res.text;
@@ -181,8 +251,8 @@ export class OpenCompanyClient {
   }
 
   /** A typed GET, for surfaces that live outside this class (e.g. auth). */
-  get<T>(path: string): Promise<T> {
-    return this.request<T>("GET", path);
+  get<T>(path: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", path, undefined, undefined, options);
   }
 
   /**
@@ -1389,6 +1459,38 @@ function attachmentFilename(header: string | null): string | undefined {
   const match = /filename="([^"]+)"/i.exec(header);
   const name = match?.[1]?.split(/[\\/]/).pop()?.trim();
   return name && name !== "." && name !== ".." ? name : undefined;
+}
+
+/**
+ * Rejects when `signal` aborts, even if `work` never settles.
+ *
+ * A transport whose `fetch` honours the signal already rejects `work` on abort;
+ * the desktop proxy cannot cancel its in-flight IPC and never would, so the
+ * abort is raised here too. Either way the caller stops waiting the instant the
+ * deadline (or its own signal) fires, and a late transport answer is dropped.
+ */
+function settleWithin<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal.reason));
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** A real `AbortError`, reusing the signal's reason when it already is one. */
+function abortError(reason: unknown): Error {
+  if (reason instanceof Error && reason.name === "AbortError") return reason;
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
 /** How much of an unrecognised body is kept on `ApiError.detail`. */
