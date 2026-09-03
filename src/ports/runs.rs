@@ -528,6 +528,29 @@ impl RunOutcome {
         self.error = Some(error.into());
         self
     }
+
+    /// Carries an attempt's already-recorded usage into this settle.
+    ///
+    /// [`RunStore::finish_run`] **assigns** `usage` and `step_count` from the
+    /// outcome rather than merging them, and [`RunOutcome::new`] zeroes both. So
+    /// a settle that only means to change a row's *status* — an expiry
+    /// cancelling an attempt that was waiting on it, a reaper closing an
+    /// interrupted one — silently erases the tokens and cost that attempt
+    /// really did spend unless it carries them back (Codex, B-012 review).
+    /// Paired with [`with_step_count`](Self::with_step_count) for the same
+    /// reason.
+    pub fn with_usage(mut self, usage: TokenUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    /// Carries an attempt's already-recorded step count into this settle.
+    ///
+    /// See [`with_usage`](Self::with_usage) — same assignment, same erasure.
+    pub fn with_step_count(mut self, step_count: u32) -> Self {
+        self.step_count = step_count;
+        self
+    }
 }
 
 /// Which runs [`RunStore::list_runs`] should return.

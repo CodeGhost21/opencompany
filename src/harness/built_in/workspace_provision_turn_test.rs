@@ -35,7 +35,7 @@ use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
 use crate::ports::brain::{Brain, CycleHost};
-use crate::ports::tasks::{COLUMN_IN_PROGRESS, TaskRecord, TaskStore};
+use crate::ports::tasks::{COLUMN_IN_PROGRESS, TaskRecord, TaskStore, TaskTitle};
 use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, OverlayAgent, ToolCall, ToolResult,
@@ -327,7 +327,7 @@ fn build_brain(
 fn card(id: &str, assignee: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Write the first note".to_string(),
+        title: TaskTitle::authored("Write the first note"),
         note: None,
         column: COLUMN_IN_PROGRESS.to_string(),
         priority: "medium".to_string(),
@@ -342,6 +342,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     }
 }

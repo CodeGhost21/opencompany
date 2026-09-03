@@ -12,7 +12,7 @@ import { hasOtherOpenTurns, type OpenTurn } from "@/lib/live-reply";
  * them — a failed turn has no `agent_reply` to fall back on.
  */
 describe("deciding whether a thread still has work in flight", () => {
-  const turn = (turnId: string): OpenTurn => ({ turnId, queued: false });
+  const turn = (turnId: string): OpenTurn => ({ turnId, queued: false, chatId: "eng" });
 
   it("ignores the turn that just settled, even on a snapshot that still lists it", () => {
     // The race: `getChatHistory` resolves before React commits the
@@ -43,7 +43,7 @@ describe("deciding whether a thread still has work in flight", () => {
     // `onSendDetached` can append a row the host minted no turn id for; the
     // poll skips anything without a `turnId`, so counting it here would block
     // this clear forever.
-    const idLess: OpenTurn = { queued: false };
+    const idLess: OpenTurn = { queued: false, chatId: "main" };
     expect(hasOtherOpenTurns({ eng: [idLess] }, "eng")).toBe(false);
     expect(hasOtherOpenTurns({ eng: [idLess, turn("t2")] }, "eng")).toBe(true);
   });

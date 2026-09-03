@@ -52,6 +52,7 @@ import {
   reportAddMember,
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
+import { usd } from "@/lib/money";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { personAvatar, personName } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
@@ -195,7 +196,7 @@ interface Props {
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -735,7 +736,7 @@ export function ChatView({
       // Update the one card from the host's answer rather than refetching the
       // roster: the response IS the new state, so a refetch could only disagree.
       setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
+      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
     } catch (error) {
       toast.error(budgetError(error, "Couldn't change the daily cap."));
     }
@@ -1517,14 +1518,28 @@ export function ChatView({
       ? turnStateKey(activeThreadId, threadRootOf(openThreadId))
       : undefined;
   const threadTurn = threadTurnKey ? openTurns?.[threadTurnKey]?.[0] : undefined;
-  const openTurn = activeThreadId
-    ? Object.entries(openTurns ?? {}).find(
+  const openTurn = (() => {
+    if (!activeThreadId) return undefined;
+    const candidates = Object.entries(openTurns ?? {})
+      .filter(
         ([key, turns]) =>
           key !== threadTurnKey &&
           (key === activeThreadId || key.startsWith(`${activeThreadId}#`)) &&
           turns.length > 0,
-      )?.[1][0]
-    : undefined;
+      )
+      // Every turn, not each list's head. `mergeOpenTurns` appends rather than
+      // re-sorts, so a reload re-arm racing a detached POST can leave a running
+      // row *behind* a queued one in the same list — and a search over heads
+      // alone would never see it, which is the same "Queued…" over live work
+      // this is here to prevent (Codex review on #2044).
+      .flatMap(([, turns]) => turns);
+    // A running turn outranks a queued one. Taking the first match instead
+    // would let map order decide the wording, and map order follows `/runs`,
+    // which is newest-first — so the ordinary serialized case (an older turn
+    // working while a newer one waits on the company lock) rendered "Queued…"
+    // over live work (Codex review on #2042).
+    return candidates.find((t) => !t.queued) ?? candidates[0];
+  })();
   /**
    * The count beside the channel title.
    *
@@ -1732,7 +1747,9 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen);
+        // The desk goes with the state key: the key can be composite and the
+        // shell's settle poll has to ask the host about a real desk.
+        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen, chatId);
         return true;
       }
       const reply = answer;

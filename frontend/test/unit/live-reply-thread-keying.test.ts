@@ -31,8 +31,14 @@ describe("openTurnsFromRuns keys on the thread, not the channel", () => {
     ]);
 
     expect(Object.keys(open).sort()).toEqual(["engineering#11", "engineering#22"]);
-    expect(open["engineering#11"]).toEqual([{ turnId: "t1", queued: false }]);
-    expect(open["engineering#22"]).toEqual([{ turnId: "t2", queued: false }]);
+    // `chatId` rides alongside the composite key so the settle poll can re-read
+    // the real desk (Codex review on #2042).
+    expect(open["engineering#11"]).toEqual([
+      { turnId: "t1", queued: false, chatId: "engineering" },
+    ]);
+    expect(open["engineering#22"]).toEqual([
+      { turnId: "t2", queued: false, chatId: "engineering" },
+    ]);
   });
 
   it("keeps an unrooted turn on the channel, exactly where it was before", () => {
@@ -52,8 +58,12 @@ describe("openTurnsFromRuns keys on the thread, not the channel", () => {
     // sorted first.
     const open = openTurnsFromRuns([run({ id: "channel" }), run({ id: "threaded", threadRoot: 11 })]);
 
-    expect(open["engineering"]).toEqual([{ turnId: "channel", queued: false }]);
-    expect(open["engineering#11"]).toEqual([{ turnId: "threaded", queued: false }]);
+    expect(open["engineering"]).toEqual([
+      { turnId: "channel", queued: false, chatId: "engineering" },
+    ]);
+    expect(open["engineering#11"]).toEqual([
+      { turnId: "threaded", queued: false, chatId: "engineering" },
+    ]);
   });
 
   it("still keeps a running turn ahead of one queued behind it in the same thread", () => {
@@ -66,8 +76,8 @@ describe("openTurnsFromRuns keys on the thread, not the channel", () => {
     ]);
 
     expect(open["engineering#11"]).toEqual([
-      { turnId: "running", queued: false },
-      { turnId: "queued", queued: true },
+      { turnId: "running", queued: false, chatId: "engineering" },
+      { turnId: "queued", queued: true, chatId: "engineering" },
     ]);
   });
 

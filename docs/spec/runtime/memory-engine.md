@@ -30,7 +30,9 @@ Whether Cortex could return as a *hosted* engine under `remote` — the opposite
 question from #1568 — is investigated in
 [`memory-engine-cortex.md`](memory-engine-cortex.md), which records what a
 deployed CortexDB instance actually provides. Nothing there is implemented; it
-is a design record with open decisions.
+is a design record with open decisions. A companion,
+[`memory-engine-cortex-driver.md`](memory-engine-cortex-driver.md), records what a
+driver against v0.9.8 has to do and what each call costs.
 
 ## Choosing a hosted engine (`remote`)
 

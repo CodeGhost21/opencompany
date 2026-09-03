@@ -164,13 +164,14 @@ pub(super) fn reconcile(
 mod tests {
     use super::*;
     use crate::ports::runs::{RunRecord, RunStatus};
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::tasks::{TaskDeliverable, TaskPlanningUsage};
     use crate::ports::types::{CompanyId, TokenUsage};
 
     fn task(id: &str, parent: Option<&str>, planning_cost: f64) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: id.to_string(),
+            title: TaskTitle::authored(id),
             note: None,
             column: "done".to_string(),
             priority: "low".to_string(),
@@ -194,6 +195,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

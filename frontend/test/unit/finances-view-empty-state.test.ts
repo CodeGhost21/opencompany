@@ -64,7 +64,7 @@ describe("FinancesView empty data", () => {
     expect(container.textContent).not.toContain("Available USDC");
 
     const net = container.querySelectorAll<HTMLElement>(".text-2xl")[3];
-    expect(net?.textContent).toBe("$0");
+    expect(net?.textContent).toBe("$0.00");
     expect(net?.className).not.toContain("text-status-done-text");
   });
 

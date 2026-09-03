@@ -268,6 +268,10 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
 /// (issue #1835): per-message company-driven spend, uncappable by any
 /// teammate's budget, that must stop when the tier ceiling does.
 ///
+/// [`SampleKind::TitleCall`] is counted on the same terms (card titling): a
+/// pass runs per card opened, so a company left able to name cards indefinitely
+/// past its ceiling would keep paying per tracked request.
+///
 /// [`SampleKind::SetupCall`] is counted too, and its exposure is the smallest of
 /// the three: a company runs first-run setup once. It is included so the ceiling
 /// covers every completion billed to the tenant rather than only the ones that
@@ -289,6 +293,7 @@ pub fn tokens_in(samples: &[UsageSample]) -> u64 {
                     | SampleKind::JudgeCall
                     | SampleKind::TriageCall
                     | SampleKind::SelectorCall
+                    | SampleKind::TitleCall
                     | SampleKind::SetupCall
                     | SampleKind::AuthoringCall
             )

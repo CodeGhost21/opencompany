@@ -74,6 +74,7 @@ import { FieldCopilot } from "@/views/team/FieldCopilot";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
+import { usd } from "@/lib/money";
 import { personName } from "@/lib/person";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
@@ -496,7 +497,7 @@ export function AgentDetailView({
             }
           : held,
       );
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
+      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
     } catch (error) {
       toast.error(budgetError(error, "Couldn't change the daily cap."));
     }
@@ -1255,8 +1256,7 @@ function FactLine({
       )}
       {capped && (
         <span data-testid="agent-spend">
-          Today ${(agent.spentTodayUsd ?? 0).toFixed(2)} of $
-          {(agent.budgetUsdDaily ?? 0).toFixed(2)}
+          Today {usd(agent.spentTodayUsd ?? 0)} of {usd(agent.budgetUsdDaily ?? 0)}
         </span>
       )}
     </div>
@@ -1840,7 +1840,6 @@ function Budget({
   // An override exists (someone set this deliberately), as opposed to the cap
   // simply coming from the company's own definition.
   const overridden = agent.budgetSetBy !== undefined;
-  const usd = (n: number) => `$${n.toFixed(2)}`;
   return (
     <Section
       title="Budget"
@@ -1856,9 +1855,17 @@ function Budget({
     >
       <div className="space-y-1 text-sm" data-testid="agent-budget">
         {capped ? (
-          <p className="text-muted-foreground">
-            {usd(cap)}/day · {usd(agent.spentTodayUsd ?? 0)} spent today
-          </p>
+          <>
+            <p className="text-muted-foreground">
+              {usd(cap)}/day · {usd(agent.spentTodayUsd ?? 0)} spent today
+            </p>
+            <p className="text-xs text-muted-foreground" data-testid="agent-budget-scope">
+              Spent today counts everything this teammate has spent since 00:00
+              UTC — chat turns and metered searches included, not only the
+              attempts listed above. This is the total the cap is enforced
+              against.
+            </p>
+          </>
         ) : (
           <p className="text-muted-foreground">No daily cap — this teammate spends freely.</p>
         )}

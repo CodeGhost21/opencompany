@@ -151,6 +151,7 @@ pub mod selector;
 pub mod skills;
 pub mod steer;
 pub mod steps;
+pub mod title;
 pub mod tool_dispatcher;
 pub mod toolbelt;
 pub mod triage;

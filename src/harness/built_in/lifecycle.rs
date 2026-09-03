@@ -570,11 +570,12 @@ pub fn relay_reply(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     fn card(column: &str, note: Option<&str>) -> TaskRecord {
         TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship the thing".to_string(),
+            title: TaskTitle::authored("Ship the thing"),
             note: note.map(str::to_string),
             column: column.to_string(),
             priority: "medium".to_string(),
@@ -589,6 +590,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

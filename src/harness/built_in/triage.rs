@@ -33,11 +33,19 @@
 //! * Everything else leaves the gate exactly where the abstention left it.
 //!
 //! **It never mints a card.** A verdict does not become
-//! [`MessageTriage::Track`], because the title a card is opened under is pinned
-//! byte-for-byte between the REST handler and `chat_handler_card` (issue #463) —
-//! a model-authored title would desynchronise them and orphan the card. That
-//! also keeps the issue's own tie-breaker intact: a missed card costs one
-//! follow-up message, a spurious card pollutes the board permanently.
+//! [`MessageTriage::Track`], on the issue's own tie-breaker: a missed card costs
+//! one follow-up message, a spurious card pollutes the board permanently.
+//!
+//! That tie-breaker is now the *whole* of the reason, and it used to be the
+//! lesser half. A card's title was once pinned byte-for-byte between the REST
+//! handler and `DelegationRunner::chat_handler_card`, which re-derived it to
+//! find the card the handler had opened — so a model-authored title
+//! desynchronised the two and orphaned the card. That constraint is gone:
+//! adoption keys on the message's own journal position
+//! ([`TaskRecord::origin_message_seq`](crate::ports::tasks::TaskRecord::origin_message_seq)),
+//! and titles are model-authored by design. A maintainer weighing whether this
+//! verdict may open a card is therefore weighing the tie-breaker alone, and
+//! nothing mechanical stands in the way any more.
 //!
 //! # Failure is silence, not an error
 //!

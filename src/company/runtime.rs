@@ -902,6 +902,16 @@ impl CompanyRuntime {
         &self.id
     }
 
+    /// The pass that names the work a card is opened for, when this company's
+    /// brain has a model to name it with.
+    ///
+    /// `None` on an echo brain and in any build without the harness, which
+    /// leaves [`mint_task_title`](crate::ports::tasks::mint_task_title) on the
+    /// shortened request.
+    pub fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
+        self.brain.titler()
+    }
+
     /// This company's secret store (SMTP creds, OAuth tokens, domain config).
     /// Sets the install-wide default MCP servers (issue #527). Called by
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from resolved config.
@@ -2266,9 +2276,11 @@ impl CompanyRuntime {
         // the same badge behind.
         let unanswered = self.unanswered_blocker(id);
         let is_blocker = self.is_blocker(id);
+        let waiting_runs = self.parked_workflow_attempts(id).await;
         self.retire_approval(id, ExpiryReason::Ttl, now_millis())
             .await?;
-        self.finish_expiry(id, is_blocker, unanswered).await;
+        self.finish_expiry(id, is_blocker, unanswered, waiting_runs)
+            .await;
         Ok(())
     }
 
@@ -4750,8 +4762,12 @@ impl CompanyRuntime {
             // as blockers, not ordinary approvals, even though unanswered
             // returns None for them.
             let is_blocker = self.is_blocker(id);
+            // Issue B-012: and which workflow run was waiting on it, for the
+            // same before-the-retirement reason as the two above.
+            let waiting_runs = self.parked_workflow_attempts(id).await;
             self.retire_approval(id, ExpiryReason::Ttl, now).await?;
-            self.finish_expiry(id, is_blocker, unanswered).await;
+            self.finish_expiry(id, is_blocker, unanswered, waiting_runs)
+                .await;
         }
         Ok(expired)
     }
@@ -4783,7 +4799,66 @@ impl CompanyRuntime {
         id: &ApprovalId,
         was_blocker: bool,
         unanswered: Option<(String, String)>,
+        waiting_runs: Vec<crate::ports::runs::RunRecord>,
     ) {
+        // **The run that was waiting stops claiming it still is** (issue B-012).
+        //
+        // A workflow that parks on a gate is recorded `WaitingApproval` — the
+        // run is settled, nothing is executing, and that status is the row's
+        // account of why it stopped. Expiry retired the approval and removed it
+        // from the pending set, but nothing ever revisited the row, so it went
+        // on naming an approval no sweep will see again: the Observatory showed
+        // a run waiting for a decision that had already defaulted, and the
+        // approvals list showed nothing to decide. Two screens, no way to tell
+        // which was lying.
+        //
+        // `Cancelled` — "the attempt was cancelled before it could settle" — is
+        // what a default-deny leaves behind. Not `Declined`, which is reserved
+        // for work refused *by design* by the compiler or a step; here the
+        // decision was made by the clock and nobody chose it. Not `Failed`:
+        // nothing errored.
+        //
+        // **Whether or not the expiry released a continuation** (Codex on this
+        // PR, third round). It is tempting to skip this when something was
+        // released — a node whose *other* gated call the operator approved does
+        // continue — but the continuation runs as a **new attempt**:
+        // `RunAttempts` is an in-memory map built fresh per run
+        // (`workflows/runner.rs`) and `caps` mints every attempt under
+        // `generate_id()`. Nothing ever writes this row again. So skipping it
+        // left exactly the stale `WaitingApproval` this issue exists to remove,
+        // and — because the continuation cannot touch this id — there was never
+        // a race here to avoid in the first place. This attempt stopped at a
+        // gate that defaulted to denied, which is true either way.
+        //
+        // **Usage is carried, not reset** (Codex, same round). `finish_run`
+        // assigns `run.usage` and `run.step_count` from the outcome
+        // (`ports/runs.rs`), and `RunOutcome::new` zeroes both — so settling
+        // from a bare outcome would silently erase the tokens and cost this
+        // attempt really did spend, on a row the billing surfaces read.
+        //
+        // Best-effort and last, like everything else here: a row that cannot be
+        // written must not undo a default-deny that already happened.
+        for row in waiting_runs {
+            let run_id = row.id;
+            let outcome =
+                crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Cancelled)
+                    .with_error(
+                        "the approval this attempt was waiting on expired and defaulted to denied",
+                    )
+                    .with_usage(row.usage)
+                    .with_step_count(row.step_count);
+            if let Err(err) = self.runs().finish_run(&self.id, &run_id, outcome).await {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    run = %run_id,
+                    %err,
+                    "[approval] expired, but the waiting run's row could not be settled; \
+                     it will keep reporting `waiting_approval`"
+                );
+            }
+        }
+
         let mut card_returned = false;
         if let Some((task_id, question)) = unanswered {
             match crate::runtime::advance::return_expired_blocker_card(
@@ -4849,6 +4924,86 @@ impl CompanyRuntime {
         };
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
         pending.effect.kind.starts_with(&prefix)
+    }
+
+    /// The **attempt rows** this approval left recorded `WaitingApproval`, read
+    /// **before** the retirement for the reason its two siblings are (B-012).
+    ///
+    /// `workflow_run_of` needs the pending entry, and retiring is what removes
+    /// it — so after `retire_approval` there is no way back to which run was
+    /// waiting, exactly as there is no way back to what was being asked.
+    ///
+    /// # Why the cycle, and not `Effect::run_id` or the effect kind
+    ///
+    /// Two Codex findings, in sequence, both about reaching for the wrong
+    /// handle. `Effect::run_id` on a `workflow.approve` gate is the **lineage**
+    /// id, while `RunStore` rows are per-node *attempts* minted under
+    /// `generate_id()` and merely linked to it (`NewRun::for_workflow_node`), so
+    /// handing it to `finish_run` names no row at all. And the path that
+    /// actually leaves an attempt reading `WaitingApproval` is not that gate: it
+    /// is a **gated tool call** inside a workflow agent node
+    /// (`caps::park_gated_calls` → the `!parked.is_empty()` settle), parked with
+    /// `ApprovalPolicy::effect_for`'s own effect — whose `kind` is the tool name
+    /// and whose `run_id` is `None`. So on the real path neither the kind test
+    /// nor `workflow_run_of` can say anything, and a fix keyed on either is a
+    /// no-op that a fixture combining a gate effect with a hand-made attempt row
+    /// will nonetheless report as working.
+    ///
+    /// The **cycle recorded at park time** is the one correlation that survives
+    /// both shapes, so it is what this reads:
+    ///
+    /// * `workflow-node:{run}:{node}` — a blocked node's gated calls. The real
+    ///   case, and it names the run and the node outright.
+    /// * `workflow-run:{run}` — a run-level gate, whose node is on its own
+    ///   payload (`gate_node_id`).
+    ///
+    /// Narrowed to that node, never "every `WaitingApproval` attempt in the
+    /// lineage": a graph can park two nodes on two gates and only one expired.
+    /// Anything whose node cannot be resolved settles nothing — a stale row is
+    /// the bug, but cancelling a sibling still waiting on a live decision would
+    /// be a worse one.
+    async fn parked_workflow_attempts(
+        &self,
+        id: &ApprovalId,
+    ) -> Vec<crate::ports::runs::RunRecord> {
+        use crate::runtime::workflow_resume::{gate_node_id, run_and_node_from_node_turn};
+
+        let Some(pending) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
+            return Vec::new();
+        };
+        let cycle = self.journal.approval_cycle(id).flatten();
+        let resolved = cycle
+            .as_deref()
+            .and_then(run_and_node_from_node_turn)
+            .map(|(run, node)| (run.to_string(), node.to_string()))
+            .or_else(|| {
+                let run = workflow_run_of(&pending)?;
+                let node = gate_node_id(&pending.effect)?;
+                Some((run, node.to_string()))
+            });
+        let Some((lineage, node)) = resolved else {
+            return Vec::new();
+        };
+        let filter = crate::ports::runs::RunFilter {
+            workflow_run_id: Some(lineage),
+            statuses: vec![crate::ports::runs::RunStatus::WaitingApproval],
+            ..Default::default()
+        };
+        match self.runs().list_runs(&self.id, &filter).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| row.node_id.as_deref() == Some(node.as_str()))
+                .collect(),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    %err,
+                    "[approval] could not resolve the attempts waiting on an expiring approval"
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn unanswered_blocker(&self, id: &ApprovalId) -> Option<(String, String)> {
@@ -6670,6 +6825,7 @@ mod tests {
         CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
         task_enters_planning,
     };
+    use crate::ports::tasks::TaskTitle;
 
     /// Issue #880: which parked approvals name a workflow run, and which must
     /// not.
@@ -7066,7 +7222,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "card-1".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -7081,6 +7237,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             // A stale chip from a dispatch attempt that already bounced.
             bounced: Some("a previous run's dispatch failed".to_string()),
         };
@@ -7144,7 +7301,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "card-2".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
@@ -7159,6 +7316,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             // A stale chip from a dispatch attempt that already bounced.
             bounced: Some("a previous run's dispatch failed".to_string()),
         };
@@ -7652,7 +7810,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -7667,6 +7825,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -7746,7 +7905,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -7761,6 +7920,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -7902,7 +8062,7 @@ mod tests {
 
         let card = TaskRecord {
             id: "t-1".to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_PROGRESS.to_string(),
             priority: "medium".to_string(),
@@ -7919,6 +8079,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -8059,7 +8220,7 @@ mod tests {
         let orchestrator = "ceo";
         let card = |id: &str, origin: &str| TaskRecord {
             id: id.to_string(),
-            title: "Ship it".to_string(),
+            title: TaskTitle::authored("Ship it"),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -8074,6 +8235,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         let dm_card = card("t-dm", "writer");
@@ -8293,7 +8455,7 @@ mod tests {
 
         let mut card = crate::ports::tasks::TaskRecord {
             id: "t-relay".to_string(),
-            title: "Draft the launch email".to_string(),
+            title: TaskTitle::authored("Draft the launch email"),
             note: None,
             column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
@@ -8308,6 +8470,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         rt.tasks().upsert(&id, &card).await.unwrap();
@@ -8425,6 +8588,83 @@ mod tests {
         }
     }
 
+    /// A **gated tool call** parked by a workflow agent node, in the shape
+    /// production actually creates (Codex on the B-012 PR, second round).
+    ///
+    /// This is the path that leaves an attempt reading `WaitingApproval`:
+    /// `caps::park_gated_calls` journals `ApprovalPolicy::effect_for`'s effect —
+    /// `kind` is the **tool name**, `run_id` is `None` — under the node's
+    /// `workflow-node:{run}:{node}` cycle, and the node then settles its attempt
+    /// `WaitingApproval`. The earlier fixture here paired a `gate_effect` with a
+    /// hand-made attempt row, a combination no parking path produces, and so
+    /// reported a fix that could not fire in production as working.
+    ///
+    /// Returns the attempt row's id — the row the expiry has to find.
+    async fn park_gated_node_call(
+        rt: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
+        approval: &crate::ports::types::ApprovalId,
+        lineage: &str,
+        node: &str,
+        at_millis: u64,
+        arm_continuation: bool,
+    ) -> String {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::{Effect, EffectGroup, EventSeq};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let attempt = crate::ports::generate_id();
+        rt.runs()
+            .create_run(
+                rt.id(),
+                crate::ports::NewRun::for_workflow_node(attempt.clone(), lineage, node, "ceo"),
+            )
+            .await
+            .unwrap();
+        rt.runs()
+            .begin_run(rt.id(), &attempt, EventSeq::new(1))
+            .await
+            .unwrap();
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                &attempt,
+                crate::ports::runs::RunOutcome::new(RunStatus::WaitingApproval),
+            )
+            .await
+            .unwrap();
+
+        // `effect_for`'s shape, field for field: the tool's own name as the
+        // kind, the agent stamped, and **no** `run_id`.
+        let effect = Effect {
+            kind: "workspace.write".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "path": "README.md" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(lineage, node);
+        if arm_continuation {
+            rt.continuations.arm(&node_turn);
+        }
+        rt.approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at_millis);
+        rt.journal
+            .record_parked(
+                approval,
+                &effect,
+                at_millis,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                Some(node_turn),
+            )
+            .await
+            .unwrap();
+        attempt
+    }
+
     /// Seeds one parked approval into BOTH the live gate and the durable journal
     /// under a fixed id at `at_millis`, exactly as a real park leaves them — the
     /// gate answers "is this live?" for extend/sweep, the journal projects the
@@ -8452,6 +8692,232 @@ mod tests {
             .await
             .unwrap();
         approval
+    }
+
+    /// **B-012.** A workflow run parked on a gate stops claiming it is waiting
+    /// once that approval expires.
+    ///
+    /// A parked run is recorded `WaitingApproval` — settled, nothing executing,
+    /// and the status is the row's account of *why* it stopped. Expiry retired
+    /// the approval and dropped it from the pending set, but nothing revisited
+    /// the row, so it went on naming an approval no sweep would see again: the
+    /// Observatory showed a run awaiting a decision while the approvals list
+    /// showed nothing to decide, and neither screen was wrong about its own
+    /// data.
+    #[tokio::test]
+    async fn an_expired_approval_settles_the_workflow_run_that_was_waiting_on_it() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::ApprovalId;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        // A workflow node parked on a gate: an attempt row settled
+        // `WaitingApproval` and linked to the lineage, plus the gate itself
+        // carrying that lineage. Parked at epoch 0 — past any TTL.
+        let approval = ApprovalId::new("appr-b012");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-b012", "solve", 0, false).await;
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&approval),
+            "the sweep must find the epoch-0 park: {expired:?}"
+        );
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(
+            row.status,
+            RunStatus::Cancelled,
+            "a default-denied gate leaves the attempt cancelled, not still waiting"
+        );
+    }
+
+    /// **The narrowing** the settle above is scoped by. One expiry must not
+    /// cancel a *sibling* node still waiting on a live decision.
+    ///
+    /// A graph can park two nodes on two gates, and `RunFilter` can only ask
+    /// for the lineage — so "every `WaitingApproval` attempt of this run" is
+    /// the obvious query and the wrong one. The node is read off the gate's own
+    /// payload (`gate_node_id`) to close that gap.
+    #[tokio::test]
+    async fn an_expiry_leaves_a_sibling_node_still_waiting_on_a_live_gate() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::ApprovalId;
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        // Same lineage, two nodes: one parked at epoch 0 (past any TTL), one
+        // parked now (nowhere near it).
+        let expiring = ApprovalId::new("appr-expiring");
+        let attempt_expiring =
+            park_gated_node_call(&rt, &expiring, "wr-two-gates", "solve", 0, false).await;
+        let live = ApprovalId::new("appr-live");
+        let attempt_live = park_gated_node_call(
+            &rt,
+            &live,
+            "wr-two-gates",
+            "review",
+            crate::ports::now_millis(),
+            false,
+        )
+        .await;
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&expiring) && !expired.contains(&live),
+            "only the epoch-0 park expires: {expired:?}"
+        );
+
+        let settled = rt
+            .runs()
+            .get_run(rt.id(), &attempt_expiring)
+            .await
+            .unwrap()
+            .expect("the expired node's attempt survives");
+        assert_eq!(settled.status, RunStatus::Cancelled);
+
+        let sibling = rt
+            .runs()
+            .get_run(rt.id(), &attempt_live)
+            .await
+            .unwrap()
+            .expect("the sibling's attempt survives");
+        assert_eq!(
+            sibling.status,
+            RunStatus::WaitingApproval,
+            "the sibling node is still waiting on a decision nobody has made"
+        );
+    }
+
+    /// **An expiry settles its attempt even when it releases a continuation**
+    /// (Codex on the B-012 PR, third round).
+    ///
+    /// The tempting reading is that a released node is "still going" and must
+    /// not be settled. It is not: a continuation runs as a **new** attempt —
+    /// `RunAttempts` is rebuilt per run and `caps` mints every attempt under
+    /// `generate_id()` — so nothing ever writes this row again. Skipping it left
+    /// exactly the stale `WaitingApproval` this issue exists to remove, and the
+    /// earlier version of this test could not see that, because it asserted only
+    /// that the cancellation *error* was absent and never looked at the status.
+    ///
+    /// The scenario is the one that makes a node's batch non-empty, since an
+    /// expiry alone never does (`ContinuationQueue::decide` banks no event for
+    /// one): two gated calls on one node, one answered and one expired.
+    #[tokio::test]
+    async fn an_expiry_settles_its_attempt_even_when_it_releases_a_continuation() {
+        use crate::ports::runs::RunStatus;
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        let approval = ApprovalId::new("appr-released");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-released", "solve", 0, true).await;
+
+        // The node's *second* gated call, answered by the operator before the
+        // first expires. Its banked event is what makes the released batch
+        // non-empty, and so what makes this node continue at all.
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key("wr-released", "solve");
+        rt.continuations.arm(&node_turn);
+        assert!(
+            rt.continuations
+                .decide(
+                    &node_turn,
+                    Some(CompanyEvent::ApprovalResolved {
+                        approval_id: ApprovalId::new("appr-answered"),
+                        verdict: Verdict::Approve,
+                        by: Actor {
+                            kind: ActorKind::Operator,
+                            id: "operator".into(),
+                        },
+                    }),
+                )
+                .is_none(),
+            "the node is still blocked on the gate that has not expired yet"
+        );
+
+        let expired = rt.sweep_expired_approvals().await.unwrap();
+        assert!(
+            expired.contains(&approval),
+            "the sweep must find the epoch-0 park: {expired:?}"
+        );
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(
+            row.status,
+            RunStatus::Cancelled,
+            "the released continuation runs as a NEW attempt, so this row is nobody else's \
+             to settle and must not be left reading `WaitingApproval`"
+        );
+    }
+
+    /// **A settle that only changes status must not erase what the attempt
+    /// spent** (Codex on the B-012 PR, third round).
+    ///
+    /// `RunStore::finish_run` assigns `usage` and `step_count` from the outcome
+    /// rather than merging, and `RunOutcome::new` zeroes both — so cancelling an
+    /// expired attempt from a bare outcome silently wipes the tokens and cost it
+    /// really did spend, on a row the billing surfaces read.
+    #[tokio::test]
+    async fn settling_an_expired_attempt_keeps_the_usage_it_recorded() {
+        use crate::ports::runs::{RunOutcome, RunStatus};
+        use crate::ports::types::{ApprovalId, TokenUsage};
+        use std::sync::Arc;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+
+        let approval = ApprovalId::new("appr-usage");
+        let attempt = park_gated_node_call(&rt, &approval, "wr-usage", "solve", 0, false).await;
+
+        // What the attempt spent before it parked. Re-settled onto the parked
+        // row exactly as a real turn's trace fold would leave it.
+        let usage = TokenUsage {
+            input: 1_200,
+            output: 340,
+            cached_input: 0,
+            cost_usd: 0.042,
+        };
+        rt.runs()
+            .finish_run(
+                rt.id(),
+                &attempt,
+                RunOutcome::new(RunStatus::WaitingApproval)
+                    .with_usage(usage)
+                    .with_step_count(7),
+            )
+            .await
+            .unwrap();
+
+        rt.sweep_expired_approvals().await.unwrap();
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), &attempt)
+            .await
+            .unwrap()
+            .expect("the attempt row survives the sweep");
+        assert_eq!(row.status, RunStatus::Cancelled);
+        assert_eq!(
+            row.usage, usage,
+            "the expiry changed the status; it must not have erased the spend"
+        );
+        assert_eq!(row.step_count, 7, "nor the trace it recorded");
     }
 
     /// Issue #1865 (Codex review on PR #1883): a late resolve that discovers
@@ -8953,7 +9419,9 @@ mod tests {
     #[cfg(feature = "openhuman")]
     mod review {
         use crate::ports::TaskRecord;
-        use crate::ports::tasks::{COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore};
+        use crate::ports::tasks::{
+            COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskStore, TaskTitle,
+        };
         use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
         use std::sync::Arc;
         use tempfile::TempDir;
@@ -9087,7 +9555,7 @@ mod tests {
         fn card(id: &str, origin: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
-                title: "Ship it".to_string(),
+                title: TaskTitle::authored("Ship it"),
                 note: None,
                 column: column.to_string(),
                 priority: "medium".to_string(),
@@ -9102,6 +9570,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }
@@ -9899,7 +10368,7 @@ mod tests {
         use crate::company::task_intent::BlockerReplyIntent;
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
         use crate::ports::tasks::{
-            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord, TaskTitle,
         };
         use crate::ports::types::CompanyId;
         use std::path::Path;
@@ -9955,7 +10424,7 @@ mod tests {
         fn card(id: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
-                title: "Draft the launch note".to_string(),
+                title: TaskTitle::authored("Draft the launch note"),
                 note: None,
                 column: column.to_string(),
                 priority: "medium".to_string(),
@@ -9970,6 +10439,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: None,
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }

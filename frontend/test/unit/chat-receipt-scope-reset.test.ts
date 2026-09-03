@@ -98,7 +98,7 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     // to `clearReceipt` is now unused — the param is present but underscored,
     // and no `clearReceipt` call survives inside the callback body.
     expect(appShell).toMatch(
-      /const onSendDetached = useCallback\(\s*\n\s*\(threadId: string, turnId\?: string, _gen\?: number\) =>/,
+      /const onSendDetached = useCallback\(\s*\n\s*\(threadId: string, turnId\?: string, _gen\?: number, chatId\?: string\) =>/,
     );
     const start = appShell.indexOf("const onSendDetached = useCallback(");
     expect(start, "onSendDetached must be present").toBeGreaterThan(-1);
