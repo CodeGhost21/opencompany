@@ -10797,34 +10797,133 @@ mod tests {
             );
         }
 
-        /// **Issue #2028 (P1 review finding) — the concurrency race, proven by
-        /// actually interleaving two resolves rather than asserting a lock
-        /// exists.** Two operators resolve the same blocker with different
-        /// verdicts back to back, on the SAME company (so both cross
-        /// `blocker_resolutions`). Whichever verdict the durable approval
-        /// event names must be the SAME verdict the resume actually acts on —
-        /// before the fix, the side-channel arming was a plain last-write-wins
-        /// map insertion, so the resume could carry out the LOSING request's
-        /// verdict while the receipt reported the winner's.
-        #[tokio::test]
-        async fn concurrent_resolves_cannot_desync_the_armed_verdict_from_the_settled_one() {
-            use crate::ports::blockers::BlockerVerdict;
-
-            let (runtime, _home) = runtime().await;
-            // Deliberately a bare question (`step: None`), not the module's
-            // `blocker()` helper — that one is a Task-step blocker, and with
-            // no board card seeded here both retry and cancel would resume as
-            // "card not found", which cannot tell the two verdicts apart. A
-            // step-less blocker's resume note differs by verdict regardless of
-            // any card, which is exactly the observable this test needs.
-            let payload = BlockerPayload {
+        /// A bare agent question — `step: None`, so no board card is needed and
+        /// the resume note alone distinguishes one verdict from another.
+        ///
+        /// Deliberately not the module's `blocker()` helper: that one carries a
+        /// Task step, and with no card seeded both retry and cancel resume as
+        /// "card not found", which cannot tell the two verdicts apart.
+        fn question() -> BlockerPayload {
+            BlockerPayload {
                 kind: BlockerKind::Information,
                 source: BlockerSource::AgentQuestion,
                 step: None,
                 reason: "which cluster should this deploy to?".to_string(),
                 needed: "the cluster name".to_string(),
                 group_key: None,
-            };
+            }
+        }
+
+        /// Every verdict the durable journal banked for `id`, in append order —
+        /// read off disk, not off the in-memory map a resume consumes and
+        /// clears. What an operator's answer actually recorded.
+        async fn banked_verdicts(
+            home: &std::path::Path,
+            company: &CompanyId,
+            id: &crate::ports::types::ApprovalId,
+        ) -> Vec<String> {
+            let path = crate::store::paths::Bundle::new(home, company).journal_jsonl();
+            let raw = tokio::fs::read_to_string(path).await.unwrap_or_default();
+            raw.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|line| line["record"] == "BlockerResolved" && line["id"] == id.to_string())
+                .filter_map(|line| line["resolution"]["verdict"].as_str().map(str::to_string))
+                .collect()
+        }
+
+        /// **Issue #2028 — a late second verdict must not overwrite the answer
+        /// that already won, deterministically.** No threads: the first request
+        /// is resolved and resumed to completion, and only then does a second
+        /// arrive carrying a group list captured before any of it ran — exactly
+        /// what a second browser tab holds, and what every caller passes
+        /// (`parked_blocker_group` snapshots outside the lock).
+        ///
+        /// The loser must write **nothing**. Before the fix it banked its own
+        /// `record_blocker_resolution` and armed its own answer before
+        /// `settle_approval` told it that it had lost, so the durable journal
+        /// gained a Cancel line for an approval the host had settled as Retry,
+        /// and the armed Cancel was left in the side-channel with no resume left
+        /// to consume it — for the next boot to re-arm and act on.
+        #[tokio::test]
+        async fn a_late_second_verdict_banks_nothing_over_the_answer_that_won() {
+            use crate::ports::blockers::BlockerVerdict;
+
+            let (runtime, home) = runtime().await;
+            let id = runtime
+                .park_blocker(&question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            // Captured BEFORE the first request runs, and reused afterwards —
+            // the stale snapshot every caller holds.
+            let group = runtime
+                .parked_blocker_group(&id)
+                .expect("the blocker is parked");
+
+            let (winner, follow_up) = runtime
+                .apply_blocker_reply_spawned(&group, &id, BlockerVerdict::Retry, "", None)
+                .await
+                .expect("the first request resolves");
+            assert_eq!(winner.outcome(), "settled", "the first request wins");
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("its resume runs to completion");
+
+            let (loser, follow_up) = runtime
+                .apply_blocker_reply_spawned(&group, &id, BlockerVerdict::Cancel, "", None)
+                .await
+                .expect("the late request is answered, not refused");
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("it owes no resume");
+            assert_eq!(
+                loser.outcome(),
+                "already_resolved",
+                "the late request settled nothing: {loser:?}"
+            );
+
+            let banked = banked_verdicts(home.path(), runtime.id(), &id).await;
+            assert_eq!(
+                banked,
+                vec!["retry".to_string()],
+                "the durable journal must hold only the verdict that actually settled; a \
+                 losing request that banks its own is the record disagreeing with the \
+                 approval event about what the operator decided: {banked:?}"
+            );
+            assert!(
+                runtime.grants.peek_blocker_resolution(&id).is_none(),
+                "a losing request must leave nothing armed — an answer banked with no resume \
+                 left to consume it is what the next boot re-arms and carries out"
+            );
+        }
+
+        /// **Issue #2028 (P1 review finding) — the same race, run as a race.**
+        /// Two operators resolve one blocker with different verdicts
+        /// concurrently, on a multi-thread runtime so the two really interleave.
+        /// Whichever verdict the durable approval event names must be the one
+        /// the resume acts on, the only one banked, and the only one left armed.
+        ///
+        /// Repeated over fresh runtimes because the losing order is what varies:
+        /// a single round can have the loser arrive after the winner's resume
+        /// has already consumed the entry, which is the benign interleaving.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_resolves_cannot_desync_the_armed_verdict_from_the_settled_one() {
+            use crate::ports::blockers::BlockerVerdict;
+
+            for round in 0..15 {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    one_concurrent_round(round),
+                )
+                .await
+                .expect("a resolve round must not hang");
+            }
+        }
+
+        async fn one_concurrent_round(round: usize) {
+            use crate::ports::blockers::BlockerVerdict;
+
+            let (runtime, home) = runtime().await;
+            let payload = question();
             let id = runtime
                 .park_blocker(&payload, "t-1", assignee("eng"))
                 .await
@@ -10935,14 +11034,32 @@ mod tests {
             };
             assert!(
                 notes.iter().any(|n| n.as_str() == expected),
-                "the resume must post the WINNING verdict's note ({expected:?}); posted: \
-                 {notes:?}"
+                "round {round}: the resume must post the WINNING verdict's note \
+                 ({expected:?}); posted: {notes:?}"
             );
             assert!(
                 !notes.iter().any(|n| n.as_str() == contradicting),
-                "the resume must never carry out the LOSING request's verdict — found its \
-                 note ({contradicting:?}) even though the durable event named {winner_verdict:?}: \
-                 {notes:?}"
+                "round {round}: the resume must never carry out the LOSING request's verdict \
+                 — found its note ({contradicting:?}) even though the durable event named \
+                 {winner_verdict:?}: {notes:?}"
+            );
+
+            // The note only catches the loser when it overwrote the arming
+            // *before* the winner's resume consumed it, which is the narrow
+            // window. The journal catches it every time: a losing request that
+            // banks at all leaves a second verdict on the record for an
+            // approval only one verdict ever settled.
+            let banked = banked_verdicts(home.path(), runtime.id(), &id).await;
+            assert_eq!(
+                banked,
+                vec![winner_verdict.as_str().to_string()],
+                "round {round}: only the verdict that settled may be banked; the durable \
+                 record must not disagree with the approval event: {banked:?}"
+            );
+            assert!(
+                runtime.grants.peek_blocker_resolution(&id).is_none(),
+                "round {round}: nothing may stay armed once the one resume this approval \
+                 owed has run — a leftover answer is what the next boot re-arms and acts on"
             );
         }
     }
