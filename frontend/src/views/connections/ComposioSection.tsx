@@ -1,9 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, KeyRound, Loader2, Plug, Save, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  KeyRound,
+  Loader2,
+  Plug,
+  Save,
+  ShieldCheck,
+  Trash2,
+  Wallet,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { getComposioStatus, setComposioToken, type ComposioStatus } from "@/api/composio";
+import {
+  getComposioStatus,
+  setComposioApiKey,
+  setComposioToken,
+  type ComposioMode,
+  type ComposioStatus,
+} from "@/api/composio";
 import { ApiError } from "@/api/types";
 import { grantStanding } from "@/lib/provider-grid";
 import { classifyLoadFailure } from "@/lib/section-load";
@@ -15,6 +31,45 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
+
+/**
+ * The two routes to Composio, as an operator chooses between them.
+ *
+ * One table so the tile's label, its explanation and its billing line cannot
+ * drift apart, and so the order below is the order they render.
+ */
+const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string }> = {
+  managed: {
+    label: "OpenHuman-managed",
+    blurb:
+      "Reached through OpenHuman, which holds the Composio account. Nothing to paste; the providers on offer are the ones OpenHuman permits.",
+    billed: "Billed by OpenHuman",
+  },
+  byok: {
+    label: "This company's own Composio account",
+    blurb:
+      "Calls go straight to Composio with this company's API key. Nothing is proxied here, and the providers on offer are whatever that account has.",
+    billed: "Billed by Composio, to you",
+  },
+};
+
+/** The routes in render order — also the order the arrow keys walk. */
+const MODE_ORDER: ComposioMode[] = ["managed", "byok"];
+
+/**
+ * The route to render for whatever the host said.
+ *
+ * A host predating BYOK omits `mode`, and one from a future shape could name a
+ * route this console has no copy for. Both read as `managed`: it is the only
+ * route every host has, and the one whose controls are safe to offer when we do
+ * not know. Narrowing here means nothing below can index {@link MODES} with a
+ * key it does not hold.
+ */
+function modeOf(status: ComposioStatus | null): ComposioMode {
+  const mode = status?.mode;
+  return mode && mode in MODES ? mode : "managed";
+}
 
 interface Props {
   client: OpenCompanyClient;
@@ -71,12 +126,24 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   const [load, setLoad] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
   const [status, setStatus] = useState<ComposioStatus | null>(null);
   const [token, setToken] = useState("");
-  const [busy, setBusy] = useState<"save" | "clear" | null>(null);
+  const [busy, setBusy] = useState<"save" | "clear" | "route" | null>(null);
+  // The route the picker shows, and the one actually stored. Kept apart so a
+  // Save can tell "switch this company to BYOK" from "rotate the key it already
+  // uses" — only the first needs the confirmation step below.
+  const [mode, setMode] = useState<ComposioMode>("managed");
+  const [persistedMode, setPersistedMode] = useState<ComposioMode>("managed");
+  const [apiKey, setApiKey] = useState("");
+  // The managed → BYOK confirmation. Not a modal: the warning belongs in the
+  // same scroll context as the control that raised it, and what it warns about
+  // — every provider connected through the managed route becoming invisible —
+  // is not readable off a pair of tiles.
+  const [confirmSwitch, setConfirmSwitch] = useState(false);
   // Only meaningful in the credentialled states, where the paste card is an
   // override rather than the way in.
   const [showOverride, setShowOverride] = useState(false);
 
   const requestGeneration = useRef(0);
+  const modeButtons = useRef<(HTMLButtonElement | null)[]>([]);
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -84,6 +151,8 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       const s = await getComposioStatus(client, company);
       if (generation !== requestGeneration.current) return;
       setStatus(s);
+      setMode(modeOf(s));
+      setPersistedMode(modeOf(s));
       // Hide the whole section when the feature is not compiled into this build.
       setLoad(s.inBuild ? "ready" : "unavailable");
     } catch (err) {
@@ -98,6 +167,8 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   useEffect(() => {
     setStatus(null);
     setShowOverride(false);
+    setApiKey("");
+    setConfirmSwitch(false);
     setLoad("loading");
     void refresh();
   }, [refresh]);
@@ -135,6 +206,91 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     }
   }
 
+  /**
+   * Store this company's own Composio API key and route it there.
+   *
+   * The key is sent once and never comes back — the field is blanked on success,
+   * and what tells the operator it worked is the status the host returns, not
+   * anything held here.
+   */
+  async function saveApiKey() {
+    if (!apiKey.trim()) return;
+    setBusy("route");
+    try {
+      const res = await setComposioApiKey(client, company, apiKey.trim());
+      setStatus(res.status);
+      setMode(modeOf(res.status));
+      setPersistedMode(modeOf(res.status));
+      setApiKey("");
+      setConfirmSwitch(false);
+      toast.success(res.note);
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not save the Composio API key.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Give the managed route back: clear the key, and the mode with it. */
+  async function clearApiKey() {
+    setBusy("route");
+    try {
+      const res = await setComposioApiKey(client, company, "");
+      setStatus(res.status);
+      setMode(modeOf(res.status));
+      setPersistedMode(modeOf(res.status));
+      setApiKey("");
+      setConfirmSwitch(false);
+      toast.success(res.note);
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not clear the Composio API key.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * A Save that would move this company off the managed route for the first
+   * time. Gated on a confirmation because the consequence — the providers
+   * connected through OpenHuman's Composio account are in *that* account and
+   * vanish from the grid until they are connected again here — is not readable
+   * off the tiles. Rotating a key already in use, and switching back, are not
+   * gated: neither strands anything the operator cannot immediately undo.
+   */
+  function requestApiKeySave() {
+    if (persistedMode === "managed") {
+      setConfirmSwitch(true);
+      return;
+    }
+    void saveApiKey();
+  }
+
+  /**
+   * Arrow keys move between the route tiles and select in the same step, the way
+   * native radios behave.
+   *
+   * Without it every tile stays in the Tab order and no Arrow key moves between
+   * them — a screen reader announces radiogroup controls whose keyboard behavior
+   * does not exist. Same shape `policy-settings` uses for its approval tiers,
+   * which states the reasoning at length. Navigates from the tile that has
+   * FOCUS: the keydown bubbles from the focused button to the container, so
+   * `event.target` is that button. Wraps at both ends rather than dead-ending.
+   */
+  function handleModeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (busy !== null) return;
+    if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)) return;
+    const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+    const focused = modeButtons.current.indexOf(event.target as HTMLButtonElement);
+    if (focused === -1) return;
+    event.preventDefault();
+    const next = (focused + step + MODE_ORDER.length) % MODE_ORDER.length;
+    setMode(MODE_ORDER[next]);
+    setConfirmSwitch(false);
+    modeButtons.current[next]?.focus();
+  }
+
   if (load === "unavailable") return null;
 
   const attested = status?.credentialSource === "attested";
@@ -152,7 +308,20 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   // A company already brokered through its own key is in the same position as an
   // attested one: the paste card is a deliberate override, not the way in.
   const credentialed = attested || companyKey;
-  const showTokenCard = canManage && (!credentialed || showOverride || byoToken);
+  // Which route this company is actually on, as opposed to what the picker shows.
+  const onByok = persistedMode === "byok";
+  // Everything below is about the managed route's credential tiers, and under
+  // BYOK none of them is in play — the company's own Composio key is the whole
+  // credential. Rendering the token card there would offer a control that
+  // changes nothing about the calls being made.
+  //
+  // Gated on the SELECTED mode, not the persisted one: an operator part-way
+  // through switching to BYOK would otherwise see two credential fields at once
+  // — a Composio API key and a backend token — with no way to tell which one the
+  // Save below belongs to. What is on screen should be the route being looked
+  // at, not the one being left.
+  const showTokenCard =
+    mode === "managed" && canManage && (!credentialed || showOverride || byoToken);
   // The composio-grant tri-state, narrowed the same way `ProvidersSection` does
   // (issue #1478): `undefined` reads as "unknown", never as "not granted", so
   // this badge and the grid a few inches below it cannot disagree on the same
@@ -170,11 +339,21 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       <p className="text-sm text-muted-foreground">
         {!canManage
           ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
-          : attested
-            ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
-            : companyKey
-              ? "Your teammates reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every teammate in the company can then use what you connect."
-              : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
+          : onByok
+            ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — OpenHuman proxies nothing and bills nothing. Connect providers in the grid below; they are connected in that account."
+            : attested
+              ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
+              : companyKey
+                ? "Your teammates reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every teammate in the company can then use what you connect."
+                : // The last arm is the only one that *instructs*, and the
+                  // instruction is route-specific — so it follows the route the
+                  // operator is looking at rather than the one still stored.
+                  // Telling someone to paste a backend token underneath a
+                  // Composio API key field is how copy comes to contradict the
+                  // form directly beneath it.
+                  mode === "byok"
+                  ? "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account rather than OpenHuman's."
+                  : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
       </p>
 
       {load === "loading" ? (
@@ -192,7 +371,23 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     ? "not granted"
                     : "grant unknown"}
               </Badge>
-              {attested ? (
+              {onByok ? (
+                // BYOK with no key stored is a real state the resolver handles —
+                // it withholds the tools rather than borrowing the platform's
+                // identity — so the badge has to tell the two apart. Reporting
+                // "using its own account" for a company whose agents have no
+                // Composio at all is the confident-wrong-answer shape #886 was
+                // filed about, one route over.
+                status.credentialSource === "none" ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-status-blocked-text">
+                    <AlertTriangle className="size-3" /> No API key — agents get no Composio tools
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
+                    <KeyRound className="size-3" /> Using this company&apos;s own Composio account
+                  </span>
+                )
+              ) : attested ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <ShieldCheck className="size-3" /> Linked via cluster identity — nothing stored
                 </span>
@@ -229,12 +424,174 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
             />
           )}
 
+          {canManage && (
+            <Card>
+              <CardContent className="space-y-4">
+                {/* Two tiles, not a dropdown. The choice is binary, consequential,
+                    and both sides need a sentence — a select collapses the option
+                    NOT currently chosen to nothing, which is exactly the half an
+                    operator is trying to evaluate. Same radiogroup shape
+                    `policy-settings` uses for approval tiers, roving tabindex
+                    included. */}
+                <div
+                  role="radiogroup"
+                  aria-label="Which Composio account this company uses"
+                  className="grid gap-2 sm:grid-cols-2"
+                  onKeyDown={handleModeKeyDown}
+                >
+                  {MODE_ORDER.map((m, index) => {
+                    const active = mode === m;
+                    return (
+                      <button
+                        key={m}
+                        ref={(el) => {
+                          modeButtons.current[index] = el;
+                        }}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        tabIndex={active ? 0 : -1}
+                        disabled={busy !== null}
+                        data-testid={`composio-mode-${m}`}
+                        onClick={() => {
+                          setMode(m);
+                          setConfirmSwitch(false);
+                        }}
+                        className={cn(
+                          "rounded-md border p-3 text-left transition-colors",
+                          "disabled:cursor-not-allowed disabled:opacity-60",
+                          active ? "border-primary bg-primary/5" : "hover:bg-muted/50",
+                        )}
+                      >
+                        <div className="flex items-start gap-2">
+                          <span className="flex-1 text-sm font-medium">{MODES[m].label}</span>
+                          {persistedMode === m && (
+                            <Badge variant="secondary" className="text-xs">
+                              Current
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">{MODES[m].blurb}</p>
+                        <p className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground">
+                          <Wallet className="size-3 shrink-0" />
+                          {MODES[m].billed}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* The endpoint, so the routing claim above is checkable rather
+                    than merely asserted — but only when the managed token card
+                    below is not already printing it. Two copies of one URL on
+                    one screen reads as two different facts. */}
+                {status && !showTokenCard && (
+                  <p className="truncate font-mono text-xs text-muted-foreground">
+                    {status.backendUrl}
+                  </p>
+                )}
+
+                {mode === "byok" && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="composio-api-key" className="text-xs">
+                      Composio API key
+                    </Label>
+                    <Input
+                      id="composio-api-key"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={onByok ? "stored — paste a new key to rotate" : "ak_…"}
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      From your Composio dashboard at app.composio.dev. Stored on this host, never
+                      shown again.
+                    </p>
+                  </div>
+                )}
+
+                {/* Said before the switch, not after: what it costs is not
+                    readable off the tiles. */}
+                {confirmSwitch && (
+                  <div
+                    role="alertdialog"
+                    aria-labelledby="composio-switch-warning"
+                    className="space-y-3 rounded-md border border-status-blocked/40 bg-status-blocked-soft p-3"
+                  >
+                    <p
+                      id="composio-switch-warning"
+                      className="inline-flex items-center gap-2 text-xs font-medium"
+                    >
+                      <AlertTriangle className="size-3.5 shrink-0" />
+                      Providers connected through OpenHuman stay there
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      They live in OpenHuman&apos;s Composio account, not in this one, so the grid
+                      below will look empty until you connect them again here. Clearing the key puts
+                      this company back where it is now.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" disabled={busy !== null} onClick={() => void saveApiKey()}>
+                        {busy === "route" ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Save className="size-4" />
+                        )}
+                        Use this company&apos;s account
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy !== null}
+                        onClick={() => setConfirmSwitch(false)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Nothing to act on for a managed company that has stored no
+                    key: no Save (there is nothing to save) and no Clear (there
+                    is nothing to clear). Rendering the row anyway left a band of
+                    empty padding under the tiles that read as a missing
+                    control. */}
+                {!confirmSwitch && (mode === "byok" || onByok) && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {mode === "byok" ? (
+                      <Button disabled={busy !== null || !apiKey.trim()} onClick={requestApiKeySave}>
+                        {busy === "route" ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Save className="size-4" />
+                        )}
+                        {onByok ? "Rotate key" : "Save key"}
+                      </Button>
+                    ) : (
+                      onByok && (
+                        <Button disabled={busy !== null} onClick={() => void clearApiKey()}>
+                          {busy === "route" ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
+                          Clear key & use OpenHuman-managed
+                        </Button>
+                      )
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {/* Gated on `credentialed`, not `attested`: a company brokered through
               its own TinyHumans key is equally "already credentialled", so it
               equally needs a way back to the BYO card. Gating this on `attested`
               alone left a company-key admin with the paste card hidden and no
               control to reveal it — the override became unreachable. */}
-          {canManage && credentialed && !showTokenCard && (
+          {canManage && !onByok && credentialed && !showTokenCard && (
             <Button variant="outline" size="sm" onClick={() => setShowOverride(true)}>
               <KeyRound className="size-4" />
               Use your own Composio account instead

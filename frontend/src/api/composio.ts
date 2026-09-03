@@ -30,6 +30,23 @@ import type { OpenCompanyClient, RequestOptions } from "./client";
 export type ComposioCredentialSource = "attested" | "company" | "static" | "none";
 
 /**
+ * Which host this company's Composio calls go to.
+ *
+ * - `managed` — proxied through the OpenHuman backend, which owns the Composio
+ *   API key, the toolkit allowlist and the billing. The default, and the route
+ *   that needs no configuration at all.
+ * - `byok` — straight to this company's **own** Composio account with the API key
+ *   its admin stored. Nothing is proxied and nothing is billed here; the
+ *   providers it can connect are whatever that Composio account permits.
+ *
+ * Orthogonal to {@link ComposioCredentialSource}, which names *whose identity* a
+ * call presents rather than *which host* it is presented to. A BYOK company
+ * reports `byok` + `static`; a company that pasted a backend token override
+ * reports `managed` + `static`.
+ */
+export type ComposioMode = "managed" | "byok";
+
+/**
  * One provider in the catalog the host offers, with the backend's own display
  * metadata (issue #600).
  *
@@ -66,7 +83,19 @@ export interface ComposioStatus {
   granted: boolean;
   /** Which credential this company's Composio calls present — never the credential itself. */
   credentialSource: ComposioCredentialSource;
-  /** The effective Composio backend URL (non-secret). */
+  /**
+   * Which host those calls go to — OpenHuman-managed, or this company's own
+   * Composio account.
+   *
+   * Optional on the wire: a host predating BYOK answers without it, and absent
+   * must read as `managed` (the only route those hosts have) rather than as
+   * "unknown".
+   */
+  mode?: ComposioMode;
+  /**
+   * The endpoint the calls actually reach (non-secret) — the managed backend, or
+   * Composio's own API host under `byok`.
+   */
   backendUrl: string;
   /** The manifest toolkit allowlist verbatim (empty = defer to the backend allowlist). */
   toolkits: string[];
@@ -257,6 +286,33 @@ export function setComposioToken(
   token: string,
 ): Promise<ComposioMutation> {
   return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/token`, { token });
+}
+
+/**
+ * Point this company at its **own** Composio account, or give the managed route
+ * back (BYOK).
+ *
+ * A non-empty `apiKey` stores the key and switches the company to `byok`; an
+ * empty string clears it and returns it to OpenHuman-managed Composio. One call
+ * for both because the mode is a consequence of the key rather than a separate
+ * control — selecting BYOK with nothing stored would leave the company with no
+ * Composio tools and no visible reason why.
+ *
+ * WRITE-ONLY, like every other credential here: the key goes out on this call,
+ * lands in the host's secret store, and is never returned. Admin-only — a member
+ * gets a 403.
+ *
+ * **Not** interchangeable with {@link setComposioToken}. That one stores a bearer
+ * the *TinyHumans backend* recognises and leaves the route managed; this one
+ * stores a key *Composio* recognises and changes the route. They authenticate
+ * different hosts.
+ */
+export function setComposioApiKey(
+  client: OpenCompanyClient,
+  company: string | null,
+  apiKey: string,
+): Promise<ComposioMutation> {
+  return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/api-key`, { apiKey });
 }
 
 /**
