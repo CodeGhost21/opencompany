@@ -204,6 +204,9 @@ pub struct MeteredTitler {
     company: crate::ports::types::CompanyId,
     store: Arc<dyn crate::ports::CompanyStore>,
     meter: Option<Arc<dyn crate::ports::usage::UsageMeter>>,
+    /// Held for the plan-level ceiling check alone. The pass runs before any
+    /// teammate has the card, so there is no agent whose refusal would carry it.
+    deps: HarnessDeps,
 }
 
 impl MeteredTitler {
@@ -214,6 +217,7 @@ impl MeteredTitler {
             company,
             store: deps.store.clone(),
             meter: deps.meter.clone(),
+            deps: deps.clone(),
         }
     }
 }
@@ -221,6 +225,20 @@ impl MeteredTitler {
 #[async_trait::async_trait]
 impl TitleSummariser for MeteredTitler {
     async fn title(&self, request: &str) -> Option<TaskTitle> {
+        // The plan-level total-token ceiling gates naming a card, exactly as it
+        // gates a responder selection (issue #1872). Both run before any agent
+        // exists, so `total_ceiling_refusal` has nobody to refuse as and never
+        // fires — and without this a tenant past the hard ceiling keeps paying,
+        // one call per card opened, after the point that is supposed to permit
+        // no model calls at all. `None` costs nothing and lands the caller on
+        // the name it would have used anyway (codex on #2055).
+        if crate::harness::HarnessPool::total_ceiling_spent(&self.company, &self.deps).await {
+            tracing::info!(
+                company = %self.company,
+                "[title] total token ceiling reached; naming the card from the request instead"
+            );
+            return None;
+        }
         let (title, usage) = self.evaluator.title(request).await;
         crate::metering::record_title_usage(
             &usage,

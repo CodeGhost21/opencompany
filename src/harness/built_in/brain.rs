@@ -10984,6 +10984,38 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// The same ceiling, one pass later (codex on #2055): naming a card is a
+    /// model call with no agent behind it, exactly like a selection, so
+    /// `total_ceiling_refusal` never fires for it either.
+    ///
+    /// Without the gate in `MeteredTitler::title` the provider answers and this
+    /// returns `Some("chief")` — a tenant past its hard ceiling paying once per
+    /// card opened, forever.
+    #[tokio::test]
+    async fn an_exhausted_total_ceiling_names_a_card_without_paying_for_a_title() {
+        use crate::ports::tasks::TitleSummariser;
+
+        let dir = tempfile::tempdir().unwrap();
+        let meter = Arc::new(SpentMeter);
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: Default::default(),
+            total_budget: Some(10),
+        };
+        let (brain, _provider) =
+            brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+        let company = brain.record().id.clone();
+
+        assert_eq!(
+            brain
+                .title_pass(&company)
+                .title("can you fix the checkout bug, it keeps dropping orders")
+                .await,
+            None,
+            "past the ceiling the card is named from the request, not by a model"
+        );
+    }
+
     /// Issue #1872 (codex P2): a channel emptied *after* creation.
     ///
     /// `POST …/desks` refuses an empty auto channel, but `DELETE …/team/{id}`
