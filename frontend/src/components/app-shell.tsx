@@ -99,6 +99,8 @@ import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
+import { foldLiveFrame } from "@/lib/live-frame";
+
 import {
   dispatchMarkerPlacement,
   fromHistory,
@@ -774,6 +776,11 @@ export function AppShell({
   useEffect(() => {
     setOpenTurns((prev) => (Object.keys(prev).length === 0 ? prev : {}));
   }, [company]);
+  // Company-scoped for the reason `openTurns` above is: the keys are message ids
+  // from one company's journal, and two companies' sequences collide freely.
+  useEffect(() => {
+    setLiveStepsByMessage((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -781,6 +788,26 @@ export function AppShell({
   // in-place flip; it is structurally a superset of `TurnStep`, so these render
   // through the same `StepTimeline` as the final steps.
   const [liveStepsByThread, setLiveStepsByThread] = useState<
+    Record<string, (TurnStep & { toolCallId?: string })[]>
+  >({});
+  // The same timeline, per **query** rather than per thread, for a frame that
+  // says which operator message its turn answers (`messageSeq`). Keyed by that
+  // message's console id, so a running turn's rows render under the question
+  // that asked them — the way a settled turn's folded steps already render under
+  // its reply.
+  //
+  // Two turns in one thread is the case this exists for. `liveStepsByThread`
+  // holds ONE row-list per thread, and `onSendStart` resets it, so asking a
+  // second question destroyed the first turn's rows outright — and a turn
+  // blocked on a teammate emits nothing further, so its timeline never came
+  // back. Measured on a real pair: the reset discarded two rows from a live
+  // delegated turn. Separate keys mean neither turn can clear the other, and
+  // the merged pile that would otherwise render is split back into the two
+  // questions it came from.
+  //
+  // Not a replacement: a frame with no `messageSeq` still keys by thread, which
+  // is every turn answering no journaled message and every older host.
+  const [liveStepsByMessage, setLiveStepsByMessage] = useState<
     Record<string, (TurnStep & { toolCallId?: string })[]>
   >({});
   // The live receipt for each synchronous chat turn in flight (issue #1934),
@@ -2164,6 +2191,23 @@ export function AppShell({
       // only when polling recovers the durable history (issue #1743).
       const channelId = channelForThread(chatChannelByThread, event.chatId);
       if (!channelId) return;
+      // This turn's answer is here, carrying the authoritative folded steps, so
+      // the live rows filed under the question it answers have done their job.
+      // Same swap `liveStepsByThread` makes when a reply lands — the durable
+      // timeline replaces the transient one with no empty frame between them.
+      //
+      // Addressed by the reply's parent, which is the message that asked: the
+      // same id `messageSeq` resolved to when the rows were filed. A reply with
+      // no parent answers no journaled message and so filed no rows.
+      if (event.parentId) {
+        const askedBy = hostMessageId(event.parentId);
+        setLiveStepsByMessage((prev) => {
+          if (!(askedBy in prev)) return prev;
+          const next = { ...prev };
+          delete next[askedBy];
+          return next;
+        });
+      }
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
         // The same recent-tail content dedupe the thread store uses. It still
@@ -2679,6 +2723,13 @@ export function AppShell({
     [typing.typers, companyPeople],
   );
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
+    // The three kinds this folds. `use-events` only routes these here, so the
+    // guard is a type narrowing rather than a runtime filter — but it is stated
+    // rather than assumed, because `foldLiveFrame` takes the narrow shape and a
+    // cast would let a fourth kind through silently if that routing ever grew.
+    if (event.type !== "tool_call" && event.type !== "tool_result" && event.type !== "thinking") {
+      return;
+    }
     // Workflow agent-node frames carry `workflowRunId`/`nodeId` instead of a
     // `chatId` (issue #1702) and belong to the run-trace sheet's own
     // subscription, not to any chat timeline. Route them out BEFORE the legacy
@@ -2711,60 +2762,26 @@ export function AppShell({
       // workflow node events in `onWorkflowRunEvent`.
       return;
     }
-    setLiveStepsByThread((prev) => {
-      const rows = prev[threadId] ? [...prev[threadId]] : [];
-      if (event.type === "tool_call") {
-        const idx = event.toolCallId
-          ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
-          : -1;
-        const row = {
-          kind: "tool_call" as const,
-          status: "running" as const,
-          label: event.label ?? "Working",
-          toolCallId: event.toolCallId,
-        };
-        if (idx >= 0) rows[idx] = { ...rows[idx], ...row };
-        else rows.push(row);
-      } else if (event.type === "tool_result") {
-        let idx = event.toolCallId
-          ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
-          : -1;
-        if (idx < 0 && event.toolCallId) return prev;
-        if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
-        const status = event.status === "error" ? ("error" as const) : ("ok" as const);
-        if (idx >= 0) {
-          rows[idx] = {
-            ...rows[idx],
-            status,
-            detail: event.detail ?? rows[idx].detail,
-            // `result` is what came back — the summary `StepTimeline` renders
-            // under the label. Carried for the same reason `detail` is: the
-            // live row and the folded step it is replaced by should not say
-            // different amounts about the same call. It was dropped here while
-            // only the built-in harness streamed (its rows lean on `detail`,
-            // derived from the arguments); an ACP tool call carries its
-            // summary in `result` and nothing else, so a dropped `result` is
-            // the whole of what the row could have said.
-            result: event.result ?? rows[idx].result,
-            elapsedMs: event.elapsedMs,
-          };
-        } else {
-          rows.push({
-            kind: "tool_call",
-            status,
-            label: event.label ?? "Working",
-            detail: event.detail,
-            result: event.result,
-            elapsedMs: event.elapsedMs,
-            toolCallId: event.toolCallId,
-          });
-        }
-      } else if (event.type === "thinking") {
-        // The backend already coalesces a thinking run into one frame, so each
-        // arrival is a distinct row (mirrors the folded "Thinking" step).
-        rows.push({ kind: "thinking", status: "ok", label: "Thinking" });
-      }
-      return { ...prev, [threadId]: rows };
+    // Which bucket this row belongs in. A frame that names the operator message
+    // it answers is filed under that **query**; one that does not falls back to
+    // the thread, which is every turn answering no journaled message and every
+    // host older than `messageSeq`.
+    //
+    // Filing under one or the other — never both — is what keeps a row from
+    // rendering twice, and is why arming a second turn can no longer clear the
+    // first one's rows: they are not in the same list any more.
+    const messageKey =
+      "messageSeq" in event && event.messageSeq !== undefined
+        ? hostMessageId(String(event.messageSeq))
+        : undefined;
+    const setRows = messageKey ? setLiveStepsByMessage : setLiveStepsByThread;
+    const rowKey = messageKey ?? threadId;
+    setRows((prev) => {
+      const rows = foldLiveFrame(prev[rowKey] ?? [], event);
+      // `null` is "this frame belongs to rows we do not hold" — keep the
+      // previous object so React skips the re-render.
+      if (!rows) return prev;
+      return { ...prev, [rowKey]: rows };
     });
     // Keep this thread's receipt alive off the same frame (issue #1934): a frame
     // arriving means the turn is advancing, so bump `lastFrameAt` (which clears
@@ -3490,6 +3507,7 @@ export function AppShell({
           scopeRef={scopeRef}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
+              liveStepsByMessage={liveStepsByMessage}
               receiptByThread={receiptByThread}
               agentNames={agentNames}
               unread={unread}
