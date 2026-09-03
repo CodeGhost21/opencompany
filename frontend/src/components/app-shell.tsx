@@ -102,6 +102,7 @@ import { toast } from "sonner";
 import { foldLiveFrame } from "@/lib/live-frame";
 
 import {
+  type ChatMessage,
   dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
@@ -810,6 +811,39 @@ export function AppShell({
   const [liveStepsByMessage, setLiveStepsByMessage] = useState<
     Record<string, (TurnStep & { toolCallId?: string })[]>
   >({});
+  /**
+   * Retires the live rows of every message that now has durable steps of its
+   * own, and of every message named in `alsoDrop`.
+   *
+   * Two cleanup paths meet here because a turn can end two ways.
+   *
+   * A turn that **answers** journals its folded steps onto the message, so the
+   * arrival of those steps is the swap signal — the durable timeline is there
+   * to replace the transient one, with no empty frame between them. That is a
+   * fact about the message itself, unlike the reply's `parentId`, which names
+   * the thread root rather than the question (see `renderAgentReply`).
+   *
+   * A turn that **fails** journals a `TurnFailed` line and no reply at all, so
+   * nothing ever grows steps for it. Its bucket would sit there for the life of
+   * the session — quite possibly holding a row still marked `running`, since a
+   * result that never arrived cannot flip it. `alsoDrop` is how the terminal
+   * settle path retires those (Codex on #2069).
+   */
+  const clearLiveRowsSettledBy = useCallback(
+    (messages: readonly ChatMessage[], alsoDrop: readonly string[] = []) => {
+      setLiveStepsByMessage((prev) => {
+        const done = new Set(alsoDrop);
+        for (const m of messages) if (m.steps && m.steps.length > 0) done.add(m.id);
+        let hit = false;
+        for (const id of done) if (id in prev) { hit = true; break; }
+        if (!hit) return prev;
+        const next = { ...prev };
+        for (const id of done) delete next[id];
+        return next;
+      });
+    },
+    [],
+  );
   // The live receipt for each synchronous chat turn in flight (issue #1934),
   // keyed by host thread id — armed on `onSendStart`, bumped by every live
   // frame (which also captures who picked the turn up), and cleared on whichever
@@ -1243,6 +1277,10 @@ export function AppShell({
         .then((entries) => {
           if (cancelled || requestCompany !== company) return;
           const hydrated = fromHistory(entries);
+          // Any message that came back carrying steps has a durable timeline
+          // now, so its transient one is spent. Covers the ordinary success
+          // swap, and re-converges a console that reloaded mid-turn.
+          clearLiveRowsSettledBy(hydrated);
           if (hydrated.length > 0) {
             // Persisted rows take the history's own oldest-first order, and
             // local rows the host has not persisted yet stay at the tail — so
@@ -1648,6 +1686,16 @@ export function AppShell({
               delete next[liveKey];
               return next;
             });
+            // The per-query buckets retire on the same transition, inside the
+            // same guard and for the same reason: a queued sibling still
+            // running owns its rows, and this must not take them.
+            //
+            // Every message here, not only those carrying steps — which is what
+            // covers a turn that FAILED. It journals a `TurnFailed` line and no
+            // reply, so it never grows durable steps to swap for, and its bucket
+            // would otherwise hold a row marked `running` for the whole session
+            // (Codex on #2069).
+            clearLiveRowsSettledBy(hydrated, hydrated.map((m) => m.id));
           }
           const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
@@ -2193,21 +2241,19 @@ export function AppShell({
       if (!channelId) return;
       // This turn's answer is here, carrying the authoritative folded steps, so
       // the live rows filed under the question it answers have done their job.
-      // Same swap `liveStepsByThread` makes when a reply lands — the durable
-      // timeline replaces the transient one with no empty frame between them.
+      // NOT keyed off `event.parentId`. That is the reply's *placement* parent,
+      // and `AcceptedTurn::thread_root` is explicit that "a reply is parented to
+      // its question's parent, never to the question" — so for a follow-up typed
+      // inside a thread it names the thread ROOT. Clearing by it would leave the
+      // follow-up's own rows resident and, far worse, delete the root's bucket:
+      // if the root's turn were still running this would erase a live sibling's
+      // timeline, which is the exact failure this whole change exists to stop
+      // (Codex on #2069).
       //
-      // Addressed by the reply's parent, which is the message that asked: the
-      // same id `messageSeq` resolved to when the rows were filed. A reply with
-      // no parent answers no journaled message and so filed no rows.
-      if (event.parentId) {
-        const askedBy = hostMessageId(event.parentId);
-        setLiveStepsByMessage((prev) => {
-          if (!(askedBy in prev)) return prev;
-          const next = { ...prev };
-          delete next[askedBy];
-          return next;
-        });
-      }
+      // The swap is driven by the durable steps instead — see
+      // `clearLiveRowsSettledBy` below, which retires a bucket once the message
+      // it belongs to has real steps to render, and the terminal settle path,
+      // which covers a turn that failed and so journals no reply at all.
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
         // The same recent-tail content dedupe the thread store uses. It still
