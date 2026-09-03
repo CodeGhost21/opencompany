@@ -61,6 +61,31 @@ const CONSOLE_LATENCY_MS = 6_000;
 const PROBE_FAILED = "providers-probe-failed";
 const GRANT_UNKNOWN = "Couldn't check whether this company grants";
 
+/**
+ * A provider this company has NOT connected.
+ *
+ * Load-bearing, and the reason it is not Gmail or Slack: a connected provider
+ * gets a tile from the connection list alone, so it appears whether or not the
+ * catalog ever arrived. An assertion on one of those passes on a page whose
+ * catalog read failed — which is precisely the state under test. Only an
+ * unconnected provider proves the catalog reached the grid.
+ */
+const UNCONNECTED = {
+  slug: "notion",
+  name: "Notion",
+  enabled: true,
+  description: "Pages and databases.",
+  categories: ["productivity"],
+};
+
+/** Which toolkits the fixture publishes. */
+async function setCatalog(page: Page, entries: unknown[]): Promise<void> {
+  const set = await page.request.post(`${COMPOSIO_FIXTURE_URL}/__catalog`, {
+    data: { catalog: entries },
+  });
+  expect(set.ok(), `the composio fixture refused /__catalog: ${set.status()}`).toBeTruthy();
+}
+
 /** How long the fixture's catalog route takes to answer. */
 async function setCatalogDelay(page: Page, toolkitsMs: number): Promise<void> {
   const set = await page.request.post(`${COMPOSIO_FIXTURE_URL}/__delay`, {
@@ -138,16 +163,18 @@ test("a first visit paints the catalog the host sent, however long it took to se
 }) => {
   test.setTimeout(120_000);
   await setCatalogDelay(page, 0);
+  await setCatalog(page, [UNCONNECTED]);
   await setTokenAndEvictCatalog(page);
   await delayTheConsolesRead(page, CONSOLE_LATENCY_MS);
 
   await openApps(page);
 
   // The catalog the fixture actually serves, on the FIRST visit — no reload,
-  // no warm cache.
+  // no warm cache. Asserted on the unconnected provider: Gmail and Slack have
+  // tiles either way, so they cannot tell a catalog that arrived from one that
+  // was abandoned.
   const grid = providerGrid(page);
-  await expect(grid.getByText("Gmail", { exact: true })).toBeVisible({ timeout: 60_000 });
-  await expect(grid.getByText("Slack", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(grid.getByText(UNCONNECTED.name, { exact: true })).toBeVisible({ timeout: 60_000 });
 
   // And neither warning. They were never two failures: abandoning the read
   // nulled the whole status, so the catalog warning and the grant warning came
@@ -203,28 +230,41 @@ test("rotating the credential re-reads the catalog instead of warning about it",
   await openApps(page);
   const grid = providerGrid(page);
   await expect(grid.getByText("Gmail", { exact: true })).toBeVisible({ timeout: 60_000 });
+  // Nothing is showing it yet, which is what makes its arrival below evidence
+  // of a re-read rather than of a page that never changed.
+  await expect(grid.getByText(UNCONNECTED.name, { exact: true })).toHaveCount(0);
+
+  // A rotated token can resolve a different Composio account, so the catalog
+  // moves with the credential — that is why the host evicts its cached one on
+  // every token write, and it is the only way this spec can tell a re-read from
+  // a page that simply kept what it had.
+  await setCatalog(page, [UNCONNECTED]);
 
   // A rotation re-probes by tearing the in-flight read down and starting
   // another. That teardown now cancels the request rather than merely ignoring
   // its answer, and a cancellation this page caused says nothing about the
   // host — so it must leave no warning where a fresh catalog belongs.
+  const reread = page.waitForResponse(
+    (response) => isComposioStatus(new URL(response.url())) && response.status() === 200,
+  );
   const field = page.getByLabel(/Composio token/);
   await field.fill(`${TOKEN}-rotated`);
   await page.getByRole("button", { name: "Save token" }).click();
-  // The field is cleared only on a write the host accepted, so this is what
-  // separates "the rotation happened" from "the click did nothing and the
-  // assertions below re-read a page that never changed".
+  // The field is cleared only on a write the host accepted, so this separates
+  // "the rotation happened" from "the click did nothing".
   await expect(field).toHaveValue("", { timeout: 30_000 });
+  await reread;
 
-  await expect(grid.getByText("Gmail", { exact: true })).toBeVisible({ timeout: 60_000 });
-  await expect(grid.getByText("Slack", { exact: true })).toBeVisible({ timeout: 60_000 });
+  // The provider this company has not connected, so it can only have reached
+  // the grid through a catalog read AFTER the rotation.
+  await expect(grid.getByText(UNCONNECTED.name, { exact: true })).toBeVisible({ timeout: 60_000 });
   await expect(page.getByTestId(PROBE_FAILED)).toHaveCount(0);
   await expect(page.getByText(GRANT_UNKNOWN)).toHaveCount(0);
 });
 
 /**
  * Put the company back as this file found it: no Composio token, and a fixture
- * that answers immediately.
+ * that answers immediately and publishes what it seeds with.
  *
  * The suite runs serially against one host, and this file sorts among the other
  * `composio-*` specs and before `connections-*`. A token left set hands those a
@@ -243,6 +283,13 @@ test.afterAll(async ({ playwright }, testInfo) => {
     expect(
       undelayed.ok(),
       `clearing the composio fixture delay failed: ${undelayed.status()}`,
+    ).toBeTruthy();
+    // Back to the seed catalog: an empty body restores it, and the specs
+    // running after this file expect gmail and slack to be what is published.
+    const reseeded = await request.post(`${COMPOSIO_FIXTURE_URL}/__catalog`, { data: {} });
+    expect(
+      reseeded.ok(),
+      `restoring the composio fixture catalog failed: ${reseeded.status()}`,
     ).toBeTruthy();
     const cleared = await request.put("/api/v1/company/composio/token", { data: { token: "" } });
     expect(
