@@ -343,9 +343,8 @@ host-side, because Cortex does not provide them:
 ## Infrastructure
 
 **Deliberately incomplete.** #1936 asked for HA, backup/restore and an upgrade
-path alongside sizing. They are absent by decision, not oversight: they describe
-operating a deployment this record recommends against, and belong with the Phase
-0 topology decision if it goes the other way.
+path alongside sizing. They are absent by decision: they describe operating a
+deployment this record recommends against, and belong with the Phase 0 decision.
 
 Per-instance footprint is the open number. The binary's own config lint projects
 **~18 GiB steady-state RAM** on a 3.9 GiB box, and that estimate did not move
