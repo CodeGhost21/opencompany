@@ -147,7 +147,10 @@ describe("ChatView's send surface generation-tags its receipt clears", () => {
   });
 
   it("forwards that generation to all three terminal outcomes", () => {
-    expect(chatViewTsx).toMatch(/onSendDetached\?\.\(stateKey, answer\.turnId, gen\);/);
+    // `gen` pinned by position, with the argument list left open: #2044 added
+    // a fourth (`chatId`) and the generation being third is the whole of what
+    // this asserts. Its own contract is `appShell`'s signature check above.
+    expect(chatViewTsx).toMatch(/onSendDetached\?\.\(stateKey, answer\.turnId, gen[,)]/);
     expect(chatViewTsx).toMatch(/onSendEnd\?\.\(stateKey, gen\);/);
     expect(chatViewTsx).toMatch(/onSendFailed\?\.\(stateKey, gen\);/);
   });
