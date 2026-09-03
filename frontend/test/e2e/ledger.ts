@@ -104,3 +104,23 @@ export function subDollarMonth(now = Date.now()): SeedEntry[] {
     },
   ];
 }
+
+/**
+ * A single outflow at exactly half a cent, negative.
+ *
+ * `balance_usd` (`finances_from`) is the bookkeeping sum across the whole
+ * ledger, passed to `usd` as a raw signed float rather than pre-`abs`'d —
+ * unlike a transaction row's `amount_usd`, which the host already sends
+ * non-negative. That is the one call site where a sign/magnitude boundary bug
+ * in the shared formatter reaches the screen.
+ */
+export function halfCentDebit(now = Date.now()): SeedEntry[] {
+  return [
+    {
+      atMillis: now - 60_000,
+      kind: "inference.spend",
+      amountUsd: -0.005,
+      memo: "Half-cent debit",
+    },
+  ];
+}

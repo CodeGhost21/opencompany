@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { clearLedger, ledgerPath, seedLedger, subDollarMonth } from "./ledger";
+import { clearLedger, halfCentDebit, ledgerPath, seedLedger, subDollarMonth } from "./ledger";
 
 /**
  * The Finance overview must tell one story about money.
@@ -74,6 +74,50 @@ test.describe("Finance number agreement", () => {
     await expect(budget).toBeVisible();
     await expect(budget).toContainText("company manifest");
     await expect(budget).toContainText("cannot be changed here");
+  });
+});
+
+/**
+ * The wallet balance tile is the one call site that hands `usd` a raw signed
+ * float below a cent — a transaction row's amount and the net tile's amount
+ * are both `abs`'d before they reach it. A boundary bug in the shared
+ * formatter that only misfires on a negative value would pass every other
+ * surface on this page and still ship, which is exactly what happened.
+ */
+test.describe("negative half-cent agreement", () => {
+  test.skip(
+    !SEEDED,
+    "needs a host this suite brought up, so the ledger can be seeded on its disk (unset PW_BASE_URL)",
+  );
+
+  test.beforeEach(async () => {
+    clearLedger();
+    seedLedger(halfCentDebit());
+  });
+
+  test.afterEach(async () => {
+    clearLedger();
+  });
+
+  test("renders a negative half-cent debit at the same magnitude on the wallet tile, the net tile, and the transaction row", async ({
+    page,
+  }) => {
+    await page.goto("/#/finances/overview");
+    await expect(page.getByText("Recent transactions")).toBeVisible();
+
+    // Exact text, not `toContainText` — a bound like `>-$0.01` also *contains*
+    // the substring `-$0.01`, so a loose match cannot fail on the bug this
+    // pins: the wallet tile stating the sub-cent bound instead of the amount.
+    const walletLabel = page.locator("div").filter({ hasText: /^Wallet balance$/ }).first();
+    const walletTile = page.locator("div.space-y-2").filter({ has: walletLabel }).first();
+    await expect(walletTile.locator(".text-2xl")).toHaveText("-$0.01");
+
+    const netLabel = page.locator("div").filter({ hasText: /^Net$/ }).first();
+    const netTile = page.locator("div.space-y-2").filter({ has: netLabel }).first();
+    await expect(netTile.locator(".text-2xl")).toHaveText("−$0.01");
+
+    const row = page.locator("li").filter({ hasText: "Half-cent debit" });
+    await expect(row).toContainText("−$0.01");
   });
 });
 
