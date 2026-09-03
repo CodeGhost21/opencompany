@@ -69,8 +69,8 @@ export function isGeneralChannel(id: string): boolean {
  *
  * Also resolves a `dm:`-prefixed **channel** id standing in for its thread:
  * the map is keyed on the bare teammate id (`dmThreadId`), so an origin
- * recorded in the console-local channel form (a direct API caller, not this
- * console's own "Add to board") missed it on an exact match even though that
+ * recorded in the console-local channel form (a direct API caller rather than
+ * the host) missed it on an exact match even though that
  * teammate's DM is reachable. Folded case-insensitively, the same way the
  * host's own `resolve_roster_agent_id` resolves a `dm:`-addressed teammate —
  * an origin stamped from a caller's differently-cased address (`dm:DESIGNER`
@@ -154,9 +154,9 @@ export interface ChatMessage {
    */
   steps?: TurnStep[];
   /**
-   * The board card this line is about (issue #246): one the turn opened, or one
-   * created from this message by "Add to board". Renders as a chip linking to
-   * `#/tasks/<id>`.
+   * The board card this line opened (issue #246). Journaled onto the reply by
+   * the turn that raised it, so it survives a transcript reload; renders as a
+   * chip linking to `#/tasks/<id>`.
    */
   taskId?: string;
   /**
@@ -549,17 +549,16 @@ export function reconcileIds(
 /**
  * Forget the board card `taskId` on every line that carries it (issue #984).
  *
- * The dismissal half of "Add to board": #442 justified opening cards from chat
- * on the grounds that *"a spurious card can be dismissed in one click"*, and
- * the chat surfaces offered no such click — the chip was a bare link to the
- * card's detail screen. Deleting the card on the host is only half of it; this
+ * #442 justified opening cards from chat on the grounds that *"a spurious card
+ * can be dismissed in one click"*, and the chat surfaces offered no such click
+ * — the chip was a bare link to the card's detail screen. Deleting the card on the host is only half of it; this
  * is what stops the console still drawing a chip for a card that is gone.
  *
  * Keyed on the **card**, not on the message the operator clicked, and that is
  * the reason this is a named function rather than two lines inside a
  * `setState`. One card can be named by more than one line — a turn journals the
- * id onto its reply, and "Add to board" writes it onto the operator's own
- * message — so clearing only the clicked bubble would leave the other chips
+ * id onto every reply that raised it — so clearing only the clicked bubble
+ * would leave the other chips
  * pointing at a card the host no longer has, i.e. a link to a 404. A dismissal
  * that leaves a stale chip on screen reads as the delete having failed.
  *
