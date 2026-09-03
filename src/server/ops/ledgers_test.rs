@@ -199,7 +199,15 @@ async fn a_ledger_round_trips_under_both_scope_forms() {
 /// must equal what the rows in that same response actually say — not merely
 /// most of the time. This does not assert the fix's code shape; it holds the
 /// invariant a two-fold response can violate under a real race.
-#[tokio::test]
+///
+/// Needs real OS-thread concurrency to land the write inside the narrow
+/// window between the two folds the old handler had: on the default
+/// current-thread runtime the pair never actually overlaps and the race
+/// never reproduces. Confirmed against the pre-fix handler (reintroducing
+/// `summary(&ctx, spec).await?` in place of `summary_from_counts`) that this
+/// fails within the first ~15 rounds; against the fix, 300 rounds passed
+/// clean across repeated runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn the_read_count_never_disagrees_with_its_own_rows_under_a_racing_write() {
     let (state, _home) = state().await;
     send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
@@ -211,7 +219,7 @@ async fn the_read_count_never_disagrees_with_its_own_rows_under_a_racing_write()
     )
     .await;
 
-    for round in 0..40 {
+    for round in 0..80 {
         // Alternate direction so the race is attempted flipping each way.
         let write_body = if round % 2 == 0 {
             json!({ "id": "r1", "status": "closed", "reason": "handled" })
