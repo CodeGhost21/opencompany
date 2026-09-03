@@ -15,7 +15,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
+import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
 import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
@@ -64,6 +64,7 @@ import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
+import { InflightRunBar } from "./chat/InflightRunBar";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
@@ -324,6 +325,14 @@ interface Props {
   chatChannelByThread?: Record<string, string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /**
+   * The company's steerable runs, whole. Separate from `taskStatusByTaskId`
+   * because that map is card-keyed and a delegation has no card, so the runs
+   * that most need a control here are exactly the ones it cannot carry.
+   */
+  inflightRuns?: readonly InflightRun[];
+  /** Re-read the in-flight list after a steer lands. */
+  onInflightSteered?: () => void;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -413,6 +422,8 @@ export function ChatView({
   approvals,
   chatChannelByThread,
   taskStatusByTaskId,
+  inflightRuns,
+  onInflightSteered,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -2507,6 +2518,17 @@ export function ChatView({
                 DOM gets nothing — no textarea, no Send, no `data-tour` anchor —
                 while the draft survives. See that prop's doc for why a
                 `display:none` wrapper is not the same thing. */}
+            {/* Above the composer, and outside the read-only branch: a channel
+                nobody may post in is still a place the company's runs are
+                visible, and stopping one is not posting. */}
+            {inflightRuns !== undefined && onInflightSteered !== undefined && (
+              <InflightRunBar
+                client={client}
+                company={company}
+                runs={inflightRuns}
+                onSteered={onInflightSteered}
+              />
+            )}
             <MessageComposer
               suppressed={readOnly}
               placeholder={`Message ${channelTitle(channel)}`}
