@@ -238,8 +238,10 @@ each page under the 500-line cap.
       who does want a per-call gate sets
       `[policy].always_approve = ["web_search"]`, which overrides every tier.
     - **`[policy].mode = "readonly"` still denies it.** A search reaches a third
-      party and spends money, so a desk whose contract is that nothing is spent
-      does not get one.
+      party and is billed, and `readonly` denies every `Reach` but `Nothing`.
+      Note the contract is about *tool* spend: inference is not a tool call and
+      reaches neither gate, so a read-only desk still thinks on the company's
+      money (B-023).
     - **There is no `search` Cargo feature.** The tool rides the `openhuman`
       harness feature so CI's gated lane actually compiles and tests it.
 
