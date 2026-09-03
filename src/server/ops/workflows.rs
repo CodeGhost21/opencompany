@@ -1548,13 +1548,19 @@ async fn run_workflow(
 ) -> Result<RunWorkflowOk, crate::server::Rejection> {
     // **A paused company does not take new work, and pressing Run is new work.**
     //
-    // Every *background* path already refuses on this — the workflow scheduler
-    // (`workflow_scheduler.rs`), the task scheduler, the mailbox poller, A2A and
-    // chat all gate on `ensure_running`. This route did not, and neither does
-    // the resume path, which is why "Pause does nothing" is what an operator
-    // observes: the two unguarded surfaces are the two they drive themselves.
-    // The console meanwhile promises "Pause stops this company taking new work",
-    // and the run bills either way.
+    // Every other path already refuses on this: the workflow scheduler
+    // (`workflow_scheduler.rs`), the task scheduler, the mailbox poller, A2A,
+    // chat, and — verified, because the first draft of this comment claimed
+    // otherwise — the approve/resume route, which gates in `run_resolve`
+    // (`operator.rs`) above both `resolve_approval_spawned` and the workflow
+    // resume it forks into. This POST was the single unguarded door, which is
+    // exactly why the report reads "chat correctly refuses with 409, and
+    // pressing Run on a workflow starts a real billed run anyway": the console
+    // promises "Pause stops this company taking new work" on the same screen.
+    //
+    // Pause deliberately does **not** stop a run already executing — `pause`
+    // only writes the lifecycle (`provision.rs` `transition`), and the promise
+    // is about *taking new work*. That is a separate question from this one.
     //
     // **Before the runner lookup, not after.** Whether this company is paused
     // does not depend on whether workflow execution is wired, and a host without
