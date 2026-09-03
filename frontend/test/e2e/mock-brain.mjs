@@ -50,6 +50,11 @@
 // because a later arm would otherwise consume a directive that was not meant
 // for it.
 //
+//   0. a message carrying `__MOCK_BURN_THEN_FAIL__ <in> <out>` (B-120) — meter
+//      the first call and refuse every one after it, so a turn can spend real
+//      tokens and then die. Tried before the routing below rather than beside
+//      it: every other arm answers, and an answer is the one thing this arm
+//      must not produce.
 //   1. a **triage classification** (issue #678) — answer `chatter` and touch
 //      nothing else. It is handed the operator's raw message, so it carries any
 //      directive that message carried, and serving one here burns it.
@@ -166,6 +171,52 @@ function slowMillis(messages) {
     if (Number.isFinite(ms) && ms > 0) return Math.min(ms, 10_000);
   }
   return 0;
+}
+
+/**
+ * "Burn `<in>` input and `<out>` output tokens, then break" — e.g.
+ * `__MOCK_BURN_THEN_FAIL__ 1200 340` (B-120).
+ *
+ * The first call carrying it answers with a **metered tool call**: real usage in
+ * the envelope, and a call that keeps the turn going. Every call after it is
+ * refused outright, so the turn dies at its second model call having already
+ * spent. openhuman publishes a turn's totals only after the turn succeeds, so
+ * that spend is reported nowhere — which is the exact shape of the run a founder
+ * was shown as `0 tok / $0.000` after ten minutes of real work.
+ *
+ * Every other reply this server sends carries a zeroed usage block on purpose
+ * (see `completion`), so a lane that never asks for this directive still books
+ * no spend at all.
+ */
+const BURN_THEN_FAIL_DIRECTIVE = "__MOCK_BURN_THEN_FAIL__";
+
+/**
+ * How many calls carrying [`BURN_THEN_FAIL_DIRECTIVE`] have been served.
+ * Per-process, like `servedDirectives`: the first is metered, the rest fail.
+ */
+let burnThenFailServed = 0;
+
+/**
+ * The `<in> <out>` token pair a message asks to burn, or `null` when none does.
+ *
+ * @param {any[]} messages
+ * @returns {{ input: number, output: number } | null}
+ */
+function burnThenFail(messages) {
+  for (const message of messages) {
+    const content = typeof message?.content === "string" ? message.content : "";
+    const at = content.indexOf(BURN_THEN_FAIL_DIRECTIVE);
+    if (at === -1) continue;
+    const [input, output] = content
+      .slice(at + BURN_THEN_FAIL_DIRECTIVE.length)
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((word) => Number.parseInt(word, 10));
+    if (!Number.isFinite(input) || !Number.isFinite(output)) return null;
+    return { input: Math.max(0, input), output: Math.max(0, output) };
+  }
+  return null;
 }
 
 /** The cue that makes the orchestrator open exactly one board card. */
@@ -940,9 +991,53 @@ const server = createServer((request, response) => {
         return;
       }
       if (path.endsWith("/chat/completions")) {
+        const messages = Array.isArray(body?.messages) ? body.messages : [];
+        // B-120: spend, then break. Tried before every other arm, because the
+        // point of it is that no reply ever ends this turn — an arm that
+        // answered first would turn the failure this stages into a success.
+        const burn = burnThenFail(messages);
+        if (burn) {
+          burnThenFailServed += 1;
+          if (burnThenFailServed > 1) {
+            process.stderr.write("[mock brain] refusing the follow-up call\n");
+            sendJson(response, 500, {
+              error: { message: `${BURN_THEN_FAIL_DIRECTIVE} scripted outage`, type: "server_error" },
+            });
+            return;
+          }
+          process.stderr.write(
+            `[mock brain] burning ${burn.input} in / ${burn.output} out, then failing\n`,
+          );
+          // A **tool call**, not a blank message. A blank one also fails the
+          // turn, but tinyagents classifies that as a degenerate completion and
+          // retries at the provider, so the usage of the call it threw away
+          // never reaches the progress stream — the run under test would then be
+          // genuinely free rather than wrongly reported as free. A tool call is
+          // an ordinary, fully-accounted model call that happens not to end the
+          // turn, which is what lets the NEXT call be the one that dies.
+          // `workspace_list` needs no arguments and the harness company grants it.
+          const metered = completion(body?.model ?? "mock", {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "mock-burn-call",
+                type: "function",
+                function: { name: "workspace_list", arguments: "{}" },
+              },
+            ],
+          }, "tool_calls");
+          metered.usage = {
+            prompt_tokens: burn.input,
+            completion_tokens: burn.output,
+            total_tokens: burn.input + burn.output,
+          };
+          sendJson(response, 200, metered);
+          return;
+        }
         // Issue #863: hold the reply back when the prompt asks for it, so a
         // spec can watch a workflow run while it is still walking the graph.
-        const held = slowMillis(Array.isArray(body?.messages) ? body.messages : []);
+        const held = slowMillis(messages);
         if (held > 0) {
           setTimeout(() => sendJson(response, 200, chatCompletion(body)), held);
           return;

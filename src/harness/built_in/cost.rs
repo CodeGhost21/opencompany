@@ -57,6 +57,19 @@ pub struct TurnUsage {
 }
 
 impl TurnUsage {
+    /// Whether this turn moved no tokens and cost nothing.
+    ///
+    /// Mirrors [`TokenUsage::is_zero`] rather than inventing a second rule of
+    /// what counts as usage, and exists for one caller: this is the shape
+    /// `read_turn_usage` reads back when openhuman published no totals at all
+    /// — which, since `run_single` sets them only after its own `?`, is exactly
+    /// what a hard-failed turn leaves behind. Telling that apart from a turn
+    /// that genuinely spent nothing is what lets the live tally observed on the
+    /// progress stream stand in for it.
+    pub fn is_zero(&self) -> bool {
+        self.to_token_usage().is_zero()
+    }
+
     /// This turn as the crate-wide [`TokenUsage`] the metering seam maps from.
     fn to_token_usage(self) -> TokenUsage {
         TokenUsage {
