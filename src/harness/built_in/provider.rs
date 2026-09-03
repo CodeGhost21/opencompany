@@ -1225,6 +1225,36 @@ fn model_response_from_payload_offering(
     Ok(response)
 }
 
+/// Whether a payload the parser rejected as empty still proves the endpoint
+/// **answered** — it deliberated and simply had no budget left to write a
+/// visible reply.
+///
+/// Reachability and usability are different questions, and only [`probe`] asks
+/// the first. A real turn that comes back with nothing but chain-of-thought is
+/// a failed turn: there is no answer to show, and promoting the reasoning is
+/// what this PR removed. A *probe* asking `ping` with `max_tokens: 16` is not
+/// judging the answer at all — it is asking whether the credential, the base
+/// URL and the model name reach a server that completes chat turns. A response
+/// carrying reasoning tokens answers that with a yes.
+///
+/// Without this, the probe re-created the bug #1779 fixed: an endpoint that
+/// every real turn reached fine was reported as a broken connection, and the
+/// setup wizard would not proceed past it. 16 tokens is little enough room that
+/// a well-behaved reasoning model burns it on deliberation routinely — for the
+/// DeepSeek-style models this matters for, it is the *expected* shape, not an
+/// edge case.
+///
+/// Deliberately a **predicate on the payload**, not a second content path. The
+/// probe calls the same [`model_response_from_payload`] the turn path does and
+/// only consults this when that parser has already refused; giving the probe
+/// its own narrower parser is exactly how it drifted from the turn path before
+/// (Codex review on #1779). Nothing here is ever surfaced — the reasoning text
+/// is not read, only its presence.
+fn probe_reachable_despite_empty_turn(payload: &serde_json::Value) -> bool {
+    !extract_content_text(payload.pointer("/choices/0/message/reasoning")).is_empty()
+        || !extract_content_text(payload.pointer("/choices/0/message/reasoning_content")).is_empty()
+}
+
 /// Deterministic offline model for tests and offline harness wiring.
 ///
 /// Every call returns a canned reply built from a fixed prefix and the last
@@ -1955,8 +1985,20 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
     // second, narrower copy of the parsing logic is exactly how it drifted
     // from the turn path the first time; calling the shared function directly
     // means there is only one content path to keep in sync.
-    let response = model_response_from_payload(payload)
-        .map_err(|e| anyhow::anyhow!("probe response carried no usable content: {e}"))?;
+    //
+    // Checked BEFORE the parser takes ownership: a reasoning-only reply fails
+    // the parser's empty-turn check, and for a reachability probe that failure
+    // is still a yes. See [`probe_reachable_despite_empty_turn`].
+    let reachable_despite_empty = probe_reachable_despite_empty_turn(&payload);
+    let response = match model_response_from_payload(payload) {
+        Ok(response) => response,
+        Err(_) if reachable_despite_empty => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "probe response carried no usable content: {e}"
+            ));
+        }
+    };
     // `model_response_from_payload` accepts a tool-call-only reply — correct
     // for a real turn, where the model may have been offered tools and
     // legitimately chose to call one instead of answering in prose. This
@@ -4648,33 +4690,27 @@ mod tests {
             .expect("array-shaped content must be recognized as a successful probe");
     }
 
-    /// `probe` routes through the exact same parser the turn path calls
-    /// (`model_response_from_payload`) so the two paths cannot diverge — see
-    /// that function's own module docs for why a reasoning-only turn
-    /// (`content: null`, `finish_reason: "stop"`, visible text only under
-    /// `reasoning`) is an error rather than a promoted answer.
+    /// Reachability and usability are different questions, and `probe` asks
+    /// only the first.
     ///
-    /// This used to be the opposite assertion: a prior revision of `probe`
-    /// treated this shape as success (Codex review on #1779, comment
-    /// 3864906472), on the reasoning-fallback's original premise that the
-    /// model's real answer had landed in the wrong field. That premise turned
-    /// out to be false for the turn path — `reasoning` is chain-of-thought,
-    /// not a response — and `probe` sharing the same parser means it inherits
-    /// the same correction: a reasoning-only reply is not evidence of a
-    /// completed turn for a probe either, even though `probe` never surfaces
-    /// the text anywhere.
+    /// The turn path must not promote `reasoning` into a reply — that is this
+    /// PR — and `probe` shares that parser, so a reasoning-only payload fails
+    /// its empty-turn check. For a *probe* that failure is still a yes: the
+    /// credential, base URL and model name reached a server that completed a
+    /// chat turn. It deliberated and ran out of room, which is a statement
+    /// about the budget, not the connection.
     ///
-    /// Known trade-off, not addressed by this test: `probe` sends `ping` with
-    /// `max_tokens: 16`, which is little enough room that even a normally
-    /// well-behaved reasoning model can plausibly burn it entirely on
-    /// deliberation before writing anything to `content` — reproducing the
-    /// original #1779 symptom (a working reasoning-model connection reported
-    /// as broken) for a different, now-legitimate reason. If that turns out
-    /// to matter in practice, the fix belongs in `probe`'s own budget or a
-    /// probe-specific tolerance, not in resurrecting promotion in the shared
-    /// parser.
+    /// An earlier revision of this branch asserted the opposite, and named the
+    /// risk in its own doc: `probe` sends `ping` with `max_tokens: 16`, little
+    /// enough that a well-behaved reasoning model burns it on deliberation
+    /// routinely. For the DeepSeek-style models this PR exists for that is the
+    /// *expected* shape, so rejecting it re-created the bug #1779 fixed — a
+    /// connection every real turn reached fine, reported as broken, with the
+    /// setup wizard refusing to move past it (Codex review on #2068). The fix
+    /// is the probe-specific tolerance that doc pointed at, not promotion in
+    /// the shared parser.
     #[tokio::test]
-    async fn probe_rejects_reasoning_only_content() {
+    async fn probe_accepts_a_reasoning_only_reply_as_proof_the_endpoint_answers() {
         let url = spawn_stub_message(serde_json::json!({
             "role": "assistant",
             "content": null,
@@ -4691,12 +4727,25 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let err = probe(&decl, None)
-            .await
-            .expect_err("reasoning-only content must not be recognized as a successful probe");
+        probe(&decl, None).await.expect(
+            "a reply carrying reasoning tokens proves the endpoint completes chat turns, \
+             even with no budget left for a visible answer",
+        );
+
+        // The turn path is unmoved by the probe's tolerance: the same payload
+        // through the same parser is still an error, so nothing promotes the
+        // chain-of-thought into a reply. Reachability is the only thing the
+        // tolerance buys.
+        let err = model_response_from_payload(serde_json::json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": null, "reasoning": "42 is the answer." },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect_err("a real turn carrying only reasoning is still an empty turn");
         assert!(
             !err.to_string().contains("42"),
-            "leaked reasoning text must not appear in the probe error, got: {err}"
+            "reasoning text must not leak into the turn error either, got: {err}"
         );
     }
 
