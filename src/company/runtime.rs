@@ -5967,8 +5967,9 @@ impl CompanyRuntime {
     ///
     /// Every id is banked, armed and settled **inline**, in order, before this
     /// returns; the returned handle runs each member's follow-up in that same
-    /// order. An error mid-loop leaves the members already settled settled and
-    /// the rest parked, which is the behaviour this inherits.
+    /// order. A follow-up failing does not stop the rest from running — every
+    /// member still gets its resume attempt, and the handle surfaces the first
+    /// error once all of them have run.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn apply_blocker_reply_spawned(
         self: &Arc<Self>,
@@ -6031,10 +6032,19 @@ impl CompanyRuntime {
         // joined in turn, so the resumes stay in the order the group settled in.
         let follow_up = tokio::spawn(async move {
             let mut last = CycleReport::default();
+            let mut first_err = None;
             for receipt in receipts {
-                last = join_follow_up(rt.spawn_follow_up(receipt)).await?;
+                match join_follow_up(rt.spawn_follow_up(receipt)).await {
+                    Ok(report) => last = report,
+                    Err(err) => {
+                        first_err.get_or_insert(err);
+                    }
+                }
             }
-            Ok(last)
+            match first_err {
+                Some(err) => Err(err),
+                None => Ok(last),
+            }
         });
         Ok((head, follow_up))
     }
@@ -11063,6 +11073,77 @@ to = "draft"
             id.to_string()
         }
 
+        /// [`park_node_blocker_stashed`], but for a caller that needs its own
+        /// run id — a batch mixing a stashed and an unstashed member must not
+        /// have them collide on one turn key.
+        async fn park_node_blocker_on_run(
+            rt: &Arc<CompanyRuntime>,
+            run_id: &str,
+            input: Value,
+            stash: bool,
+        ) -> String {
+            let payload = BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Provider,
+                step: Some(BlockerStep::Node {
+                    run_id: run_id.to_string(),
+                    node_id: NODE_ID.to_string(),
+                }),
+                reason: "the model id `gpt-nope` was rejected".to_string(),
+                needed: "a model id this provider serves".to_string(),
+                group_key: None,
+            };
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: Some(run_id.to_string()),
+            };
+            let id = rt
+                .approvals
+                .park(rt.id(), effect.clone())
+                .await
+                .expect("parks");
+            rt.journal()
+                .record_parked(
+                    &id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+            if stash {
+                let turn = workflow_node_turn_key(run_id, NODE_ID);
+                rt.blocked_nodes.arm_checkpointed(
+                    &turn,
+                    "reporting",
+                    &input,
+                    &crate::ports::types::StartedBy::from_scheduled(false),
+                    None,
+                    None,
+                );
+                rt.journal()
+                    .record_blocked_node_stashed_checkpointed(
+                        &turn,
+                        "reporting",
+                        &input,
+                        &crate::ports::types::StartedBy::from_scheduled(false),
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("stashes");
+            }
+            id.to_string()
+        }
+
         async fn answer(
             rt: &Arc<CompanyRuntime>,
             id: &str,
@@ -11286,6 +11367,47 @@ to = "draft"
                 "an answer that reached no run must not read as a resume"
             );
             assert!(runner.started().is_empty());
+        }
+
+        /// A batch's members are independent: one failing to resume must not
+        /// stop the rest from getting their own resume attempt.
+        #[tokio::test]
+        async fn a_batch_follow_up_continues_past_one_members_failure() {
+            let home = seed_home();
+            let (rt, runner) = runtime(home.path(), true).await;
+            let failing_id = park_node_blocker_on_run(
+                &rt,
+                RUN_ID,
+                json!({ "topic": "quarterly numbers" }),
+                false,
+            )
+            .await;
+            let ok_id = park_node_blocker_on_run(
+                &rt,
+                "run-ok",
+                json!({ "topic": "quarterly numbers" }),
+                true,
+            )
+            .await;
+
+            let ids = vec![
+                crate::ports::types::ApprovalId::from(failing_id),
+                crate::ports::types::ApprovalId::from(ok_id),
+            ];
+            let outcome = rt
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .await;
+
+            assert!(
+                outcome.is_err(),
+                "the batch must still surface the failing member's error"
+            );
+            assert_eq!(
+                runner.started().len(),
+                1,
+                "the member after the failing one must still get its resume, not be skipped \
+                 because an earlier member's follow-up errored"
+            );
         }
 
         /// The reserved key is never written for a verdict that starts no run.
