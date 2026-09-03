@@ -1659,8 +1659,13 @@ export function ChatView({
     // legs describe the same turn under two names and the indicator that
     // survives a reload is not the one the POST armed. Unthreaded sends key at
     // the channel exactly as before — `turnStateKey` returns `chatId` for them.
+    // Derived from `openThreadId`, not from `parentId`. A review reply is
+    // anchored to a *reply* (`threadReviewAnchor.anchorId`), not to the thread
+    // root, so keying on the parent would arm a key the panel's own lookup —
+    // which keys on the open thread — could never match. `parentId` stays what
+    // it was: the host's `parent`, for `client.chat` alone.
     const stateKey = chatId
-      ? turnStateKey(chatId, threadRootOf(parentId))
+      ? turnStateKey(chatId, threadRootOf(openThreadId ?? undefined))
       : undefined;
     const gen = stateKey ? onSendStart?.(stateKey) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
@@ -1727,7 +1732,7 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (chatId) onSendDetached?.(chatId, answer.turnId, gen);
+        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen);
         return true;
       }
       const reply = answer;
@@ -1825,9 +1830,9 @@ export function ChatView({
       // carries on regardless, so the frame it holds is the only copy of the
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
-      if (chatId) {
-        if (outcome === "resolved") onSendEnd?.(chatId, gen);
-        else if (outcome === "failed") onSendFailed?.(chatId, gen);
+      if (stateKey) {
+        if (outcome === "resolved") onSendEnd?.(stateKey, gen);
+        else if (outcome === "failed") onSendFailed?.(stateKey, gen);
       }
       setSending(false);
     }
