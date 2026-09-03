@@ -61,7 +61,12 @@ test("operator console renders a mocked backend reply end to end", async ({
 
   // The mocked backend reply must render as a company bubble, and no send
   //    error may appear.
-  await expect(page.getByText("__MOCK_LLM__").first()).toBeVisible({
+  //
+  // On the reply's own words rather than the `__MOCK_LLM__` marker: Room runs a
+  // company line through `Markdown`, so the marker's underscores are emphasis
+  // and the DOM carries `<strong>MOCK_LLM</strong>` — no node holds the literal
+  // string. The prose is what the assertion was always about anyway.
+  await expect(page.getByText("mock inference backend reply").first()).toBeVisible({
     timeout: 60_000,
   });
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
