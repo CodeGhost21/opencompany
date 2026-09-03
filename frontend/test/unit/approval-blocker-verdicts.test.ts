@@ -197,6 +197,10 @@ describe("a blocker card offers four verdicts, not two", () => {
   });
 
   it("separates skip from cancel by words and by consequence, not by position", async () => {
+    // BLOCKER carries no `blocker_step_kind` — an old host, or a blocker with
+    // no step behind it — so this exercises the generic fallback wording, not
+    // either step-specific pair (see the "worded by which step" describe
+    // block below for those).
     await render(BLOCKER);
     const skip = blockerVerdictLabel("skip");
     const cancel = blockerVerdictLabel("cancel");
@@ -206,13 +210,84 @@ describe("a blocker card offers four verdicts, not two", () => {
     const skipLine = blockerVerdictConsequence("skip");
     const cancelLine = blockerVerdictConsequence("cancel");
     expect(skipLine).not.toBe(cancelLine);
-    expect(skipLine).toMatch(/continues/i);
-    expect(cancelLine).toMatch(/stops the run/i);
     // Different weight as well as different words.
     expect(button(cancel).className).not.toBe(button(skip).className);
     // …and both sentences are on the card, not only in a tooltip.
     expect(container.textContent).toContain(skipLine);
     expect(container.textContent).toContain(cancelLine);
+  });
+});
+
+/**
+ * **The headline finding from the second review round on #2028.** The four
+ * consequence lines were worded for a workflow node and rendered on every
+ * `blocker.*` card, including a paused board card — whose `skip` in fact
+ * redispatches the card (there is no card-level skip yet) and whose `cancel`
+ * returns it to To-do rather than stopping a run. An operator reading the
+ * node's wording on a card would click Skip expecting the work omitted and
+ * get it re-run instead.
+ */
+describe("a blocker's consequence is worded by which step it stopped", () => {
+  it("gives retry, skip and cancel a different sentence for a card than for a node", () => {
+    for (const verdict of ["retry", "skip", "cancel"] as BlockerVerdict[]) {
+      const task = blockerVerdictConsequence(verdict, "task");
+      const node = blockerVerdictConsequence(verdict, "node");
+      expect(
+        task,
+        `${verdict}'s task wording must not equal its node wording: both read "${task}"`,
+      ).not.toBe(node);
+    }
+  });
+
+  it("does not put the node's skip/cancel claims on a task-backed card", () => {
+    const skip = blockerVerdictConsequence("skip", "task");
+    const cancel = blockerVerdictConsequence("cancel", "task");
+    // The node's skip claims the work produces nothing; a card's skip in fact
+    // redispatches it (`resume_task_card` treats skip and retry alike).
+    expect(skip).not.toMatch(/produces nothing/i);
+    // The node's cancel claims it stops a run; a card has no run to stop — it
+    // returns to To-do.
+    expect(cancel).not.toMatch(/stops the run/i);
+    expect(cancel).toMatch(/to-do/i);
+  });
+
+  it("falls back to wording no step kind contradicts when the step is unknown", () => {
+    const generic = {
+      retry: blockerVerdictConsequence("retry"),
+      skip: blockerVerdictConsequence("skip"),
+      cancel: blockerVerdictConsequence("cancel"),
+    };
+    // Neither the node's specific claims ("produces nothing", "stops the
+    // run") nor the card's ("back in progress", "To-do") belong here — an
+    // unknown step must not borrow either path's promise.
+    expect(generic.skip).not.toMatch(/produces nothing|back in progress/i);
+    expect(generic.cancel).not.toMatch(/stops the run|to-do/i);
+  });
+
+  it("renders the task-specific sentence on a task-backed card, not the node's", async () => {
+    await render({ ...BLOCKER, blocker_step_kind: "task" });
+    const skipLine = blockerVerdictConsequence("skip", "task");
+    const nodeSkipLine = blockerVerdictConsequence("skip", "node");
+    expect(container.textContent).toContain(skipLine);
+    expect(container.textContent).not.toContain(nodeSkipLine);
+  });
+
+  it("renders the node-specific sentence on a node-backed card, not the task's", async () => {
+    await render({ ...BLOCKER, blocker_step_kind: "node" });
+    const skipLine = blockerVerdictConsequence("skip", "node");
+    const taskSkipLine = blockerVerdictConsequence("skip", "task");
+    expect(container.textContent).toContain(skipLine);
+    expect(container.textContent).not.toContain(taskSkipLine);
+  });
+
+  it("sends the same skip wire verdict regardless of which sentence the operator read", async () => {
+    for (const stepKind of ["task", "node", undefined] as const) {
+      await render({ ...BLOCKER, blocker_step_kind: stepKind });
+      await click(button(blockerVerdictLabel("skip")));
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0].blocker?.verdict).toBe("skip");
+      expect(decisions[0].verdict).toBe("approve");
+    }
   });
 });
 

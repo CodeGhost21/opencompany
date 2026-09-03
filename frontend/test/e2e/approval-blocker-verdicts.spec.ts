@@ -31,6 +31,8 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 const BLOCKER_ID = "e2e-2028-blocker";
+const TASK_BLOCKER_ID = "e2e-2028-task-blocker";
+const NODE_BLOCKER_ID = "e2e-2028-node-blocker";
 const GATED_ID = "e2e-2028-gated";
 
 const isApprovalList = (url: URL) => /\/approvals$/.test(url.pathname);
@@ -38,7 +40,13 @@ const isCompanyRead = (url: URL) =>
   /\/api\/v1\/(company|companies|companies\/[^/]+)$/.test(url.pathname);
 const isApprovalResolve = (url: URL) => /\/approvals\/[^/]+$/.test(url.pathname);
 
-/** A parked workflow-node blocker, in the host's own `ApprovalSummary` shape. */
+/**
+ * A parked blocker with no step behind it — a bare agent question
+ * (`escalate_to_human`), in the host's own `ApprovalSummary` shape. Carries no
+ * `blocker_step_kind`, the same as a host that predates the field, so this
+ * fixture also stands in for "unknown step" — see
+ * `blockerStepKindShapesTheConsequence` below.
+ */
 function parkedBlocker() {
   return {
     id: BLOCKER_ID,
@@ -53,6 +61,32 @@ function parkedBlocker() {
       reason: "the model id `gpt-nope` was rejected",
       needed: "a model id this provider serves",
     },
+  };
+}
+
+/**
+ * A parked blocker whose stopped step is a paused board card (#2028).
+ *
+ * `skip` and `cancel` do not do the same thing here that they do to a
+ * workflow node: skip puts the card back in progress (there is no
+ * card-level skip yet — see `resume_task_card` in `src/company/runtime.rs`)
+ * and cancel returns it to To-do, neither of which is "produces nothing" or
+ * "stops the run". The consequence text must say so, not the node's wording.
+ */
+function parkedTaskBlocker() {
+  return {
+    ...parkedBlocker(),
+    id: TASK_BLOCKER_ID,
+    blocker_step_kind: "task" as const,
+  };
+}
+
+/** A parked blocker whose stopped step is a workflow-run node (#2028). */
+function parkedNodeBlocker() {
+  return {
+    ...parkedBlocker(),
+    id: NODE_BLOCKER_ID,
+    blocker_step_kind: "node" as const,
   };
 }
 
@@ -124,6 +158,8 @@ async function captureResolve(page: Page) {
 }
 
 const decideFooter = (page: Page) => page.getByTestId("approval-decide");
+const cardFooter = (page: Page, id: string) =>
+  page.locator(`[data-approval-id="${id}"]`).getByTestId("approval-decide");
 
 async function openApprovals(page: Page, parked: unknown[]) {
   await stubQueue(page, parked);
@@ -147,9 +183,78 @@ test("a blocker card offers four verdicts where an ordinary card offers two", as
   await expect(footer.getByRole("button", { name: /^Decline:/ })).toHaveCount(0);
 
   // The consequence of each is on the card, not hidden behind a hover — skip
-  // and cancel are opposite outcomes one click apart.
-  await expect(page.getByText("Moves past this step.", { exact: false })).toBeVisible();
-  await expect(page.getByText("Stops the run here.", { exact: false })).toBeVisible();
+  // and cancel are opposite outcomes one click apart. `parkedBlocker()` names
+  // no `blocker_step_kind`, so this is the generic (step-unknown) wording —
+  // see "worded by which step it stopped" below for the task/node pair.
+  await expect(page.getByText("Moves on without doing it now.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Stops it here.", { exact: false })).toBeVisible();
+});
+
+/**
+ * **The headline of #2028's follow-up.** A card's `skip` and `cancel` do not
+ * do what a workflow node's do — a card redispatches on skip (there is no
+ * card-level skip yet) and returns to To-do on cancel — so the consequence
+ * line must say a different thing for each, and neither may be the node's
+ * wording. Real DOM text, on the same three fixtures the resolve-body tests
+ * below click through.
+ */
+test("a blocker's consequence text is worded by which step it stopped, not one shared line", async ({
+  page,
+}) => {
+  await openApprovals(page, [parkedTaskBlocker(), parkedNodeBlocker(), parkedBlocker()]);
+
+  const task = cardFooter(page, TASK_BLOCKER_ID);
+  const node = cardFooter(page, NODE_BLOCKER_ID);
+  const unknown = cardFooter(page, BLOCKER_ID);
+
+  // The node card keeps the original, still-accurate wording.
+  await expect(node.getByText("Moves past this step. It produces nothing", { exact: false })).toBeVisible();
+  await expect(node.getByText("Stops the run here. Nothing after this step will run.", { exact: false })).toBeVisible();
+
+  // The task card must NOT claim the node's behaviour — "produces nothing" /
+  // "stops the run" would tell the operator work is skipped or a run is
+  // halted when the card in fact redispatches on skip and only returns to
+  // To-do on cancel.
+  await expect(task.getByText("Moves past this step. It produces nothing", { exact: false })).toHaveCount(0);
+  await expect(task.getByText("Stops the run here.", { exact: false })).toHaveCount(0);
+  await expect(task.getByText("Puts the card back in progress", { exact: false }).first()).toBeVisible();
+  await expect(task.getByText("Moves the card back to To-do without running it.", { exact: false })).toBeVisible();
+
+  // A blocker with no step behind it (or an old host) must not borrow either
+  // path's specific claim — it gets the generic, always-true wording.
+  await expect(unknown.getByText("Moves past this step. It produces nothing", { exact: false })).toHaveCount(0);
+  await expect(unknown.getByText("Puts the card back in progress", { exact: false })).toHaveCount(0);
+  await expect(unknown.getByText("Moves on without doing it now.", { exact: false })).toBeVisible();
+  await expect(unknown.getByText("Stops it here.", { exact: false })).toBeVisible();
+
+  // The three fixtures render three DIFFERENT skip sentences — the assertion
+  // that would have failed against the one-shared-line bug.
+  const skipTexts = new Set(
+    await Promise.all(
+      [task, node, unknown].map((footer) =>
+        footer.locator("li", { hasText: "Skip" }).innerText(),
+      ),
+    ),
+  );
+  expect(skipTexts.size, `expected 3 distinct skip sentences, got ${[...skipTexts].join(" | ")}`).toBe(3);
+});
+
+/**
+ * Whatever the card says will happen, it must still send the same wire
+ * verdict — the copy differs by step kind, the request does not.
+ */
+test("Skip sends a skip on every step kind, however its consequence is worded", async ({
+  page,
+}) => {
+  const bodies = await captureResolve(page);
+  await openApprovals(page, [parkedTaskBlocker(), parkedNodeBlocker()]);
+
+  await cardFooter(page, TASK_BLOCKER_ID).getByRole("button", { name: /^Skip this step/ }).click();
+  await cardFooter(page, NODE_BLOCKER_ID).getByRole("button", { name: /^Skip this step/ }).click();
+  await expect.poll(() => bodies.length).toBe(2);
+  for (const body of bodies) {
+    expect(body).toMatchObject({ verdict: "approve", blocker_verdict: "skip" });
+  }
 });
 
 test("an ordinary approval still decides with Decline and Approve", async ({ page }) => {
