@@ -41,8 +41,11 @@ export function InflightRunBar({
   client: OpenCompanyClient;
   company: string | null;
   runs: readonly InflightRun[];
-  /** Re-read the inflight list, so a settled or cancelled run leaves the bar. */
-  onSteered: () => void;
+  /**
+   * Re-read the inflight list, so a settled or cancelled run leaves the bar.
+   * Awaited where it is called, so it must report when it has finished.
+   */
+  onSteered: () => void | Promise<void>;
 }) {
   if (runs.length === 0) return null;
 
@@ -84,7 +87,7 @@ export function InflightRunRow({
   run: InflightRun;
   client: OpenCompanyClient;
   company: string | null;
-  onSteered: () => void;
+  onSteered: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
 
@@ -95,23 +98,28 @@ export function InflightRunRow({
     if (!window.confirm(`Cancel “${run.title}”? This stops the run.`)) return;
     setBusy(true);
     try {
-      await steerTask(client, company, run.key, { action: "cancel", confirm: true });
-      toast.success(`Cancelling “${run.title}”…`);
-    } catch (e) {
-      // A run that settled while the click was in flight is no longer in the
-      // registry, and the host says so with 404/409. That is the run ending on
-      // its own, not a failure to act on it — reporting it as an error would
-      // tell the operator their cancel broke when the work is already over.
-      if (isAlreadyGone(e)) {
-        toast.info(`“${run.title}” had already finished.`);
-      } else {
-        toast.error(e instanceof Error ? e.message : "could not cancel the run");
+      try {
+        await steerTask(client, company, run.key, { action: "cancel", confirm: true });
+        toast.success(`Cancelling “${run.title}”…`);
+      } catch (e) {
+        // A run that settled while the click was in flight is no longer in the
+        // registry, and the host says so with 404/409. That is the run ending on
+        // its own, not a failure to act on it — reporting it as an error would
+        // tell the operator their cancel broke when the work is already over.
+        if (isAlreadyGone(e)) {
+          toast.info(`“${run.title}” had already finished.`);
+        } else {
+          toast.error(e instanceof Error ? e.message : "could not cancel the run");
+        }
       }
+      // Always re-read, on both paths: the cancel landed, or the row is stale
+      // and the refetch is what removes it. Awaited before the control comes
+      // back, because until the fresh row arrives carrying its own
+      // `pendingAction` there is nothing else holding the button down, and a
+      // second click inside that window buys a second accepted steer.
+      await onSteered();
     } finally {
       setBusy(false);
-      // Always re-read, on both paths: the cancel landed, or the row is stale
-      // and the refetch is what removes it.
-      onSteered();
     }
   }, [client, company, run.key, run.title, onSteered]);
 

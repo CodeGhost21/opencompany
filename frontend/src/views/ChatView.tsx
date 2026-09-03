@@ -332,7 +332,7 @@ interface Props {
    */
   inflightRuns?: readonly InflightRun[];
   /** Re-read the in-flight list after a steer lands. */
-  onInflightSteered?: () => void;
+  onInflightSteered?: () => void | Promise<void>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
