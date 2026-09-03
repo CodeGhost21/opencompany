@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { fromHistory, replyVoice, SYSTEM_AUTHOR } from "@/lib/chat";
-import type { ChatHistoryEntry } from "@/api/types";
+import type { ChatHistoryMessageDto } from "@/api/types";
 
 /**
  * One settled turn must read the same whether you watched it or loaded it.
@@ -19,14 +19,14 @@ import type { ChatHistoryEntry } from "@/api/types";
  * the pause-attribution fix set out to remove (Codex review on #2068).
  */
 
-const entry = (author: string): ChatHistoryEntry =>
-  ({
-    id: "7",
-    author,
-    text: "The reply above is a pause, not a finished answer",
-    atMillis: 1,
-    mine: false,
-  }) as ChatHistoryEntry;
+const entry = (author: string): ChatHistoryMessageDto => ({
+  id: "7",
+  channel: author,
+  author,
+  text: "The reply above is a pause, not a finished answer",
+  atMillis: 1,
+  mine: false,
+});
 
 describe("a host-authored reply", () => {
   it("is a system row live, exactly as it is after a reload", () => {
