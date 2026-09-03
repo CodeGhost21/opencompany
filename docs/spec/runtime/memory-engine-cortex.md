@@ -7,7 +7,12 @@ let tenants bind to it through the `remote` seam, on equal footing with
 
 Companion to [`memory-engine.md`](memory-engine.md), which specifies the seam this
 would bind through. **That document describes what ships; this one describes a
-proposal and the measurements behind it.** Nothing here is implemented.
+proposal and the measurements behind it.**
+
+Nothing here is wired into OpenCompany. A driver exists —
+[tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128), passing the
+contract against a live CortexDB — and is deliberately unregistered. Binding it
+is the decision this record informs, and it has not been taken.
 
 ## Findings first
 
@@ -34,9 +39,13 @@ question, and the recommendation follows from them.
    bind-time failure.
 4. **Retrieval quality is real, and comes from embeddings alone.** Ranked recall
    over the Events layer is good and needs no LLM lanes at all.
-5. **A conformant driver cannot be written against v0.9.8 at all.** The contract's
-   `(namespace, key)` upsert has no expressible mapping onto an append-only event
-   log whose keys are immutable. This blocks Phase 1 outright.
+5. **The contract's upsert has no direct mapping, but a conformant driver is
+   still reachable.** `(namespace, key)` replacement cannot be expressed against
+   an append-only log whose keys are immutable. It can be *reconstructed*: append
+   every write under a fresh idempotency key carrying the logical key in the
+   payload, and fold the log to newest-per-key on read. That driver exists and
+   passes. What it costs is the subject of its own section below — and the cost,
+   not the impossibility, is what should decide this.
 
 ## The isolation choice collapses
 
@@ -144,7 +153,7 @@ claim against a structure. Tracked as
 probe of the mandatory families is proposed in
 [#1973](https://github.com/tinyhumansai/opencompany/pull/1973).
 
-## A conformant driver cannot be written against v0.9.8
+## The upsert gap, and what it costs to work around
 
 This is the finding that decides the phasing, and it is not about capability
 breadth — it is that the two data models disagree.
@@ -200,7 +209,56 @@ The reproduction is recorded at
 [cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3)
 — closed there, like #1 and #2, because that tracker is scoped to packaging, and
 being raised with CortexDB directly instead.
-**Phase 1 is blocked on their answer, not on our effort.**
+
+**This was written as blocking Phase 1. It is not.** The driver appends every
+write under a fresh idempotency key — which the engine always accepts — carrying
+the logical key inside the payload, and folds the log down to newest-per-key on
+read. Replacement is reconstructed on the read side rather than performed on the
+write side, and the full conformance suite passes that way against a live
+v0.9.8.
+
+The price is paid on every call, and it is the real input to the decision:
+
+- **keyed reads are a scan.** `/v1/events` has no metadata filter, so `get` and
+  `list` fetch the scope and fold it — a walk that grows with everything the
+  namespace has ever held.
+- **writes cost seconds, not milliseconds.** `/v1/experience` answers
+  `202 captured` and indexes afterwards, so the driver waits for its own record
+  to become readable: 1–4s to the listing, about a second more to ranked recall.
+- **superseded values stay in the ranking corpus.** The fold removes them from
+  keyed reads, not from recall — the one path Cortex was wanted for. A caller can
+  see through `recall` a value `get` would never return.
+
+All three disappear the day the engine grows `on_conflict: "replace"`. None is a
+correctness defect in the driver; each is the cost of emulating replacement on an
+engine that does not offer it.
+
+## What building it taught us
+
+Five engine behaviours surfaced only against a running instance. Each produced a
+driver that passed every offline test and was wrong in production — the
+conformance double and the driver were written from the same documentation, so
+they agreed with each other rather than with the service. These are properties of
+the engine, not of our adapter; whoever revisits this will meet them again.
+
+1. **The two read paths return different bytes for the same event.**
+   `/v1/events` returns content as stored; `/v1/recall` renders it with the
+   speaker prefixed (`[user] {...}`). A driver storing structured content lists
+   perfectly and **searches to nothing** — every hit fails to parse and is
+   dropped, which looks exactly like an empty index.
+2. **The listing emits every record twice**, and `limit` counts the duplicates,
+   so a page of 200 carries about 100 distinct events.
+3. **Unknown query parameters are ignored, not refused** — a wrong paging
+   parameter re-serves page one instead of erroring.
+4. **No readiness signal exists.** `/v1/experience/status` never advances past
+   `captured`, and the `lifecycle_stream` URL the write returns connects and
+   emits nothing. Read-after-write means polling.
+5. **A namespace segment may contain `:` and a scope id may not.** The contract
+   addresses a *section* with it (`conversation:thread-8f21`); Cortex's grammar
+   separates `type:id`. Refusing makes whole sections unstorable; collapsing it
+   re-addresses the namespace out of its section, so `namespaces()` reports a
+   scope nobody enumerating that section can find. The driver encodes it
+   reversibly.
 
 ## Belief revision is not reachable
 
@@ -286,6 +344,11 @@ host-side, because Cortex does not provide them:
 
 ## Infrastructure
 
+**Deliberately incomplete.** #1936 asked for HA, backup/restore and an upgrade
+path alongside sizing. They are absent by decision, not oversight: they describe
+operating a deployment this record recommends against. They belong with the
+Phase 0 topology decision, if it goes the other way.
+
 Per-instance footprint is the open number. The binary's own config lint projects
 **~18 GiB steady-state RAM** on a 3.9 GiB box, and that estimate did not move
 under any remediation it suggests — probed across `CORTEX_VECTOR_RESIDENT_MAX`
@@ -348,7 +411,7 @@ and cloud-hosted offerings at sales@cortexdb.ai — neither is required here.
 explicitly and write down why. Licensing is settled (clause 2 permits it); what
 remains is the topology decision, which gates everything below.
 
-**Phase 1 — the driver. Currently blocked upstream.**
+**Phase 1 — the driver. Done, and unbound.**
 A `cortex` driver over `tinymemory-api` implementing the mandatory three —
 `Core`, `Recall` and `Portability`. All three are non-negotiable:
 `MemoryProvider` declares them as supertraits
@@ -361,12 +424,17 @@ whole of what `MemoryStore`, `ContextStore` and `FactStore` need, since all
 three are host ports over the same `Bound` helper and no driver advertises or
 withholds them individually. `Portability` is not optional scope to defer,
 though: it is what Phase 3 runs migration over, and implementing it against an
-append-only event log is its own problem rather than a line of glue. What Phase 1 leaves out is Cortex's derived fact and belief tier,
-which no host port reads and which Phase 4 revisits. This cannot start until
-CortexDB offers a way to replace a value at a key
-([cortexdb-releases#3](https://github.com/cortexdbai/cortexdb-releases/issues/3));
-without it the driver fails a mandatory conformance assertion no amount of
-adapter work can satisfy. Acceptance, once unblocked:
+append-only event log is its own problem rather than a line of glue. What Phase 1
+leaves out is Cortex's derived fact and belief tier, which no host port reads and
+which Phase 4 revisits.
+
+Merged as [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128),
+with a live-engine test lane — a double written from the same documentation as
+the driver agrees with the driver, not with the service. It is deliberately not
+registered: `SUPPORTED_REMOTE_DRIVERS` and `remote_provider()` are untouched, so
+nothing here can select it. Registering it is a decision, not a task.
+
+Acceptance, against the list this record set before the work started:
 
 - the full driver conformance suite (tinymemory#18 §E1);
 - failure-path tests for error mapping and malformed responses, as the existing
@@ -376,11 +444,14 @@ adapter work can satisfy. Acceptance, once unblocked:
   provisioned empty instance probing clean. Note this cannot be expressed
   through `provides()`, which is a fixed-body structural check — the lever is a
   probe or a conformance case (#1968, #1973);
-- **key-exact deletion**, verified. `Bound::forget`, `evict`'s
-  archive-then-delete loop and `delete_label` all require it, and an
-  over-deleting `forget` destroys tenant memory even with upsert working — the
-  observed `deleted.events: 2` for a one-id selector is disqualifying on its own
-  until explained.
+- **key-exact deletion**, verified — and the `deleted.events: 2` alarm above was
+  ours, not the engine's. That request named `selector.event_ids`, which is not a
+  schema field, alongside `confirm_all: true`; an unrecognised selector field
+  deserialises as an *empty* selector, meaning the whole scope, which
+  `confirm_all` then authorises. The real field is `selector.memory_ids`, and
+  deletion with it is exact (`requested: 1, matched: 1, deleted: 1`). Two
+  interlocks refuse the mistake on its own, which is why it was never destructive
+  in practice. The driver names `memory_ids` and never sends `confirm_all`.
 
 One operational note for whoever starts Phase 1: `cortex` is clean as a *driver
 id* in the registry, but `OPENCOMPANY_MEMORY=cortex` remains a hard boot refusal
@@ -410,8 +481,11 @@ not.
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
   so a self-hosted deployment's support path is itself unproven.
 - Is there an undocumented prerequisite for fact extraction that we missed?
-- Will Cortex add an upsert path? Without one, the only route is a stateful
-  driver carrying its own key index — is that acceptable, or disqualifying?
+- Will Cortex add an upsert path? **Answered enough to decide on.** No stateful
+  key index is needed — append-and-fold works and passes. The question is no
+  longer whether a driver is possible but whether its cost is worth paying: a
+  scan per keyed read, seconds per write, and superseded values left in the
+  ranking corpus.
 - Is the embedded engine a fallback? `tinymemory-tinycortex` still exists and
   still passes the full suite, so it is technically viable today with no
   upstream dependency. #1568's PR body records only the mechanical removal and
@@ -419,6 +493,8 @@ not.
 - Self-hosted deployments have no support channel we can reach: the public
   tracker is packaging-only and Cortex Cloud support presumes a customer
   relationship. Worth settling when we contact them about the upsert gap.
-- If Facts and Beliefs stay unreachable, does Cortex still beat `supermemory` /
-  `mem0` / `cognee` on retrieval alone — and is that enough to justify running
-  one instance per tenant?
+- If Facts and Beliefs stay unreachable, does Cortex beat `supermemory` / `mem0`
+  / `cognee` on retrieval alone? **No.** Its ranked recall is vector search over
+  the event log — confirmed on a fresh scope queried before any derived layer had
+  built — which is what all three incumbents already provide through this seam,
+  without a scan per read or a multi-second write.
