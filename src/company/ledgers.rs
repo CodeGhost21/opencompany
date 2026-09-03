@@ -199,6 +199,12 @@ pub struct Read {
     pub matched: usize,
     /// What the declared checks found on the whole ledger.
     pub faults: Vec<String>,
+    /// Rows not in a closed status, counted over the same fold `entries` came
+    /// from — never a second, independent fold that could observe a write
+    /// landing between the two.
+    pub open: usize,
+    /// Rows in one, counted over that same fold.
+    pub closed: usize,
 }
 
 /// What a read is narrowed by.
@@ -261,10 +267,14 @@ pub async fn read(ctx: &Ledgers, spec: &LedgerSpec, query: &Query) -> Result<Rea
         .unwrap_or(budget::DEFAULT_READ_LIMIT)
         .clamp(1, budget::MAX_READ_LIMIT);
     rows.truncate(limit);
+    let open = folded.open_count(spec);
+    let closed = folded.closed_count(spec);
     Ok(Read {
         entries: rows,
         matched,
         faults: folded.faults,
+        open,
+        closed,
     })
 }
 
