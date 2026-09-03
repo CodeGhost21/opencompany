@@ -10319,13 +10319,16 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-9".to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: crate::ports::tasks::TaskTitle::authored(
+                        "Draft the launch note",
+                    ),
                     note: None,
                     column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
                     priority: "medium".to_string(),
                     assignee: "eng".to_string(),
                     updated_at_millis: 1,
                     origin: None,
+                    origin_message_seq: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
