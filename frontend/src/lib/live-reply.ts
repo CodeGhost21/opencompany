@@ -284,6 +284,23 @@ export function turnStateKey(chatId: string, threadRoot?: number): string {
 }
 
 /**
+ * The desk a state key belongs to — the inverse of {@link turnStateKey}.
+ *
+ * A row's `chatId` is the authority when it has one, but not every row does:
+ * `onSendDetached` mints its entry from the 202 alone, and rows written before
+ * the field existed have none either. Since the key is either the desk or the
+ * desk plus a numeric root, the desk is recoverable from the key itself, which
+ * is what keeps the settle re-read total rather than conditional on every
+ * insert site having remembered to carry the field.
+ *
+ * Anchored on a **numeric** suffix rather than the last `#`, so a desk id that
+ * happens to contain one keeps its whole name.
+ */
+export function deskOfStateKey(stateKey: string): string {
+  return stateKey.replace(/#\d+$/, "");
+}
+
+/**
  * Folds the open run rows into the per-thread turn lists the working indicator
  * and the poll read (issue #983).
  *

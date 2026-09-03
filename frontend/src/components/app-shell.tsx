@@ -58,6 +58,7 @@ import {
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
 import {
+  deskOfStateKey,
   hasOtherOpenTurns,
   mergeOpenTurns,
   openTurnsFromRuns,
@@ -1724,7 +1725,7 @@ export function AppShell({
       // knows, so `getChatHistory` would return nothing and the durable reply
       // would never be rehydrated — the poll-based recovery path, which is the
       // one that matters when SSE is unavailable.
-      if (chatId) reReadSettledThread(chatId, turnId);
+      reReadSettledThread(chatId ?? deskOfStateKey(stateKey), turnId);
     };
 
     const poll = () => {
