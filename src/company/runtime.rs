@@ -437,19 +437,22 @@ pub struct CompanyRuntime {
     /// `Arc`-shared for the same reason as [`serial`](Self::serial): a rebuild
     /// inherits it rather than minting a second one.
     pub(crate) task_writes: Arc<TokioMutex<()>>,
-    /// Held across a blocker group's whole bank-arm-settle sequence (issue
-    /// #2028), so two operators resolving members of the same group
-    /// concurrently cannot interleave.
+    /// Held across a blocker group's resolve loop so the group settles as a
+    /// unit: two operators answering different members of one group cannot
+    /// interleave their verdicts across it.
     ///
-    /// Without it, two requests racing on one id each write
-    /// `record_blocker_resolution` and `arm_blocker_resolution` before either
-    /// calls `settle_approval` — the actual claim — so the side-channel data
-    /// the eventual resume reads is whichever request wrote last, not
-    /// whichever request's verdict the durable approval event actually
-    /// records. Serializing the whole sequence makes the second request's
-    /// `settle_approval` observe the first's claim before it ever writes its
-    /// own (losing) resolution, the same "claim before you write" fix
-    /// [`task_writes`](Self::task_writes) gives board edits.
+    /// **Not what makes a single blocker's answer safe.** That is
+    /// `claim_blocker_resolution`, which arms the answer only into an empty
+    /// slot and tells the caller whether it was the one to fill it, so a losing
+    /// request returns having written neither the durable record nor the armed
+    /// answer. Correctness per id lives in that one atomic step; this lock only
+    /// decides how a *group* is batched, and dropping it would cost group
+    /// atomicity rather than let two verdicts blur into one.
+    ///
+    /// Never acquired while [`task_writes`](Self::task_writes) is held, and
+    /// never held across a resume: a member's follow-up is spawned, so it runs
+    /// outside this lock and is free to take `task_writes` for the board edit
+    /// its resume makes.
     ///
     /// `Arc`-shared for the same reason as [`serial`](Self::serial): a rebuild
     /// inherits it rather than minting a second one.
@@ -5963,13 +5966,14 @@ impl CompanyRuntime {
     /// Records the operator's verdict on a blocker group and **drives the
     /// resume** (issue #1863), fanning it to every member of the group.
     ///
-    /// The four-way intent is banked as a durable
-    /// [`BlockerResolution`](crate::ports::blockers::BlockerResolution) and armed
-    /// on the grant set's blocker side-channel **before** the detached follow-up
-    /// spawns, so a restart mid-resume replays the answer rather than dropping
-    /// it — the same restart-durable ordering the blocked-node bank keeps. Each
-    /// id is then resolved with the two-value event verdict the operator's
-    /// answer lowers onto (Retry/Amend/Skip approve, Cancel denies), and
+    /// Each id is claimed on the grant set's blocker side-channel and banked as
+    /// a durable
+    /// [`BlockerResolution`](crate::ports::blockers::BlockerResolution) **before**
+    /// the detached follow-up spawns, so a restart mid-resume replays the answer
+    /// rather than dropping it — the same restart-durable ordering the
+    /// blocked-node bank keeps. It is then resolved with the two-value event
+    /// verdict the operator's answer lowers onto (Retry/Amend/Skip approve,
+    /// Cancel denies), and
     /// [`spawn_follow_up`](Self::spawn_follow_up)'s blocker fork re-enters the
     /// stopped step carrying the resolution — a resuming verdict re-dispatches
     /// the work, a cancel settles it and starts nothing.
@@ -6012,6 +6016,90 @@ impl CompanyRuntime {
         Ok(())
     }
 
+    /// Answers **one** parked blocker: claims it, banks the verdict, settles it
+    /// and starts its resume — the only place a blocker reply writes a
+    /// [`BlockerResolution`].
+    ///
+    /// The claim comes **first**, and it is the arming:
+    /// [`claim_blocker_resolution`](crate::runtime::grants::GrantSet::claim_blocker_resolution)
+    /// inserts only into an empty slot and says whether it was this caller that
+    /// filled it. A caller that loses returns here having written nothing at
+    /// all. Before, the sequence banked and armed the verdict and only then
+    /// called `settle_approval` to discover it had lost, by which point it had
+    /// already overwritten the winner's durable record and its armed answer —
+    /// so a resume that had not yet consumed the entry executed the loser's
+    /// verdict, and the journal disagreed with the approval event about what
+    /// the operator had decided.
+    ///
+    /// Claiming is not on its own enough to write: an id that is not a blocker
+    /// still parked in `pending` is released again and reported as
+    /// already-resolved, so an unknown, expired or non-blocker id banks nothing
+    /// — the guard [`arm_console_blocker_resolution`](Self::arm_console_blocker_resolution)
+    /// keeps for the console's way in.
+    ///
+    /// Bank stays before settle, the journal-before-live ordering `mint_grant`
+    /// keeps: the claim only reserves an in-memory slot, so a crash between the
+    /// two still replays as "still armed" and re-resumes rather than losing the
+    /// operator's decision. A settle that answers `AlreadyResolved` or `Expired`
+    /// has no resume left to consume the entry, so both are compensated —
+    /// the arming is taken back and the journal records the resolution as
+    /// resumed — rather than left banked for a next boot to re-arm and replay.
+    ///
+    /// Hands back the receipt and, only for a settle that actually landed, the
+    /// follow-up running its resume.
+    #[cfg(feature = "openhuman")]
+    async fn claim_and_settle_blocker(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        parked: Option<&crate::runtime::journal::PendingApproval>,
+        verdict: crate::ports::blockers::BlockerVerdict,
+        answer: &str,
+        actor: &Actor,
+    ) -> Result<(ResolveReceipt, Option<JoinHandle<Result<CycleReport>>>)> {
+        use crate::ports::blockers::{BlockerPayload, BlockerResolution};
+
+        let step = parked
+            .and_then(|parked| {
+                serde_json::from_value::<BlockerPayload>(parked.effect.payload.clone()).ok()
+            })
+            .and_then(|payload| payload.step);
+        let resolution = BlockerResolution {
+            verdict,
+            answer: answer.to_string(),
+            step,
+        };
+        if !self.grants.claim_blocker_resolution(id, resolution.clone()) {
+            return Ok((ResolveReceipt::AlreadyResolved, None));
+        }
+        let still_parked = parked
+            .is_some_and(|parked| crate::ports::blockers::is_blocker_effect(&parked.effect));
+        if !still_parked {
+            self.grants.take_blocker_resolution(id);
+            return Ok((ResolveReceipt::AlreadyResolved, None));
+        }
+        self.journal
+            .record_blocker_resolution(id, &resolution)
+            .await?;
+        let receipt = CycleRunner::new(self)
+            .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
+            .await?;
+        self.retire_if_expired(id, &receipt).await?;
+        if !matches!(receipt, ResolveReceipt::Settled(_)) {
+            self.grants.take_blocker_resolution(id);
+            if let Err(err) = self.journal.record_blocker_resumed(id).await {
+                tracing::warn!(
+                    company = %self.id,
+                    approval = %id,
+                    error = %err,
+                    "could not retire a blocker answer whose settle found nothing to resume"
+                );
+            }
+            return Ok((receipt, None));
+        }
+        let follow_up = self.spawn_follow_up(receipt.clone());
+        Ok((receipt, Some(follow_up)))
+    }
+
     /// [`apply_blocker_reply`](Self::apply_blocker_reply), handing back the
     /// addressed member's own receipt and a handle to the group's follow-ups
     /// rather than awaiting them — the blocker twin of
@@ -6034,24 +6122,20 @@ impl CompanyRuntime {
     /// caller passes an id it already sourced `ids` from, so this is a
     /// defensive fallback rather than a case any caller should hit.
     ///
-    /// Every id is banked, armed and settled **inline**, in order, before this
-    /// returns; the returned handle runs each member's follow-up in that same
-    /// order. A follow-up failing does not stop the rest from running — every
-    /// member still gets its resume attempt, and the handle surfaces the first
-    /// error once all of them have run.
+    /// Every id is claimed, banked and settled **inline**, in order, before
+    /// this returns; the returned handle runs each member's follow-up in that
+    /// same order. A follow-up failing does not stop the rest from running —
+    /// every member still gets its resume attempt, and the handle surfaces the
+    /// first error once all of them have run.
     ///
-    /// **Serialized against every other blocker resolve on this company**
-    /// (issue #2028) by [`blocker_resolutions`](Self::blocker_resolutions),
-    /// held for the whole bank-arm-settle loop below. Without it, two
-    /// operators resolving members of the same group concurrently with
-    /// different verdicts can each write `record_blocker_resolution` and
-    /// `arm_blocker_resolution` for an id before either calls
-    /// `settle_approval` — the actual claim — so the side-channel resolution a
-    /// resume reads back is whichever request wrote last rather than
-    /// whichever request's verdict the durable approval event names. Holding
-    /// the lock across the whole sequence means the losing request's
-    /// `settle_approval` observes `NotParked` before it can overwrite the
-    /// winner's arming.
+    /// Each id goes through
+    /// [`claim_and_settle_blocker`](Self::claim_and_settle_blocker), which owns
+    /// the claim: a member another request already answered is skipped with an
+    /// `AlreadyResolved` receipt and nothing written, so correctness here does
+    /// not depend on the loop running alone.
+    /// [`blocker_resolutions`](Self::blocker_resolutions) is still held across
+    /// the loop, but only so a group settles as a unit rather than interleaving
+    /// two operators' verdicts across its members.
     #[cfg(feature = "openhuman")]
     pub(crate) async fn apply_blocker_reply_spawned(
         self: &Arc<Self>,
@@ -6070,21 +6154,14 @@ impl CompanyRuntime {
             ));
         }
         let _resolving = self.blocker_resolutions.lock().await;
-        // The stopped step each blocker re-enters, read off the **still-parked**
-        // effect's full payload before any resolve pops it — the journal scrubs
-        // that payload the moment the approval leaves the pending set, so it must
-        // be captured now and banked on the resolution. Snapshotted once so a
-        // group's later members are still resolvable after the first is popped.
+        // The still-parked entry each blocker re-enters from, snapshotted before
+        // any resolve pops it: the journal scrubs a parked effect's payload the
+        // moment the approval leaves the pending set, so the stopped step must be
+        // read now and banked on the resolution, and a group's later members must
+        // still be findable after the first is popped.
         let pending = self.journal.pending();
-        let step_of = |id: &ApprovalId| {
-            pending
-                .iter()
-                .find(|parked| &parked.id == id)
-                .and_then(|parked| {
-                    serde_json::from_value::<BlockerPayload>(parked.effect.payload.clone()).ok()
-                })
-                .and_then(|payload| payload.step)
-        };
+        let parked_of =
+            |id: &ApprovalId| pending.iter().find(|parked| &parked.id == id);
         let actor = by.cloned().unwrap_or_else(|| Actor {
             kind: ActorKind::Operator,
             id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
@@ -6101,31 +6178,17 @@ impl CompanyRuntime {
         // would only find `AlreadyResolved` and never resume it.
         let mut handles: Vec<JoinHandle<Result<CycleReport>>> = Vec::with_capacity(ids.len());
         for id in ids {
-            let resolution = crate::ports::blockers::BlockerResolution {
-                verdict,
-                answer: answer.to_string(),
-                step: step_of(id),
-            };
-            // Bank durably, then arm the side-channel, then settle — the same
-            // journal-before-live ordering `mint_grant` keeps, so a crash
-            // between the two replays as "still armed" and re-resumes rather
-            // than losing the operator's decision.
-            self.journal
-                .record_blocker_resolution(id, &resolution)
+            let (receipt, follow_up) = self
+                .claim_and_settle_blocker(id, parked_of(id), verdict, answer, &actor)
                 .await?;
-            self.grants.arm_blocker_resolution(id, resolution);
-            let receipt = CycleRunner::new(self)
-                .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
-                .await?;
-            self.retire_if_expired(id, &receipt).await?;
             // The addressed member's own receipt, not the first one settled —
             // `ids` is oldest-first, and the id this request named need not be
             // the oldest. Falls back to the first receipt only if `addressed`
             // is somehow not a member of `ids` at all.
             if id == addressed || head.is_none() {
-                head = Some(receipt.clone());
+                head = Some(receipt);
             }
-            handles.push(self.spawn_follow_up(receipt));
+            handles.extend(follow_up);
         }
         let head = head.expect("ids is non-empty, so the loop above ran at least once");
         // One handle for the whole group: each member's follow-up was spawned
