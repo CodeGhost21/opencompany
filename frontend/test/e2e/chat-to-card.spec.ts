@@ -42,7 +42,12 @@ async function dismissWelcome(page: Page) {
     } catch {
       return;
     }
-    await skip.first().click();
+    const openDialogs = await skip.count();
+    await skip.first().click({ timeout: 10_000 });
+    // A dismissed dialog animates out, so it stays visible for a beat after
+    // its click. Waiting for one to actually go is what leaves the next pass
+    // looking at a genuinely second dialog rather than this one on its way out.
+    await expect(skip).toHaveCount(openDialogs - 1, { timeout: 10_000 });
   }
   await expect(skip).toHaveCount(0, { timeout: 10_000 });
 }
