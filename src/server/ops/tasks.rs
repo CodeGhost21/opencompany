@@ -523,6 +523,30 @@ async fn create_task(
     company: ScopedCompany,
     Json(body): Json<CreateTask>,
 ) -> Result<Json<TaskCard>, ApiError> {
+    // Named BEFORE the lock. Naming reads nothing off the board and writes
+    // nothing to it, and it can spend the titling pass's whole deadline on a
+    // model — inside the critical section that would queue every concurrent
+    // patch, delete, review and create for this company behind it, and a burst
+    // of creates would serialise those delays cumulatively (codex on #2055).
+    let title = match body.title.as_deref().map(str::trim) {
+        Some(title) if !title.is_empty() => crate::ports::tasks::TaskTitle::authored(title),
+        _ => {
+            let source = body.note.as_deref().map(str::trim).unwrap_or_default();
+            if source.is_empty() {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    "a task needs a title, or a note to name it from".to_string(),
+                )));
+            }
+            crate::ports::tasks::mint_task_title(source, None, company.runtime.titler()).await
+        }
+    };
+    // A headline that normalises away leaves a card with nothing on its face, so
+    // it is refused here rather than persisted blank.
+    if title.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "that title has no name in it".to_string(),
+        )));
+    }
     // Read → validate → write is one critical section. Two concurrent requests
     // that each read the board before either has written would both validate
     // against a snapshot missing the other's edge, and could persist a lineage
@@ -547,18 +571,6 @@ async fn create_task(
         None => COLUMN_TODO.to_string(),
     };
     let assignee = resolve_assignee(&company, body.assignee.unwrap_or_default()).await?;
-    let title = match body.title.as_deref().map(str::trim) {
-        Some(title) if !title.is_empty() => crate::ports::tasks::TaskTitle::authored(title),
-        _ => {
-            let source = body.note.as_deref().map(str::trim).unwrap_or_default();
-            if source.is_empty() {
-                return Err(ApiError(OpenCompanyError::InvalidRequest(
-                    "a task needs a title, or a note to name it from".to_string(),
-                )));
-            }
-            crate::ports::tasks::mint_task_title(source, None, company.runtime.titler()).await
-        }
-    };
     let record = TaskRecord {
         id: generate_id(),
         title,
@@ -636,7 +648,13 @@ async fn patch_task(
         .cloned()
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("task {task_id}")))?;
     if let Some(title) = body.title {
-        record.title = crate::ports::tasks::TaskTitle::authored(&title);
+        let renamed = crate::ports::tasks::TaskTitle::authored(&title);
+        if renamed.is_empty() {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "that title has no name in it".to_string(),
+            )));
+        }
+        record.title = renamed;
     }
     if let Some(note) = body.note {
         record.note = Some(note);

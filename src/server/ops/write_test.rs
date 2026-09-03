@@ -205,6 +205,69 @@ async fn send_auth(
     (status, value)
 }
 
+/// A headline that normalises away is refused, not persisted (coderabbit on
+/// #2055).
+///
+/// The `"""` bug's sibling, one layer out. That one was a *model* reply peeling
+/// to a lone quote; this is a person typing punctuation into the title field.
+/// The junk test that catches the first deliberately does not apply here — a
+/// person who names a card `🚀` means it — so the boundary that persists the
+/// card is what has to refuse a name with nothing in it, on both routes that
+/// can set one.
+#[tokio::test]
+async fn a_title_that_normalises_to_nothing_is_refused_on_create_and_rename() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Non-blank on the wire, and nothing left after the sentence-punctuation
+    // strip — so a length check on the raw input passes it through.
+    for junk in ["...", "!!!", " . . . "] {
+        let (status, _body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/tasks",
+            Some(json!({ "title": junk })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "create accepted {junk:?}");
+    }
+
+    // A symbol a person plainly meant is still a title, and still lands.
+    let (status, rocket) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "🚀" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rocket["title"], "🚀");
+    let id = rocket["id"].as_str().unwrap().to_string();
+
+    // …and the rename route refuses the same junk rather than blanking it.
+    let (status, _body) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({ "title": "..." })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let still = board
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id.as_str());
+    assert_eq!(
+        still.map(|t| &t["title"]),
+        Some(&json!("🚀")),
+        "a refused rename leaves the card named as it was"
+    );
+}
+
 #[tokio::test]
 async fn tasks_crud_round_trips_under_both_scopes() {
     let home_dir = home();
