@@ -238,6 +238,23 @@ export type OpenTurn = {
    * lock rather than working. Drives the indicator's wording.
    */
   queued: boolean;
+  /**
+   * The **desk** this turn is in — the host thread id, never the map key.
+   *
+   * The map is keyed per thread (`turnStateKey`), so its key can be a composite
+   * like `engineering#41`. Consumers that need to talk to the *host* — the
+   * settle poll re-reads a desk's history — must use this, because there is no
+   * desk called `engineering#41` and asking for one silently recovers nothing
+   * (Codex review on #2042).
+   *
+   * **Required, so the compiler proves every insertion site carries it.** It was
+   * optional for one commit, with the desk recovered from the key by stripping a
+   * trailing `#<digits>`. That parser is lossy in exactly the case it claimed to
+   * handle — a desk genuinely named `c#4` parses to `c` — and a fallback that is
+   * usually right is worse than none here, because the failure is a silent
+   * history read against a desk that does not exist (CodeRabbit on #2044).
+   */
+  chatId: string;
 };
 
 /** The per-thread rows the fold produces — the same shape as {@link OpenTurn}. */
@@ -273,6 +290,7 @@ export function turnStateKey(chatId: string, threadRoot?: number): string {
   return threadRoot === undefined ? chatId : `${chatId}#${threadRoot}`;
 }
 
+
 /**
  * Folds the open run rows into the per-thread turn lists the working indicator
  * and the poll read (issue #983).
@@ -305,8 +323,9 @@ export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, O
     const queued = run.status === "pending";
     const key = turnStateKey(run.chatId, run.threadRoot);
     const list = byThread.get(key);
-    if (list) list.push({ turnId: run.id, queued });
-    else byThread.set(key, [{ turnId: run.id, queued }]);
+    const row = { turnId: run.id, queued, chatId: run.chatId };
+    if (list) list.push(row);
+    else byThread.set(key, [row]);
   }
   const open: Record<string, OpenTurnRow[]> = {};
   for (const [chatId, rows] of byThread) {

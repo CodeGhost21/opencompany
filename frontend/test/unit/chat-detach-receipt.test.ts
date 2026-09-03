@@ -72,14 +72,22 @@ describe("the poll's terminal settle clears the receipt under the open-turns gua
     // sit inside the SAME guard so a queued sibling keeps it, and after the
     // company-scope checks above it so a late cross-company settle cannot delete
     // a newer company's receipt.
+    //
+    // Addressed by `liveKey`, not by the desk. Since #2042 the open-turn map
+    // and the two per-turn maps are keyed on the composite state key, while the
+    // same callback's `threadId` is the desk `chat/history` is asked for — so
+    // the guard and its clears take the key and only the host call takes the
+    // desk (Codex review on #2044).
     const guardAt = appShell.indexOf(
-      "if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {",
+      "if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {",
     );
     expect(guardAt, "the settle guard must be present").toBeGreaterThan(-1);
     const block = appShell.slice(guardAt, guardAt + 900);
     expect(block).toContain("setLiveStepsByThread(");
     expect(block).toContain("setReceiptByThread(");
-    expect(block).toMatch(/delete next\[threadId\];/);
+    expect(block).toMatch(/delete next\[liveKey\];/);
+    // And the desk never addresses per-turn state in that block.
+    expect(block).not.toContain("[threadId]");
   });
 });
 

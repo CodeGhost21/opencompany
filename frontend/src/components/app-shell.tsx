@@ -119,7 +119,7 @@ import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
-import { drainReReadQueue } from "@/lib/re-read-queue";
+import { drainReReadQueue, type PendingReRead } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
@@ -1487,7 +1487,7 @@ export function AppShell({
   // channel, parked for replay once it does (issue #1701). A ref, not state:
   // it must survive renders without itself provoking one, and the drain that
   // reads it is triggered by the channel map landing, not by this set changing.
-  const pendingReReadRef = useRef<Set<string>>(new Set());
+  const pendingReReadRef = useRef<Map<string, PendingReRead>>(new Map());
   // Mirrors `chatChannelByThread` so `reReadSettledThread`'s `.then()` always
   // reads the map's current value instead of the one closed over when the
   // request started (issue #1701 follow-up). `reReadSettledThread` is
@@ -1570,7 +1570,19 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string, settledTurnId?: string) => {
+    (threadId: string, settledTurnId?: string, stateKey?: string) => {
+      // Two identities, and after #2042 they are no longer the same string.
+      // `threadId` is the **desk** — what `chat/history`, the `threads` fold and
+      // `channelForThread` are addressed by. `liveKey` is the **open-turn state
+      // key**, which is what `openTurns`, `liveStepsByThread` and
+      // `receiptByThread` are keyed by, because `ChatView` hands `onSendStart`
+      // its `stateKey` and that key is `engineering#41` for a threaded send.
+      //
+      // Conflating them breaks one side or the other: reading the desk out of
+      // the map misses a queued sibling and leaves a threaded turn's receipt
+      // ticking forever, and asking the host about the composite recovers no
+      // history at all (Codex review on #2044).
+      const liveKey = stateKey ?? threadId;
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1605,9 +1617,9 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+          if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {
             setLiveStepsByThread((prev) =>
-              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+              prev[liveKey]?.length ? { ...prev, [liveKey]: [] } : prev,
             );
             // The receipt the detached turn carried through its queued/working
             // window (issue #2021) is cleared on the same terminal transition
@@ -1616,9 +1628,9 @@ export function AppShell({
             // above confirm the settle belongs to the company on screen — so a
             // late cross-company settle cannot delete a newer company's receipt.
             setReceiptByThread((prev) => {
-              if (!(threadId in prev)) return prev;
+              if (!(liveKey in prev)) return prev;
               const next = { ...prev };
-              delete next[threadId];
+              delete next[liveKey];
               return next;
             });
           }
@@ -1637,7 +1649,18 @@ export function AppShell({
           // the drain effect replays the transcript fold once the map lands,
           // rather than dropping it and leaving the Chat panel stale.
           if (!channelId) {
-            pendingReReadRef.current.add(threadId);
+            // Both identities, not just the desk: the replay re-runs the
+            // cleanup above, and that cleanup is filed under the state key. A
+            // desk-only replay clears whatever sits under the desk — which on
+            // a cold load can be a live unthreaded send's own live steps and
+            // receipt, armed before its `openTurns` row landed (Codex on
+            // #2044). Keyed by the pair so two threads of one desk park
+            // separately rather than collapsing onto one entry.
+            pendingReReadRef.current.set(`${liveKey}\u0000${settledTurnId ?? ""}`, {
+              desk: threadId,
+              stateKey: liveKey,
+              turnId: settledTurnId,
+            });
             return;
           }
           setTranscripts((t) => {
@@ -1698,16 +1721,20 @@ export function AppShell({
     if (watching.length === 0) return;
     let cancelled = false;
 
-    const settle = (threadId: string, turnId: string) => {
+    // `stateKey` prunes the map; `chatId` is the desk the re-read talks to.
+    // They are different strings for a threaded turn — the map is keyed
+    // `engineering#41` while the desk is `engineering` — and asking the host
+    // for the composite recovers nothing at all (Codex review on #2042).
+    const settle = (stateKey: string, chatId: string, turnId: string) => {
       setOpenTurns((prev) => {
-        const turns = prev[threadId];
+        const turns = prev[stateKey];
         if (!turns) return prev;
         // Drop just this turn; a queued sibling behind it stays watched, so
         // its reply is still delivered when it settles in turn.
         const rest = turns.filter((t) => t.turnId !== turnId);
         const next = { ...prev };
-        if (rest.length) next[threadId] = rest;
-        else delete next[threadId];
+        if (rest.length) next[stateKey] = rest;
+        else delete next[stateKey];
         return next;
       });
       // Deliberately not awaited here, and deliberately not written inline —
@@ -1716,27 +1743,33 @@ export function AppShell({
       //
       // The turn id goes with it: the re-read's own clear must not be fooled
       // by a ref that has not caught up with the `setOpenTurns` above.
-      reReadSettledThread(threadId, turnId);
+      //
+      // Both identities, and both required. The desk is what `getChatHistory`
+      // is addressed by — a composite key names no desk the host knows — and
+      // the state key is what the per-turn cleanup is filed under. `chatId` is
+      // non-optional on `OpenTurn`, so this cannot silently lose the desk the
+      // way a derived fallback did.
+      reReadSettledThread(chatId, turnId, stateKey);
     };
 
     const poll = () => {
-      for (const [threadId, turn] of watching) {
+      for (const [stateKey, turn] of watching) {
         if (!turn.turnId) continue;
         getRun(client, company, turn.turnId)
           .then(({ run }) => {
             if (cancelled) return;
             if (run.phase === "terminal") {
-              settle(threadId, turn.turnId!);
+              settle(stateKey, turn.chatId, turn.turnId!);
               return;
             }
             // Still open: keep the queued/working distinction honest. `pending`
             // means it has not taken the per-company lock yet.
             const queued = run.status === "pending";
             setOpenTurns((prev) =>
-              prev[threadId]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
+              prev[stateKey]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
                 ? {
                     ...prev,
-                    [threadId]: prev[threadId].map((t) =>
+                    [stateKey]: prev[stateKey].map((t) =>
                       t.turnId === turn.turnId ? { ...t, queued } : t,
                     ),
                   }
@@ -1753,7 +1786,7 @@ export function AppShell({
             // settles through whatever terminal signal it does answer.
             if (cancelled) return;
             if (err instanceof ApiError && err.status === 404 && turn.turnId)
-              settle(threadId, turn.turnId);
+              settle(stateKey, turn.chatId, turn.turnId);
           });
       }
     };
@@ -2504,7 +2537,7 @@ export function AppShell({
    * suppression lose nothing: the frame was never dropped, only queued.
    */
   const onSendDetached = useCallback(
-    (threadId: string, turnId?: string, _gen?: number) => {
+    (threadId: string, turnId?: string, _gen?: number, chatId?: string) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       // Append, never replace (issue #1000). The serial lock queues a second
       // send behind the running turn, and a replace would stop the poll
@@ -2514,7 +2547,17 @@ export function AppShell({
         const turns = prev[threadId] ?? [];
         // The reload arm can race this POST's answer on the same turn.
         if (turnId && turns.some((t) => t.turnId === turnId)) return prev;
-        return { ...prev, [threadId]: [...turns, { turnId, queued: true }] };
+        // The desk travels with the row, from the caller that knows it. The map
+        // key can be a composite (`engineering#41`) and no desk is called that,
+        // so a row minted here without it left the settle poll unable to ask the
+        // host anything — the poll being the only delivery path when SSE is
+        // unavailable. `threadId` is the desk for callers whose key is not
+        // composite (`Conversation`), which is why it is the fallback rather
+        // than a parse of the key (CodeRabbit on #2044).
+        return {
+          ...prev,
+          [threadId]: [...turns, { turnId, queued: true, chatId: chatId ?? threadId }],
+        };
       });
       held.forEach((frame) => renderAgentReply(frame));
       // The receipt is NOT cleared here (issue #2021). The 202 hands the turn to
