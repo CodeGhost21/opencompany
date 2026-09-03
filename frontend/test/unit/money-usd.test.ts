@@ -26,6 +26,14 @@ describe("usd", () => {
     expect(usd(0.005)).toBe("$0.01");
   });
 
+  it("decides the zero boundary the same way on either side of zero", () => {
+    expect(usd(-0.005)).toBe("-$0.01");
+    expect(usd(0.005)).toBe("$0.01");
+    expect(usd(-0.004)).toBe(">-$0.01");
+    expect(usd(-0.0049)).toBe(">-$0.01");
+    expect(usd(-0)).toBe("$0.00");
+  });
+
   it("groups a large amount without dropping its cents", () => {
     expect(usd(12345.678)).toBe("$12,345.68");
     expect(usd(1000000)).toBe("$1,000,000.00");
@@ -70,6 +78,15 @@ describe("agreement", () => {
     for (const amount of [0.0001, 0.004, 0.0049, 0.005, 0.16]) {
       expect(usd(amount)).not.toBe("$0.00");
       expect(usd(amount)).not.toBe("$0");
+    }
+  });
+
+  it("never disagrees with usdMagnitude about the same magnitude", () => {
+    const magnitude = (rendered: string): string =>
+      rendered.startsWith(">-") ? `<${rendered.slice(2)}` : rendered.startsWith("-") ? rendered.slice(1) : rendered;
+
+    for (const amount of [-0.005, 0.005, -0.004, -0.0049, -0, 0.16, 0.5, 42, 12345.678]) {
+      expect(magnitude(usd(amount))).toBe(usdMagnitude(amount));
     }
   });
 });

@@ -32,10 +32,11 @@ const ZERO = "$0.00";
  *
  * Mirrors the rounding `Intl` applies rather than testing a hand-picked
  * threshold, so the bound and the rendered string can never disagree about
- * which side of a cent a value falls on.
+ * which side of a cent a value falls on. Decided from the magnitude, so a
+ * debit and its matching credit land on the same side of the boundary.
  */
 function roundsToZero(amount: number): boolean {
-  return Math.round(amount * 100) === 0;
+  return Math.round(Math.abs(amount) * 100) === 0;
 }
 
 /**
