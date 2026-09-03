@@ -2599,6 +2599,16 @@ impl CompanyRuntime {
     ) -> Result<()> {
         use crate::ports::blockers::BlockerVerdict;
 
+        // The whole list-check-upsert below is one read-modify-write on the
+        // board, so it holds `task_writes` for its duration — otherwise the
+        // "already moved on" check reads a column another edit overwrites before
+        // the upsert lands, and the resume yanks back a card an operator had
+        // just dragged somewhere else.
+        //
+        // Lock order: `task_writes` is never taken while `blocker_resolutions`
+        // is held. A resume runs on the follow-up task, which is spawned and so
+        // outside the group lock the resolve loop holds.
+        let _serialized = self.task_writes.lock().await;
         let Some(mut card) = self
             .ops
             .tasks
@@ -2607,6 +2617,7 @@ impl CompanyRuntime {
             .into_iter()
             .find(|t| t.id == task_id)
         else {
+            drop(_serialized);
             return self
                 .post_blocker_resume_note(
                     thread,
@@ -2632,6 +2643,7 @@ impl CompanyRuntime {
         card.column = IN_PROGRESS.to_string();
         card.updated_at_millis = now_millis();
         self.upsert_task(&card).await?;
+        drop(_serialized);
         self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
             .await
     }
@@ -2645,6 +2657,9 @@ impl CompanyRuntime {
     /// mover marks a card nobody answered.
     #[cfg(feature = "openhuman")]
     async fn cancel_task_card(self: &Arc<Self>, task_id: &str, thread: Option<&str>) -> Result<()> {
+        // Held for the same read-modify-write reason, and in the same order, as
+        // [`resume_task_card`](Self::resume_task_card).
+        let _serialized = self.task_writes.lock().await;
         let Some(mut card) = self
             .ops
             .tasks
@@ -2667,6 +2682,7 @@ impl CompanyRuntime {
         card.bounced = Some(BLOCKER_CANCELLED.to_string());
         card.updated_at_millis = now_millis();
         self.ops.tasks.upsert(&self.id, &card).await?;
+        drop(_serialized);
         self.post_blocker_resume_note(
             thread,
             "Okay — I've cancelled that. It's back in To-do if you want to pick it up later.",
@@ -6071,8 +6087,8 @@ impl CompanyRuntime {
         if !self.grants.claim_blocker_resolution(id, resolution.clone()) {
             return Ok((ResolveReceipt::AlreadyResolved, None));
         }
-        let still_parked = parked
-            .is_some_and(|parked| crate::ports::blockers::is_blocker_effect(&parked.effect));
+        let still_parked =
+            parked.is_some_and(|parked| crate::ports::blockers::is_blocker_effect(&parked.effect));
         if !still_parked {
             self.grants.take_blocker_resolution(id);
             return Ok((ResolveReceipt::AlreadyResolved, None));
@@ -6145,8 +6161,6 @@ impl CompanyRuntime {
         answer: &str,
         by: Option<&Actor>,
     ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
-        use crate::ports::blockers::BlockerPayload;
-
         self.ensure_accepting()?;
         if ids.is_empty() {
             return Err(OpenCompanyError::InvalidRequest(
@@ -6160,8 +6174,7 @@ impl CompanyRuntime {
         // read now and banked on the resolution, and a group's later members must
         // still be findable after the first is popped.
         let pending = self.journal.pending();
-        let parked_of =
-            |id: &ApprovalId| pending.iter().find(|parked| &parked.id == id);
+        let parked_of = |id: &ApprovalId| pending.iter().find(|parked| &parked.id == id);
         let actor = by.cloned().unwrap_or_else(|| Actor {
             kind: ActorKind::Operator,
             id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
