@@ -52,6 +52,11 @@ services:
         VITE_SENTRY_ENVIRONMENT: ${VITE_SENTRY_ENVIRONMENT:-}
         VITE_SENTRY_TRACES_SAMPLE_RATE: ${VITE_SENTRY_TRACES_SAMPLE_RATE:-}
         VITE_SENTRY_TRACE_PROPAGATION_TARGETS: ${VITE_SENTRY_TRACE_PROPAGATION_TARGETS:-}
+        # Without this the console's release tag has no commit in it and two
+        # builds are indistinguishable in Sentry. Compose cannot read git, so
+        # set it in `.env` or pass it inline:
+        #   VITE_BUILD_COMMIT=$(git rev-parse HEAD) docker compose build console
+        VITE_BUILD_COMMIT: ${VITE_BUILD_COMMIT:-}
     image: opencompany-console:local
     environment:
       OC_UPSTREAM: opencompany:8080
