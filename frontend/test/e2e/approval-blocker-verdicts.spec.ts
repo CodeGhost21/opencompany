@@ -39,6 +39,7 @@ const isApprovalList = (url: URL) => /\/approvals$/.test(url.pathname);
 const isCompanyRead = (url: URL) =>
   /\/api\/v1\/(company|companies|companies\/[^/]+)$/.test(url.pathname);
 const isApprovalResolve = (url: URL) => /\/approvals\/[^/]+$/.test(url.pathname);
+const isSpec = (url: URL) => url.pathname === "/spec";
 
 /**
  * A parked blocker with no step behind it — a bare agent question
@@ -119,6 +120,7 @@ test.beforeEach(async ({ page }) => {
  * other real is not a state the host can be in.
  */
 async function stubQueue(page: Page, parked: unknown[]) {
+  await advertiseFourWayBlockers(page);
   await page.route(isApprovalList, async (route) => {
     await route.fulfill({
       status: 200,
@@ -138,6 +140,46 @@ async function stubQueue(page: Page, parked: unknown[]) {
           ? body.map((c) => ({ ...c, pending_approvals: parked.length }))
           : { ...body, pending_approvals: parked.length },
       ),
+    });
+  });
+}
+
+/**
+ * Add the four-way blocker capability to the host's own `/spec` handshake.
+ *
+ * The console negotiates before it sends: `skip` and `amend` lower to an
+ * `approve` that an unaware host would act on differently — it would re-run the
+ * step rather than leave it out, and re-run it without the operator's words —
+ * so the client refuses to send either unless the host advertises
+ * `blocker-verdict` (`src/api/client.ts`).
+ *
+ * The binary this lane drives is a default-feature `cargo build --bin
+ * opencompany`, and the capability is gated on `openhuman` because that is
+ * where the blocker resume lives — a host without it refuses `blocker_verdict`
+ * outright (`operator::blocker_verdict`). So the real handshake here says
+ * "cannot", correctly, and the cases below are about the body a host that
+ * *can* receives.
+ *
+ * This is the same class of fake as the queue itself, and stated in the same
+ * terms: the response is the host's real one with one capability added, not a
+ * fabricated handshake. `blockerVerdictRefusedByAnUnawareHost` covers the other
+ * side by taking it back off.
+ */
+async function advertiseFourWayBlockers(page: Page) {
+  await page.route(isSpec, async (route) => {
+    const response = await route.fetch();
+    if (!response.ok()) return route.fulfill({ response });
+    const body = await response.json();
+    const capabilities: string[] = Array.isArray(body.capabilities) ? body.capabilities : [];
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...body,
+        capabilities: capabilities.includes("blocker-verdict")
+          ? capabilities
+          : [...capabilities, "blocker-verdict"],
+      }),
     });
   });
 }
@@ -275,6 +317,50 @@ test("Skip sends a skip, not the approve it rides on", async ({ page }) => {
   // Nothing rides along that the host would refuse.
   expect(bodies[0]).not.toHaveProperty("blocker_answer");
   expect(bodies[0]).not.toHaveProperty("scope");
+});
+
+/**
+ * **The other side of the negotiation (P1 review finding on PR #2038).** Against
+ * a host that does not advertise `blocker-verdict`, `skip` must not reach the
+ * wire at all: it lowers to an `approve`, and an unaware host acts on that by
+ * re-running the very step the operator asked it to leave out, while this
+ * console reports a skip. `retry` lowers faithfully and still goes.
+ *
+ * The retry is the control, and it is what makes the absence provable: polling
+ * for "no body" would pass before a slow request arrived, whereas a retry that
+ * has landed means the click before it has had its chance and sent nothing.
+ */
+test("a skip is refused, not lowered, on a host that cannot perform it", async ({
+  page,
+}) => {
+  const bodies = await captureResolve(page);
+  await openApprovals(page, [parkedBlocker()]);
+  // Registered after `stubQueue`'s, and Playwright prefers the newest match.
+  await page.route(isSpec, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...body,
+        capabilities: (Array.isArray(body.capabilities) ? body.capabilities : []).filter(
+          (c: string) => c !== "blocker-verdict",
+        ),
+      }),
+    });
+  });
+
+  const footer = decideFooter(page);
+  await footer.getByRole("button", { name: /^Skip this step/ }).click();
+  await footer.getByRole("button", { name: /^Retry/ }).click();
+
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(
+    bodies[0],
+    "the retry must be the only thing that reached the host — a skip that got \
+through would have been carried out as a re-run",
+  ).toMatchObject({ verdict: "approve", blocker_verdict: "retry" });
 });
 
 test("Cancel run sends a cancel on the deny it rides on", async ({ page }) => {
