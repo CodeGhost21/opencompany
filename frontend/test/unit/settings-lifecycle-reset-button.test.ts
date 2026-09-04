@@ -9,24 +9,6 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyStatus } from "@/api/types";
 import { LifecycleControls } from "@/views/SettingsView";
 
-// The company-creation funnel is closed at the product level:
-// `canCreateCompanies` is `!COMPANY_SWITCHING_HIDDEN && carriesPlatformBearer`
-// (#2074), and with the flag set it answers `false` for every client — so the
-// dialog and the Reset button this file renders never mount, and every case
-// here fails on an element that cannot exist.
-//
-// The flag is neutralised rather than the tests skipped, because what they
-// cover is not the funnel. It is the dialog's own behaviour once open — the
-// wallet field, the preflight race, the pre-archive guard, the lifecycle
-// disable — and that code still ships and can still regress. The *gate* has its
-// own coverage in `product-scope-hidden-surfaces.test.ts`, which pins the
-// absence directly and is where a change to the hide belongs.
-vi.mock("@/product-scope", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/product-scope")>()),
-  COMPANY_SWITCHING_HIDDEN: false,
-}));
-
-
 /**
  * The Reset / Start clean button (#1807, SettingsView.tsx `LifecycleControls`)
  * had no render test of its own — tinysweeper flagged the gap (PR comment
