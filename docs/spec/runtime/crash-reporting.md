@@ -369,6 +369,14 @@ Named so they are countable rather than implied.
 - **Host cognition is not tagged per company.** A multi-company host reports one
   instance id for all of them. Which company an error belongs to is in the
   `tracing` fields on the event, not in a tag.
+- **The two surfaces' release tags can disagree on the version.** Both are
+  shaped `opencompany@<version>[+<commit>]`, but the host reads
+  `Cargo.toml`'s version and the console reads `frontend/package.json`'s, and
+  nothing keeps those two numbers in step — they are `0.1.1` and `0.1.0` as
+  this is written. The commit half still matches for a build that sets
+  `OPENCOMPANY_BUILD_COMMIT` / `VITE_BUILD_COMMIT`, which is what actually
+  identifies a build; set `SENTRY_RELEASE` explicitly if the two surfaces must
+  file under one exact string.
 - **Host spans stop at the HTTP boundary.** See
   [tracing.md](tracing.md#known-limitations).
 - **`Authorization: Token <value>` with an unprefixed value is not scrubbed.**
