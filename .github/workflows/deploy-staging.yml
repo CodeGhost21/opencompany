@@ -186,6 +186,14 @@ jobs:
           # bundle at build time, where the manager's runtime env can never
           # reach it (Codex on #2073).
           #
+          # `VITE_SENTRY_TRACES_SAMPLE_RATE` gets NO fallback, unlike the
+          # environment above. Absent means `0` and no tracing integration at
+          # all, which is what both surfaces already default to and what this
+          # repository deliberately chose: transactions bill separately from
+          # errors and are emitted per page load, so defaulting anyone into them
+          # here would be a recurring cost nobody asked for. Set the variable to
+          # turn tracing on knowingly.
+          #
           # `VITE_BUILD_COMMIT` takes the SAME value as the Rust half above so
           # both surfaces compute one `opencompany@<version>+<commit>` release
           # string. Passed different values they still both report — and their
@@ -196,6 +204,7 @@ jobs:
             VITE_SENTRY_DSN=${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
             VITE_BUILD_COMMIT=${{ github.sha }}
             VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
+            VITE_SENTRY_TRACES_SAMPLE_RATE=${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
           push: true
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}

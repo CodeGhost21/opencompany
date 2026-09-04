@@ -91,6 +91,13 @@ WORKDIR /console
 # reports split across two `environment` values and no filter shows both. The
 # manager's `OPENCOMPANY_SENTRY_ENVIRONMENT` is the value to match.
 #
+# `VITE_SENTRY_TRACES_SAMPLE_RATE` is here for the same build-time reason, and
+# is deliberately given NO default: absent means `0`, which installs no tracing
+# integration at all. That is the shipped choice, not an oversight — errors and
+# transactions bill separately, and a transaction is emitted per page load
+# rather than only when something breaks, so a rate chosen on an operator's
+# behalf is a recurring bill they did not ask for.
+#
 # `VITE_BUILD_COMMIT` is the frontend's spelling of the builder stage's
 # `OPENCOMPANY_BUILD_COMMIT`, not a second source of truth — `vite.config.ts`
 # shortens it to the same twelve characters `src/build_stamp.rs` normalizes to,
@@ -109,9 +116,11 @@ RUN npm ci
 ARG VITE_SENTRY_DSN=""
 ARG VITE_BUILD_COMMIT=""
 ARG VITE_SENTRY_ENVIRONMENT=""
+ARG VITE_SENTRY_TRACES_SAMPLE_RATE=""
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
     VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT \
-    VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT
+    VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
+    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE
 
 COPY frontend/ ./
 RUN npm run build && npm run build:pages-sdk
