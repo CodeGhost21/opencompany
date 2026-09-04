@@ -98,6 +98,12 @@ function labelled(...wanted: string[]): HTMLButtonElement {
 }
 
 /** "Looks good" is the same control under a different word, on Advanced. */
+/** The wizard's own progress line, e.g. `Review · step 4 of 4`. */
+function stepLabel(): string {
+  const match = container.textContent?.match(/(\w[\w -]*) · step \d+ of \d+/);
+  return match ? match[0] : "";
+}
+
 const next = async () =>
   act(async () => {
     labelled("Next", "Looks good").click();
@@ -169,6 +175,14 @@ describe("where the sign-in question sits", () => {
     await fill("setup-field-email", "ada@example.com");
     await next(); // -> review
 
+    // Landed on Review, asserted before anything about what is absent. Without
+    // this the three checks below would also pass if the press had gone nowhere
+    // — a test that cannot fail for the reason it exists.
+    //
+    // Read off the step label rather than `setup-review`: entering Review kicks
+    // off the roster design, so the screen is its spinner first and the review
+    // body only once that settles. The label is true in both.
+    expect(stepLabel(), "the press should have reached Review").toMatch(/^Review · step/);
     expect(find("setup-advanced")).toBeNull();
     expect(find("auth-mode-email")).toBeNull();
     expect(find("field-auth_mode")).toBeNull();
@@ -201,6 +215,9 @@ describe("a step this host does not need gets no slot", () => {
     expect(container.textContent).toContain("step 3 of 4");
 
     await next();
+    // Review, not "wherever the press left us": absence proves nothing about a
+    // screen that never changed.
+    expect(stepLabel(), "the press should have reached Review").toMatch(/^Review · step/);
     expect(find("setup-advanced")).toBeNull();
     expect(find("setup-field-email")).toBeNull();
   });
