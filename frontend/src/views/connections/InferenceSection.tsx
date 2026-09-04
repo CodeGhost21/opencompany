@@ -42,6 +42,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 
 /** The abstract cognition tiers the tenant model table maps. */
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
@@ -136,6 +137,15 @@ const PROVIDERS: Record<
 const PROVIDER_LABEL_ITEMS: Record<InferenceProvider, string> = Object.fromEntries(
   (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, PROVIDERS[p].label]),
 ) as Record<InferenceProvider, string>;
+
+/**
+ * The providers on offer. {@link PROVIDERS} keeps every descriptor, including the
+ * ones not listed here — a company whose stored provider is hidden still needs
+ * its label, and the host resolves that value exactly as it always did.
+ */
+const PROVIDER_OPTIONS: InferenceProvider[] = (Object.keys(PROVIDERS) as InferenceProvider[]).filter(
+  (p) => p !== "managed" || !INFERENCE_MANAGED_HIDDEN,
+);
 
 /**
  * What the live cognition path's metering mode means for the Usage view — so a
@@ -878,7 +888,7 @@ export function InferenceSection({
                 <p className="text-xs text-muted-foreground">
                   Test sends one real message to this provider using its stored key, and your provider
                   may charge for it; it does not change the saved configuration. A company with no
-                  custom inference configured stays on the managed brain, and Test just reports that
+                  custom inference configured has nothing to send, and Test just reports that
                   instead of sending anything.
                 </p>
                 <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
@@ -1011,7 +1021,7 @@ export function InferenceSection({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => (
+                        {PROVIDER_OPTIONS.map((p) => (
                           <SelectItem key={p} value={p}>
                             {PROVIDERS[p].label}
                           </SelectItem>
@@ -1239,7 +1249,6 @@ export function InferenceSection({
                       Paste {PROVIDERS[provider].keyKind}. This field is scoped to the provider
                       selected above and is stored against it — a key for any other vendor will
                       fail at the first turn, so it is not the place for one.
-                      {provider === "managed" && " Leave it blank to keep running on the platform credential."}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       Whatever you set here is what the company spends against: everyone you invite
