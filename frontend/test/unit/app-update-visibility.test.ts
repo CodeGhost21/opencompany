@@ -4,6 +4,7 @@ import {
   type AppUpdatePhase,
   isActionable,
   probeIsSuperseded,
+  probeMayReport,
   shouldResurface,
   updateHeadline,
   updateSummary,
@@ -91,6 +92,36 @@ describe("when a background probe may write its answer", () => {
     // overwrites "ready" — banner gone, bytes still in memory, `busy` still
     // true so nothing probes again. Silence for the rest of the session.
     expect(probeIsSuperseded("ready", true)).toBe(true);
+  });
+});
+
+describe("when two probes overlap", () => {
+  it("lets the newest probe report", () => {
+    expect(probeMayReport(2, 2, "checking", false)).toBe(true);
+  });
+
+  it("silences a probe a newer one has already replaced", () => {
+    // The generation is the whole point: phase and `busy` here say nothing is
+    // wrong, and the answer is still stale.
+    expect(probeMayReport(1, 2, "checking", false)).toBe(false);
+  });
+
+  it("silences the stale probe in the window phase alone could not see", () => {
+    // The gap the phase guard left, one frame before the one it closed. The
+    // newer probe has set `available`; the effect that starts its download has
+    // not run, so nothing is `busy` and nothing is `ready`. Without the
+    // generation the older probe writes `up-to-date` here, the auto-download
+    // never fires, and the update goes missing for another fifteen minutes.
+    expect(probeIsSuperseded("available", false)).toBe(false);
+    expect(probeMayReport(1, 2, "available", false)).toBe(false);
+  });
+
+  it("still yields to the download when no newer probe exists", () => {
+    // Nothing bumps the generation when the operator clicks "Try again" — that
+    // stages bytes without probing — so the counter alone would let this
+    // answer through. Both halves of the rule are load-bearing.
+    expect(probeMayReport(3, 3, "ready", true)).toBe(false);
+    expect(probeMayReport(3, 3, "downloading", true)).toBe(false);
   });
 });
 

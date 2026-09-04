@@ -46,25 +46,53 @@ export function isActionable(phase: AppUpdatePhase): boolean {
 }
 
 /**
- * Whether a background probe must keep its hands off the phase.
+ * Whether the download owns the phase, so a probe must keep its hands off it.
  *
- * Asked twice per probe — before it starts, and again with its answer in hand
- * — because the two are not the same question. A probe that was in flight when
- * the laptop's lid closed lands whenever the machine wakes, and `setInterval`
- * fires its overdue tick on the same wake: two checks in flight at once, from
- * one timer that was never meant to overlap. If the second one stages a build
- * while the first is still waiting, the first then writes `up-to-date` over
- * `ready` — and that takes the banner off screen with ~100 MB of verified
- * bytes still in memory and no further probe coming, because `busy` is now
- * true. Silence for the rest of the session, which is exactly the failure the
- * silence-by-default design makes hardest to notice.
+ * `busy` is the download's own flag: bytes are being fetched, or are already
+ * staged and waiting on a restart. `ready` and `installing` are the phases a
+ * probe must not disturb even in the instant before that flag is set.
  *
- * `busy` is the download's own flag: bytes are being fetched or are already
- * staged. `ready` and `installing` are the phases a probe must not disturb even
- * before that flag is set.
+ * This is the entry guard — asked before a probe starts. What an answer needs
+ * on the way back is [`probeMayReport`], which asks this *and* whether a newer
+ * probe has started since.
  */
 export function probeIsSuperseded(phase: AppUpdatePhase, busy: boolean): boolean {
   return busy || phase === "ready" || phase === "installing";
+}
+
+/**
+ * Whether a probe that has just answered may still write what it learned.
+ *
+ * Two probes can be in flight at once and it takes no unusual timing: a check
+ * that was waiting on the network when the laptop's lid closed lands whenever
+ * the machine wakes, and `setInterval` fires its overdue tick on the same wake.
+ * One timer, never meant to overlap, now has two answers coming back in an
+ * order nobody chose.
+ *
+ * **Staleness is a property of which probe this is, not of what phase we happen
+ * to be in**, and that distinction is the whole reason `generation` exists.
+ * Phase alone leaves gaps, because a phase is only a snapshot of how far the
+ * newer probe has got. Guarding on the *staged* phases closed the window where
+ * the older answer overwrites `ready`; it left the one a beat earlier, where
+ * the newer probe has set `available` but the effect that starts its download
+ * has not run yet — nothing is `busy`, nothing is `ready`, and a stale
+ * `up-to-date` lands on top. The auto-download never fires, and the update
+ * stays invisible until another quarter of an hour goes by. Same root cause,
+ * one frame earlier. A monotonic counter has no such frames: a probe is either
+ * the newest one or it is not.
+ *
+ * So the rule is both halves. `generation === latest` settles probe against
+ * probe. [`probeIsSuperseded`] settles probe against the download, which the
+ * counter cannot see — a "Try again" click stages bytes without starting a
+ * probe at all, so nothing would have bumped it.
+ */
+export function probeMayReport(
+  generation: number,
+  latest: number,
+  phase: AppUpdatePhase,
+  busy: boolean,
+): boolean {
+  return generation === latest && !probeIsSuperseded(phase, busy);
 }
 
 /** The banner's heading for a phase. Only actionable phases have one. */

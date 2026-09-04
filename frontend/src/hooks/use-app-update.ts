@@ -7,7 +7,7 @@ import {
   installAppUpdate,
 } from "@/api/transport/desktop";
 import { isDesktopRuntime } from "@/api/transport";
-import { type AppUpdatePhase, probeIsSuperseded } from "@/lib/app-update";
+import { type AppUpdatePhase, probeIsSuperseded, probeMayReport } from "@/lib/app-update";
 
 /**
  * The desktop shell's update flow: probing, downloading, and the restart.
@@ -93,19 +93,23 @@ export function useAppUpdate(options: UseAppUpdateOptions = {}): UseAppUpdate {
   // throw either away, and the auto-download effect must not fire twice for
   // one detection.
   const busyRef = useRef(false);
+  // Which probe is the newest. Bumped where a probe starts and compared where
+  // it answers, so an answer knows whether it is still the current one — see
+  // `probeMayReport` for why phase alone cannot tell it that.
+  const probeRef = useRef(0);
 
   const check = useCallback(async () => {
     if (!isDesktopRuntime()) return;
     if (probeIsSuperseded(phaseRef.current, busyRef.current)) return;
 
+    const generation = ++probeRef.current;
     setPhase("checking");
     const answer = await checkAppUpdate();
-    // Asked again on the way out, and that is the whole point of asking twice:
-    // this probe may have started before the lid closed and be landing after
-    // the one that woke with the machine has already staged a build. Writing
-    // its answer now would put `up-to-date` over `ready` and take the banner
-    // off screen for good. See `probeIsSuperseded`.
-    if (probeIsSuperseded(phaseRef.current, busyRef.current)) return;
+    // Two probes overlap whenever the machine sleeps through one, and the
+    // answers come back in whatever order the network decides. This one writes
+    // only if it is still the newest probe and the download has not taken the
+    // phase over in the meantime.
+    if (!probeMayReport(generation, probeRef.current, phaseRef.current, busyRef.current)) return;
     setInfo(answer);
     setPhase(answer?.available ? "available" : "up-to-date");
   }, []);
