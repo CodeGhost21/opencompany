@@ -131,21 +131,57 @@ const PROVIDERS: Record<
 };
 
 /**
- * The base-ui `Select` wants a plain id -> label map for its `items` prop, so
- * project one out of the descriptor rather than maintaining a second list.
- */
-const PROVIDER_LABEL_ITEMS: Record<InferenceProvider, string> = Object.fromEntries(
-  (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, PROVIDERS[p].label]),
-) as Record<InferenceProvider, string>;
-
-/**
  * The providers on offer. {@link PROVIDERS} keeps every descriptor, including the
- * ones not listed here — a company whose stored provider is hidden still needs
- * its label, and the host resolves that value exactly as it always did.
+ * ones not listed here — the form still needs a hidden route's `requiresBaseUrl`
+ * and `preset`, and the host resolves the stored value exactly as it always did.
+ *
+ * Declared ahead of everything that reads it: `PROVIDER_LABEL_ITEMS` below is a
+ * module-level const built through `isOffered`, so a later declaration would be
+ * read in its temporal dead zone and throw on import.
  */
 const PROVIDER_OPTIONS: InferenceProvider[] = (Object.keys(PROVIDERS) as InferenceProvider[]).filter(
   (p) => p !== "managed" || !INFERENCE_MANAGED_HIDDEN,
 );
+
+/**
+ * What a provider this console does not offer is called on screen.
+ *
+ * Deliberately says nothing about the route it stands in for. The host reports
+ * an unconfigured company as `provider: "managed"` — the same value a newer
+ * host could send for something else entirely — and this console neither offers
+ * that route nor brands it, so the honest thing to render is the fact that
+ * nothing is configured *here*, which is true of every value that lands in it.
+ */
+const NOT_CONFIGURED = "Not configured";
+
+/** Whether this console offers `provider` as something to choose. */
+function isOffered(provider: string): provider is InferenceProvider {
+  return (PROVIDER_OPTIONS as string[]).includes(provider);
+}
+
+/**
+ * The label for a provider as the operator sees it.
+ *
+ * Never reaches into {@link PROVIDERS} for a route that is not offered: that
+ * table still holds the descriptor (the form needs its `requiresBaseUrl` and
+ * `preset`), but its label is a brand name for a choice this console does not
+ * present, and printing it is what made the card claim a route.
+ */
+function providerLabel(provider: string): string {
+  return isOffered(provider) ? PROVIDERS[provider].label : NOT_CONFIGURED;
+}
+
+/**
+ * The base-ui `Select` wants a plain id -> label map for its `items` prop, so
+ * project one out of the descriptor rather than maintaining a second list.
+ *
+ * Built through {@link providerLabel}, because `items` is what the *trigger*
+ * renders — a filtered `SelectItem` list alone leaves the closed control still
+ * showing the hidden route's own name.
+ */
+const PROVIDER_LABEL_ITEMS: Record<InferenceProvider, string> = Object.fromEntries(
+  (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, providerLabel(p)]),
+) as Record<InferenceProvider, string>;
 
 /**
  * What the live cognition path's metering mode means for the Usage view — so a
@@ -865,10 +901,18 @@ export function InferenceSection({
             {status && (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">{PROVIDERS[status.provider as InferenceProvider]?.label ?? status.provider}</span>
-                  <Badge variant={status.source === "runtime" ? "outline" : "secondary"}>
-                    {status.source}
-                  </Badge>
+                  <span className="font-medium" data-testid="inference-current-provider">
+                    {providerLabel(status.provider)}
+                  </span>
+                  {/* `source` reads `managed` for a company this console has no
+                      route for, which is the hidden route's own name. The badge
+                      says where a configuration came from, and there is no
+                      configuration to attribute. */}
+                  {isOffered(status.provider) && (
+                    <Badge variant={status.source === "runtime" ? "outline" : "secondary"}>
+                      {status.source}
+                    </Badge>
+                  )}
                   {status.keyConfigured && (
                     <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                       <Check className="size-3" /> key set
@@ -891,7 +935,9 @@ export function InferenceSection({
                   custom inference configured has nothing to send, and Test just reports that
                   instead of sending anything.
                 </p>
-                <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
+                {isOffered(status.provider) && (
+                  <p className="truncate text-xs text-muted-foreground">{status.baseUrl}</p>
+                )}
                 {/* Issue #174: config resolving to a provider does not mean the
                     company booted onto it. Say which cognition path is live and
                     whether its usage is metered, so a zero Usage reading reads as
@@ -1021,6 +1067,20 @@ export function InferenceSection({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
+                        {/* A value the list does not offer still gets a row, the
+                            way the tier picker below keeps a retired model id
+                            selectable (`optionsForTier`). Without it the control
+                            shows a value no item matches: nothing is checked and
+                            the popup reads as though nothing is chosen.
+
+                            Disabled, because it is not a route to return to —
+                            it is the state the company is in until a provider is
+                            picked. */}
+                        {!isOffered(provider) && (
+                          <SelectItem value={provider} disabled>
+                            {NOT_CONFIGURED}
+                          </SelectItem>
+                        )}
                         {PROVIDER_OPTIONS.map((p) => (
                           <SelectItem key={p} value={p}>
                             {PROVIDERS[p].label}
@@ -1028,10 +1088,20 @@ export function InferenceSection({
                         ))}
                       </SelectContent>
                     </Select>
-                    <p className="text-xs text-muted-foreground">
-                      Choosing a provider applies its Base URL and model defaults. If you have typed
-                      either, we ask before replacing them; your API key stays in this form.
-                    </p>
+                    {isOffered(provider) ? (
+                      <p className="text-xs text-muted-foreground">
+                        Choosing a provider applies its Base URL and model defaults. If you have
+                        typed either, we ask before replacing them; your API key stays in this form.
+                      </p>
+                    ) : (
+                      <p
+                        className="text-xs text-muted-foreground"
+                        data-testid="inference-not-configured"
+                      >
+                        No provider is configured for this company. Pick one to give its teammates a
+                        brain of their own.
+                      </p>
+                    )}
                   </div>
                   {PROVIDERS[provider].requiresBaseUrl && (
                     <div className="space-y-1">
@@ -1048,7 +1118,7 @@ export function InferenceSection({
                   )}
                 </div>
 
-                {provider !== "managed" && (
+                {isOffered(provider) && (
                   <div className="space-y-2">
                     {provider === "openrouter" && modelCatalog.kind === "error" && (
                       <p
@@ -1232,7 +1302,11 @@ export function InferenceSection({
                   always preferred a stored key over the env default on this
                   provider. Ollama is the one provider that takes no bearer.
                 */}
-                {PROVIDERS[provider].acceptsKey && (
+                {/* No key field until a provider is chosen. The descriptor for a
+                    route this console does not offer still carries its `keyKind`
+                    prose, which names that route — and a key typed against a
+                    provider nobody selected has nowhere to be scoped to. */}
+                {isOffered(provider) && PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">
                       API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
@@ -1263,7 +1337,11 @@ export function InferenceSection({
                 <div className="flex items-center gap-2">
                   <Button
                     data-testid="inference-save"
-                    disabled={busy !== null}
+                    // Nothing to save while the form sits on a route this console
+                    // does not offer: sending it back would normalize to a real
+                    // provider on the host and move the company somewhere the
+                    // operator never chose.
+                    disabled={busy !== null || !isOffered(provider)}
                     onClick={() => void save()}
                   >
                     {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
