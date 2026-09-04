@@ -62,6 +62,7 @@ import {
 } from "@/lib/company-setup";
 import { isDesktopRuntime } from "@/api/transport";
 import { cn } from "@/lib/utils";
+import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
 
 /**
  * The flow, in order. `fields` names the config keys each step owns.
@@ -118,7 +119,7 @@ const STEPS: readonly (Step & { fields: readonly string[] })[] = [
  * works, which is what earns something a place behind "press on if none of it
  * matters to you".
  */
-const ADVANCED_GROUPS: readonly {
+const ALL_ADVANCED_GROUPS: readonly {
   id: string;
   label: string;
   title: string;
@@ -133,6 +134,11 @@ const ADVANCED_GROUPS: readonly {
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
   },
 ];
+
+/** Advanced groups on offer — the Host group is hidden while hosts are. */
+const ADVANCED_GROUPS = ALL_ADVANCED_GROUPS.filter(
+  (group) => group.id !== "host" || !HOST_SETTINGS_HIDDEN,
+);
 
 /** How each sign-in mode is described, in consequences rather than mode names. */
 const AUTH_MODE_COPY: Record<string, { label: string; hint: string }> = {
@@ -511,7 +517,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * starts at its longest.
    */
   const visibleSteps = useMemo(
-    () => STEPS.filter((s) => s.id !== "account" || !status || requiresSignIn(status, values)),
+    () =>
+      STEPS.filter(
+        (s) =>
+          (s.id !== "account" || !status || requiresSignIn(status, values)) &&
+          (s.id !== "advanced" || ADVANCED_GROUPS.length > 0),
+      ),
     [status, values],
   );
 

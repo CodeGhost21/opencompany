@@ -155,7 +155,7 @@ async function pickTemplate(id: string) {
   });
 }
 
-/** model -> business -> sign-in (none) -> advanced -> review. */
+/** model -> business -> sign-in (none) -> review. */
 async function walkToReview(client: OpenCompanyClient, template: string | null) {
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
@@ -171,7 +171,6 @@ async function walkToReview(client: OpenCompanyClient, template: string | null) 
   await act(async () => {
     (container.querySelector('[data-testid="auth-mode-none"]') as HTMLElement).click();
   });
-  await next(); // -> advanced (or account, on a host that signs people in)
   await next(); // -> review
 }
 
@@ -248,16 +247,15 @@ describe("what a finished wizard says the company is", () => {
     ).toBe(TEMPLATE.name);
 
     // Back to Business, a different template, forward again.
-    for (let i = 0; i < 3; i += 1) {
-      // review -> advanced -> sign-in -> business.
+    for (let i = 0; i < 2; i += 1) {
+      // review -> sign-in -> business.
       await act(async () => {
         button("Back").click();
       });
     }
     await pickTemplate(OTHER_TEMPLATE.id);
-    // business -> sign-in -> advanced -> review. The sign-in answer survives
-    // going back, so the address step stays absent.
-    await next();
+    // business -> sign-in -> review. The sign-in answer survives going back, so
+    // the address step stays absent.
     await next();
     await next();
     await act(async () => {
@@ -281,16 +279,15 @@ describe("what a finished wizard says the company is", () => {
     await walkToReview(client, TEMPLATE.id);
     await fill("setup-company-name", "Northwind Studio");
 
-    for (let i = 0; i < 3; i += 1) {
-      // review -> advanced -> sign-in -> business.
+    for (let i = 0; i < 2; i += 1) {
+      // review -> sign-in -> business.
       await act(async () => {
         button("Back").click();
       });
     }
     await pickTemplate(OTHER_TEMPLATE.id);
-    // business -> sign-in -> advanced -> review. The sign-in answer survives
-    // going back, so the address step stays absent.
-    await next();
+    // business -> sign-in -> review. The sign-in answer survives going back, so
+    // the address step stays absent.
     await next();
     await next();
     await act(async () => {

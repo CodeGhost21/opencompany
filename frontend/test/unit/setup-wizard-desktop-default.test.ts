@@ -166,17 +166,11 @@ describe("the sign-in a desktop install starts from", () => {
     // The consequence of the seeded answer, and the reason it is seeded: the
     // address step is gone from the bar before the operator has pressed
     // anything, rather than appearing and then being taken away.
-    expect(slots()).toEqual([
-      "step-power",
-      "step-business",
-      "step-signin",
-      "step-advanced",
-      "step-review",
-    ]);
+    expect(slots()).toEqual(["step-power", "step-business", "step-signin", "step-review"]);
 
     await next();
     expect(find("setup-field-email")).toBeNull();
-    expect(find("setup-advanced")).toBeTruthy();
+    expect(find("setup-advanced")).toBeNull();
   });
 
   it("still lets a desktop operator turn a sign-in on", async () => {

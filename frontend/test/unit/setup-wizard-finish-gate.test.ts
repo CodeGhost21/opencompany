@@ -128,7 +128,7 @@ async function skipModel() {
   await next(); // -> business
 }
 
-/** model -> business -> sign-in -> account -> advanced -> review. */
+/** model -> business -> sign-in -> account -> review. */
 async function goToReview() {
   await skipModel();
   await fill("setup-field-industry", "E-commerce — homeware");
@@ -140,7 +140,6 @@ async function goToReview() {
   // The address is required on any host that asks people to sign in — leaving
   // it blank holds the wizard here, which is its own assertion below.
   await fill("setup-field-email", "ada@example.com");
-  await next(); // -> advanced
   await next(); // -> review
   // Entering Review kicks off the design call. Let it settle, or the assertions
   // below run against the spinner rather than the outcome.

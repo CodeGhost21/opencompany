@@ -160,23 +160,23 @@ describe("where the sign-in question sits", () => {
     expect(find("setup-advanced")).toBeNull();
   });
 
-  it("no longer offers the mode a second time inside Advanced", async () => {
-    // Two controls for one setting, one of them behind copy telling you to
-    // press past it, is how the question ended up after its consequence.
+  it("has no Advanced step left to offer the mode a second time in", async () => {
+    // Advanced held one group — how this host runs — and hiding it leaves the
+    // step with nothing on it, so the step goes too rather than rendering blank.
     await show(clientWith(status()));
     await goToSignIn();
     await next(); // -> account
     await fill("setup-field-email", "ada@example.com");
-    await next(); // -> advanced
+    await next(); // -> review
 
-    expect(find("setup-advanced")).toBeTruthy();
+    expect(find("setup-advanced")).toBeNull();
     expect(find("auth-mode-email")).toBeNull();
     expect(find("field-auth_mode")).toBeNull();
   });
 });
 
 describe("a step this host does not need gets no slot", () => {
-  it("draws six steps on a host that asks people to sign in", async () => {
+  it("draws five steps on a host that asks people to sign in", async () => {
     await show(clientWith(status()));
     await goToSignIn();
 
@@ -185,30 +185,23 @@ describe("a step this host does not need gets no slot", () => {
       "step-business",
       "step-signin",
       "step-account",
-      "step-advanced",
       "step-review",
     ]);
-    expect(container.textContent).toContain("step 3 of 6");
+    expect(container.textContent).toContain("step 3 of 5");
   });
 
-  it("draws five, and never the address field, once no sign-in is chosen", async () => {
+  it("draws four, and never the address field, once no sign-in is chosen", async () => {
     await show(clientWith(status()));
     await goToSignIn();
     await click("auth-mode-none");
 
-    expect(slots()).toEqual([
-      "step-power",
-      "step-business",
-      "step-signin",
-      "step-advanced",
-      "step-review",
-    ]);
-    // The bar must renumber too: a five-step flow that says "of 6" is telling
+    expect(slots()).toEqual(["step-power", "step-business", "step-signin", "step-review"]);
+    // The bar must renumber too: a four-step flow that says "of 5" is telling
     // the operator about a screen they will never be shown.
-    expect(container.textContent).toContain("step 3 of 5");
+    expect(container.textContent).toContain("step 3 of 4");
 
     await next();
-    expect(find("setup-advanced")).toBeTruthy();
+    expect(find("setup-advanced")).toBeNull();
     expect(find("setup-field-email")).toBeNull();
   });
 });
@@ -227,7 +220,7 @@ describe("the position survives the list changing under it", () => {
     await show(clientWith(status()));
     await goToSignIn();
     await click("auth-mode-none");
-    await next(); // -> advanced, with no address step in the list
+    await next(); // -> review, with no address step in the list
     await back(); // -> sign-in
     expect(find("auth-mode-email")).toBeTruthy();
 
