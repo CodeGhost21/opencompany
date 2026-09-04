@@ -268,7 +268,7 @@ test.describe("the agent acts as the chosen account", () => {
    */
   async function runOneExecute(page: Page): Promise<{ tool: string; connectionId?: string }[]> {
     await resetFixture(page);
-    await page.goto("/#/conversation");
+    await page.goto("/#/chat");
     const skip = page.getByRole("button", { name: "Skip for now" });
     await skip
       .waitFor({ state: "visible", timeout: 5_000 })
@@ -276,11 +276,7 @@ test.describe("the agent acts as the chosen account", () => {
       .catch(() => {
         /* already dismissed */
       });
-    await page
-      .getByRole("complementary")
-      .getByRole("button", { name: /Your company/ })
-      .first()
-      .click();
+    await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 
     // A SEND, deliberately: it is the case #820 is written around ("send from
     // billing@, not ops@") and proves the selected account reaches an effectful

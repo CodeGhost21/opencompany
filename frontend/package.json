@@ -30,7 +30,6 @@
     "tauri:build": "npm run build && cd ../src-tauri && ../frontend/node_modules/.bin/tauri build -- --features opencompany/acp,opencompany/composio"
   },
   "dependencies": {
-    "@assistant-ui/react": "^0.15.16",
     "@base-ui/react": "^1.6.0",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/geist-mono": "^5.3.0",

@@ -16,7 +16,7 @@ auth (magic link) → console → POST /api/v1/company/chat → brain → reply 
 To do that it needs an address that is allowed to log in. `[users] admins`
 lists `harness-e2e@tinyhumans.ai` as a standing admin invite, so the test can
 request a login code, redeem it for a session cookie, and then open
-`#/conversation`.
+`#/chat`.
 
 ## Agent roster
 

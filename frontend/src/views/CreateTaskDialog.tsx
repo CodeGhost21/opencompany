@@ -127,9 +127,8 @@ export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint:
  *
  * Title/Note are derived from the prompt. Priority is an explicit choice here
  * and remains editable on the card. `column` is omitted on purpose so the
- * *server's* intake default decides where the card lands — the same spend gate
- * the transcript's "Add to board" relies on, keeping the human drag into In
- * progress the only thing that spends an agent turn.
+ * *server's* intake default decides where the card lands, keeping the human
+ * drag into In progress the only thing that spends an agent turn.
  *
  * Three fields are collected beyond the prompt.
  *

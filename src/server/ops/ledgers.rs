@@ -256,9 +256,14 @@ async fn human_label(scope: &ScopedCompany, actor_id: &str) -> String {
     }
 }
 
-async fn summary(ctx: &ledgers::Ledgers, spec: &LedgerSpec) -> Result<LedgerSummary, ApiError> {
-    let entries = ledgers::entries(ctx, spec).await?;
-    Ok(LedgerSummary {
+/// Builds the wire summary from counts the caller already folded.
+///
+/// Every other field comes straight off `spec`, so this does no I/O of its
+/// own — a caller that already holds `open`/`closed` from the fold behind the
+/// rows it is sending alongside should call this rather than [`summary`],
+/// which folds again and can observe a write the rows' fold did not.
+fn summary_from_counts(spec: &LedgerSpec, open: usize, closed: usize) -> LedgerSummary {
+    LedgerSummary {
         slug: spec.slug.clone(),
         title: spec.title.clone(),
         purpose: spec.purpose.clone(),
@@ -270,9 +275,18 @@ async fn summary(ctx: &ledgers::Ledgers, spec: &LedgerSpec) -> Result<LedgerSumm
         statuses: spec.statuses.iter().map(LedgerStatusDto::from).collect(),
         sections: spec.sections.clone(),
         writers: spec.writers.clone(),
-        open: entries.open_count(spec),
-        closed: entries.closed_count(spec),
-    })
+        open,
+        closed,
+    }
+}
+
+async fn summary(ctx: &ledgers::Ledgers, spec: &LedgerSpec) -> Result<LedgerSummary, ApiError> {
+    let entries = ledgers::entries(ctx, spec).await?;
+    Ok(summary_from_counts(
+        spec,
+        entries.open_count(spec),
+        entries.closed_count(spec),
+    ))
 }
 
 async fn list_ledgers(scope: ScopedCompany) -> Result<Json<LedgerList>, ApiError> {
@@ -318,7 +332,7 @@ async fn read_ledger(
     )
     .await?;
     Ok(Json(LedgerRead {
-        ledger: summary(&ctx(&scope), spec).await?,
+        ledger: summary_from_counts(spec, read.open, read.closed),
         entries: read.entries.iter().map(|e| EntryRow::of(e, spec)).collect(),
         matched: read.matched,
         faults: read.faults,

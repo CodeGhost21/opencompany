@@ -9,10 +9,11 @@ Companion to [`memory-engine.md`](memory-engine.md), which specifies the seam th
 would bind through. **That document describes what ships; this one describes a
 proposal and the measurements behind it.**
 
-Nothing here is wired into OpenCompany. A driver exists —
-[tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128), passing the
-contract against a live CortexDB — and is deliberately unregistered. Binding it
-is the decision this record informs, and it has not been taken.
+`cortex` is a **selectable** engine as of #2065 — the driver from
+[tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128) is
+registered, and both live suites pass against a real CortexDB. Selectable is not
+selected: `OPENCOMPANY_MEMORY` defaults exactly as it did, and choosing Cortex is
+the decision this record informs. It argues against it.
 
 ## Findings first
 
@@ -344,9 +345,10 @@ leaves out is Cortex's derived fact and belief tier, which no host port reads an
 which Phase 4 revisits.
 
 Merged as [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128)
-with a live-engine test lane, and deliberately not registered:
-`SUPPORTED_REMOTE_DRIVERS` and `remote_provider()` are untouched, so nothing here
-can select it. Registering it is a decision, not a task.
+with a live-engine test lane, and registered here in #2065:
+`SUPPORTED_REMOTE_DRIVERS`, `remote_provider()` and the console catalog all carry
+`cortex`. Selecting it remains a decision this record argues against; the default
+is untouched.
 
 Acceptance, against the list this record set before the work started:
 
@@ -375,14 +377,13 @@ Acceptance, against the list this record set before the work started:
   So the only thing standing between a typo and a destroyed tenant is driver-side:
   it names `memory_ids` and never sends `confirm_all` anywhere.
 
-Two operational notes for whoever registers it. `cortex` is clean as a *driver
-id*, but `OPENCOMPANY_MEMORY=cortex` remains a hard boot refusal as a **mode**
-value, left over from #1568. And the selection recipe below does **not** work
-today: `SUPPORTED_REMOTE_DRIVERS` holds only `supermemory`, `mem0` and `cognee`,
-and `remote_provider()` rejects every other id, so
-`OPENCOMPANY_MEMORY=remote` plus `OPENCOMPANY_MEMORY_DRIVER=cortex` is a boot
-refusal until registration lands. It is the target configuration, not a usable
-one.
+Two operational notes. Select it with `OPENCOMPANY_MEMORY=remote` plus
+`OPENCOMPANY_MEMORY_DRIVER=cortex` — `OPENCOMPANY_MEMORY=cortex` is still a hard
+boot refusal as a **mode** value, left over from #1568. And registering the
+driver needed no change to tinymemory's reserved table: `admit` takes an
+unreserved id when the host declares the class, and this host declares every
+remote driver `External` with `TRUSTED`, so the class stays host-decided rather
+than self-reported.
 
 **Phase 2 — provisioning.** Per-tenant instance lifecycle through
 opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existing

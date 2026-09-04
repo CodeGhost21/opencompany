@@ -375,15 +375,24 @@ impl AcpRunTurn {
     /// live rows land on the same thread the durable reply does — byte for
     /// byte the rule `built_in`'s `LiveStream::On` applies, because a frame
     /// routed to a different thread than its reply is worse than no frame.
-    fn chat_ctx(company: &CompanyId, agent_id: &str, chat_id: Option<&str>) -> TurnStreamCtx {
+    fn chat_ctx(company: &CompanyId, agent_id: &str, chat: ChatTarget<'_>) -> TurnStreamCtx {
         TurnStreamCtx {
             company: company.clone(),
             agent_id: agent_id.to_string(),
             route: LiveRoute::Chat {
-                chat_id: chat_id
+                chat_id: chat
+                    .chat_id
                     .map(str::to_string)
                     .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
             },
+            // Takes the whole `ChatTarget` rather than the id alone, so this
+            // cannot go on answering with `None` while the caller holds the
+            // sequence. An ACP agent answers operator messages in a shared chat
+            // exactly as the built-in harness does, so without it two of its
+            // turns in one thread share a single row-list and arming the second
+            // erases the first — the failure this field exists to stop, left in
+            // place for one of the two harnesses (Codex on #2069).
+            message_seq: chat.message_seq.map(|seq| seq.value()),
         }
     }
 
@@ -685,7 +694,7 @@ impl RunTurn for AcpRunTurn {
         // (`LiveRoute::Chat`), and #1890's `thread_root` narrows *which
         // conversation inside it* the durable reply hangs from — a dimension
         // the transient timeline does not carry.
-        let ctx = Self::chat_ctx(company, agent_id, chat.chat_id);
+        let ctx = Self::chat_ctx(company, agent_id, chat);
         self.run_once(company, agent_id, message, chat.chat_id, Some(ctx))
             .await
     }
@@ -699,7 +708,7 @@ impl RunTurn for AcpRunTurn {
         chat: ChatTarget<'_>,
         _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        let ctx = Self::chat_ctx(company, agent_id, chat.chat_id);
+        let ctx = Self::chat_ctx(company, agent_id, chat);
         self.steered(company, agent_id, message, control, chat.chat_id, Some(ctx))
             .await
     }
@@ -772,6 +781,8 @@ impl RunTurn for AcpRunTurn {
                 run_id: workflow_run_id.to_string(),
                 node_id: node_id.to_string(),
             },
+            // A workflow node answers a graph, not a message.
+            message_seq: None,
         };
         self.run_once(company, agent_id, message, None, Some(ctx))
             .await
@@ -993,6 +1004,41 @@ impl AcpRunTurn {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// An ACP agent's frames say which query they belong to, exactly as the
+    /// built-in harness's do.
+    ///
+    /// `chat_ctx` used to take `chat_id` alone and hard-code `message_seq:
+    /// None`, so every ACP frame fell into the shared per-thread bucket — two
+    /// of its turns in one chat shared a single row-list, and arming the second
+    /// erased the first's timeline. That is the failure `messageSeq` exists to
+    /// stop, and it was left in place for one of the two harnesses (Codex on
+    /// #2069).
+    ///
+    /// It now takes the whole `ChatTarget`, which is what keeps the two from
+    /// drifting again: there is no `chat_id`-only shape left to answer with.
+    #[test]
+    fn an_acp_chat_turn_carries_the_query_it_answers() {
+        use crate::ports::types::EventSeq;
+
+        let company = CompanyId::new("acp-msg-seq");
+
+        let answering = AcpRunTurn::chat_ctx(
+            &company,
+            "product_manager",
+            ChatTarget::channel(Some("general")).answering(Some(EventSeq::new(45))),
+        );
+        assert_eq!(answering.message_seq, Some(45));
+
+        // And a turn answering no journaled message still says nothing, so the
+        // consumer falls back to the thread exactly as it did before.
+        let unaddressed = AcpRunTurn::chat_ctx(
+            &company,
+            "product_manager",
+            ChatTarget::channel(Some("general")),
+        );
+        assert_eq!(unaddressed.message_seq, None);
+    }
 
     fn turn(updates: Vec<AcpUpdate>) -> AcpTurn {
         AcpTurn {

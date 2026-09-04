@@ -7,7 +7,7 @@ record of that decision. It is Rule 8 of
 is at its 500-line ceiling and this is the largest IA change it has seen.
 
 Read Rule 6 there first. It governs what a view without a nav row must be, and
-nine views need that call making here.
+eight views need that call making here.
 
 ## Why four
 
@@ -136,7 +136,7 @@ control makes the one thing you came for the one thing you cannot see. Scrolling
 costs a gesture only at the sizes where truncating would cost a click *and* a
 gesture.
 
-## The nine Rule 6 calls
+## The eight Rule 6 calls
 
 Every view that lost, or never had, a nav row, and which of Rule 6's four
 treatments it takes.
@@ -148,14 +148,13 @@ treatments it takes.
 | `observatory` | **Discoverable elsewhere** | A row on the Settings rail. `#/settings/observatory` is *rewritten* onto `#/observatory` rather than rendered under Settings — the Observatory owns four query keys of its own and reads them off the hash's head (`views/observatory/hash.ts`), so under `#/settings/…` its analytics tab and agent/turn selection stop being addressable. The rail row is the doorway; the surface keeps its own address. |
 | `tasks` | **Deep-link destination** | `#/tasks/<id>` is a card on Work's board, linked from chat, approvals, workflow rows and every card. Bare `#/tasks` is rewritten onto the board (Rule 2). |
 | `team` | **Deep-link destination** | `#/team/<id>` is a seat on the org chart. Bare `#/team` is rewritten onto Agents (issue #1141). |
-| `conversation` | **Deep-link destination** | The desk transcript Room replaces; it keeps answering until Room covers the last of what it does better. |
 | `pages` | **Deep-link destination** | Agent-authored dashboards are direct-URL-only on purpose (issues #1171, #1172). What keeps `#/pages` answering is its `ROUTABLE` entry, never a commented nav row — that confusion is issue #1311. |
 | `inbox` | **Parked but reachable** | Unchanged by this restructure. Issue #302 parked it; issue #1337 is the open question of what a parked surface should say. |
 | `feedback` | **Discoverable elsewhere** | The sidebar footer links to it, as it always has. |
 
-`isNavigationActive` in `lib/console-routes.ts` is where three of those deep-link
+`isNavigationActive` in `lib/console-routes.ts` is where two of those deep-link
 views are claimed by the section they belong to. Without it the sidebar empties
-the moment an operator opens a card, a teammate or a transcript: the section
+the moment an operator opens a card or a teammate: the section
 goes dark and its contents block disappears with it.
 
 ## Labels and view ids are allowed to differ
@@ -200,7 +199,7 @@ that one.
 
 - Rule 2's reasoning about a row per declared list is the argument this file
   generalises. Nothing in it is superseded.
-- Rule 6 is unchanged and is now exercised by nine views rather than five.
+- Rule 6 is unchanged and is now exercised by eight views rather than five.
 - Rule 7's Connections section survives; only its rail moved into the sidebar.
 - `finance-console.md` still describes Finance's sub-pages correctly. Its
   content rail is the last one left and is the obvious next thing to convert.

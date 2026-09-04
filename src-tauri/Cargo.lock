@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "opencompany"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3620,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "opencompany-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman"
-version = "0.63.19"
+version = "0.63.21"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -6435,7 +6435,7 @@ dependencies = [
 
 [[package]]
 name = "tinymemory"
-version = "1.13.7"
+version = "1.13.8"
 dependencies = [
  "anyhow",
  "async-trait",

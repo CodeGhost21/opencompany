@@ -379,6 +379,19 @@ export type CompanyStreamEvent =
       toolCallId?: string;
       label?: string;
       status?: string;
+      /**
+       * The journal sequence of the operator message this turn answers (`h`-less
+       * — {@link hostMessageId} prefixes it to reach a console id).
+       *
+       * `chatId` says which conversation; this says which *query*. Two questions
+       * asked in one channel share the thread and, whenever the same desk
+       * answers both, the agent too — so before this there was nothing to group
+       * a row by but the thread, and both turns' rows merged into one timeline.
+       *
+       * Absent on a turn answering no journaled message (a relay, a dispatched
+       * card, a workflow node), where a consumer falls back to keying by thread.
+       */
+      messageSeq?: number;
     }
   | {
       type: "tool_result";
@@ -403,11 +416,20 @@ export type CompanyStreamEvent =
       result?: string;
       status?: string;
       elapsedMs?: number;
+      /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
+      messageSeq?: number;
     }
   // A coalesced "Thinking" run between tool calls — streamed so the live
   // timeline shows the same rows the final folded one does (else the count
   // jumps up when the reply lands).
-  | { type: "thinking"; seq: number; agentId?: string; chatId?: string }
+  | {
+      type: "thinking";
+      seq: number;
+      agentId?: string;
+      chatId?: string;
+      /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
+      messageSeq?: number;
+    }
   // Somebody arrived, went idle, or left. Published on a CHANGE only — a
   // console heartbeats every minute whether or not anything moved, and
   // republishing that would be one frame per person per minute for no visible

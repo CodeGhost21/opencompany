@@ -12,7 +12,7 @@
 // Pure logic only (no JSX): callers render the returned `NodeResult` / message
 // list however they like (markdown, raw JSON behind a toggle).
 
-import type { WorkflowGraph } from "@/api/workflows";
+import type { WorkflowGraph, WorkflowRunVerdict } from "@/api/workflows";
 
 /** A single agent reply extracted from a node's `items[].json`. */
 export interface NodeMessage {
@@ -150,6 +150,97 @@ export function parseRunNodes(
   return orderedIds.map((id) =>
     parseSingleNode(id, nameById.get(id) ?? id, nodes[id]),
   );
+}
+
+/**
+ * Why the drawer has no per-node result cards to show, and whether the raw
+ * engine payload is worth putting in front of the operator (B-005, B-039).
+ *
+ * `null` when there ARE cards — the caller renders them and this says nothing.
+ */
+export interface NoNodeResultsNotice {
+  /** One sentence, true of how this run actually ended. */
+  message: string;
+  /**
+   * Whether to open the raw-engine-output disclosure unprompted.
+   *
+   * Only for a genuine shape fault. `{"nodes": {}}` and a `null` output are the
+   * *correct* payloads of a run that produced nothing, and showing an operator
+   * raw JSON as evidence of a problem they do not have is how B-005 came to
+   * report one panel saying two contradictory things about the same run.
+   */
+  showRaw: boolean;
+}
+
+/**
+ * What to say when a run produced no per-node cards.
+ *
+ * The drawer used to have one answer for this — "The run finished, but its
+ * output didn't match the expected node shape" — and it was wrong twice over
+ * for the two commonest ways to get here.
+ *
+ * *"The run finished"* is false for a run that parked on an approval (B-005)
+ * and for one an operator stopped (B-039); both are reported elsewhere in the
+ * same panel as exactly that, which is how one drawer came to describe one run
+ * two contradictory ways, one paragraph apart.
+ *
+ * *"didn't match the expected node shape"* is false for `{"nodes": {}}`, which
+ * is the shape a run that never reached a node correctly has, and for the
+ * `null` a stopped run carries. A shape fault is an output that is *present and
+ * wrong* — nothing else.
+ *
+ * So the reading comes from the host's own `verdict` (issue #981: the host owns
+ * what a run adds up to, and every other reader mirrors it rather than
+ * re-deriving it), and the shape fault is narrowed to the case that is actually
+ * one.
+ */
+export function noNodeResultsNotice(
+  nodeResults: NodeResult[] | null,
+  output: unknown,
+  verdict: WorkflowRunVerdict | undefined,
+): NoNodeResultsNotice | null {
+  if (nodeResults && nodeResults.length > 0) return null;
+  // A shape fault is an output that is present and wrong. An absent one — the
+  // `null` a stopped run settles with — is a run that produced nothing, which
+  // is a fact about the run and not about its encoding.
+  const malformed = nodeResults === null && output !== null && output !== undefined;
+  if (malformed) {
+    return {
+      message:
+        "This run's output didn't match the shape the console can read — the raw engine output is below.",
+      showRaw: true,
+    };
+  }
+  return { message: producedNothingMessage(verdict), showRaw: false };
+}
+
+/**
+ * The one sentence for a run that reached no node output, read off the host's
+ * verdict.
+ *
+ * Every arm is phrased "no step produced output", because that is the only
+ * claim this branch can make: had any step produced any, there would be a card
+ * and the caller would never have asked. An unknown or absent verdict says just
+ * that much and nothing about how the run ended — a host predating issue #981
+ * sends no verdict, and inventing one for it is what this whole path is being
+ * fixed for.
+ */
+function producedNothingMessage(verdict: WorkflowRunVerdict | undefined): string {
+  switch (verdict) {
+    case "running":
+      return "No step has produced output yet — this run is still going.";
+    case "stopped":
+      return "You stopped this run before any step produced output.";
+    case "failed":
+      return "This run failed before any step produced output.";
+    case "blocked":
+    case "awaiting-approval":
+      return "No step produced output before this run stopped for an approval.";
+    case "stranded":
+      return "No step produced output, and this run cannot be continued.";
+    default:
+      return "This run produced no step output.";
+  }
 }
 
 /**

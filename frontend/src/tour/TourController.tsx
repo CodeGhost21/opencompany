@@ -275,6 +275,18 @@ export function TourController({
               overlayColor: "rgba(0,0,0,0.45)",
               spotlightPadding: 6,
               arrowSize: 0,
+              // The overlay is a backdrop, not a control. Its default action is
+              // `close`, which under `continuous` advances the run — so a click
+              // anywhere on the dimmed page moved the tour on, and `before`
+              // then drove the console to the next stop's view. An operator
+              // clicking a card got the chat Room and no card.
+              //
+              // The element the tour points at stays interactive
+              // (`blockTargetInteraction` keeps its default): a step's target
+              // always belongs to the view that step is already on, so acting
+              // on it cannot navigate anywhere the tour did not intend, and the
+              // final stop invites typing into the composer it spotlights.
+              overlayClickAction: false,
               before,
             }}
           />

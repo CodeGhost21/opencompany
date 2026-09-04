@@ -72,22 +72,14 @@ export interface ChatReceipt {
  * re-armed the slot in between, the generations differ and the clear is a
  * no-op, leaving the newer receipt alone.
  *
- * `gen === undefined` now REFUSES to clear (issue #1935 review, codex
+ * `gen === undefined` REFUSES to clear (issue #1935 review, codex
  * 3892702774 — reversing the original "clears unconditionally" reading of
- * this branch). That original reading treated an omitted generation as
- * `Conversation`'s calling convention, on the assumption the parked
- * conversation view "has no scope to switch out from under" — which was
- * wrong: `#/conversation` is a live, still-routable surface (`ROUTABLE.
- * conversation` in `console-routes.ts`), it stays mounted across a company
- * switch exactly like `ChatView`, and its own `useConversationRuntime` send
- * never generation-tagged its calls — so a slow Conversation POST from
- * company A could delete a newer `ChatView` (or Conversation) receipt on
- * company B through the identical reused-thread-id race, just missing the
- * `shouldClearReceipt` guard that was supposed to close it everywhere.
+ * this branch). A send surface that omits the generation is one whose slow
+ * POST from company A can delete a newer receipt on company B through the
+ * reused-thread-id race, which is exactly what this guard exists to close.
  *
- * `Conversation`'s `useConversationRuntime` is now generation-tagged too (see
- * `runtime.ts`), so every current caller always supplies a defined `gen` and
- * this branch is not load-bearing for them. It stays fail-closed rather than
+ * Every current caller supplies a defined `gen`, so this branch is not
+ * load-bearing for them. It stays fail-closed rather than
  * being deleted so a FUTURE send surface that forgets to capture and forward
  * `onSendStart`'s return value cannot reintroduce this exact leak by omission
  * — the failure mode of forgetting becomes a receipt that lingers until the

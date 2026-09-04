@@ -4,7 +4,7 @@
 # Tauri package under src-tauri is therefore its own workspace.
 [package]
 name = "opencompany"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/opencompany"

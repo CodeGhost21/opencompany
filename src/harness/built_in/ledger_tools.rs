@@ -470,7 +470,9 @@ impl Tool for RecordEntry {
          ledger holds. USE FOR putting something durable where the company will find it again, \
          instead of leaving it in a reply or a note. Reusing an existing `id` MERGES into that row \
          rather than opening a second one, so amending a row and moving it back to the top of the \
-         list are both this call. Fill the fields `list_ledgers` names for that ledger."
+         list are both this call. Fill the fields `list_ledgers` names for that ledger: a new row \
+         must carry every one it marks required, and is REFUSED without them; an amendment need \
+         only carry what changes, because the row keeps the rest."
     }
 
     fn parameters_schema(&self) -> Value {

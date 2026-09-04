@@ -9,10 +9,10 @@ import { describe, expect, it } from "vitest";
  * a detached turn past its 202 into the queued/working window, on every send
  * surface, instead of being dropped for a bare open-turn row.
  *
- * The behaviour lives in three large hosts that the repo already declines to
+ * The behaviour lives in two large hosts that the repo already declines to
  * mount for this kind of wiring assertion (`chat-receipt-scope-reset.test.ts`
  * settles `AppShell` the same way): `AppShell`'s send-outcome callbacks and poll
- * settle, `MessageTimeline`'s render gate, and `Transcript`'s working row. The
+ * settle, and `MessageTimeline`'s render gate. The
  * *semantics* of what the receipt shows in each state are proven directly by
  * `chat-live-receipt.test.ts` (`ChatLiveReceipt` + `receiptStateLine`); what
  * this file locks down is that each host is actually wired into them.
@@ -23,8 +23,6 @@ const read = (rel: string) => readFileSync(resolve(here, "../../", rel), "utf8")
 
 const appShell = read("src/components/app-shell.tsx");
 const messageTimeline = read("src/views/chat/MessageTimeline.tsx");
-const transcript = read("src/views/conversation/Transcript.tsx");
-const conversation = read("src/views/Conversation.tsx");
 
 /** Slice a `const <name> = useCallback(` body up to its dependency array. */
 function callbackBody(source: string, name: string, depsMarker: string): string {
@@ -103,28 +101,5 @@ describe("MessageTimeline renders the receipt in the queued state too", () => {
     const at = messageTimeline.indexOf("<ChatLiveReceipt");
     expect(at, "MessageTimeline must render ChatLiveReceipt").toBeGreaterThan(-1);
     expect(messageTimeline.slice(at, at + 300)).toContain("queued={queued}");
-  });
-});
-
-describe("the Conversation surface renders the receipt too (both send surfaces)", () => {
-  it("AppShell feeds Conversation the receipt map and the name map", () => {
-    const at = appShell.indexOf("<Conversation");
-    expect(at, "AppShell must render Conversation").toBeGreaterThan(-1);
-    const block = appShell.slice(at, at + 600);
-    expect(block).toContain("receiptByThread={receiptByThread}");
-    expect(block).toContain("agentNames={agentNames}");
-  });
-
-  it("Conversation threads the resolved receipt down to the transcript", () => {
-    expect(conversation).toContain("receipt={receiptByThread?.[active.id]}");
-    expect(conversation).toMatch(/receipt=\{receipt\}/);
-  });
-
-  it("Transcript shows ChatLiveReceipt in place of the bare typing row when one is armed", () => {
-    expect(transcript).toContain("<ChatLiveReceipt");
-    expect(transcript).toMatch(/working &&\s*\n?\s*\(receipt \?/);
-    // And keeps the queued wording honest here as well.
-    const at = transcript.indexOf("<ChatLiveReceipt");
-    expect(transcript.slice(at, at + 300)).toContain("queued={openTurn?.queued}");
   });
 });
