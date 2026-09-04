@@ -32,12 +32,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
- * The two routes to Composio, as an operator chooses between them.
+ * The routes to Composio.
  *
  * One table so the tile's label, its explanation and its billing line cannot
- * drift apart, and so the order below is the order they render.
+ * drift apart, and so the order below is the order they render. Every route stays
+ * here even when it is not offered: this is what labels the route a company is
+ * already on.
  */
 const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string }> = {
   managed: {
@@ -55,7 +58,12 @@ const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string
 };
 
 /** The routes in render order — also the order the arrow keys walk. */
-const MODE_ORDER: ComposioMode[] = ["managed", "byok"];
+const ALL_MODE_ORDER: ComposioMode[] = ["managed", "byok"];
+
+/** The routes on offer. Managed stays in {@link MODES} to label a company on it. */
+const MODE_ORDER: ComposioMode[] = ALL_MODE_ORDER.filter(
+  (mode) => mode !== "managed" || !COMPOSIO_MANAGED_HIDDEN,
+);
 
 /**
  * The route to render for whatever the host said.
@@ -502,10 +510,19 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     operator is trying to evaluate. Same radiogroup shape
                     `policy-settings` uses for approval tiers, roving tabindex
                     included. */}
+                {/* A route this console no longer offers is still a route a
+                    company can be on, and no tile below will be marked Current
+                    for it. Say which, rather than reading as unconfigured. */}
+                {!MODE_ORDER.includes(persistedMode) && (
+                  <p className="text-sm text-muted-foreground" data-testid="composio-current-mode">
+                    This company reaches Composio through OpenHuman. Add an API key below to use
+                    its own Composio account instead.
+                  </p>
+                )}
                 <div
                   role="radiogroup"
                   aria-label="Which Composio account this company uses"
-                  className="grid gap-2 sm:grid-cols-2"
+                  className={cn("grid gap-2", MODE_ORDER.length > 1 && "sm:grid-cols-2")}
                   onKeyDown={handleModeKeyDown}
                 >
                   {MODE_ORDER.map((m, index) => {
@@ -634,14 +651,33 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                 {!confirmSwitch && (mode === "byok" || onByok) && (
                   <div className="flex flex-wrap items-center gap-2">
                     {mode === "byok" ? (
-                      <Button disabled={busy !== null || !apiKey.trim()} onClick={requestApiKeySave}>
-                        {busy === "route" ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <Save className="size-4" />
+                      <>
+                        <Button
+                          disabled={busy !== null || !apiKey.trim()}
+                          onClick={requestApiKeySave}
+                        >
+                          {busy === "route" ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Save className="size-4" />
+                          )}
+                          {onByok ? "Rotate key" : "Save key"}
+                        </Button>
+                        {/* Clearing used to be reached by picking the other tile.
+                            With no other tile there is nothing to pick, and a
+                            company could rotate its key but never remove it. */}
+                        {onByok && COMPOSIO_MANAGED_HIDDEN && (
+                          <Button
+                            variant="outline"
+                            disabled={busy !== null}
+                            data-testid="composio-clear-key"
+                            onClick={() => void clearApiKey()}
+                          >
+                            <Trash2 className="size-4" />
+                            Clear key
+                          </Button>
                         )}
-                        {onByok ? "Rotate key" : "Save key"}
-                      </Button>
+                      </>
                     ) : (
                       onByok && (
                         <Button disabled={busy !== null} onClick={() => void clearApiKey()}>
@@ -650,7 +686,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                           ) : (
                             <Trash2 className="size-4" />
                           )}
-                          Clear key & use OpenHuman-managed
+                          {COMPOSIO_MANAGED_HIDDEN
+                            ? "Clear key"
+                            : "Clear key & use OpenHuman-managed"}
                         </Button>
                       )
                     )}
