@@ -309,6 +309,34 @@ enum Speaker {
     Other(String),
 }
 
+/// The wire role a turn by somebody other than the seeded agent carries.
+///
+/// **Deliberately not `"user"`, even though the model must read it as one.**
+/// [`seed_resume_from_messages`](openhuman_core::openhuman::agent::Agent::seed_resume_from_messages)
+/// maps `"agent"`/`"assistant"` to the assistant role and *everything else* to
+/// the user role, so a peer turn lands in front of the model exactly as a
+/// labelled user message either way. What the spelling changes is what happens
+/// on the way there: that same function drops a trailing entry whose role is
+/// literally `"user"` and whose text equals the current request, to stop the
+/// operator's own message being seeded twice.
+///
+/// A peer turn is a standing candidate for that drop. It is routinely the
+/// **trailing** entry — the desk's newest line before this turn's message is
+/// the teammate who just answered, which is the very case this projection
+/// exists to carry — so all it takes is an operator who types `"ada: hello"`
+/// after Ada said `"hello"`, and the teammate's reply is silently deleted from
+/// the seed as though it were a duplicate request (coderabbit on #2075). The
+/// same collision reaches [`strip_current_message`] on this side, which tests a
+/// *prefix* and is therefore looser still.
+///
+/// Naming the role something no tail-strip matches removes the whole class by
+/// construction, with no vendor change and no boundary metadata threaded
+/// through the seed API. The cost is a dependency on that fallback arm mapping
+/// unknown roles to `user` rather than dropping them, which
+/// [`tests::a_peer_role_is_invisible_to_every_tail_strip`] pins so a vendor
+/// bump that changed it fails here instead of quietly losing teammates.
+pub const PEER_ROLE: &str = "peer";
+
 impl SeedEntry {
     /// Flattens one accumulated turn into the `(role, content)` pair
     /// [`seed_resume_from_messages`](openhuman_core::openhuman::agent::Agent::seed_resume_from_messages)
@@ -328,7 +356,7 @@ impl SeedEntry {
     fn flatten(self) -> (String, String) {
         match self.speaker {
             Speaker::Operator | Speaker::Viewer => (self.role.to_string(), self.text),
-            Speaker::Other(label) => ("user".to_string(), format!("{label}: {}", self.text)),
+            Speaker::Other(label) => (PEER_ROLE.to_string(), format!("{label}: {}", self.text)),
         }
     }
 }
@@ -1762,7 +1790,7 @@ mod tests {
                 ("user".to_string(), "what did we learn?".to_string()),
                 ("agent".to_string(), "CAC is down 12%".to_string()),
                 (
-                    "user".to_string(),
+                    PEER_ROLE.to_string(),
                     "ada: and retention held flat".to_string()
                 ),
             ],
@@ -1785,7 +1813,7 @@ mod tests {
             ada,
             vec![
                 ("user".to_string(), "what did we learn?".to_string()),
-                ("user".to_string(), "ceo: CAC is down 12%".to_string()),
+                (PEER_ROLE.to_string(), "ceo: CAC is down 12%".to_string()),
                 ("agent".to_string(), "and retention held flat".to_string()),
             ],
             "Ada owns her own line and reads the CEO's as a colleague's: {ada:?}"
@@ -1818,9 +1846,9 @@ mod tests {
         assert_eq!(
             seed,
             vec![
-                ("user".to_string(), "system: Acknowledged.".to_string()),
+                (PEER_ROLE.to_string(), "system: Acknowledged.".to_string()),
                 (
-                    "user".to_string(),
+                    PEER_ROLE.to_string(),
                     "workflow-report: run 7 finished".to_string()
                 ),
                 ("agent".to_string(), "on it".to_string()),
@@ -1847,7 +1875,7 @@ mod tests {
                 ("user".to_string(), "who owns the launch?".to_string()),
                 ("agent".to_string(), "I can take the email".to_string()),
                 (
-                    "user".to_string(),
+                    PEER_ROLE.to_string(),
                     "ada: I will take the landing page".to_string()
                 ),
                 ("user".to_string(), "good — go".to_string()),
@@ -1870,9 +1898,132 @@ mod tests {
             seed,
             vec![
                 ("user".to_string(), "what is CAC?".to_string()),
-                ("user".to_string(), "ada: $412, up 18%".to_string()),
+                (PEER_ROLE.to_string(), "ada: $412, up 18%".to_string()),
             ],
             "the question was answered, by somebody: {seed:?}"
+        );
+    }
+
+    // ── Peer/boundary collision (#2075 review) ───────────────────────────
+
+    /// The contract [`PEER_ROLE`] rests on, pinned here so a vendor pin bump
+    /// that changes it fails on this assertion rather than by silently deleting
+    /// teammates from seeds.
+    ///
+    /// `seed_resume_from_messages` strips a trailing entry whose role is
+    /// literally `"user"`, and renders `"agent"`/`"assistant"` as the assistant
+    /// role. A peer turn must be neither: not `"user"`, or the strip can eat it;
+    /// not `"agent"`, or the model reads a colleague as itself again — which is
+    /// the whole of issue #1956.
+    #[test]
+    fn a_peer_role_is_invisible_to_every_tail_strip() {
+        assert_ne!(
+            PEER_ROLE, "user",
+            "a `user` peer turn is a candidate for the trailing-duplicate strip"
+        );
+        assert_ne!(PEER_ROLE, "agent", "that is the first-person collapse");
+        assert_ne!(PEER_ROLE, "assistant", "likewise");
+    }
+
+    /// [`strip_current_message`] must not mistake a teammate's turn for the
+    /// operator's own request.
+    ///
+    /// The prefix test is the looser of the two strips, so this is the easier
+    /// collision to hit: Ada says `"hello"`, the operator types `"ada: hello
+    /// there"`, and the flattened `"ada: hello"` is a prefix of it.
+    #[test]
+    fn strip_current_message_leaves_a_trailing_peer_turn_alone() {
+        let mut seed = vec![
+            ("user".to_string(), "morning".to_string()),
+            (PEER_ROLE.to_string(), "ada: hello".to_string()),
+        ];
+        strip_current_message(&mut seed, "ada: hello there");
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "morning".to_string()),
+                (PEER_ROLE.to_string(), "ada: hello".to_string()),
+            ],
+            "Ada's reply is not the operator asking again: {seed:?}"
+        );
+    }
+
+    /// The **text** boundary. The operator's message is word-for-word what
+    /// Ada's reply flattens to, so every comparison in the pipeline collides at
+    /// once — and Ada's line must still reach the model.
+    #[tokio::test]
+    async fn a_peer_turn_survives_a_colliding_text_boundary() {
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "morning"),
+            reply_by(2, "growth", "ada", "hello"),
+            operator(3, Some("growth"), "ada: hello"),
+        ]);
+        let events: Arc<dyn EventLog> = Arc::new(log);
+        let mut seed = build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            "growth",
+            "growth",
+            VIEWER,
+            None,
+            CHAT_SEED_WINDOW,
+            SelfBoundary::Text("ada: hello"),
+        )
+        .await;
+        strip_current_message(&mut seed, "ada: hello");
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "morning".to_string()),
+                (PEER_ROLE.to_string(), "ada: hello".to_string()),
+            ],
+            "the operator's own duplicate goes, Ada's reply stays: {seed:?}"
+        );
+        // The OC-side strip inspects only the trailing entry, so on this path
+        // it removes the operator's real duplicate and Ada's line survives
+        // either way. What it survives *as* is the load-bearing part: the
+        // vendor's own strip runs next, on this same tail.
+        assert_ne!(
+            seed.last().map(|(role, _)| role.as_str()),
+            Some("user"),
+            "Ada's turn now trails, and a trailing `user` is what gets eaten next"
+        );
+    }
+
+    /// The **seq** boundary, same collision. The trailing entry the vendor's
+    /// strip would inspect is Ada's turn, and its role is what saves it.
+    #[tokio::test]
+    async fn a_peer_turn_survives_a_colliding_seq_boundary() {
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "morning"),
+            reply_by(2, "growth", "ada", "hello"),
+            operator(3, Some("growth"), "ada: hello"),
+        ]);
+        let events: Arc<dyn EventLog> = Arc::new(log);
+        let seed = build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            "growth",
+            "growth",
+            VIEWER,
+            None,
+            CHAT_SEED_WINDOW,
+            SelfBoundary::Seq(EventSeq::new(3)),
+        )
+        .await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "morning".to_string()),
+                (PEER_ROLE.to_string(), "ada: hello".to_string()),
+            ],
+            "a seq boundary already excluded the current message; Ada's reply \
+             is what trails, and it must not read as a duplicate: {seed:?}"
+        );
+        assert_ne!(
+            seed.last().map(|(role, _)| role.as_str()),
+            Some("user"),
+            "a trailing `user` here is exactly what the vendor tail-strip eats"
         );
     }
 
