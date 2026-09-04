@@ -234,34 +234,35 @@ async function mountComposio(status: ComposioStatus) {
 }
 
 describe("Composio offers this company's own account and nothing else", () => {
-  it("does not offer the OpenHuman-managed route as a choice", async () => {
-    await mountComposio(composioStatus({ mode: "byok" }));
+  it("offers this company's own Composio key, and no route to pick between", async () => {
+    // With one route left there is nothing to choose, so the picker goes and the
+    // credential field for that route is what the operator lands on. A picker of
+    // one is not a choice; it is a click between the operator and the task.
+    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
+    expect(document.querySelector("#composio-api-key")).not.toBeNull();
+    expect(document.querySelectorAll('[role="radiogroup"]')).toHaveLength(0);
     expect(find("composio-mode-managed")).toBeNull();
-    expect(find("composio-mode-byok")).not.toBeNull();
   });
 
-  it("keeps a radio checked for a company on a route it does not offer", async () => {
-    // The a11y break this guards: with managed filtered out of the order array
-    // and a company still on it, `active` was false for every tile — the whole
-    // group reported `aria-checked="false"`, which states "nothing is chosen"
-    // rather than "this is not a route offered here".
+  it("cannot leave a radiogroup with nothing checked, because there is none", async () => {
+    // The a11y break this replaces: managed filtered out of the order array with
+    // a company still on it left `active` false for every tile, so the whole
+    // group reported aria-checked="false". Removing the group removes the state.
     await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
+    const radios = document.querySelectorAll('[role="radio"]');
     const checked = document.querySelectorAll('[role="radio"][aria-checked="true"]');
-    expect(checked).toHaveLength(1);
-    expect(checked[0].getAttribute("data-testid")).toBe("composio-mode-unconfigured");
+    expect(radios.length === 0 || checked.length === 1).toBe(true);
   });
 
-  it("names nothing about the hidden route on the tile that stands in for it", async () => {
+  it("names nothing about the hidden route anywhere on the panel", async () => {
     await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
-    const tile = find("composio-mode-unconfigured")!;
-    expect(tile.textContent).toContain("Not configured");
-    expect(tile.textContent).not.toContain("OpenHuman");
-    expect(container.textContent).not.toContain("OpenHuman-managed");
+    expect(container.textContent).not.toContain("OpenHuman");
+    expect(container.textContent).not.toContain("TinyHumans");
+    expect(container.textContent).not.toContain("api.tinyhumans.ai");
   });
-
   it("still lets a BYOK company clear its key, and does not name the hidden route", async () => {
     // Clearing was reached by picking the managed tile. With no tile to pick, a
     // company could rotate its key but never remove it — so the control has to
@@ -344,8 +345,8 @@ describe("inference asks the operator to name a provider", () => {
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
     const trigger = document.querySelector("#inference-provider") as HTMLElement;
-    expect(trigger.textContent).toContain("Not configured");
-    expect(trigger.textContent).not.toContain("Managed (TinyHumans)");
+    const shown = trigger.textContent ?? "";
+    expect(shown).not.toContain("Managed (TinyHumans)");
 
     await act(async () => {
       trigger.click();
@@ -354,15 +355,14 @@ describe("inference asks the operator to name a provider", () => {
       trigger.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     });
 
-    const options = Array.from(document.querySelectorAll("[role='option']")).map((o) =>
-      o.textContent?.trim(),
+    const options = Array.from(document.querySelectorAll("[role='option']")).map(
+      (o) => o.textContent?.trim() ?? "",
     );
     expect(options.length, "the list did not open").toBeGreaterThan(0);
-    // Whatever the trigger says must be one of the rows below it.
-    expect(options).toContain("Not configured");
     expect(options).not.toContain("Managed (TinyHumans)");
+    // Whatever the trigger shows has to be one of the rows below it.
+    expect(options.some((label) => shown.includes(label))).toBe(true);
   });
-
   it("brands nothing on the card for a route it does not offer", async () => {
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
@@ -373,19 +373,20 @@ describe("inference asks the operator to name a provider", () => {
     expect(container.textContent).not.toContain("api.tinyhumans.ai");
   });
 
-  it("does not paint an unconfigured company as one of the offered providers", async () => {
-    // The other way to make the value a member is to quietly move it onto the
-    // first real option. That reads as a configured company and is a lie of the
-    // same size as the one being removed.
+  it("leads an unconfigured company into a provider it can actually finish", async () => {
+    // Not an inert placeholder: the resting state has to be completable, or
+    // onboarding dead-ends on a row nobody can act on. The header still reports
+    // the company's real state, so proposing a provider in the form is an offer
+    // rather than a claim about what is configured.
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
-    const trigger = document.querySelector("#inference-provider") as HTMLElement;
-    expect(trigger.textContent).not.toContain("OpenRouter");
-    expect((find("inference-save") as HTMLButtonElement).disabled).toBe(true);
+    expect(find("inference-current-provider")!.textContent).toBe("Not configured");
+    expect(document.querySelector("#inference-provider")?.textContent).toContain("OpenRouter");
+    expect(document.querySelector("#inference-key")).not.toBeNull();
+    expect((find("inference-save") as HTMLButtonElement).disabled).toBe(false);
   });
-
-
 });
+
 describe("the wizard's model step asks the operator to name a provider too", () => {
   it("does not offer the managed endpoint as the thing to think with", () => {
     // The wizard has its own provider list, and it is the FIRST screen of a

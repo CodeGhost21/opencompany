@@ -448,9 +448,14 @@ export function InferenceSection({
    * reasoning as `removeKey` below.
    */
   const seedFromStatus = useCallback((next: InferenceStatus) => {
-    const seeded = (
+    const stored = (
       next.provider in PROVIDERS ? next.provider : "openrouter"
     ) as InferenceProvider;
+    // The form is a "switch to" form, so it opens on something the operator can
+    // actually complete. A company on a route this console does not offer has no
+    // provider to reflect here, and resting on an inert row leaves onboarding
+    // with no way forward — the card's header above still reports the real state.
+    const seeded = isOffered(stored) ? stored : PROVIDER_OPTIONS[0];
     const nextBaseUrl = PROVIDERS[seeded].requiresBaseUrl
       ? next.baseUrl
       : presetFor(seeded).baseUrl;
@@ -1067,20 +1072,6 @@ export function InferenceSection({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {/* A value the list does not offer still gets a row, the
-                            way the tier picker below keeps a retired model id
-                            selectable (`optionsForTier`). Without it the control
-                            shows a value no item matches: nothing is checked and
-                            the popup reads as though nothing is chosen.
-
-                            Disabled, because it is not a route to return to —
-                            it is the state the company is in until a provider is
-                            picked. */}
-                        {!isOffered(provider) && (
-                          <SelectItem value={provider} disabled>
-                            {NOT_CONFIGURED}
-                          </SelectItem>
-                        )}
                         {PROVIDER_OPTIONS.map((p) => (
                           <SelectItem key={p} value={p}>
                             {PROVIDERS[p].label}
@@ -1088,7 +1079,7 @@ export function InferenceSection({
                         ))}
                       </SelectContent>
                     </Select>
-                    {isOffered(provider) ? (
+                    {isOffered(status?.provider ?? "") ? (
                       <p className="text-xs text-muted-foreground">
                         Choosing a provider applies its Base URL and model defaults. If you have
                         typed either, we ask before replacing them; your API key stays in this form.
@@ -1098,8 +1089,8 @@ export function InferenceSection({
                         className="text-xs text-muted-foreground"
                         data-testid="inference-not-configured"
                       >
-                        No provider is configured for this company. Pick one to give its teammates a
-                        brain of their own.
+                        No provider is configured for this company yet. Pick one above and paste its
+                        key below to give its teammates a brain of their own.
                       </p>
                     )}
                   </div>
@@ -1337,11 +1328,7 @@ export function InferenceSection({
                 <div className="flex items-center gap-2">
                   <Button
                     data-testid="inference-save"
-                    // Nothing to save while the form sits on a route this console
-                    // does not offer: sending it back would normalize to a real
-                    // provider on the host and move the company somewhere the
-                    // operator never chose.
-                    disabled={busy !== null || !isOffered(provider)}
+                    disabled={busy !== null}
                     onClick={() => void save()}
                   >
                     {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}

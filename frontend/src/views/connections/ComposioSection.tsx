@@ -71,6 +71,18 @@ function isOffered(mode: ComposioMode): boolean {
 }
 
 /**
+ * The route the form works in.
+ *
+ * With one route on offer there is nothing to choose, so the form opens on it
+ * rather than behind a picker: the operator lands on the credential field for
+ * the only account this company can use. `persistedMode` still reports what the
+ * host holds, which is what the switch confirmation keys on.
+ */
+function formModeFor(status: ComposioStatus | null): ComposioMode {
+  return MODE_ORDER.length === 1 ? MODE_ORDER[0] : modeOf(status);
+}
+
+/**
  * What a route this console does not offer is called on screen.
  *
  * Says nothing about the route it stands in for. `MODES` still holds that
@@ -222,7 +234,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       const s = await getComposioStatus(client, company);
       if (generation !== requestGeneration.current) return;
       setStatus(s);
-      setMode(modeOf(s));
+      setMode(formModeFor(s));
       setPersistedMode(modeOf(s));
       // Hide the whole section when the feature is not compiled into this build.
       setLoad(s.inBuild ? "ready" : "unavailable");
@@ -307,7 +319,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     try {
       const res = await setComposioApiKey(client, company, apiKey.trim());
       setStatus(res.status);
-      setMode(modeOf(res.status));
+      setMode(formModeFor(res.status));
       setPersistedMode(modeOf(res.status));
       setApiKey("");
       setConfirmSwitch(false);
@@ -326,7 +338,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     try {
       const res = await setComposioApiKey(client, company, "");
       setStatus(res.status);
-      setMode(modeOf(res.status));
+      setMode(formModeFor(res.status));
       setPersistedMode(modeOf(res.status));
       setApiKey("");
       setConfirmSwitch(false);
@@ -525,6 +537,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     operator is trying to evaluate. Same radiogroup shape
                     `policy-settings` uses for approval tiers, roving tabindex
                     included. */}
+                {MODE_ORDER.length > 1 && (
                 <div
                   role="radiogroup"
                   aria-label="Which Composio account this company uses"
@@ -597,12 +610,13 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     );
                   })}
                 </div>
+                )}
 
                 {/* The endpoint, so the routing claim above is checkable rather
                     than merely asserted — but only when the managed token card
                     below is not already printing it. Two copies of one URL on
                     one screen reads as two different facts. */}
-                {status && !showTokenCard && (
+                {status && !showTokenCard && isOffered(persistedMode) && (
                   <p className="truncate font-mono text-xs text-muted-foreground">
                     {status.backendUrl}
                   </p>
@@ -775,7 +789,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     value={token}
                     onChange={(e) => setToken(e.target.value)}
                   />
-                  {status && (
+                  {status && isOffered(persistedMode) && (
                     <p className="truncate text-xs text-muted-foreground">{status.backendUrl}</p>
                   )}
                 </div>
