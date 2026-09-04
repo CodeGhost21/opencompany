@@ -902,6 +902,241 @@ pub async fn oc_device_identity() -> Result<crate::identity::DeviceIdentity, Str
     Ok(crate::identity::device_identity())
 }
 
+/// What one probe of the update endpoint told us.
+///
+/// `available: false` is the answer to every uninteresting outcome — up to
+/// date, offline, endpoint down, this build carrying no signing key — because
+/// the console does nothing different for any of them. See
+/// [`oc_app_update_check`] for why a failure is not an error here.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfo {
+    /// The version running right now, from `tauri.conf.json`.
+    pub current_version: String,
+    pub available: bool,
+    /// What the endpoint is offering, when it is offering something.
+    pub available_version: Option<String>,
+    /// The manifest's release notes, if it carried any.
+    pub notes: Option<String>,
+}
+
+impl AppUpdateInfo {
+    fn nothing(current_version: String) -> Self {
+        Self {
+            current_version,
+            available: false,
+            available_version: None,
+            notes: None,
+        }
+    }
+}
+
+/// What a background download left behind.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateStaged {
+    /// True when bytes are staged and `oc_app_update_install` can finish.
+    pub ready: bool,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+}
+
+impl AppUpdateStaged {
+    fn nothing() -> Self {
+        Self {
+            ready: false,
+            version: None,
+            notes: None,
+        }
+    }
+}
+
+/// This build's configured minisign public key, or the empty string.
+///
+/// Read back out of the plugin config rather than kept as a second constant:
+/// the config file is the only place the key is written, and a copy here would
+/// be a copy that can disagree with the one the plugin actually verifies with.
+fn updater_pubkey(app: &tauri::AppHandle) -> String {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|updater| updater.get("pubkey"))
+        .and_then(|pubkey| pubkey.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Asks the update endpoint whether there is a newer shell than this one.
+///
+/// Downloads nothing and installs nothing. The console runs this on a timer, so
+/// **every failure answers "no update"** rather than erroring: a laptop on a
+/// train, a GitHub outage and a release that has not happened yet are all the
+/// same fact to the person using the application, and none of them is worth a
+/// banner. A build carrying the placeholder signing key answers the same way —
+/// see [`crate::update::is_configured`], which is what stops a misconfigured
+/// release offering an update that could never verify.
+#[tauri::command]
+pub async fn oc_app_update_check(app: tauri::AppHandle) -> Result<AppUpdateInfo, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let current_version = app.package_info().version.to_string();
+
+    if !crate::update::is_configured(&updater_pubkey(&app)) {
+        tracing::debug!("updates are not configured in this build; reporting none");
+        return Ok(AppUpdateInfo::nothing(current_version));
+    }
+
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(error) => {
+            tracing::warn!(%error, "the updater could not be built; reporting no update");
+            return Ok(AppUpdateInfo::nothing(current_version));
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            tracing::info!(
+                current = %current_version,
+                offered = %update.version,
+                "a newer desktop build is available"
+            );
+            Ok(AppUpdateInfo {
+                current_version,
+                available: true,
+                available_version: Some(update.version.clone()),
+                notes: update.body.clone(),
+            })
+        }
+        Ok(None) => Ok(AppUpdateInfo::nothing(current_version)),
+        Err(error) => {
+            tracing::warn!(%error, "the update check failed; reporting no update");
+            Ok(AppUpdateInfo::nothing(current_version))
+        }
+    }
+}
+
+/// Downloads the offered bundle and holds it, verified, until someone restarts.
+///
+/// The counterpart to the check's silence: this one **does** report its
+/// failures, because the console only calls it after a check said there is
+/// something to fetch, and a download that keeps failing is worth one banner
+/// with a retry on it.
+///
+/// A mid-stream network failure is retried up to
+/// [`crate::update::MAX_DOWNLOAD_ATTEMPTS`] times; a signature failure is not
+/// retried at all. The bytes are verified against the configured public key
+/// *inside* this call, so what lands in the staging slot is already trusted and
+/// the restart has nothing left to check.
+#[tauri::command]
+pub async fn oc_app_update_download(
+    app: tauri::AppHandle,
+    pending: State<'_, crate::update::PendingUpdate>,
+) -> Result<AppUpdateStaged, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    if !crate::update::is_configured(&updater_pubkey(&app)) {
+        return Ok(AppUpdateStaged::nothing());
+    }
+
+    let updater = app
+        .updater()
+        .map_err(|error| format!("the updater could not be built: {error}"))?;
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => return Ok(AppUpdateStaged::nothing()),
+        Err(error) => return Err(format!("the update check failed: {error}")),
+    };
+
+    let version = update.version.clone();
+    let notes = update.body.clone();
+    tracing::info!(%version, "downloading a desktop update in the background");
+
+    let mut attempt: u32 = 1;
+    let bytes = loop {
+        match update.download(|_, _| {}, || {}).await {
+            Ok(bytes) => break bytes,
+            Err(error) => {
+                let transient = crate::update::is_transient(&error);
+                match crate::update::classify(
+                    attempt,
+                    crate::update::MAX_DOWNLOAD_ATTEMPTS,
+                    transient,
+                ) {
+                    crate::update::RetryDecision::Retry => {
+                        tracing::warn!(%error, attempt, "the update download failed; retrying");
+                        tokio::time::sleep(crate::update::backoff_for(attempt)).await;
+                        attempt += 1;
+                    }
+                    crate::update::RetryDecision::GiveUp => {
+                        tracing::error!(%error, attempt, "the update download failed");
+                        return Err(format!("the update could not be downloaded: {error}"));
+                    }
+                }
+            }
+        }
+    };
+
+    tracing::info!(%version, "a desktop update is staged and waiting for a restart");
+    *pending.0.lock().await = Some(crate::update::StagedUpdate {
+        update,
+        bytes,
+        version: version.clone(),
+    });
+
+    Ok(AppUpdateStaged {
+        ready: true,
+        version: Some(version),
+        notes,
+    })
+}
+
+/// Applies the staged bytes and relaunches. Never returns on success.
+///
+/// Stops every listening host first, and that is the whole reason this command
+/// touches [`crate::AppHandleState`] at all: `restart` spawns the replacement
+/// process and *then* exits, so a host still holding its data root would still
+/// be holding it when the new process reaches for the same root — and the
+/// application would come back with its companies down and "held by another
+/// process" against each one. [`crate::local::LocalHosts::quiesce`] releases
+/// the locks without recording a decision the operator did not make.
+///
+/// A failed install puts them back: the bundle on disk was not replaced, so
+/// this build keeps running and its hosts should keep serving.
+#[tauri::command]
+pub async fn oc_app_update_install(
+    state: State<'_, crate::AppHandleState>,
+    pending: State<'_, crate::update::PendingUpdate>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let staged = pending
+        .0
+        .lock()
+        .await
+        .take()
+        .ok_or("no update has been downloaded yet")?;
+
+    tracing::info!(version = %staged.version, "installing a desktop update");
+
+    let mut local = state.local.lock().await;
+    let quiesced = local.quiesce();
+
+    if let Err(error) = staged.update.install(staged.bytes) {
+        tracing::error!(%error, "the update could not be installed");
+        for id in quiesced {
+            if let Err(error) = local.start(&id).await {
+                tracing::error!(%id, %error, "a host did not come back after a failed install");
+            }
+        }
+        return Err(format!("the update could not be installed: {error}"));
+    }
+
+    tracing::info!("the update is installed; relaunching");
+    app.restart();
+}
+
 #[cfg(test)]
 mod adopt_session_tests {
     use super::adopt_session;

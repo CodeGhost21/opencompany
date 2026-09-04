@@ -12,6 +12,8 @@
 //!   loopback there, which is the one connector a browser cannot have.
 //! - **[`keychain`]** — where a paired device's token lives, so the webview
 //!   holds a handle and never the secret.
+//! - **[`update`]** — replacing this application with a newer one, which is the
+//!   one thing a desktop build cannot get from the host it is talking to.
 //! - **[`commands`]** — the thin Tauri surface over all three.
 //!
 //! The console itself is unchanged: it is the same `frontend/` bundle the web
@@ -29,6 +31,7 @@ pub mod keychain;
 pub mod local;
 pub mod proxy;
 pub mod ssh;
+pub mod update;
 
 use std::path::PathBuf;
 
@@ -106,7 +109,15 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // Replacing this application with a newer one. The endpoint and the
+        // minisign public key the downloaded bundle is verified against live in
+        // `tauri.conf.json` under `plugins.updater`; the private half is a
+        // release secret and is not in this repository. A build compiled
+        // against the placeholder key is inert rather than broken — see
+        // `update::is_configured` and `docs/spec/runtime/desktop-updates.md`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(proxy::SharedProxy::default())
+        .manage(update::PendingUpdate::default())
         .manage(AppHandleState {
             data_dir,
             local: tokio::sync::Mutex::new(local),
@@ -136,6 +147,9 @@ pub fn run() {
             commands::oc_open_ssh_tunnel,
             commands::oc_close_ssh_tunnel,
             commands::oc_ssh_tunnels,
+            commands::oc_app_update_check,
+            commands::oc_app_update_download,
+            commands::oc_app_update_install,
         ])
         .run(tauri::generate_context!())
         .expect("run the desktop shell");

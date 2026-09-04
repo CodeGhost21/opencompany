@@ -268,6 +268,33 @@ impl LocalHosts {
         Ok(self.instances[index].info(&self.data_dir))
     }
 
+    /// Stops every listening host without recording that anyone stopped it.
+    ///
+    /// [`Self::stop`] is an operator's decision and writes it down — it clears
+    /// `autostart`, so the next launch leaves that instance down. This is not
+    /// that. It is for the moment the shell is about to be replaced on disk and
+    /// relaunched: `restart` spawns the successor and *then* exits, so every
+    /// data root has to be unlocked before the new process reaches for it, or
+    /// the application comes back with each company reading "held by another
+    /// process". The roster is left exactly as it was, so what comes back up is
+    /// what was running.
+    ///
+    /// Answers with the ids it stopped, so a caller whose install then failed
+    /// can put them back.
+    pub fn quiesce(&mut self) -> Vec<String> {
+        self.instances
+            .iter_mut()
+            .filter(|instance| instance.host.is_some())
+            .map(|instance| {
+                // Dropping the host aborts its server task and releases the
+                // root lock — the same mechanism as `stop`, without the
+                // roster edit.
+                instance.host = None;
+                instance.entry.id.clone()
+            })
+            .collect()
+    }
+
     /// Removes an instance from the roster, leaving its data on disk.
     ///
     /// Deliberately not a delete. The roster is a list of things to run; the
@@ -627,6 +654,36 @@ mod test {
         assert_eq!(ports.len(), 2, "each instance binds its own port");
         // Two roots are two hosts, and the console tells them apart by this.
         assert_ne!(listed[0].instance_id, listed[1].instance_id);
+    }
+
+    /// Quiescing for a restart is not stopping.
+    ///
+    /// The update path has to release every data root before the replacement
+    /// process reaches for it, but the operator did not ask for anything to be
+    /// switched off — so the relaunched application must come back running what
+    /// this one was running. `stop` would have written `autostart = false` and
+    /// brought the companies back down.
+    #[tokio::test]
+    async fn quiescing_releases_the_roots_without_editing_the_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        hosts.create("Acme Corp").await.expect("it starts");
+
+        let quiesced = hosts.quiesce();
+
+        assert_eq!(quiesced.len(), 2, "both instances were listening");
+        assert!(
+            hosts.list().iter().all(|instance| !instance.running),
+            "every root has to be free before the successor launches"
+        );
+
+        // What the next launch sees, over the roster this one left behind.
+        drop(hosts);
+        let relaunched = LocalHosts::load(dir.path().to_path_buf()).await;
+        assert!(
+            relaunched.list().iter().all(|instance| instance.running),
+            "an instance that was up before the update must be up after it"
+        );
     }
 
     /// The roster is what makes an instance a thing rather than a session.
