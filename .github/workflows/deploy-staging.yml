@@ -171,11 +171,20 @@ jobs:
           #
           # `VITE_SENTRY_ENVIRONMENT` reads the SAME variable the manager injects
           # into the tenant as `OPENCOMPANY_SENTRY_ENVIRONMENT`, so one value
-          # tags both surfaces. Their defaults differ — the host falls back to
-          # its deployment kind (`hosted-tenant`), the console to `production` —
-          # so leaving it unset splits one tenant's reports across two
-          # `environment` values, and the console's copy is baked in where the
-          # manager's runtime env cannot reach it.
+          # tags both surfaces.
+          #
+          # The `|| 'hosted-tenant'` is the part that matters, because an empty
+          # build-arg is NOT the same as an unset one here. Passed empty, the
+          # console keeps its own default of `production` while the host keeps
+          # its deployment kind — and everything this image builds is a hosted
+          # tenant. The fallback is `Deployment::HostedTenant::as_str()`
+          # verbatim, which is exactly what the host reports when the manager
+          # leaves the variable unset, so unset now means "both agree" instead
+          # of "both guess differently".
+          #
+          # It has to be decided here: the console's copy is baked into the
+          # bundle at build time, where the manager's runtime env can never
+          # reach it (Codex on #2073).
           #
           # `VITE_BUILD_COMMIT` takes the SAME value as the Rust half above so
           # both surfaces compute one `opencompany@<version>+<commit>` release
@@ -186,7 +195,7 @@ jobs:
             OPENCOMPANY_BUILD_COMMIT=${{ github.sha }}
             VITE_SENTRY_DSN=${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
             VITE_BUILD_COMMIT=${{ github.sha }}
-            VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT }}
+            VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
           push: true
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
