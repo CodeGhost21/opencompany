@@ -71,8 +71,39 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # already carries it into the runtime image with no second COPY needed.
 FROM node:22-slim AS console
 WORKDIR /console
+
+# Console crash reporting (`docs/spec/runtime/crash-reporting.md`).
+#
+# These are read by Vite at BUILD time and inlined into the bundle, so unlike
+# the host's `OPENCOMPANY_SENTRY_DSN` they cannot be injected into the running
+# container: by the time k8s sets env, the bundle is already built. Without
+# them there is no path for a console DSN to reach a hosted tenant at all, and
+# setting one on the StatefulSet is a silent no-op.
+#
+# Both default to empty, which is the shipped behaviour: `resolveCrashReporting`
+# builds no client without a DSN, and `sentryRelease()` falls back to the bare
+# version without a commit. A local `docker build` therefore needs neither.
+#
+# `VITE_BUILD_COMMIT` is the frontend's spelling of the builder stage's
+# `OPENCOMPANY_BUILD_COMMIT`, not a second source of truth — `vite.config.ts`
+# shortens it to the same twelve characters `src/build_stamp.rs` normalizes to,
+# so both surfaces compute one `opencompany@<version>+<commit>` release string.
+# Passed the same value, a console event and a host event from this image line
+# up in one filter; passed different ones, they silently never join.
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
+
+# Declared AFTER `npm ci` on purpose. `ENV` invalidates every layer beneath it
+# and `VITE_BUILD_COMMIT` changes on every commit, so hoisting these above the
+# install would re-run a full `npm ci` for each build — the same cache argument
+# the builder stage makes for `OPENCOMPANY_BUILD_COMMIT`, which is cheap there
+# only because the cargo `target` mount survives it. Nothing survives a lost
+# `node_modules`.
+ARG VITE_SENTRY_DSN=""
+ARG VITE_BUILD_COMMIT=""
+ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
+    VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT
+
 COPY frontend/ ./
 RUN npm run build && npm run build:pages-sdk
 

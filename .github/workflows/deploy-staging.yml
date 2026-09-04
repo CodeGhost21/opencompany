@@ -153,9 +153,31 @@ jobs:
           # which revision it is compiling — every hosted tenant would report
           # `unknown` forever. `actions/checkout` checked out `github.sha`, so
           # this names the commit that was actually built.
+          #
+          # `VITE_SENTRY_DSN` / `VITE_BUILD_COMMIT` are the console's half of
+          # crash reporting, and the host's runtime env cannot supply them: Vite
+          # inlines them into the bundle during this image build, so a DSN set
+          # on the StatefulSet afterwards arrives far too late and is a silent
+          # no-op (`docs/spec/runtime/crash-reporting.md`).
+          #
+          # The DSN is a repository VARIABLE, not a secret. A browser bundle's
+          # DSN is public by construction — anyone who opens the console can
+          # read it — so masking would buy nothing and would only stop this
+          # workflow from being able to report whether it is set.
+          #
+          # Empty when the variable is unset, which keeps the console silent
+          # rather than failing the build: the same "no DSN, no client" gate
+          # every local `npm run build` already takes.
+          #
+          # `VITE_BUILD_COMMIT` takes the SAME value as the Rust half above so
+          # both surfaces compute one `opencompany@<version>+<commit>` release
+          # string. Passed different values they still both report — and their
+          # events silently never join in one filter.
           build-args: |
             FEATURES=${{ env.TENANT_FEATURES }}
             OPENCOMPANY_BUILD_COMMIT=${{ github.sha }}
+            VITE_SENTRY_DSN=${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
+            VITE_BUILD_COMMIT=${{ github.sha }}
           push: true
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
