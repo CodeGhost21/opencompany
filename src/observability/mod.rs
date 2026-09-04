@@ -379,6 +379,23 @@ fn scrub_map(fields: &mut sentry::protocol::Map<String, serde_json::Value>) {
     }
 }
 
+/// Scrubs a `String -> String` map, considering each entry's key.
+///
+/// The tag map's twin of [`scrub_map`]. Tags were value-only until a review
+/// found `{"password": "hunter2"}` going out whole: the value is a word with
+/// no issuer prefix and no `password=` beside it, so the text rule has nothing
+/// to bite on and only the key says what it is.
+#[cfg(feature = "crash-reporting")]
+fn scrub_string_map(fields: &mut sentry::protocol::Map<String, String>) {
+    for (name, value) in fields.iter_mut() {
+        if redaction::key_names_a_secret(name) {
+            *value = redaction::REDACTED.to_string();
+        } else {
+            scrub_in_place(value);
+        }
+    }
+}
+
 /// Scrubs the free-form parts of one context, leaving its typed fields.
 ///
 /// Two variants carry text that nothing else reaches:
@@ -427,9 +444,39 @@ fn sanitize(
     event.user = None;
     event.request = None;
 
-    // (1) text
+    // (1) text.
+    //
+    // The list is the `protocol::Event` field list, walked rather than
+    // remembered: a surface covered by memory is a surface covered until
+    // someone forgets, which is exactly how `tags` came to be value-only.
+    // Deliberately untouched: `modules` (package name to version, SDK-made),
+    // `release` / `environment` / `dist` / `platform` (this build's own
+    // configuration), and everything that is not text.
     if let Some(message) = event.message.as_mut() {
         scrub_in_place(message);
+    }
+    // The operation or route this event happened in, and the grouping key an
+    // app builds from whatever distinguishes the error.
+    if let Some(transaction) = event.transaction.as_mut() {
+        scrub_in_place(transaction);
+    }
+    if let Some(culprit) = event.culprit.as_mut() {
+        scrub_in_place(culprit);
+    }
+    if let Some(logger) = event.logger.as_mut() {
+        scrub_in_place(logger);
+    }
+    if event
+        .fingerprint
+        .iter()
+        .any(|part| matches!(redaction::scrub(part), std::borrow::Cow::Owned(_)))
+    {
+        event.fingerprint = event
+            .fingerprint
+            .iter()
+            .map(|part| std::borrow::Cow::Owned(redaction::scrub(part).into_owned()))
+            .collect::<Vec<_>>()
+            .into();
     }
     if let Some(entry) = event.logentry.as_mut() {
         scrub_in_place(&mut entry.message);
@@ -453,6 +500,24 @@ fn sanitize(
     if let Some(stacktrace) = event.stacktrace.as_mut() {
         strip_frames(stacktrace);
     }
+    // Threads carry stack traces of their own, with the same locals and the
+    // same source context. Nothing in this crate populates them today; the
+    // point of walking the field list is that "today" is not the guarantee.
+    for thread in &mut event.threads.values {
+        if let Some(stacktrace) = thread.stacktrace.as_mut() {
+            strip_frames(stacktrace);
+        }
+        if let Some(stacktrace) = thread.raw_stacktrace.as_mut() {
+            strip_frames(stacktrace);
+        }
+    }
+    // `TemplateInfo` is a stack frame in all but name — same `context_line`,
+    // same surrounding source.
+    if let Some(template) = event.template.as_mut() {
+        template.pre_context.clear();
+        template.context_line = None;
+        template.post_context.clear();
+    }
     for breadcrumb in &mut event.breadcrumbs.values {
         if let Some(message) = breadcrumb.message.as_mut() {
             scrub_in_place(message);
@@ -460,9 +525,7 @@ fn sanitize(
         scrub_map(&mut breadcrumb.data);
     }
     scrub_map(&mut event.extra);
-    for value in event.tags.values_mut() {
-        scrub_in_place(value);
-    }
+    scrub_string_map(&mut event.tags);
     // `trace` is kept, not dropped: it is what associates this error with the
     // request that caused it, which is the whole point of continuing a trace.
     // Its `data` is scrubbed; see `scrub_context`.
@@ -590,11 +653,11 @@ fn sanitize_transaction(
             scrub_in_place(description);
         }
         scrub_map(&mut span.data);
+        // A span carries its own tag map, with the same key-shaped hole.
+        scrub_string_map(&mut span.tags);
     }
     scrub_map(&mut transaction.extra);
-    for value in transaction.tags.values_mut() {
-        scrub_in_place(value);
-    }
+    scrub_string_map(&mut transaction.tags);
     transaction.contexts.values_mut().for_each(scrub_context);
     transaction
 }
@@ -895,6 +958,84 @@ mod test {
             // the decision cannot disagree.
             assert!(matches!(decision, Decision::Report { .. }));
             assert!(guard.is_active());
+        }
+
+        #[test]
+        fn a_tag_whose_key_names_a_credential_is_redacted() {
+            // The tag map was value-only: `hunter2` under a `password` key has
+            // no issuer prefix and no `password=` beside it, so the text rule
+            // has nothing to bite on and only the KEY says what it is.
+            let mut event = Event::default();
+            event.tags.insert("password".into(), "hunter2".into());
+            event.tags.insert("token".into(), "hunter2".into());
+            event.tags.insert("company".into(), "acme".into());
+
+            let sanitized = sanitize(event).expect("the hook never drops an event");
+            let rendered = serde_json::to_string(&sanitized).expect("an event serializes");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+            // A tag that names nothing secret survives, or filtering breaks.
+            assert_eq!(
+                sanitized.tags.get("company").map(String::as_str),
+                Some("acme")
+            );
+        }
+
+        #[test]
+        fn the_free_form_fields_that_are_not_the_message_are_scrubbed_too() {
+            // Walked from `protocol::Event`'s own field list rather than
+            // remembered. Every one of these was uncovered until it was.
+            let mut event = Event {
+                transaction: Some("GET /login?code=hunter2".into()),
+                culprit: Some("api_key=hunter2".into()),
+                logger: Some("api_key=hunter2".into()),
+                fingerprint: vec!["api_key=hunter2".into(), "route".into()].into(),
+                ..Default::default()
+            };
+            event.threads.values.push(sentry::protocol::Thread {
+                stacktrace: Some(sentry::protocol::Stacktrace {
+                    frames: vec![sentry::protocol::Frame {
+                        context_line: Some("let key = \"hunter2\";".into()),
+                        vars: [("key".to_string(), Value::String("hunter2".into()))]
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            event.template = Some(sentry::protocol::TemplateInfo {
+                context_line: Some("password = \"hunter2\"".into()),
+                ..Default::default()
+            });
+
+            let sanitized = sanitize(event).expect("the hook never drops an event");
+            let rendered = serde_json::to_string(&sanitized).expect("an event serializes");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+            // The diagnostic around each redaction survives.
+            assert!(rendered.contains("/login"), "{rendered}");
+            assert!(rendered.contains("route"), "{rendered}");
+        }
+
+        #[test]
+        fn a_span_tag_is_redacted_by_its_key_as_well() {
+            let mut transaction = sentry::protocol::Transaction::default();
+            transaction.tags.insert("password".into(), "hunter2".into());
+            transaction.tags.insert("route".into(), "/desk".into());
+            transaction.spans.push(sentry::protocol::Span {
+                tags: [("secret".to_string(), "hunter2".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            });
+
+            let sanitized = sanitize_transaction(transaction);
+            let rendered = serde_json::to_string(&sanitized).expect("a transaction serializes");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+            assert_eq!(
+                sanitized.tags.get("route").map(String::as_str),
+                Some("/desk")
+            );
         }
 
         #[test]

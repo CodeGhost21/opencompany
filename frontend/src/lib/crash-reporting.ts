@@ -154,14 +154,37 @@ const SECRET_QUERY_KEYS = new Set(["code", "state", "sig", "signature"]);
  * Runs before the token pass, which cannot see these: `?code=abc` has no
  * separator the token pass treats as an assignment for a key it knows.
  */
+/**
+ * Whether a query parameter's name means its value is a credential.
+ *
+ * `decodeURIComponent` **throws** `URIError` on a malformed escape — a URL as
+ * ordinary as `https://host/?%E0%A4=value` is enough. Uncaught, that threw out
+ * of `scrubSecrets`, out of `beforeSend`, and cost the **entire report**: one
+ * malformed URL anywhere in an event and nothing was sent at all, silently.
+ *
+ * So the failure is caught, and it fails **closed**: a key that cannot be
+ * decoded is treated as naming a credential. A name that malformed is not one
+ * this app produces, and over-redacting an unreadable parameter costs a
+ * diagnostic, where under-redacting it costs a credential.
+ */
+function queryKeyNamesASecret(key: string): boolean {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(key);
+  } catch {
+    return true;
+  }
+  const normalized = normalizeKey(decoded);
+  return SECRET_QUERY_KEYS.has(normalized) || SECRET_KEYS.has(normalized);
+}
+
 function scrubUrlQuery(text: string): string {
   // A URL's query runs from `?` to whitespace or one of the characters that
   // ends a URL in prose — the same set `scrubUrlUserinfo` stops at, minus `?`.
   return text.replace(/\?[^\s"'<>),;]*/g, (query) => {
     if (!query.includes("=")) return query;
     return query.replace(/([?&])([^=&]+)=([^&]*)/g, (pair, lead, key, value) => {
-      const normalized = normalizeKey(decodeURIComponent(key));
-      const secret = SECRET_QUERY_KEYS.has(normalized) || SECRET_KEYS.has(normalized);
+      const secret = queryKeyNamesASecret(key);
       return secret && value.length > 0 ? `${lead}${key}=${REDACTED}` : pair;
     });
   });
@@ -330,6 +353,89 @@ function scrubDeep(value: unknown, key?: string): unknown {
   return value;
 }
 
+/**
+ * Every free-form surface an event of **either** kind can carry, scrubbed in
+ * one place.
+ *
+ * # Why this is shared rather than repeated
+ *
+ * The previous version was two hand-maintained lists, one in each sanitizer,
+ * and a field was covered exactly when someone remembered to add it to both.
+ * `tags` is what that cost: `{ password: "hunter2" }` went out in clear from
+ * both hooks, because the tag loop scrubbed values as *text* and `hunter2` has
+ * no credential prefix and no `key=` beside it — the same key-shaped hole that
+ * was closed for contexts, spans, breadcrumbs and `extra` one round earlier,
+ * on a surface the sweep did not reach.
+ *
+ * So the enumeration lives here once, taken from `@sentry/core`'s `Event`
+ * rather than from memory, and each sanitizer adds only the policy that is
+ * genuinely different between them (which contexts survive, what happens to
+ * `request`).
+ *
+ * Deliberately NOT scrubbed, each for a reason:
+ *
+ * * `modules` — a map of package name to version, produced by the SDK.
+ * * `measurements` — numbers.
+ * * `release`, `environment`, `dist`, `platform` — set by `Sentry.init` from
+ *   this build's own configuration.
+ * * `event_id`, timestamps, `level` — not text.
+ */
+function scrubFreeFormFields(event: Event): void {
+  if (event.message) event.message = scrubSecrets(event.message);
+  // The route or operation name. Safe when the SDK derived it, but an app can
+  // set it to anything.
+  if (event.transaction) event.transaction = scrubSecrets(event.transaction);
+  if (event.logger) event.logger = scrubSecrets(event.logger);
+  if (event.logentry) {
+    if (event.logentry.message) event.logentry.message = scrubSecrets(event.logentry.message);
+    if (event.logentry.params) scrubDeep(event.logentry.params);
+  }
+  // Grouping keys, which an app builds from whatever distinguishes the error.
+  if (event.fingerprint) event.fingerprint = event.fingerprint.map(scrubSecrets);
+  // The SDK's own scratch bag. It is not meant to be serialized, but it is on
+  // the event this hook is handed, and it can hold anything.
+  delete event.sdkProcessingMetadata;
+
+  for (const exception of event.exception?.values ?? []) {
+    if (exception.value) exception.value = scrubSecrets(exception.value);
+    if (exception.mechanism) delete exception.mechanism.data;
+    // Frame locals and source snippets: a captured local is a captured
+    // credential, and source context is this repository's own code, which the
+    // operator already has.
+    for (const frame of exception.stacktrace?.frames ?? []) {
+      delete frame.vars;
+      delete frame.context_line;
+      delete frame.pre_context;
+      delete frame.post_context;
+    }
+  }
+
+  // Breadcrumbs are kept, unlike the vendored runtime's console, which drops
+  // them wholesale. They are the single most useful thing in a browser crash
+  // report — which route, which request, which status — and the integrations
+  // that carry *content* (`console`, `dom`) are switched off at the source in
+  // `@/lib/sentry` instead. What is left is a method, a URL and a status.
+  for (const breadcrumb of event.breadcrumbs ?? []) {
+    if (breadcrumb.message) breadcrumb.message = scrubSecrets(breadcrumb.message);
+    if (breadcrumb.data) scrubDeep(breadcrumb.data);
+  }
+
+  for (const span of event.spans ?? []) {
+    if (span.description) span.description = scrubSecrets(span.description);
+    if (span.data) scrubDeep(span.data);
+    // A span carries a tag map of its own, with the same key-shaped hole the
+    // event's has. Reached through a cast because `SpanJSON` does not declare
+    // it — which is exactly why it was missed, and why the value is checked
+    // at run time rather than trusted to the type.
+    const tags = (span as { tags?: unknown }).tags;
+    if (tags && typeof tags === "object") scrubDeep(tags);
+  }
+
+  // `scrubDeep`, not a value-only loop: a tag KEY is as much a label as a
+  // nested one, and this is the surface that proved it.
+  if (event.tags) scrubDeep(event.tags);
+}
+
 export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
   // Identity. `sendDefaultPii: false` already withholds the IP address; this
   // covers the fields an integration could populate later. `user` is never set
@@ -368,38 +474,8 @@ export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
     trace: event.contexts?.trace && (scrubDeep(event.contexts.trace) as typeof event.contexts.trace),
   };
 
-  if (event.message) event.message = scrubSecrets(event.message);
-
-  for (const exception of event.exception?.values ?? []) {
-    if (exception.value) exception.value = scrubSecrets(exception.value);
-    if (exception.mechanism) delete exception.mechanism.data;
-    // Frame locals and source snippets: a captured local is a captured
-    // credential, and source context is this repository's own code, which the
-    // operator already has.
-    for (const frame of exception.stacktrace?.frames ?? []) {
-      delete frame.vars;
-      delete frame.context_line;
-      delete frame.pre_context;
-      delete frame.post_context;
-    }
-  }
-
-  // Breadcrumbs are kept, unlike the vendored runtime's console, which drops
-  // them wholesale. They are the single most useful thing in a browser crash
-  // report — which route, which request, which status — and the integrations
-  // that carry *content* (`console`, `dom`) are switched off at the source in
-  // `@/lib/sentry` instead. What is left is a method, a URL and a status, and
-  // the URL goes through the same scrubber as everything else.
-  for (const breadcrumb of event.breadcrumbs ?? []) {
-    if (breadcrumb.message) breadcrumb.message = scrubSecrets(breadcrumb.message);
-    if (breadcrumb.data) scrubDeep(breadcrumb.data);
-  }
-
-  const tags: Record<string, string> = {};
-  for (const [key, value] of Object.entries(event.tags ?? {})) {
-    if (typeof value === "string") tags[key] = scrubSecrets(value);
-  }
-  event.tags = { ...tags, surface: SURFACE };
+  scrubFreeFormFields(event);
+  event.tags = { ...event.tags, surface: SURFACE };
 
   return event;
 }
@@ -579,18 +655,6 @@ export function sanitizeTransaction(event: TransactionEvent): TransactionEvent |
   event.request = undefined;
   delete event.extra;
 
-  if (event.transaction) event.transaction = scrubSecrets(event.transaction);
-
-  for (const span of event.spans ?? []) {
-    if (span.description) span.description = scrubSecrets(span.description);
-    if (span.data) scrubDeep(span.data);
-  }
-
-  for (const breadcrumb of event.breadcrumbs ?? []) {
-    if (breadcrumb.message) breadcrumb.message = scrubSecrets(breadcrumb.message);
-    if (breadcrumb.data) scrubDeep(breadcrumb.data);
-  }
-
   // Not allow-listed the way an error event's contexts are: a transaction's
   // `trace` context IS the transaction, so keeping three platform entries and
   // dropping the rest would throw the payload away. Scrubbed instead — and
@@ -600,11 +664,11 @@ export function sanitizeTransaction(event: TransactionEvent): TransactionEvent |
     if (context && typeof context === "object") scrubDeep(context);
   }
 
-  const tags: Record<string, string> = {};
-  for (const [key, value] of Object.entries(event.tags ?? {})) {
-    if (typeof value === "string") tags[key] = scrubSecrets(value);
-  }
-  event.tags = { ...tags, surface: SURFACE };
+  // Everything else — name, spans, breadcrumbs, tags, fingerprint — is the
+  // same enumeration an error event gets, and is shared with it so the two
+  // cannot drift apart again.
+  scrubFreeFormFields(event);
+  event.tags = { ...event.tags, surface: SURFACE };
 
   return event;
 }

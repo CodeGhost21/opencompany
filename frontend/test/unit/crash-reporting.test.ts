@@ -219,6 +219,28 @@ describe("scrubSecrets", () => {
     );
   });
 
+  it("never throws on a malformed percent-escape", () => {
+    // `decodeURIComponent` throws `URIError` on these. Uncaught it came out of
+    // `scrubSecrets`, out of `beforeSend`, and cost the WHOLE report — one
+    // malformed URL and nothing was sent at all, silently.
+    for (const input of [
+      "GET https://host/?%E0%A4=value failed",
+      "https://host/?%=1",
+      "https://host/?%zz=secret&page=2",
+      "https://host/?a=1&%E0%A4=2",
+    ]) {
+      expect(() => scrubSecrets(input)).not.toThrow();
+    }
+    // And it fails CLOSED: a key too malformed to decode is treated as naming
+    // a credential, because over-redacting an unreadable parameter costs a
+    // diagnostic while under-redacting it costs a credential.
+    expect(scrubSecrets("https://host/?%E0%A4=hunter2")).toBe(
+      `https://host/?%E0%A4=${REDACTED}`,
+    );
+    // A readable parameter beside it is still judged on its own merits.
+    expect(scrubSecrets("https://host/?%E0%A4=x&page=2")).toContain("page=2");
+  });
+
   it("leaves prose and ordinary diagnostics alone", () => {
     // The word-boundary false positive that plagued the regex version cannot
     // arise: `cancellation_token` is one token and normalizes to something
@@ -376,6 +398,39 @@ describe("sanitizeEvent", () => {
     expect(rendered).toContain("500");
   });
 
+  it("redacts a tag whose key names a credential", () => {
+    // The tag loop scrubbed values as TEXT, and `hunter2` under a `password`
+    // key has no prefix and no `password=` beside it for the text rule to bite
+    // on. Only the key says what it is — the same hole that was closed for
+    // contexts and span data, on a surface that sweep did not reach.
+    const sanitized = sanitizeEvent({
+      type: undefined,
+      tags: { password: "hunter2", token: "hunter2", company: "acme" },
+    } as unknown as ErrorEvent);
+    expect(JSON.stringify(sanitized)).not.toContain("hunter2");
+    // A tag that names nothing secret is untouched, or filtering breaks.
+    expect(sanitized.tags?.company).toBe("acme");
+    expect(sanitized.tags?.surface).toBe("console");
+  });
+
+  it("scrubs the free-form fields that are not the message", () => {
+    // Walked from `@sentry/core`'s `Event` rather than remembered. Each of
+    // these was uncovered until the enumeration was made shared.
+    const sanitized = sanitizeEvent({
+      type: undefined,
+      transaction: "GET /login?code=hunter2",
+      logger: "api_key=hunter2",
+      logentry: { message: "refresh failed: api_key=hunter2", params: ["password=hunter2"] },
+      fingerprint: ["api_key=hunter2", "route"],
+      sdkProcessingMetadata: { anything: "password=hunter2" },
+    } as unknown as ErrorEvent);
+    const rendered = JSON.stringify(sanitized);
+    expect(rendered).not.toContain("hunter2");
+    // The diagnostic around each redaction survives.
+    expect(sanitized.transaction).toContain("/login");
+    expect(sanitized.fingerprint).toContain("route");
+  });
+
   it("never drops an event", () => {
     // A scrubber, not a filter: deciding which errors are worth seeing belongs
     // in the operator's own project, where they can see what they suppressed.
@@ -502,6 +557,24 @@ describe("sanitizeTransaction", () => {
     expect(rendered).not.toContain("hunter2");
     // A non-secret key with a non-string value is untouched.
     expect(sanitized?.spans?.[0]?.data?.["http.status_code"]).toBe(500);
+  });
+
+  it("redacts a transaction tag whose key names a credential", () => {
+    const sanitized = sanitizeTransaction({
+      type: "transaction",
+      tags: { password: "hunter2", route: "/desk" },
+      spans: [
+        {
+          span_id: "a",
+          trace_id: "b",
+          start_timestamp: 0,
+          // A span carries its own tag map, with the same hole.
+          tags: { secret: "hunter2" },
+        },
+      ],
+    } as unknown as TransactionEvent);
+    expect(JSON.stringify(sanitized)).not.toContain("hunter2");
+    expect(sanitized?.tags?.route).toBe("/desk");
   });
 
   it("keeps what makes a transaction worth reading", () => {
