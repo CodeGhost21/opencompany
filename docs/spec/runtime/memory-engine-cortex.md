@@ -55,7 +55,8 @@ incumbents do not — does not hold. It offers this.
 Three events establishing "Priya Raman owns billing", then two handing it to
 Marcus Webb, leaves *both* owners live at `confidence: 1.0` with `valid_to:
 null`, and `/v1/recall` returns them undifferentiated. The section below was
-right about the consequence and wrong about the cause: a `FactStore` consumer
+right about the consequence and wrong about the cause (its heading is now
+corrected too): a `FactStore` consumer
 reads live and superseded claims with nothing marking which is which. Filed as
 [#2089](https://github.com/tinyhumansai/opencompany/issues/2089). Understanding
 stays empty and concepts stay broken.
@@ -91,10 +92,11 @@ question, and the recommendation follows from them.
    public repository, and no published contract. So the reachable minter does
    not isolate, and the isolating one is not reachable.
 3. ~~**The derived fact and belief tier does not work.**~~ **Overturned — see
-   [Correction](#correction-2026-09-04).** Facts and Beliefs build; enrichment
-   was off and the server had no way to report it. What still holds is the
-   structural half: these are Cortex *layers*, not contract capability families,
-   so the audit cannot fire on them however empty they are.
+   [Correction](#correction-2026-09-04).** The run below had enrichment off and
+   no way to report it; configured, and on a funded provider account, Facts and
+   Beliefs do build. What still holds is the structural half: these are Cortex
+   *layers*, not contract capability families, so the audit cannot fire on them
+   however empty they are.
 4. **Retrieval quality is real, and comes from embeddings alone.** Ranked recall
    over the Events layer is good and needs no LLM lanes at all.
 5. **The contract's upsert has no direct mapping, but a conformant driver is
@@ -230,7 +232,7 @@ alone would not make Cortex cheap**: keyed reads would still scan and writes
 would still wait, because those need a metadata filter and a readiness signal
 that are separate asks.
 
-## Belief revision is not reachable
+## Belief revision is reachable, and silently wrong
 
 Worth stating separately because it is much of what would justify preferring
 Cortex over the drivers we already have. Tested directly: three events
