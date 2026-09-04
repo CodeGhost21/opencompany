@@ -92,7 +92,22 @@ env:
   # `analytics = ["dep:reqwest"]`, and `reqwest` is already here via `openhuman`
   # — and stays inert until the manager injects `OPENCOMPANY_ANALYTICS_TOKEN`
   # (`docs/spec/runtime/analytics.md`).
-  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory,analytics
+  #
+  # `crash-reporting` is the Sentry client, and this list is the ONLY thing that
+  # decides whether a tenant has one. The feature is the sole path that compiles
+  # it, so without this entry the manager can inject `OPENCOMPANY_SENTRY_DSN`
+  # into every container and every one of them resolves `Silence::NotCompiled`,
+  # prints "off" at boot and reports nothing — the whole surface inert in
+  # exactly the deployment that has no other way to be watched. Same shape as
+  # the `analytics` note above, and the same reason it is spelled out: a feature
+  # list is not self-documenting, and the symptom of an omission is silence.
+  #
+  # It stays inert until a DSN is injected, and it is a second gate rather than
+  # the only one — see `docs/spec/runtime/crash-reporting.md`. The image cost is
+  # `sentry` plus a small `ureq` on the `rustls` already in the graph; no second
+  # HTTP client and no native TLS (`cargo tree -d` is unchanged but for
+  # `base64`).
+  TENANT_FEATURES: mongodb,openhuman,openhuman-rpc,tinyplace,github,smtp,dns,tinyhumans,webhooks,platform-jwt,export,mcp,media,composio,imap,medulla,sidecar,chargebee,paypal,tinymemory,analytics,crash-reporting
 
 jobs:
   deploy:

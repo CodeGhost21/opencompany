@@ -362,13 +362,26 @@ Named so they are countable rather than implied.
 - **No debug-file upload for the host.** A stripped release binary's stack
   traces stay unsymbolicated until a `sentry-cli upload-dif` step exists. See
   the note under [Source-map upload](#source-map-upload-ci-only).
-- **The desktop app cannot report from its webview.** `src-tauri/tauri.conf.json`
-  sets `connect-src 'self' ipc:`, so the console bundle inside the desktop shell
-  cannot reach an ingest endpoint. Widening that CSP is a security decision of
-  its own and is not taken here; the embedded host reports normally.
+- **The desktop app reports nothing, from either half.** The console bundle
+  inside the shell is blocked by `src-tauri/tauri.conf.json`'s
+  `connect-src 'self' ipc:`, and widening that CSP is a security decision of its
+  own. The embedded *host* would report if the feature were compiled in, but
+  `DESKTOP_RELEASE_FEATURES` in `.github/workflows/release-desktop-macos.yml`
+  does not include `crash-reporting`, so the released binary has no client
+  either. Adding it there is a distribution decision — it changes what ships to
+  end users rather than to operators — and is deliberately left open.
 - **Host cognition is not tagged per company.** A multi-company host reports one
   instance id for all of them. Which company an error belongs to is in the
   `tracing` fields on the event, not in a tag.
+- **A delivered envelope is not an accepted one, and nothing here can tell.**
+  `sentry-test` reports success when the queue drained, which means the ingest
+  answered — not that it kept anything. An organisation over its quota answers
+  `429 organization:error_usage_exceeded` and discards the event, and the SDK
+  surfaces that only at its own debug log level. So an install can be correctly
+  configured, correctly scrubbed, transmitting well-formed envelopes, and still
+  be reporting nothing, with every signal in this product saying it is healthy.
+  This was observed against a real project, not imagined. Check quota in Sentry
+  itself; nothing in the boot line or `sentry-test` will say.
 - **The two surfaces' release tags can disagree on the version.** Both are
   shaped `opencompany@<version>[+<commit>]`, but the host reads
   `Cargo.toml`'s version and the console reads `frontend/package.json`'s, and
