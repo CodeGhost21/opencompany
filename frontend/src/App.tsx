@@ -350,6 +350,22 @@ function Console() {
     });
   }, []);
 
+  /**
+   * Start the host on this computer, for an operator who has none.
+   *
+   * The desktop's recovery is an action rather than a choice: there is exactly
+   * one meaningful answer to "where should this run" on a machine that runs its
+   * own host, and the usual reason there is nothing to show — another copy
+   * holding the data root — is fixed by quitting that copy and trying again, not
+   * by picking a different kind of host.
+   */
+  const runHere = useCallback(async (): Promise<void> => {
+    const instances = await localInstances();
+    const target = instances?.find((instance) => !instance.running) ?? instances?.[0];
+    if (target) await startLocalInstance(target.id);
+    await refreshLocal();
+  }, [refreshLocal]);
+
   useEffect(() => {
     let cancelled = false;
     void refreshLocal().catch((error: unknown) => {
@@ -684,11 +700,12 @@ function Console() {
             isBootstrap={active.id === bootstrapId}
           />
         ) : (
-          // The switcher rides along, because an operator whose local host is
-          // gone still has somewhere else to connect to — and "Add a host" is
-          // the only way out of a desktop that holds none.
           <ConsoleChrome>
-            <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
+            <NoConnection
+              starting={!embedded.resolved}
+              desktop={isDesktopRuntime()}
+              onRunHere={runHere}
+            />
           </ConsoleChrome>
         )}
       </ConsoleOrAddHost>
@@ -781,9 +798,34 @@ function Waiting({ children }: { children: React.ReactNode }) {
  * telling somebody with nothing on screen to go and find a control is not an
  * answer, it is a description of one.
  */
-function NoConnection({ starting, desktop }: { starting: boolean; desktop: boolean }) {
+function NoConnection({
+  starting,
+  desktop,
+  onRunHere,
+}: {
+  starting: boolean;
+  desktop: boolean;
+  onRunHere: () => Promise<void>;
+}) {
   const { setAddingHost } = useHosts();
   const copy = firstHostCopy(desktop);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  async function runHere() {
+    setBusy(true);
+    setFailed(null);
+    try {
+      await onRunHere();
+    } catch (error) {
+      setFailed(
+        error instanceof Error ? error.message : "The host on this computer would not start.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <FullScreen>
       {starting ? (
@@ -794,9 +836,24 @@ function NoConnection({ starting, desktop }: { starting: boolean; desktop: boole
         <div className="max-w-sm space-y-3" data-testid="no-connection">
           <p className="text-sm font-medium">{copy.title}</p>
           <p className="text-sm text-muted-foreground">{copy.body}</p>
-          <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
-            {copy.action}
-          </Button>
+          {desktop ? (
+            <Button
+              data-testid="no-connection-run-here"
+              disabled={busy}
+              onClick={() => void runHere()}
+            >
+              {busy ? "Starting…" : copy.action}
+            </Button>
+          ) : (
+            <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
+              {copy.action}
+            </Button>
+          )}
+          {failed && (
+            <p className="text-sm text-destructive" data-testid="no-connection-failed">
+              {failed}
+            </p>
+          )}
         </div>
       )}
     </FullScreen>
