@@ -34,6 +34,7 @@ import {
   fieldsFor,
   getSetup,
   INFERENCE_PROVIDERS,
+  SETUP_INFERENCE_OPTIONS,
   proposeSetupRoster,
   testInference,
   submitSetup,
@@ -316,7 +317,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    */
   // Seeded from the host once its status arrives — see the fetch effect. Not an
   // initialiser, because `status` is null until then.
-  const [provider, setProvider] = useState<string>("managed");
+  const [provider, setProvider] = useState<string>(SETUP_INFERENCE_OPTIONS[0].id);
   const [baseUrl, setBaseUrl] = useState<string>("");
   /**
    * The verdict on the credential, and the reason the step can gate on it.
@@ -1431,7 +1432,7 @@ function PowerStep({
             someone can make without knowing the vocabulary first — a dropdown
             of slugs assumes they already do. */}
         <div className="mt-3 grid gap-2" role="radiogroup" aria-label="Model provider">
-          {INFERENCE_PROVIDERS.map((option) => (
+          {SETUP_INFERENCE_OPTIONS.map((option) => (
             <button
               key={option.id}
               type="button"

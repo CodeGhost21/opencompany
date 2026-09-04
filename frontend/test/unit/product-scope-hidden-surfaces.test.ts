@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioStatus } from "@/api/composio";
 import type { InferenceStatus } from "@/api/inference";
+import { INFERENCE_PROVIDERS, SETUP_INFERENCE_OPTIONS } from "@/api/setup";
 import { HostSwitcher, hostSwitcherMenu } from "@/components/host-switcher";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { InferenceSection } from "@/views/connections/InferenceSection";
@@ -332,5 +333,19 @@ describe("inference asks the operator to name a provider", () => {
 
     expect(container.textContent).toContain("Managed (TinyHumans)");
     expect(container.textContent).not.toMatch(/\bmanaged\b(?![\s)])/);
+  });
+});
+
+describe("the wizard's model step asks the operator to name a provider too", () => {
+  it("does not offer the managed endpoint as the thing to think with", () => {
+    // The wizard has its own provider list, and it is the FIRST screen of a
+    // first run — hiding the option only on the settings card would leave the
+    // managed route selectable at the one moment every operator passes through.
+    const offered = SETUP_INFERENCE_OPTIONS.map((option) => option.id);
+
+    expect(offered).not.toContain("managed");
+    expect(offered).toContain("openrouter");
+    // Still resolvable, so a host already reporting it keeps its label.
+    expect(INFERENCE_PROVIDERS.find((p) => p.id === "managed")?.label).toBe("TinyHumans");
   });
 });
