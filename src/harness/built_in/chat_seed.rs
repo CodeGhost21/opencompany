@@ -36,6 +36,22 @@
 //! author, sequence or parent, so a sibling thread's turn is indistinguishable
 //! from this thread's own. [`in_thread`] narrows `owns` by the parent pointer;
 //! the console's one-level fold is the whole definition of membership.
+//!
+//! # Attribution
+//!
+//! **A desk is not one voice** (#1956). Isolation decides *which* lines a seed
+//! carries; it says nothing about *who said them*, and the projection used to
+//! answer that with a single anonymous `"agent"` role for every reply on the
+//! desk. On a shared desk that is a first-person collapse: a teammate's answer,
+//! a [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) notice and a workflow
+//! report all reached the reading agent in its own **assistant** role, so it
+//! could neither attribute a colleague nor tell one from the runtime — from
+//! inside the context there were no colleagues to attribute to.
+//!
+//! The repair is [`Speaker`], resolved per reader: the seeded agent's own
+//! replies stay assistant turns, everyone else's become labelled user turns.
+//! No filter changed, because no filter was wrong — a shared room's transcript
+//! is genuinely shared, and what was missing was the byline.
 
 use std::sync::Arc;
 
@@ -107,7 +123,21 @@ impl ChatSeedRequest {
     /// prefix this message ("deploy", answering "deploy production") is a
     /// trailing `("user", _)` that the prefix test cannot tell from a
     /// duplicate, so it would be dropped as one.
-    pub async fn build(&self, company: &CompanyId, chat_id: &str) -> Vec<(String, String)> {
+    ///
+    /// `viewer_agent_id` is the teammate this seed is being built *for* — the
+    /// one whose in-memory history the result is loaded into. Taken as an
+    /// argument rather than carried on the request because the request is
+    /// assembled one frame above the agent that consumes it, while
+    /// `run_with_steer` holds the authoritative
+    /// [`agent_id`](super::CompanyAgent::agent_id): a viewer read off anything
+    /// but the seeded agent itself is a mis-attribution that compiles (issue
+    /// #1956).
+    pub async fn build(
+        &self,
+        company: &CompanyId,
+        chat_id: &str,
+        viewer_agent_id: &str,
+    ) -> Vec<(String, String)> {
         let (desk_id, desk_name) =
             chat_history::resolve_seed_desk(&self.store, company, Some(chat_id)).await;
         let mut seed = build_chat_seed(
@@ -115,6 +145,7 @@ impl ChatSeedRequest {
             company,
             &desk_id,
             &desk_name,
+            viewer_agent_id,
             self.thread_root,
             CHAT_SEED_WINDOW,
             match self.current_message_seq {
@@ -229,9 +260,77 @@ fn in_thread(stored: &StoredEvent, thread_root: Option<EventSeq>) -> bool {
 /// its oldest last.
 struct SeedEntry {
     role: &'static str,
+    /// Who said it (issue #1956) — the half `role` alone cannot carry.
+    speaker: Speaker,
     text: String,
     /// The root this turn hangs off, or `None` for a root itself.
     parent: Option<EventSeq>,
+}
+
+/// Who authored one seeded turn, from the seeded agent's point of view (issue
+/// #1956).
+///
+/// `role` answers "user or assistant"; this answers "*whose* words", and a desk
+/// with more than one teammate needs both. Before this existed every
+/// `AgentReply` on the desk mapped to the bare role `"agent"`, which
+/// [`seed_resume_from_messages`](openhuman_core::openhuman::agent::Agent::seed_resume_from_messages)
+/// turns into an **assistant** message — so a teammate's reply, a
+/// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) notice and a
+/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::WORKFLOW_REPLY_AUTHOR) report all
+/// arrived in the reading agent's context as things *it* had said. The
+/// transcript was first-person-collapsed: there were no colleagues in the room
+/// to attribute to, defer to or disagree with.
+///
+/// Nothing about the ownership filters caused that, and nothing about them can
+/// fix it: [`chat_history::owns`] is desk-scoped and [`in_thread`] is
+/// parent-scoped, so **every** agent on a desk projects the same list, by
+/// design — a shared room's transcript is shared. What was missing was the
+/// speaker, and the speaker is per-reader, which is why this is resolved
+/// against a viewer rather than stored on the event.
+enum Speaker {
+    /// A human's message. Already the user role, and already unambiguous — an
+    /// operator line is not something any agent could mistake for its own.
+    Operator,
+    /// The agent this seed is being built for. Its own prior turns, and the
+    /// only ones that stay in the assistant role.
+    Viewer,
+    /// Anybody else who spoke on this desk, labelled with the id the console
+    /// shows as the byline (`MessageView::author`).
+    ///
+    /// **The raw stored `agent_id`, deliberately.** A teammate's roster id, and
+    /// equally one of the reserved authors [`chat_history::is_known_author`]
+    /// enumerates — `system`, `workflow-report`, `workflow-copilot`,
+    /// `owner-fallback-report` — which are all already readable words that say
+    /// what they are. Classifying them further would only let the seed's label
+    /// and the transcript's byline drift apart, and an unattributable issue
+    /// #885 row (`agent_id: "operator"`) is best seeded as exactly what a human
+    /// reading the same desk is shown, rather than as a name this projection
+    /// invents for it.
+    Other(String),
+}
+
+impl SeedEntry {
+    /// Flattens one accumulated turn into the `(role, content)` pair
+    /// [`seed_resume_from_messages`](openhuman_core::openhuman::agent::Agent::seed_resume_from_messages)
+    /// accepts.
+    ///
+    /// A peer's turn becomes a **labelled user turn**, not an unlabelled
+    /// assistant one. That is the whole repair, and it needs no vendor change:
+    /// the seed API maps `"agent"`/`"assistant"` to the assistant role and
+    /// everything else to the user role, so the reading agent sees its own
+    /// prior turns as its own and everyone else's as messages addressed to it,
+    /// each carrying the speaker's name.
+    ///
+    /// The label is prefixed into the body because the wire shape is a
+    /// `(role, content)` pair and has nowhere else to put it. `"{who}: {what}"`
+    /// is the form the desk transcript itself reads in, so the model is not
+    /// being taught a new notation.
+    fn flatten(self) -> (String, String) {
+        match self.speaker {
+            Speaker::Operator | Speaker::Viewer => (self.role.to_string(), self.text),
+            Speaker::Other(label) => ("user".to_string(), format!("{label}: {}", self.text)),
+        }
+    }
 }
 
 /// Keeps each root's **first** reply and drops the rest (issue #1890 D part 3).
@@ -261,7 +360,7 @@ fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
     for entry in entries {
         match entry.parent {
             // A root: always the channel's own line.
-            None => out.push((entry.role.to_string(), entry.text)),
+            None => out.push(entry.flatten()),
             Some(root) => {
                 // **The reply, and only an agent's.** Deduping on the parent
                 // alone kept whichever parented line came first — and inside a
@@ -273,8 +372,13 @@ fn keep_first_reply_per_root(entries: Vec<SeedEntry>) -> Vec<(String, String)> {
                 // An operator's follow-up is thread body: it belongs to the
                 // thread's own seed, never to the channel's, which is why it is
                 // dropped here rather than counted.
+                //
+                // Keyed on the **role**, not the speaker: a teammate's reply is
+                // still this channel's answer to the question, and narrowing on
+                // `Speaker::Viewer` would seed a question whose only answer came
+                // from a colleague as an unanswered one (issue #1956).
                 if entry.role == "agent" && answered.insert(root) {
-                    out.push((entry.role.to_string(), entry.text));
+                    out.push(entry.flatten());
                 }
             }
         }
@@ -351,12 +455,20 @@ impl SelfBoundary<'_> {
 ///
 /// Walks the log newest-first (`read_before`), keeps only the events
 /// [`chat_history::owns`] admits for this desk **and [`in_thread`] admits for
-/// `thread_root`**, maps each to a role
-/// (`OperatorMessage` → `user`, `AgentReply` → `agent`), stops once `window`
-/// messages are gathered, and reverses to chronological order. Non-conversational
-/// owned events (a settled-dispatch terminal, reactions, anything without body
-/// text) are skipped even when `owns` admits them — a seed needs role + text, not
-/// structural markers.
+/// `thread_root`**, maps each to a role and a [`Speaker`]
+/// (`OperatorMessage` → the operator's `user` turn, `AgentReply` → `agent`,
+/// attributed to `viewer_agent_id` or to whoever else authored it), stops once
+/// `window` messages are gathered, and reverses to chronological order.
+/// Non-conversational owned events (a settled-dispatch terminal, reactions,
+/// anything without body text) are skipped even when `owns` admits them — a
+/// seed needs role + text, not structural markers.
+///
+/// `viewer_agent_id` is **who the seed is for**, and it does not scope the walk
+/// at all — the desk's transcript is shared and every teammate projects the
+/// same list. It decides only how each turn is *attributed* on the way out
+/// (issue #1956): this agent's own replies keep the assistant role, and every
+/// other author's become labelled user turns, so a room with more than one
+/// teammate stops reading as one agent talking to itself. See [`Speaker`].
 ///
 /// `thread_root` scopes the projection to one conversation within the desk:
 /// `None` is the channel itself (unparented lines only — every message in a
@@ -398,11 +510,18 @@ impl SelfBoundary<'_> {
 ///
 /// Best-effort: a read error yields an empty seed (the caller then falls back to
 /// the OpenHuman transcript lookup) rather than failing the turn.
+///
+/// Eight arguments over a parameter struct: every one of them is already
+/// spelled at the single production call site by
+/// [`ChatSeedRequest::build`], which is the type that exists to carry them
+/// together — a second one here would be that struct's shape written twice.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_chat_seed(
     events: &Arc<dyn EventLog>,
     company: &CompanyId,
     desk_id: &str,
     desk_name: &str,
+    viewer_agent_id: &str,
     thread_root: Option<EventSeq>,
     window: usize,
     boundary: SelfBoundary<'_>,
@@ -489,18 +608,36 @@ pub async fn build_chat_seed(
                     ..
                 } => Some((
                     "user",
+                    Speaker::Operator,
                     crate::brain::medulla::effects::with_attachment_refs(text, attachments),
                     *parent,
                 )),
-                CompanyEvent::AgentReply { text, parent, .. } => {
-                    Some(("agent", text.clone(), *parent))
-                }
+                // The author rides along since #1956: `agent_id` used to fall
+                // into the `..` here, which is the whole defect — every reply on
+                // the desk then mapped to the same anonymous `"agent"` and the
+                // reading agent got its teammates' words back in its own
+                // assistant role. See [`Speaker`].
+                CompanyEvent::AgentReply {
+                    agent_id,
+                    text,
+                    parent,
+                    ..
+                } => Some((
+                    "agent",
+                    if agent_id == viewer_agent_id {
+                        Speaker::Viewer
+                    } else {
+                        Speaker::Other(agent_id.clone())
+                    },
+                    text.clone(),
+                    *parent,
+                )),
                 // `owns` also admits `DeskTaskCompleted` (a structural "finished →
                 // In review" marker), but it carries no conversational body — do
                 // not seed it as a turn.
                 _ => None,
             };
-            let Some((role, text, parent)) = mapped else {
+            let Some((role, speaker, text, parent)) = mapped else {
                 continue;
             };
             if text.trim().is_empty() {
@@ -521,14 +658,24 @@ pub async fn build_chat_seed(
                     // an entry known to be the turn's own request is not
                     // history for the turn to read back.
                     if boundary.seeds_its_own_match() {
-                        collected.push(SeedEntry { role, text, parent });
+                        collected.push(SeedEntry {
+                            role,
+                            speaker,
+                            text,
+                            parent,
+                        });
                     }
                     if is_root {
                         reached_root = true;
                         break;
                     }
                 } else {
-                    pending.push(SeedEntry { role, text, parent });
+                    pending.push(SeedEntry {
+                        role,
+                        speaker,
+                        text,
+                        parent,
+                    });
                     if pending.len() > window {
                         pending.truncate(window);
                     }
@@ -540,7 +687,12 @@ pub async fn build_chat_seed(
                 continue;
             }
 
-            collected.push(SeedEntry { role, text, parent });
+            collected.push(SeedEntry {
+                role,
+                speaker,
+                text,
+                parent,
+            });
             if is_root {
                 reached_root = true;
                 break;
@@ -566,10 +718,7 @@ pub async fn build_chat_seed(
     // is a worse seed than the pre-#1890 leak it replaced.
     match thread_root {
         None => keep_first_reply_per_root(collected),
-        Some(_) => collected
-            .into_iter()
-            .map(|entry| (entry.role.to_string(), entry.text))
-            .collect(),
+        Some(_) => collected.into_iter().map(SeedEntry::flatten).collect(),
     }
 }
 
@@ -748,13 +897,24 @@ mod tests {
         }
     }
 
+    /// The agent every seed below is built **for**, and the author `reply`
+    /// journals under — so an unqualified fixture reply is the viewer's own
+    /// prior turn, and the pre-#1956 assertions still read as written.
+    const VIEWER: &str = "ceo";
+
     fn reply(seq: u64, chat_id: &str, text: &str) -> StoredEvent {
+        reply_by(seq, chat_id, VIEWER, text)
+    }
+
+    /// A reply journaled by a named author — a teammate, or one of the reserved
+    /// non-teammate authors `chat_history::is_known_author` enumerates.
+    fn reply_by(seq: u64, chat_id: &str, agent_id: &str, text: &str) -> StoredEvent {
         StoredEvent {
             seq: EventSeq::new(seq),
             company: CompanyId::new("acme"),
             event: CompanyEvent::AgentReply {
                 chat_id: chat_id.to_string(),
-                agent_id: "ceo".to_string(),
+                agent_id: agent_id.to_string(),
                 text: text.to_string(),
                 steps: Vec::new(),
                 task_id: None,
@@ -810,6 +970,10 @@ mod tests {
             &CompanyId::new("acme"),
             desk_id,
             desk_name,
+            // The fixtures' own author (see `reply`), so every case written
+            // before #1956 keeps asserting the unlabelled `"agent"` turns it
+            // always did — those are the viewer's own replies.
+            VIEWER,
             // The channel-level conversation. Every fixture below journals
             // `parent: None`, which is what an unthreaded company writes — so
             // these cases assert the pre-#1890 behaviour is byte-identical.
@@ -1064,6 +1228,7 @@ mod tests {
             &CompanyId::new("acme"),
             "general",
             "general",
+            VIEWER,
             None,
             CHAT_SEED_WINDOW,
             SelfBoundary::Seq(EventSeq::new(seq)),
@@ -1222,6 +1387,7 @@ mod tests {
             &CompanyId::new("acme"),
             "general",
             "general",
+            VIEWER,
             None,
             CHAT_SEED_WINDOW,
             SelfBoundary::Text("deploy production"),
@@ -1255,7 +1421,18 @@ mod tests {
     /// message's OWN parent, never the message itself, which is what stops a
     /// thread nesting inside a thread.
     fn reply_in(seq: u64, chat_id: &str, text: &str, parent: u64) -> StoredEvent {
-        let mut stored = reply(seq, chat_id, text);
+        reply_by_in(seq, chat_id, VIEWER, text, parent)
+    }
+
+    /// [`reply_in`] by a named author (#1956).
+    fn reply_by_in(
+        seq: u64,
+        chat_id: &str,
+        agent_id: &str,
+        text: &str,
+        parent: u64,
+    ) -> StoredEvent {
+        let mut stored = reply_by(seq, chat_id, agent_id, text);
         if let CompanyEvent::AgentReply { parent: p, .. } = &mut stored.event {
             *p = Some(EventSeq::new(parent));
         }
@@ -1274,6 +1451,7 @@ mod tests {
             &CompanyId::new("acme"),
             desk,
             desk,
+            VIEWER,
             thread_root.map(EventSeq::new),
             CHAT_SEED_WINDOW,
             SelfBoundary::Text(current_message),
@@ -1473,6 +1651,7 @@ mod tests {
             &CompanyId::new("acme"),
             "growth",
             "growth",
+            VIEWER,
             Some(EventSeq::new(OLD)),
             CHAT_SEED_WINDOW,
             SelfBoundary::Text("follow-up"),
@@ -1542,6 +1721,161 @@ mod tests {
         );
     }
 
+    // ── Attribution (#1956) ──────────────────────────────────────────────
+
+    /// A seed built for a named viewer. The desk and boundary are fixed —
+    /// these cases are about *who spoke*, and every other axis has its own
+    /// section above.
+    async fn seed_for(
+        log: FixedLog,
+        viewer: &str,
+        thread_root: Option<u64>,
+    ) -> Vec<(String, String)> {
+        let events: Arc<dyn EventLog> = Arc::new(log);
+        build_chat_seed(
+            &events,
+            &CompanyId::new("acme"),
+            "growth",
+            "growth",
+            viewer,
+            thread_root.map(EventSeq::new),
+            CHAT_SEED_WINDOW,
+            SelfBoundary::Text(""),
+        )
+        .await
+    }
+
+    /// The reported defect. Two teammates answer on one desk; the seed built
+    /// for one of them must not hand it the other's words in its own assistant
+    /// role.
+    #[tokio::test]
+    async fn a_teammates_reply_is_a_labelled_user_turn() {
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "what did we learn?"),
+            reply(2, "growth", "CAC is down 12%"),
+            reply_by(3, "growth", "ada", "and retention held flat"),
+        ]);
+        let seed = seed_for(log, VIEWER, None).await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "what did we learn?".to_string()),
+                ("agent".to_string(), "CAC is down 12%".to_string()),
+                (
+                    "user".to_string(),
+                    "ada: and retention held flat".to_string()
+                ),
+            ],
+            "the viewer's own reply is assistant, Ada's is a labelled user turn: {seed:?}"
+        );
+    }
+
+    /// The same journal, read by the other teammate. Attribution is a property
+    /// of the reader, not of the event — so the two seeds are mirror images,
+    /// and neither agent sees a first-person transcript of a room it shares.
+    #[tokio::test]
+    async fn the_same_transcript_reads_differently_for_each_teammate() {
+        let events = vec![
+            operator(1, Some("growth"), "what did we learn?"),
+            reply(2, "growth", "CAC is down 12%"),
+            reply_by(3, "growth", "ada", "and retention held flat"),
+        ];
+        let ada = seed_for(FixedLog(events.clone()), "ada", None).await;
+        assert_eq!(
+            ada,
+            vec![
+                ("user".to_string(), "what did we learn?".to_string()),
+                ("user".to_string(), "ceo: CAC is down 12%".to_string()),
+                ("agent".to_string(), "and retention held flat".to_string()),
+            ],
+            "Ada owns her own line and reads the CEO's as a colleague's: {ada:?}"
+        );
+        let ceo = seed_for(FixedLog(events), VIEWER, None).await;
+        assert_ne!(
+            ada, ceo,
+            "one desk, two readings — a shared transcript that read the same for \
+             everybody is the collapse #1956 reports"
+        );
+    }
+
+    /// A host notice and a delivered workflow report are journaled under
+    /// reserved non-teammate authors. They were the most misleading rows of all
+    /// under the old projection: the runtime talking about the agent, arriving
+    /// as the agent talking about itself.
+    #[tokio::test]
+    async fn the_runtimes_own_lines_are_not_the_agents_words() {
+        let log = FixedLog(vec![
+            reply_by(1, "growth", crate::ports::SYSTEM_AUTHOR, "Acknowledged."),
+            reply_by(
+                2,
+                "growth",
+                crate::runtime::WORKFLOW_REPLY_AUTHOR,
+                "run 7 finished",
+            ),
+            reply(3, "growth", "on it"),
+        ]);
+        let seed = seed_for(log, VIEWER, None).await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "system: Acknowledged.".to_string()),
+                (
+                    "user".to_string(),
+                    "workflow-report: run 7 finished".to_string()
+                ),
+                ("agent".to_string(), "on it".to_string()),
+            ],
+            "each reserved author says who it is: {seed:?}"
+        );
+    }
+
+    /// Inside a thread the whole exchange is seeded (see
+    /// [`a_thread_still_sees_its_whole_exchange`]) — and every line of it is
+    /// attributed, not just the channel-level ones.
+    #[tokio::test]
+    async fn a_thread_attributes_every_speaker() {
+        let log = FixedLog(vec![
+            operator(10, Some("growth"), "who owns the launch?"),
+            reply_in(11, "growth", "I can take the email", 10),
+            reply_by_in(12, "growth", "ada", "I will take the landing page", 10),
+            operator_in(13, Some("growth"), "good — go", 10),
+        ]);
+        let seed = seed_for(log, VIEWER, Some(10)).await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "who owns the launch?".to_string()),
+                ("agent".to_string(), "I can take the email".to_string()),
+                (
+                    "user".to_string(),
+                    "ada: I will take the landing page".to_string()
+                ),
+                ("user".to_string(), "good — go".to_string()),
+            ],
+            "a thread the viewer shares with Ada, with Ada in it: {seed:?}"
+        );
+    }
+
+    /// The channel-level narrowing keeps each root's first **reply**, and a
+    /// teammate's reply is one. Keying it on the viewer instead would seed a
+    /// question a colleague already answered as an unanswered one.
+    #[tokio::test]
+    async fn the_channel_keeps_a_teammates_reply_as_the_answer() {
+        let log = FixedLog(vec![
+            operator(20, Some("growth"), "what is CAC?"),
+            reply_by_in(21, "growth", "ada", "$412, up 18%", 20),
+        ]);
+        let seed = seed_for(log, VIEWER, None).await;
+        assert_eq!(
+            seed,
+            vec![
+                ("user".to_string(), "what is CAC?".to_string()),
+                ("user".to_string(), "ada: $412, up 18%".to_string()),
+            ],
+            "the question was answered, by somebody: {seed:?}"
+        );
+    }
+
     /// A read failure yields an empty seed, never a propagated error — the caller
     /// then falls back to the OpenHuman transcript lookup.
     #[tokio::test]
@@ -1552,6 +1886,7 @@ mod tests {
             &CompanyId::new("acme"),
             "general",
             "general",
+            VIEWER,
             None,
             CHAT_SEED_WINDOW,
             SelfBoundary::Text(""),
