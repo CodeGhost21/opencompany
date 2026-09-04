@@ -46,5 +46,14 @@
       "entitlements": "entitlements.plist",
       "minimumSystemVersion": "12.0"
     }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "pubkey": "PLACEHOLDER-NOT-A-KEY-see-docs-spec-runtime-desktop-updates-md",
+      "endpoints": [
+        "https://github.com/tinyhumansai/opencompany/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
