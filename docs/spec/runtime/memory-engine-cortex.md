@@ -13,7 +13,50 @@ proposal and the measurements behind it.**
 [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128) is
 registered, and both live suites pass against a real CortexDB. Selectable is not
 selected: `OPENCOMPANY_MEMORY` defaults exactly as it did, and choosing Cortex is
-the decision this record informs. It argues against it.
+the decision this record informs. It argues against it — with **one leg of that
+argument retracted**; see [Correction](#correction-2026-09-04) below.
+
+## Correction (2026-09-04)
+
+**Finding 3 below is withdrawn. It was measured on a server with enrichment
+switched off, and nothing on the wire said so.**
+
+CortexDB v0.9.9 (released 2026-09-03, after this record was written) adds
+`embeddings`, `enrichment` and `content_processors` checks to
+`GET /v1/admin/ready`, precisely because a server could report
+`{"status":"healthy"}` and `degraded: false` while underdelivering. Run against
+our deployment it answered immediately:
+
+```text
+"enrichment": { "enabled": false, "mode": "off",
+  "detail": "enrichment OFF: facts, beliefs and concepts will stay empty" }
+```
+
+Three prerequisites were unset, none of them discoverable on v0.9.8:
+
+1. `CORTEX_ENRICHMENT_URL` / `_API_KEY` — the enrichment router is a separate
+   lane from `CORTEX_LLM_*`. `_MODEL` alone gives it a model with no endpoint.
+2. `CORTEX_ENTITY_API_KEY` — the binary is explicit that "both the primary
+   entity LLM and enrichment router are required". Without it, boot logs
+   `LLM router not configured` even with `CORTEX_LLM_URL`/`_MODEL` both set.
+3. `CORTEX_ENRICHMENT_DELAY_SECONDS` — **the on/off gate**. Unset means
+   enrichment is off entirely: "events/episodes/recall only".
+
+With all three wired, enrichment reports `mode: "deferred:5s"`, both routers
+start, and 600 events drain through the pipeline. Facts still indexed 0 — but
+that run is void too: the embedding provider was returning `402 Insufficient
+credits` (0 ok / 622 failed, resident vectors 2009 -> 0). No embeddings means no
+vectors, no LLM lanes and no facts, so it measures our billing, not Cortex.
+
+**Status: the derived tier is unproven in both directions.** Re-measurement is
+pending provider credit. What survives unchanged is finding 2 — the isolation
+leak — which *forces* instance-per-tenant rather than blocking it: it removes
+the shared-instance-with-per-tenant-credentials row from the topology table, and
+instance-per-tenant needs no token scoping at all. The concepts lane also still
+fails, with both routers verifiably up. So the architecture conclusion is
+untouched; what is suspended is the "nothing over the incumbents" leg, which is
+the part that made declining look obvious rather than merely defensible.
+Tracked on [#2072](https://github.com/tinyhumansai/opencompany/issues/2072).
 
 ## Findings first
 
@@ -39,12 +82,11 @@ question, and the recommendation follows from them.
    `cortex-auth-ref` issuer — which is absent from the v0.9.8 assets, has no
    public repository, and no published contract. So the reachable minter does
    not isolate, and the isolating one is not reachable.
-3. **The derived fact and belief tier does not work.** Facts, Beliefs and
-   Understanding stay empty with the extraction and enrichment routers enabled
-   and reporting healthy; only Events and Episodes hold data. These are Cortex
-   *layers*, not contract capability families — the audit cannot fire on them —
-   so this is a reason Cortex offers nothing over the incumbent drivers, not a
-   bind-time failure.
+3. ~~**The derived fact and belief tier does not work.**~~ **Withdrawn — see
+   [Correction](#correction-2026-09-04).** Facts, Beliefs and Understanding were
+   empty, but enrichment was off and the server had no way to report it. What
+   still holds is the structural half: these are Cortex *layers*, not contract
+   capability families, so the audit cannot fire on them however empty they are.
 4. **Retrieval quality is real, and comes from embeddings alone.** Ranked recall
    over the Events layer is good and needs no LLM lanes at all.
 5. **The contract's upsert has no direct mapping, but a conformant driver is
@@ -118,7 +160,9 @@ The empty layers are real, but they are **not** a capability-audit finding, and
 it is worth separating the two because conflating them points a driver plan at
 the wrong thing.
 
-Measured on the deployment, with the LLM lanes configured and healthy:
+Measured on the deployment, with the LLM lanes believed configured and the
+server reporting healthy — see [Correction](#correction-2026-09-04) for why that
+belief was wrong:
 
 | Cortex layer | Endpoint | Contents |
 |---|---|---|
@@ -137,9 +181,10 @@ driver carries an over-claim risk it lives in `Ingest`, `Entities`, `Tree` or
 `Retrieval`, and a driver plan should name which of those it intends to
 advertise and on what evidence.
 
-What the empty layers *do* mean is commercial rather than structural: the
+What the empty layers *would* mean is commercial rather than structural: the
 derived fact/belief tier is the reason to prefer Cortex over
-`supermemory`/`mem0`/`cognee` at all, and it does not work. That is the finding.
+`supermemory`/`mem0`/`cognee` at all. Whether it works is now open — the
+measurement above did not test it.
 
 ### The audit gap that is real, and is not about Cortex
 
@@ -189,7 +234,10 @@ POST /v1/beliefs/build
  "reasons":{"no_belief_shaped_events":1,"no_facts_in_scope":1}}
 ```
 
-Beliefs are gated on Facts; Facts never extract; beliefs never build.
+Beliefs are gated on Facts; Facts did not extract; beliefs did not build. **This
+run is subject to the [Correction](#correction-2026-09-04) too** — `no_facts_in_scope`
+is exactly what an enrichment-off server reports, so this tests the same
+misconfiguration rather than belief revision.
 
 What recall does with the contradiction is adequate *by accident*: the correction
 ranks first on semantic similarity, while the superseded claim is still returned
@@ -395,9 +443,11 @@ Portability family. The existing runbook in `memory-engine.md` applies unchanged
 its per-tenant-credential caution is satisfied by the instance-per-tenant
 topology. Hosted-target enumeration cost still applies.
 
-**Phase 4 — revisit the derived layers**, only if the upstream defects are fixed.
-That is the point at which Cortex would offer something the incumbent drivers do
-not.
+**Phase 4 — revisit the derived layers.** Previously gated on upstream defects
+being fixed; per the [Correction](#correction-2026-09-04) it is now gated on
+re-measuring them on a correctly configured server, since whether there is an
+upstream defect at all is unproven. That is the point at which Cortex would
+offer something the incumbent drivers do not.
 
 ## Open questions
 
@@ -406,13 +456,15 @@ not.
 - Is the v1 minter's `scope` advisory rather than enforcing, or is the gap in
   finding 2 a defect? And what should a self-hosted multi-tenant deployment use
   instead — is `cortex-auth-ref` published, or is an external OIDC provider
-  expected, against what contract? This decides whether the strong isolation tier
-  is reachable at all, though the derived-layer finding still decides adoption.
+  expected, against what contract? This decides whether a *shared* instance can
+  ever reach the strong tier; instance-per-tenant reaches it without the minter.
+  Adoption was decided by the derived-layer finding, which is now withdrawn.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
   so a self-hosted deployment's support path is itself unproven.
 - Is there an undocumented prerequisite for fact extraction that we missed?
+  **Yes — three.** See [Correction](#correction-2026-09-04).
 - Will Cortex add an upsert path? **Answered enough to decide on.** No stateful
   key index is needed — append-and-fold works and passes. The question is no
   longer whether a driver is possible but whether its cost is worth paying: a
@@ -426,7 +478,8 @@ not.
   tracker is packaging-only and Cortex Cloud support presumes a customer
   relationship. Worth settling when we contact them about the upsert gap.
 - If Facts and Beliefs stay unreachable, does Cortex beat `supermemory` / `mem0`
-  / `cognee` on retrieval alone? **No.** Its ranked recall is vector search over
+  / `cognee` on retrieval alone? **No — but the premise is now unproven**
+  ([Correction](#correction-2026-09-04)). Its ranked recall is vector search over
   the event log — confirmed on a fresh scope queried before any derived layer had
   built — which is what all three incumbents already provide through this seam,
   without a scan per read or a multi-second write.
