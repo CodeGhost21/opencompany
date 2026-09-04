@@ -667,11 +667,11 @@ mod test {
             };
             event.exception.values.push(Exception {
                 ty: "Error".into(),
-                value: Some(format!("token: {} rejected", credential_shaped("ghp_", 36)).into()),
+                value: Some(format!("token: {} rejected", credential_shaped("ghp_", 36))),
                 ..Default::default()
             });
             event.breadcrumbs.values.push(Breadcrumb {
-                message: Some(format!("using {}", credential_shaped("sk-proj-", 20)).into()),
+                message: Some(format!("using {}", credential_shaped("sk-proj-", 20))),
                 data: [(
                     "url".to_string(),
                     Value::String("https://u:hunter2@h/1".into()),

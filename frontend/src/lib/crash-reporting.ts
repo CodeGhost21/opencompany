@@ -290,6 +290,23 @@ export function scrubSecrets(text: string): string {
  * are worth seeing belongs in the operator's own Sentry project, where they can
  * see what they are suppressing.
  */
+/**
+ * Scrubs the free-form `data` a context can carry, leaving its typed fields.
+ *
+ * The `trace` context's `data` holds `url.full` — the address bar, verbatim,
+ * including the magic-link `?code=` — so this is not a defensive measure. It
+ * was found by capturing a real outbound envelope, which had it in clear while
+ * the span descriptions beside it were correctly redacted.
+ */
+function scrubContextData<T extends Record<string, unknown>>(context: T): T {
+  const data = (context as { data?: Record<string, unknown> }).data;
+  if (!data) return context;
+  for (const [key, value] of Object.entries(data)) {
+    if (typeof value === "string") data[key] = scrubSecrets(value);
+  }
+  return context;
+}
+
 export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
   // Identity. `sendDefaultPii: false` already withholds the IP address; this
   // covers the fields an integration could populate later. `user` is never set
@@ -315,10 +332,17 @@ export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
   // Contexts, allow-listed. Anything the SDK did not derive from the platform
   // is dropped rather than scrubbed, because an unknown context has unknown
   // shape and an allow-list fails in the safe direction.
+  //
+  // `trace` is on the list and must stay on it: it is what associates this
+  // error with the transaction it happened inside, so dropping it would break
+  // exactly the "which request caused this" link tracing exists for. It is the
+  // one allow-listed context that carries free-form `data` — `url.full` among
+  // it — so unlike the platform three it is scrubbed rather than trusted.
   event.contexts = {
     os: event.contexts?.os,
     browser: event.contexts?.browser,
     device: event.contexts?.device,
+    trace: event.contexts?.trace && scrubContextData(event.contexts.trace),
   };
 
   if (event.message) event.message = scrubSecrets(event.message);
@@ -551,6 +575,17 @@ export function sanitizeTransaction(event: TransactionEvent): TransactionEvent |
       if (typeof value === "string" && breadcrumb.data) {
         breadcrumb.data[key] = scrubSecrets(value);
       }
+    }
+  }
+
+  // Not allow-listed the way an error event's contexts are: a transaction's
+  // `trace` context IS the transaction, so keeping three platform entries and
+  // dropping the rest would throw the payload away. Scrubbed instead — and
+  // `contexts.trace.data["url.full"]` is why, since it is the address bar
+  // verbatim, magic-link code and all.
+  for (const context of Object.values(event.contexts ?? {})) {
+    if (context && typeof context === "object") {
+      scrubContextData(context as Record<string, unknown>);
     }
   }
 

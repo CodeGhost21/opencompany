@@ -318,9 +318,33 @@ describe("sanitizeEvent", () => {
 
   it("allow-lists contexts rather than scrubbing them", () => {
     // An unknown context has unknown shape, so the list fails in the safe
-    // direction.
+    // direction. `redux` above must not survive.
     const sanitized = sanitizeEvent(hostileEvent());
-    expect(Object.keys(sanitized.contexts ?? {}).sort()).toEqual(["browser", "device", "os"]);
+    expect(Object.keys(sanitized.contexts ?? {})).not.toContain("redux");
+    expect(sanitized.contexts?.browser?.name).toBe("Chrome");
+  });
+
+  it("keeps the trace context, scrubbed, so the error stays on its trace", () => {
+    // Dropping `trace` would sever the link between an error and the request
+    // that caused it — the whole point of distributed tracing. But its `data`
+    // carries `url.full`, which is the address bar verbatim.
+    const sanitized = sanitizeEvent({
+      type: undefined,
+      contexts: {
+        trace: {
+          trace_id: "ed12b4924c1b4fc3a1b87ba462a40b7c",
+          span_id: "8e41772640821824",
+          data: {
+            "url.full": "http://host/?code=Xj7wQ2mNp4Lk9RtVb3Zc8Hy1Ds5Fg6Ae0Ui2Oq7Pw3",
+            "url.path": "/",
+          },
+        },
+      },
+    } as unknown as ErrorEvent);
+    expect(sanitized.contexts?.trace?.trace_id).toBe("ed12b4924c1b4fc3a1b87ba462a40b7c");
+    const rendered = JSON.stringify(sanitized);
+    expect(rendered).not.toContain("Xj7wQ2mNp4Lk9RtVb3Zc8Hy1Ds5Fg6Ae0Ui2Oq7Pw3");
+    expect(rendered).toContain("url.path");
   });
 
   it("strips frame locals and source context", () => {
@@ -383,6 +407,15 @@ describe("sanitizeTransaction", () => {
         },
       ],
       breadcrumbs: [{ message: "GET https://u:hunter2@host.example/api/v1" }],
+      contexts: {
+        trace: {
+          trace_id: "ed12b4924c1b4fc3a1b87ba462a40b7c",
+          span_id: "8e41772640821824",
+          // Found in a captured envelope: the address bar, verbatim, while the
+          // span descriptions beside it were correctly redacted.
+          data: { "url.full": "http://host/?crash=1&code=magic-link-code&api_key=hunter2" },
+        },
+      },
     } as unknown as TransactionEvent;
   }
 
