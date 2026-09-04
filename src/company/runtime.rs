@@ -6093,9 +6093,14 @@ impl CompanyRuntime {
             self.grants.take_blocker_resolution(id);
             return Ok((ResolveReceipt::AlreadyResolved, None));
         }
-        self.journal
+        if let Err(err) = self
+            .journal
             .record_blocker_resolution(id, &resolution)
-            .await?;
+            .await
+        {
+            self.grants.take_blocker_resolution(id);
+            return Err(err);
+        }
         let receipt = CycleRunner::new(self)
             .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
             .await?;
@@ -7022,6 +7027,12 @@ mod tests {
     impl RefusingJournalStore {
         fn arm(&self) {
             self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Lets appends land again — the volume coming back after a transient
+        /// failure.
+        fn disarm(&self) {
+            self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -9654,6 +9665,103 @@ mod tests {
         assert!(
             runtime.pending_approvals().is_empty(),
             "and the projection row `record_parked` inserted before its append must go with it"
+        );
+    }
+
+    /// **P1 review finding on PR #2038.** `claim_and_settle_blocker` claims
+    /// the blocker's resolution slot before banking it durably. If the bank
+    /// then fails (a transient journal write error), the claim used to stay
+    /// taken with nothing behind it — so a retry lost the race against its
+    /// own earlier attempt and answered `AlreadyResolved` forever, and the
+    /// blocker became unanswerable for the rest of the process's life. The
+    /// claim must be released on that failure so a retry can actually settle.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_transient_journal_failure_releases_the_blocker_claim_for_retry() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let journal = std::sync::Arc::new(RefusingJournalStore::default());
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .with_journal_store(journal.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks before the volume goes away");
+
+        // The volume goes away *after* the park, so the claim/bank/settle
+        // path is what fails, not the park itself.
+        journal.arm();
+        let failed = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await;
+        assert!(
+            failed.is_err(),
+            "the armed journal store must fail the bank and surface the error: {failed:?}"
+        );
+
+        // The volume is back. If the earlier failure left the claim taken,
+        // this retry loses the race against itself and reports
+        // `AlreadyResolved` without ever settling — the bug this test is for.
+        journal.disarm();
+        let (receipt, follow_up) = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await
+            .expect("the retry must be accepted once the volume is back");
+        crate::company::runtime::join_follow_up(follow_up)
+            .await
+            .expect("follow-up runs");
+
+        assert!(
+            matches!(receipt, crate::runtime::cycle::ResolveReceipt::Settled(_)),
+            "a transient journal failure must not permanently strand the claim — the \
+             retry must actually settle the blocker, not report AlreadyResolved forever: \
+             {receipt:?}"
         );
     }
 
