@@ -31,6 +31,22 @@ pub const ENABLE_ENV: &str = "OPENCOMPANY_SENTRY";
 /// Overrides the `environment` tag. Defaults to the deployment kind.
 pub const ENVIRONMENT_ENV: &str = "OPENCOMPANY_SENTRY_ENVIRONMENT";
 
+/// The fraction of requests recorded as performance transactions, `0.0` to
+/// `1.0`. **Absent means `0.0`**, and that is the point.
+///
+/// Errors and transactions are billed separately by Sentry, and a transaction
+/// is emitted for every request rather than only when something goes wrong — so
+/// a rate this repository chose on an operator's behalf would be a recurring
+/// bill they did not ask for. The same argument [`DSN_ENV`] makes about whose
+/// quota this is, one level down: having decided to report at all is not the
+/// same as having decided to report *every request*.
+///
+/// It is also a much larger content surface than an error. A transaction
+/// carries a span per outbound request, each with a URL — which is why
+/// [`super::sanitize_transaction`] exists and why turning this on without it
+/// would undo the care in `observability::redaction`.
+pub const TRACES_SAMPLE_RATE_ENV: &str = "OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE";
+
 /// A Sentry DSN.
 ///
 /// A newtype rather than a bare `String`, on the `analytics::ProjectToken`
@@ -142,6 +158,58 @@ impl Silence {
     }
 }
 
+/// What this process will do about **performance tracing**, which is a
+/// separate decision from whether it reports errors.
+///
+/// Separate because the costs are different in kind. An error event is rare and
+/// is the thing an operator asked for; a transaction is emitted for every
+/// served request whether or not anything went wrong, is billed on its own
+/// quota, and carries a span — with a URL — for every outbound call the request
+/// made. An operator who wants crash reports has not thereby asked for a
+/// per-request feed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Traces {
+    /// Record no transactions. **The default**, and what every install that
+    /// sets only a DSN gets.
+    Off,
+    /// Record this fraction of requests. Always in `0.0 < rate <= 1.0`.
+    Sampled(f32),
+    /// [`TRACES_SAMPLE_RATE_ENV`] was set to something that is not a fraction
+    /// between 0 and 1.
+    ///
+    /// A distinct state rather than a silent fall back to [`Self::Off`], on the
+    /// lesson [`Silence::Unreadable`] records: an operator who typed `0,5` or
+    /// `50%` gets the safe outcome *and* a line saying their value was not
+    /// understood, instead of silence they cannot tell from a working default.
+    Unreadable,
+}
+
+impl Traces {
+    /// The rate to hand the client. Zero unless a rate was configured and read.
+    pub fn rate(self) -> f32 {
+        match self {
+            Self::Sampled(rate) => rate,
+            Self::Off | Self::Unreadable => 0.0,
+        }
+    }
+
+    /// Whether any transaction will be recorded.
+    pub fn is_on(self) -> bool {
+        self.rate() > 0.0
+    }
+
+    /// The clause the boot line adds after the destination.
+    fn describe(self) -> String {
+        match self {
+            Self::Off => "performance tracing off".to_string(),
+            Self::Sampled(rate) => format!("tracing {}% of requests", rate * 100.0),
+            Self::Unreadable => format!(
+                "performance tracing off ({TRACES_SAMPLE_RATE_ENV} is not a number between 0 and 1)"
+            ),
+        }
+    }
+}
+
 /// What this process will do about crash reporting.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Decision {
@@ -155,6 +223,8 @@ pub enum Decision {
         environment: String,
         /// The `release` tag: `opencompany@<version>+<commit>`.
         release: String,
+        /// Whether, and how much, to record performance transactions.
+        traces: Traces,
     },
 }
 
@@ -171,9 +241,11 @@ impl Decision {
                 dsn,
                 environment,
                 release,
+                traces,
             } => format!(
-                "crash reporting: reporting to {} as {release} ({environment})",
-                dsn.loggable()
+                "crash reporting: reporting to {} as {release} ({environment}), {}",
+                dsn.loggable(),
+                traces.describe()
             ),
         }
     }
@@ -301,6 +373,39 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         dsn,
         environment: environment(deployment, env),
         release: release_tag(),
+        traces: traces(env),
+    }
+}
+
+/// The performance-tracing decision.
+///
+/// Absent, blank or unreadable bytes mean [`Traces::Off`] — the same "a
+/// variable nobody set changes nothing" rule the enable switch follows, and for
+/// the stronger reason that this one costs money. A value that parses but is
+/// outside `0.0..=1.0` is [`Traces::Unreadable`] rather than clamped: `100` is
+/// far more likely to mean "100%" than "1.0", and silently reading it as
+/// `1.0`-after-clamping would record every request for an operator who thought
+/// they had asked for something else.
+///
+/// An explicit `0` is [`Traces::Off`] rather than `Sampled(0.0)`, so the boot
+/// line reads the same as it does for an operator who set nothing — which is
+/// the same thing the process will do.
+fn traces(env: &dyn EnvSource) -> Traces {
+    let Some(raw) = env.get_os(TRACES_SAMPLE_RATE_ENV) else {
+        return Traces::Off;
+    };
+    let Some(raw) = raw.to_str().map(str::trim) else {
+        return Traces::Unreadable;
+    };
+    if raw.is_empty() {
+        return Traces::Off;
+    }
+    match raw.parse::<f32>() {
+        // `is_finite` rejects `NaN` and `inf`, both of which `parse` accepts
+        // and neither of which is a sample rate.
+        Ok(rate) if rate.is_finite() && rate == 0.0 => Traces::Off,
+        Ok(rate) if rate.is_finite() && (0.0..=1.0).contains(&rate) => Traces::Sampled(rate),
+        _ => Traces::Unreadable,
     }
 }
 
@@ -343,6 +448,7 @@ mod test {
             dsn,
             environment,
             release,
+            traces,
         } = resolved(&[(DSN_ENV, DSN)])
         else {
             panic!("a configured DSN reports");
@@ -350,6 +456,77 @@ mod test {
         assert_eq!(dsn.expose(), DSN);
         assert_eq!(environment, "self-hosted");
         assert_eq!(release, release_tag());
+        // Reporting errors is not agreeing to a per-request transaction feed.
+        assert_eq!(traces, Traces::Off);
+    }
+
+    #[test]
+    fn performance_tracing_is_off_until_a_rate_is_asked_for() {
+        for pairs in [
+            vec![(DSN_ENV, DSN)],
+            vec![(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, "")],
+            vec![(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, "  ")],
+            // An explicit zero reads the same as never having set it, because
+            // the process does the same thing.
+            vec![(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, "0")],
+            vec![(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, "0.0")],
+        ] {
+            let Decision::Report { traces, .. } = resolved(&pairs) else {
+                panic!("a configured DSN reports: {pairs:?}");
+            };
+            assert_eq!(traces, Traces::Off, "{pairs:?}");
+            assert_eq!(traces.rate(), 0.0);
+            assert!(!traces.is_on());
+        }
+    }
+
+    #[test]
+    fn a_rate_between_zero_and_one_is_taken_as_asked() {
+        for (raw, expected) in [("1", 1.0f32), ("1.0", 1.0), ("0.1", 0.1), (" 0.25 ", 0.25)] {
+            let Decision::Report { traces, .. } =
+                resolved(&[(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, raw)])
+            else {
+                panic!("a configured DSN reports: {raw}");
+            };
+            assert_eq!(traces, Traces::Sampled(expected), "{raw}");
+            assert!(traces.is_on(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_rate_that_is_not_a_fraction_is_refused_rather_than_clamped() {
+        // `100` almost certainly means "100%", and clamping it to 1.0 would
+        // record every request for an operator who meant nothing of the kind.
+        // `-1`, `abc` and `50%` are typos. All of them land on `Off`, and all
+        // of them say so in the boot line.
+        for raw in [
+            "100", "50%", "-1", "-0.5", "1.5", "abc", "0,5", "NaN", "inf",
+        ] {
+            let Decision::Report { traces, .. } =
+                resolved(&[(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, raw)])
+            else {
+                panic!("a configured DSN reports: {raw}");
+            };
+            assert_eq!(traces, Traces::Unreadable, "{raw}");
+            assert_eq!(traces.rate(), 0.0, "{raw}");
+            assert!(!traces.is_on(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn the_boot_line_says_what_tracing_will_do() {
+        // An operator who set a rate and got a typo has to be able to tell that
+        // from one who set nothing, which is the whole reason `Unreadable` is
+        // a separate state.
+        let off = resolved(&[(DSN_ENV, DSN)]).describe();
+        assert!(off.contains("performance tracing off"), "{off}");
+
+        let on = resolved(&[(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, "0.1")]).describe();
+        assert!(on.contains("tracing 10% of requests"), "{on}");
+
+        let typo = resolved(&[(DSN_ENV, DSN), (TRACES_SAMPLE_RATE_ENV, "50%")]).describe();
+        assert!(typo.contains("performance tracing off"), "{typo}");
+        assert!(typo.contains(TRACES_SAMPLE_RATE_ENV), "{typo}");
     }
 
     #[test]

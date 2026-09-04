@@ -30,7 +30,7 @@
 pub mod config;
 pub mod redaction;
 
-pub use config::{Decision, Dsn, Silence, release_tag};
+pub use config::{Decision, Dsn, Silence, Traces, release_tag};
 
 use std::time::Duration;
 
@@ -110,6 +110,7 @@ pub fn init(deployment: Deployment, env: &dyn EnvSource) -> (Decision, Guard) {
         dsn,
         environment,
         release,
+        traces,
     } = &decision
     else {
         return (decision, Guard(None));
@@ -130,10 +131,19 @@ pub fn init(deployment: Deployment, env: &dyn EnvSource) -> (Decision, Guard) {
         // the way there is for spans: an error that happens once is the one
         // worth seeing.
         sample_rate: 1.0,
-        // No performance tracing. Spans carry route templates, argument values
-        // and timings for every request, which is a far larger surface than
-        // errors and is not what this feature is for.
-        traces_sample_rate: 0.0,
+        // Performance tracing, off unless an operator asked for a rate — see
+        // `config::TRACES_SAMPLE_RATE_ENV` for why this repository will not
+        // pick one for them. When it IS on, every transaction leaves through
+        // `ScrubbingTransport` rather than `before_send`, because sentry 0.47
+        // has no `before_send_transaction`; see `scrub_envelope`.
+        traces_sample_rate: traces.rate(),
+        // The SDK's own default, written down rather than inherited. This is
+        // the length of the "what happened just before the crash" timeline —
+        // at `RUST_LOG=info` a busy request can spend a hundred breadcrumbs
+        // quickly, and the number that gets an incident diagnosed is a
+        // deliberate choice, not an accident of the SDK's default changing
+        // under a release.
+        max_breadcrumbs: 100,
         // Attach a stack trace to `capture_message` events too, so a
         // `tracing::error!` says where it came from rather than only what it
         // said. This moves the message text into the last exception's `value`
@@ -141,6 +151,9 @@ pub fn init(deployment: Deployment, env: &dyn EnvSource) -> (Decision, Guard) {
         // can be, precisely so this flag is free to change.
         attach_stacktrace: true,
         before_send: Some(std::sync::Arc::new(sanitize)),
+        // The second scrubbing seam, and the one that catches what
+        // `before_send` structurally cannot. See `ScrubbingTransport`.
+        transport: Some(std::sync::Arc::new(ScrubbingTransportFactory)),
         // Bounded on the way out; see `FLUSH_TIMEOUT`.
         shutdown_timeout: FLUSH_TIMEOUT,
         ..Default::default()
@@ -292,26 +305,34 @@ pub mod scope {
 /// Never returns `None`: this is a scrubber, not a filter. Deciding which
 /// errors are worth seeing is the operator's to make in their own project,
 /// where they can see what they are suppressing.
+/// Runs the scrubber over a string in place, allocating only when it changed.
+#[cfg(feature = "crash-reporting")]
+fn scrub_in_place(text: &mut String) {
+    if let std::borrow::Cow::Owned(scrubbed) = redaction::scrub(text) {
+        *text = scrubbed;
+    }
+}
+
+/// Runs the scrubber over every string leaf of a JSON value.
+///
+/// The structured half of a `tracing` event, a breadcrumb's `data` and a span's
+/// `data` are all arbitrary JSON, so the pass has to recurse rather than look
+/// at the top level.
+#[cfg(feature = "crash-reporting")]
+fn scrub_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => scrub_in_place(text),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_json),
+        serde_json::Value::Object(fields) => fields.values_mut().for_each(scrub_json),
+        _ => {}
+    }
+}
+
 #[cfg(feature = "crash-reporting")]
 fn sanitize(
     mut event: sentry::protocol::Event<'static>,
 ) -> Option<sentry::protocol::Event<'static>> {
     use sentry::protocol::{Context, Stacktrace};
-
-    fn scrub_in_place(text: &mut String) {
-        if let std::borrow::Cow::Owned(scrubbed) = redaction::scrub(text) {
-            *text = scrubbed;
-        }
-    }
-
-    fn scrub_json(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::String(text) => scrub_in_place(text),
-            serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_json),
-            serde_json::Value::Object(fields) => fields.values_mut().for_each(scrub_json),
-            _ => {}
-        }
-    }
 
     fn strip_frames(stacktrace: &mut Stacktrace) {
         for frame in &mut stacktrace.frames {
@@ -373,6 +394,213 @@ fn sanitize(
     }
 
     Some(event)
+}
+
+// ---------------------------------------------------------------------------
+// Transactions: the seam `before_send` cannot reach
+// ---------------------------------------------------------------------------
+
+/// Wraps `router` so each served request becomes a Sentry transaction, and so
+/// a `sentry-trace` header from the console is continued rather than starting a
+/// second, unrelated trace.
+///
+/// # Why this is a function over a `Router` rather than a layer
+///
+/// A tower `Layer` cannot be returned as `impl Layer` from two `#[cfg]`
+/// branches without also naming every bound `Router::layer` puts on the
+/// service it produces. Taking and returning the `Router` keeps all of that
+/// inside one function, so the call site in `server::routes` needs no `#[cfg]`
+/// — the same rule the rest of this module follows.
+///
+/// # Why it checks first
+///
+/// The layers are added **only** when this process is actually recording
+/// transactions. With tracing off — the default, and what every install that
+/// sets nothing but a DSN gets — the router is returned untouched, so a feature
+/// nobody asked for costs nothing on the request path. That check has to happen
+/// here rather than at `init`, because the router is built later; it reads the
+/// live client's options, which is the same thing the sampler will read.
+#[cfg(feature = "crash-reporting")]
+pub fn instrument_http(router: axum::Router) -> axum::Router {
+    use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
+
+    if !transactions_are_on() {
+        return router;
+    }
+    router
+        // Inner: starts the transaction, names it from the matched route
+        // (`/api/v1/companies/{company}` rather than one transaction per
+        // company id), continues an incoming `sentry-trace`, and sets the
+        // status from the response code. `enable_pii` is deliberately NOT
+        // called — that is what would attach the client IP.
+        .layer(SentryHttpLayer::new().enable_transaction())
+        // Outer: a Hub per request, so one request's scope, tags and
+        // breadcrumbs cannot leak into a concurrent request's report. On a
+        // server this is not optional.
+        .layer(NewSentryLayer::<axum::extract::Request>::new_from_top())
+}
+
+/// The same seam with no Sentry in the build: the router, unchanged.
+#[cfg(not(feature = "crash-reporting"))]
+pub fn instrument_http(router: axum::Router) -> axum::Router {
+    router
+}
+
+/// Whether the installed client is recording transactions.
+#[cfg(feature = "crash-reporting")]
+fn transactions_are_on() -> bool {
+    sentry::Hub::current()
+        .client()
+        .is_some_and(|client| client.options().traces_sample_rate > 0.0)
+}
+
+/// Reduces a request to the parts a report may carry: the method, and the URL
+/// with its userinfo, query string and fragment removed.
+///
+/// The query string is the point. A magic-link sign-in is `?code=<43 chars>`,
+/// and `sentry-tower` attaches the request URL to the transaction it starts.
+/// Its own `scrub_pii_from_url` removes userinfo only, so the code would
+/// survive — and a sign-in code in a transaction is a sign-in code in whoever
+/// can read the operator's Sentry project.
+///
+/// Headers, cookies and body are dropped rather than scrubbed: none of them
+/// answers a question a transaction is read to answer.
+#[cfg(feature = "crash-reporting")]
+fn narrow_request(request: sentry::protocol::Request) -> sentry::protocol::Request {
+    let url = request.url.map(|mut url| {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_fragment(None);
+        url
+    });
+    sentry::protocol::Request {
+        method: request.method,
+        url,
+        ..Default::default()
+    }
+}
+
+/// The transaction equivalent of [`sanitize`].
+///
+/// # Why this exists at all
+///
+/// `sentry` 0.47 has **no `before_send_transaction`**. `before_send` is applied
+/// in `Client::prepare_event`, and a transaction never goes through it:
+/// `Transaction::finish` builds an envelope and hands it straight to
+/// `Client::send_envelope`. So the moment `traces_sample_rate` is non-zero,
+/// every transaction would leave this process without passing any of the
+/// scrubbing this module exists for — which would quietly undo the property the
+/// rest of the file is built around.
+///
+/// Checked against the pinned version rather than assumed; a later `sentry` may
+/// grow the hook, at which point this can move into it unchanged.
+#[cfg(feature = "crash-reporting")]
+fn sanitize_transaction(
+    mut transaction: sentry::protocol::Transaction<'static>,
+) -> sentry::protocol::Transaction<'static> {
+    use sentry::protocol::Context;
+
+    // Identity, on the same terms as `sanitize`.
+    transaction.server_name = None;
+    transaction.user = None;
+    transaction.request = transaction.request.take().map(narrow_request);
+
+    // The name is the matched route when `sentry-tower` set it, which is safe
+    // by construction — but a transaction started anywhere else may be named
+    // from something less careful.
+    if let Some(name) = transaction.name.as_mut() {
+        scrub_in_place(name);
+    }
+    for span in &mut transaction.spans {
+        if let Some(description) = span.description.as_mut() {
+            scrub_in_place(description);
+        }
+        span.data.values_mut().for_each(scrub_json);
+    }
+    transaction.extra.values_mut().for_each(scrub_json);
+    for value in transaction.tags.values_mut() {
+        scrub_in_place(value);
+    }
+    for context in transaction.contexts.values_mut() {
+        if let Context::Other(fields) = context {
+            fields.values_mut().for_each(scrub_json);
+        }
+    }
+    transaction
+}
+
+/// Scrubs the items of an outgoing envelope that no callback covers.
+///
+/// Returns the envelope **untouched** when it carries no transaction, which is
+/// every envelope on an install with tracing off and also the only safe answer
+/// for a raw envelope: `Envelope::into_items` yields nothing for one, so
+/// rebuilding indiscriminately would silently empty it.
+#[cfg(feature = "crash-reporting")]
+fn scrub_envelope(envelope: sentry::Envelope) -> sentry::Envelope {
+    use sentry::protocol::EnvelopeItem;
+
+    if !envelope
+        .items()
+        .any(|item| matches!(item, EnvelopeItem::Transaction(_)))
+    {
+        return envelope;
+    }
+    let mut scrubbed = sentry::Envelope::new().with_headers(envelope.headers().clone());
+    for item in envelope.into_items() {
+        match item {
+            EnvelopeItem::Transaction(transaction) => {
+                scrubbed.add_item(sanitize_transaction(transaction));
+            }
+            other => scrubbed.add_item(other),
+        }
+    }
+    scrubbed
+}
+
+/// The default transport, with [`scrub_envelope`] in front of it.
+///
+/// The last seam before bytes leave the process, and therefore the one place a
+/// guarantee can be made about **every** envelope kind rather than about the
+/// two the SDK happens to offer a callback for today. A future SDK that starts
+/// emitting a new item type gets scrubbed by whatever this function learns,
+/// instead of shipping unexamined because nobody noticed a new hook.
+#[cfg(feature = "crash-reporting")]
+struct ScrubbingTransportFactory;
+
+#[cfg(feature = "crash-reporting")]
+impl sentry::TransportFactory for ScrubbingTransportFactory {
+    fn create_transport(
+        &self,
+        options: &sentry::ClientOptions,
+    ) -> std::sync::Arc<dyn sentry::Transport> {
+        std::sync::Arc::new(ScrubbingTransport {
+            // The transport the `ureq` + `rustls` features selected. Wrapped,
+            // never replaced: envelope framing, rate-limit handling and the
+            // background worker stay the SDK's problem.
+            inner: sentry::transports::DefaultTransportFactory.create_transport(options),
+        })
+    }
+}
+
+#[cfg(feature = "crash-reporting")]
+struct ScrubbingTransport {
+    inner: std::sync::Arc<dyn sentry::Transport>,
+}
+
+#[cfg(feature = "crash-reporting")]
+impl sentry::Transport for ScrubbingTransport {
+    fn send_envelope(&self, envelope: sentry::Envelope) {
+        self.inner.send_envelope(scrub_envelope(envelope));
+    }
+
+    fn flush(&self, timeout: Duration) -> bool {
+        self.inner.flush(timeout)
+    }
+
+    fn shutdown(&self, timeout: Duration) -> bool {
+        self.inner.shutdown(timeout)
+    }
 }
 
 #[cfg(test)]
@@ -523,6 +751,129 @@ mod test {
             assert!(frame.pre_context.is_empty());
             assert!(frame.post_context.is_empty());
             assert_eq!(frame.context_line, None);
+        }
+
+        /// One transaction carrying something it must not send in every field
+        /// a transaction has.
+        fn hostile_transaction() -> sentry::protocol::Transaction<'static> {
+            use sentry::protocol::Span;
+
+            let mut transaction = sentry::protocol::Transaction {
+                name: Some("GET /api/v1/companies/{company}".into()),
+                server_name: Some("build-host-42".into()),
+                user: Some(sentry::protocol::User {
+                    email: Some("operator@example.com".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            transaction.request = Some(sentry::protocol::Request {
+                method: Some("GET".into()),
+                url: Some(
+                    "https://key:hunter2@host/api/v1/companies/acme?code=magic-link-code#frag"
+                        .parse()
+                        .expect("a url"),
+                ),
+                headers: [("Cookie".to_string(), "oc_session=hunter2".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            });
+            transaction.spans.push(Span {
+                op: Some("http.client".into()),
+                description: Some("POST https://u:hunter2@provider/v1?api_key=hunter2".into()),
+                data: [(
+                    "http.url".to_string(),
+                    Value::String(format!("https://provider/v1?token={}", "hunter2")),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            });
+            transaction
+                .tags
+                .insert("origin".into(), credential_shaped("th_live_", 20));
+            transaction
+                .extra
+                .insert("detail".into(), Value::String("password=hunter2".into()));
+            transaction
+        }
+
+        #[test]
+        fn no_credential_survives_a_transaction() {
+            // `before_send` does not run on transactions — sentry 0.47 has no
+            // `before_send_transaction`, and `Transaction::finish` posts an
+            // envelope straight to the transport. This is the seam that closes
+            // that, so it is tested on the same terms as the event hook.
+            let sanitized = sanitize_transaction(hostile_transaction());
+            let rendered = serde_json::to_string(&sanitized).expect("a transaction serializes");
+            for leaked in [
+                "hunter2",
+                "magic-link-code",
+                "build-host-42",
+                "operator@example.com",
+                "th_live_AAAA",
+            ] {
+                assert!(!rendered.contains(leaked), "{leaked} survived: {rendered}");
+            }
+        }
+
+        #[test]
+        fn a_transaction_keeps_what_makes_it_readable() {
+            let sanitized = sanitize_transaction(hostile_transaction());
+            // The route template is the whole point of a transaction name.
+            assert_eq!(
+                sanitized.name.as_deref(),
+                Some("GET /api/v1/companies/{company}")
+            );
+            let request = sanitized.request.expect("the request survives, narrowed");
+            assert_eq!(request.method.as_deref(), Some("GET"));
+            assert_eq!(
+                request.url.map(|url| url.to_string()),
+                Some("https://host/api/v1/companies/acme".to_string())
+            );
+            // Headers and cookies are dropped rather than scrubbed: neither
+            // answers a question a transaction is read to answer.
+            assert!(request.headers.is_empty());
+            assert_eq!(sanitized.spans[0].op.as_deref(), Some("http.client"));
+            assert!(
+                sanitized.spans[0]
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| text.contains("provider")),
+                "{:?}",
+                sanitized.spans[0].description
+            );
+        }
+
+        #[test]
+        fn the_transport_scrubs_a_transaction_envelope() {
+            // The guarantee is made at the transport, so it is tested there:
+            // an envelope in, an envelope out, with nothing in between that the
+            // SDK could route around.
+            let mut envelope = sentry::Envelope::new();
+            envelope.add_item(hostile_transaction());
+            let scrubbed = scrub_envelope(envelope);
+            let mut rendered = Vec::new();
+            scrubbed
+                .to_writer(&mut rendered)
+                .expect("an envelope serializes");
+            let rendered = String::from_utf8(rendered).expect("utf-8");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+            assert!(!rendered.contains("magic-link-code"), "{rendered}");
+        }
+
+        #[test]
+        fn an_envelope_with_no_transaction_is_passed_through_untouched() {
+            // Rebuilding indiscriminately would empty a RAW envelope, because
+            // `into_items` yields nothing for one.
+            let mut envelope = sentry::Envelope::new();
+            envelope.add_item(Event {
+                message: Some("api_key=hunter2".into()),
+                ..Default::default()
+            });
+            let before = format!("{envelope:?}");
+            assert_eq!(format!("{:?}", scrub_envelope(envelope)), before);
         }
 
         #[test]

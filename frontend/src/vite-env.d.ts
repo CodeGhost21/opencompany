@@ -14,6 +14,18 @@ interface ImportMetaEnv {
   readonly VITE_SENTRY_ENVIRONMENT?: string;
   /** Exactly `true` fires one smoke event at init, to verify the pipeline. */
   readonly VITE_SENTRY_SMOKE_TEST?: string;
+  /**
+   * The traced fraction of page loads, `0` to `1`. Absent (= `0`) installs no
+   * tracing integration at all. Transactions are billed separately from errors
+   * and are emitted whether or not anything failed.
+   */
+  readonly VITE_SENTRY_TRACES_SAMPLE_RATE?: string;
+  /**
+   * Comma-separated origins that may receive `sentry-trace` / `baggage`
+   * headers, so a console action links to the host request it caused.
+   * Same-origin is always allowed.
+   */
+  readonly VITE_SENTRY_TRACE_PROPAGATION_TARGETS?: string;
 }
 
 interface ImportMeta {

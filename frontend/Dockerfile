@@ -11,6 +11,19 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# Crash reporting is a BUILD-time decision for the console: Vite substitutes
+# these into the bundle, so a variable set when the container runs arrives far
+# too late. Blank — the default — builds a bundle that never initializes the
+# SDK, which is what every build that does not pass them gets.
+# See `docs/spec/runtime/crash-reporting.md`.
+ARG VITE_SENTRY_DSN=
+ARG VITE_SENTRY_ENVIRONMENT=
+ARG VITE_SENTRY_TRACES_SAMPLE_RATE=
+ARG VITE_SENTRY_TRACE_PROPAGATION_TARGETS=
+ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
+    VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
+    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE \
+    VITE_SENTRY_TRACE_PROPAGATION_TARGETS=$VITE_SENTRY_TRACE_PROPAGATION_TARGETS
 RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────

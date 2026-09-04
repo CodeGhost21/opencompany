@@ -2605,15 +2605,23 @@ async fn async_main() -> Result<()> {
                 )));
             };
             // A flush that times out means the round trip is unconfirmed.
-            // Printing the id anyway and exiting zero would be a lie, and this
-            // command exists precisely to be believed.
-            if !crash_guard.flush(std::time::Duration::from_secs(5)) {
-                eprintln!(
-                    "opencompany: WARNING: the queue did not drain within 5s — \
-                     the event may not have reached Sentry."
-                );
-            }
+            // Exiting zero anyway would be a lie, and this command exists
+            // precisely to be believed: automation runs it to decide whether
+            // reporting works, and an unconfirmed send is not a working one.
+            //
+            // The id still goes to stdout first — it is the one thing that
+            // makes the failure investigable, since the event may well have
+            // arrived and only the acknowledgement was late.
+            let drained = crash_guard.flush(std::time::Duration::from_secs(5));
             println!("{event_id}");
+            if !drained {
+                return Err(opencompany::error::OpenCompanyError::Config(
+                    "the crash-reporting queue did not drain within 5s, so delivery of this \
+                     event is unconfirmed. Check network egress to the ingest endpoint. See \
+                     docs/spec/runtime/crash-reporting.md."
+                        .to_string(),
+                ));
+            }
             if panic {
                 eprintln!("opencompany: panicking on request, to exercise the panic hook");
                 panic!("opencompany sentry-test intentional panic");

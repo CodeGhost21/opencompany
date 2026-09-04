@@ -11,6 +11,7 @@ import {
   SMOKE_TEST_MESSAGE,
   resolveCrashReporting,
   sanitizeEvent,
+  sanitizeTransaction,
 } from "@/lib/crash-reporting";
 
 /**
@@ -43,12 +44,27 @@ export function initSentry(): void {
 
     // No IP address and no cookies.
     sendDefaultPii: false,
-    // No performance tracing and no session replay. Both are large content
-    // surfaces — a replay is a recording of the operator's screen, and spans
-    // carry every request's URL and timing — and neither is what this is for.
-    // Set to zero as well as left un-integrated, so enabling an integration
-    // later cannot silently switch sampling on.
-    tracesSampleRate: 0,
+
+    // Performance tracing: off unless the operator set a rate. See
+    // `VITE_SENTRY_TRACES_SAMPLE_RATE`, and `docs/spec/runtime/crash-reporting.md`
+    // for what it costs. The integration below is added on the same condition,
+    // so an install that did not ask for tracing carries no instrumentation
+    // rather than instrumentation that samples nothing.
+    tracesSampleRate: config.tracesSampleRate,
+    // Which origins may receive a `sentry-trace`/`baggage` header. Same-origin
+    // only unless the operator named the host's origin — a trace header sent to
+    // a third party tells them this app is instrumented and hands them an id
+    // that correlates their logs with the operator's.
+    tracePropagationTargets: config.tracePropagationTargets,
+
+    // NO SESSION REPLAY, deliberately, and this is the switch that says so.
+    // A replay is a DOM recording, which on this surface is the founder's chat,
+    // their ledger figures and their workspace text — the exact content
+    // `sanitizeEvent` exists to keep out of a report. `maskAllText` would
+    // reduce it to grey boxes, which for a text console removes the reason to
+    // have it. Zero as well as un-integrated, so adding an integration later
+    // cannot switch sampling on by itself. See the doc for the full reasoning
+    // and for what an operator who wants it anyway has to accept.
     replaysSessionSampleRate: 0,
     replaysOnErrorSampleRate: 0,
 
@@ -90,9 +106,28 @@ export function initSentry(): void {
         history: true,
         xhr: true,
       }),
+      // Page loads, navigations and a span per request — the "what did this
+      // action actually do" half of the timeline, and the half that carries a
+      // `sentry-trace` header to the host so the two sides are one trace.
+      // Added ONLY when a rate was asked for: `tracesSampleRate: 0` would
+      // sample everything out anyway, but the integration still patches
+      // `fetch`, `history` and the performance observer to do it, and an
+      // install that wanted none of this should not pay for that.
+      ...(config.tracesSampleRate > 0
+        ? [
+            Sentry.browserTracingIntegration({
+              // The DOM text of the element clicked is company data; the same
+              // reason `dom: false` is set on breadcrumbs above.
+              enableInp: false,
+            }),
+          ]
+        : []),
     ],
 
     beforeSend: sanitizeEvent,
+    // A SEPARATE hook: `beforeSend` is never called for a transaction, so
+    // without this every span would bypass the scrubber entirely.
+    beforeSendTransaction: sanitizeTransaction,
 
     // Non-actionable browser noise. Every one of these is something the page
     // recovers from on its own: a layout loop the browser already broke, a
@@ -105,6 +140,18 @@ export function initSentry(): void {
       "AbortError",
     ],
   });
+
+  // A rate that was set and could not be read is worth one line, on the same
+  // reasoning as the host's `Silence::Unreadable`: an operator who typed `50%`
+  // must be able to tell their typo from a working default. Only ever reached
+  // on an install that configured a DSN, so it cannot become noise in a local
+  // checkout or in CI.
+  if (config.tracesUnreadable) {
+    console.warn(
+      "VITE_SENTRY_TRACES_SAMPLE_RATE is not a number between 0 and 1; " +
+        "performance tracing is off.",
+    );
+  }
 
   // The one-shot pipeline check. Set `VITE_SENTRY_SMOKE_TEST=true` for a single
   // build, load the console once, and look for this message in Sentry: that

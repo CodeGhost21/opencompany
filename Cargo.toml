@@ -263,6 +263,17 @@ sentry = { version = "0.47.0", default-features = false, optional = true, featur
     "debug-images",
     "ureq",
     "rustls",
+    # Server transactions and, more importantly, trace CONTINUATION: the layer
+    # reads an incoming `sentry-trace` header, so a console action and the host
+    # request it caused are one trace rather than two unrelated ones. Adds
+    # exactly one crate (`sentry-tower`) and no HTTP or TLS stack — verified
+    # with `cargo tree -d`, which shows the same duplicate set before and after.
+    "tower",
+    # Names a transaction from axum's matched route rather than the raw path,
+    # so `/api/v1/companies/{company}` is one transaction instead of one per
+    # company id. Without it a busy install's transaction list is unreadable
+    # and its quota is spent on cardinality.
+    "tower-axum-matched-path",
 ] }
 
 # HMAC-SHA256. Two callers: webhook signing (`HttpWebhookSink`, behind

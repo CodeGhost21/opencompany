@@ -13,7 +13,18 @@
 // token-wise algorithm, same prefix and key vocabularies — so the doc can
 // describe one behaviour rather than two that drift.
 
-import type { ErrorEvent } from "@sentry/react";
+import type { ErrorEvent, Event } from "@sentry/react";
+
+/**
+ * A transaction event, as `beforeSendTransaction` receives it.
+ *
+ * Declared here rather than imported. `@sentry/browser`'s `exports.d.ts` — what
+ * `@sentry/react` re-exports — publishes `ErrorEvent` but **not**
+ * `TransactionEvent`, and reaching past it into `@sentry/core` would be
+ * importing from a package this app does not depend on and does not pin. This
+ * is the SDK's own definition, which is `Event` narrowed by its discriminant.
+ */
+export type TransactionEvent = Event & { type: "transaction" };
 
 /** What a redacted span is replaced with, on both surfaces. */
 export const REDACTED = "[redacted]";
@@ -115,6 +126,46 @@ const TOKEN_PATTERN = /[A-Za-z0-9_.+~-]+/g;
 
 /** Only the punctuation an assignment is written with may separate a pair. */
 const SEPARATOR_PATTERN = /^[ \t:="'>]*$/;
+
+/**
+ * Query-parameter names whose value is a credential *in a URL*, on top of
+ * everything in `SECRET_KEYS`.
+ *
+ * Separate from `SECRET_KEYS` because these words are only unambiguous inside a
+ * query string. `code` is the magic-link sign-in code this console redeems
+ * (`App.tsx`), and a 43-character `?code=` in a breadcrumb or a span is a
+ * working sign-in for whoever can read the operator's Sentry project — but
+ * `code` also appears in ordinary prose and in `code=ECONNREFUSED`, so
+ * redacting it everywhere would eat diagnostics. Inside `?…=` there is no such
+ * ambiguity.
+ *
+ * The gap this closes is real and not hypothetical: `clearMagicLinkFromUrl()`
+ * calls `history.replaceState` after the SDK's history instrumentation is
+ * installed, so the navigation breadcrumb records the URL *before* the code was
+ * removed. Performance tracing adds a second path to the same string, since a
+ * navigation span carries the URL too.
+ */
+const SECRET_QUERY_KEYS = new Set(["code", "state", "sig", "signature"]);
+
+/**
+ * Redacts the values of credential-bearing query parameters, wherever a URL
+ * appears in `text`.
+ *
+ * Runs before the token pass, which cannot see these: `?code=abc` has no
+ * separator the token pass treats as an assignment for a key it knows.
+ */
+function scrubUrlQuery(text: string): string {
+  // A URL's query runs from `?` to whitespace or one of the characters that
+  // ends a URL in prose — the same set `scrubUrlUserinfo` stops at, minus `?`.
+  return text.replace(/\?[^\s"'<>),;]*/g, (query) => {
+    if (!query.includes("=")) return query;
+    return query.replace(/([?&])([^=&]+)=([^&]*)/g, (pair, lead, key, value) => {
+      const normalized = normalizeKey(decodeURIComponent(key));
+      const secret = SECRET_QUERY_KEYS.has(normalized) || SECRET_KEYS.has(normalized);
+      return secret && value.length > 0 ? `${lead}${key}=${REDACTED}` : pair;
+    });
+  });
+}
 
 /**
  * The comparable form of a key token: everything after the last `.`, with `-`
@@ -225,7 +276,7 @@ function scrubUrlUserinfo(text: string): string {
  * recognise a secret that looks like a word.
  */
 export function scrubSecrets(text: string): string {
-  return scrubTokens(scrubUrlUserinfo(text));
+  return scrubTokens(scrubUrlQuery(scrubUrlUserinfo(text)));
 }
 
 /**
@@ -322,6 +373,25 @@ export interface CrashReportingEnv {
   VITE_SENTRY_ENVIRONMENT?: string;
   /** `true` fires one smoke event at init. Anything else does nothing. */
   VITE_SENTRY_SMOKE_TEST?: string;
+  /**
+   * The fraction of page loads traced, `0` to `1`. **Absent means `0`**, and
+   * that is the point: transactions are billed separately from errors and are
+   * emitted whether or not anything went wrong, so a rate this repository chose
+   * would be a recurring bill nobody asked for. Mirrors the host's
+   * `OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE`.
+   */
+  VITE_SENTRY_TRACES_SAMPLE_RATE?: string;
+  /**
+   * Comma-separated origins the browser may attach `sentry-trace` and
+   * `baggage` headers to, on top of same-origin requests.
+   *
+   * Needed only when the console talks to a host on another origin — a Vite dev
+   * server proxies `/api`, and a bundle served by the host is same-origin, so
+   * both are covered by the default. Set it to the host's origin
+   * (`https://api.example.com`) and a console action and the request it caused
+   * become one trace instead of two.
+   */
+  VITE_SENTRY_TRACE_PROPAGATION_TARGETS?: string;
   /** Vite's own dev-server flag, which names the default environment. */
   DEV?: boolean;
 }
@@ -332,6 +402,58 @@ export interface CrashReportingConfig {
   environment: string;
   release: string;
   smokeTest: boolean;
+  /** `0` — the default — means no `browserTracingIntegration` is installed. */
+  tracesSampleRate: number;
+  /**
+   * `true` when `VITE_SENTRY_TRACES_SAMPLE_RATE` was set to something that is
+   * not a fraction between 0 and 1. Distinct from "not set" so the caller can
+   * say so once, rather than leaving an operator who typed `50%` unable to tell
+   * their typo from a working default. The rate is `0` either way.
+   */
+  tracesUnreadable: boolean;
+  /** What `sentry-trace` / `baggage` headers may be attached to. */
+  tracePropagationTargets: (string | RegExp)[];
+}
+
+/**
+ * Same-origin requests, and nothing else.
+ *
+ * The default because it is the only one that cannot leak: a `sentry-trace`
+ * header sent to a third party tells them this app is instrumented and hands
+ * them a trace id that correlates their logs with the operator's. Relative URLs
+ * cover both shapes the console actually runs in — the Vite dev server proxies
+ * `/api` to the host, and a bundle the host serves is same-origin with it.
+ */
+const SAME_ORIGIN_ONLY: RegExp[] = [/^\//];
+
+/**
+ * The traced fraction, and whether the value was readable.
+ *
+ * `100` is refused rather than clamped to `1`, for the reason the host's
+ * `config::traces` gives: it far more likely means "100%" than "1.0", and
+ * clamping would trace every page load for someone who meant nothing of the
+ * kind.
+ */
+function resolveTracesSampleRate(raw: string | undefined): {
+  rate: number;
+  unreadable: boolean;
+} {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return { rate: 0, unreadable: false };
+  const rate = Number(trimmed);
+  if (!Number.isFinite(rate) || rate < 0 || rate > 1) {
+    return { rate: 0, unreadable: true };
+  }
+  return { rate, unreadable: false };
+}
+
+/** The origins trace headers may be attached to, on top of same-origin. */
+function resolveTracePropagationTargets(raw: string | undefined): (string | RegExp)[] {
+  const extra = (raw ?? "")
+    .split(",")
+    .map((target) => target.trim())
+    .filter((target) => target.length > 0);
+  return [...SAME_ORIGIN_ONLY, ...extra];
 }
 
 /**
@@ -375,6 +497,7 @@ export function resolveCrashReporting(
   const dsn = (env.VITE_SENTRY_DSN ?? "").trim();
   if (!dsn || !isUsableDsn(dsn)) return null;
   const environment = (env.VITE_SENTRY_ENVIRONMENT ?? "").trim().toLowerCase();
+  const traces = resolveTracesSampleRate(env.VITE_SENTRY_TRACES_SAMPLE_RATE);
   return {
     dsn,
     // The host defaults this to its deployment kind (`self-hosted`,
@@ -386,5 +509,56 @@ export function resolveCrashReporting(
     // Exactly `true`. Vite env values are always strings, so a loose check
     // would make `VITE_SENTRY_SMOKE_TEST=false` fire the event.
     smokeTest: env.VITE_SENTRY_SMOKE_TEST === "true",
+    tracesSampleRate: traces.rate,
+    tracesUnreadable: traces.unreadable,
+    tracePropagationTargets: resolveTracePropagationTargets(
+      env.VITE_SENTRY_TRACE_PROPAGATION_TARGETS,
+    ),
   };
+}
+
+/**
+ * What leaves the browser for a **transaction**, and what does not.
+ *
+ * A separate hook because `beforeSend` is never called for one: the SDK routes
+ * transactions through `beforeSendTransaction`, so everything `sanitizeEvent`
+ * guarantees would simply not apply to the larger, more frequent payload. The
+ * host has the same split and a worse version of the problem — sentry 0.47 has
+ * no transaction hook at all, so it scrubs at the transport instead.
+ *
+ * Spans are where the content is. A `browserTracing` page load carries one span
+ * per `fetch`/`xhr`, each with the request URL — including the magic-link
+ * `?code=` a navigation can still hold.
+ */
+export function sanitizeTransaction(event: TransactionEvent): TransactionEvent | null {
+  event.server_name = undefined;
+  event.user = undefined;
+  event.request = undefined;
+  delete event.extra;
+
+  if (event.transaction) event.transaction = scrubSecrets(event.transaction);
+
+  for (const span of event.spans ?? []) {
+    if (span.description) span.description = scrubSecrets(span.description);
+    for (const [key, value] of Object.entries(span.data ?? {})) {
+      if (typeof value === "string" && span.data) span.data[key] = scrubSecrets(value);
+    }
+  }
+
+  for (const breadcrumb of event.breadcrumbs ?? []) {
+    if (breadcrumb.message) breadcrumb.message = scrubSecrets(breadcrumb.message);
+    for (const [key, value] of Object.entries(breadcrumb.data ?? {})) {
+      if (typeof value === "string" && breadcrumb.data) {
+        breadcrumb.data[key] = scrubSecrets(value);
+      }
+    }
+  }
+
+  const tags: Record<string, string> = {};
+  for (const [key, value] of Object.entries(event.tags ?? {})) {
+    if (typeof value === "string") tags[key] = scrubSecrets(value);
+  }
+  event.tags = { ...tags, surface: SURFACE };
+
+  return event;
 }

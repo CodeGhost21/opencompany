@@ -179,6 +179,14 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
     // origin is captured per-request in a closure instead — cheap, and it keeps
     // this to two small pieces rather than a middleware stack the codebase
     // otherwise has none of.
+    // A Sentry transaction per served request, and continuation of a
+    // `sentry-trace` header the console sent — so a failed action in the
+    // browser and the request that served it are one trace. A no-op unless the
+    // operator asked for a sample rate, and absent entirely from a build
+    // without the `crash-reporting` feature; see
+    // `docs/spec/runtime/crash-reporting.md`.
+    let router = crate::observability::instrument_http(router);
+
     let cors = state.cors().clone();
     if !cors.is_enabled() {
         return router;

@@ -1,5 +1,9 @@
 # Crash reporting
 
+> Errors, panics and what a report may carry. Its companion,
+> [tracing.md](tracing.md), covers performance tracing, the console-to-host
+> distributed trace, and why Session Replay is not shipped.
+
 What an OpenCompany install reports when something breaks, what it deliberately
 never reports, and how an operator turns it on and proves it works.
 
@@ -56,6 +60,7 @@ that an operator opted into for their own install.
 | `OPENCOMPANY_SENTRY_DSN` | The DSN. **Configuration, never a compiled-in constant** — a DSN baked into a public binary is an ingest endpoint everyone can write to, and it decides whose organisation an install's crashes land in. |
 | `OPENCOMPANY_SENTRY` | `off` forbids reporting and outranks everything else. `on` is accepted and means only "not off": without a DSN there is nowhere to send, so there is nothing to force. |
 | `OPENCOMPANY_SENTRY_ENVIRONMENT` | Overrides the `environment` tag. Defaults to the deployment kind — `desktop`, `self-hosted`, `hosted-tenant` (see [`app::deployment`](../../../src/app/deployment.rs)). |
+| `OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE` | Fraction of requests recorded as performance transactions, `0`–`1`. **Defaults to `0`.** See [tracing.md](tracing.md), including what a rate costs. |
 
 Reporting happens only when **all** of these hold:
 
@@ -97,6 +102,8 @@ built, not when the host runs.
 | `VITE_SENTRY_DSN` | The console's DSN. Usually a *different* Sentry project from the host's: a browser bundle's DSN is public by construction, and mixing it with a server project means anyone who opens the console can write to it. |
 | `VITE_SENTRY_ENVIRONMENT` | Overrides the `environment` tag. Defaults to `development` under `vite dev` and `production` otherwise. Set it to the host's value when the two surfaces should line up in one filter. |
 | `VITE_SENTRY_SMOKE_TEST` | Exactly `true` fires one `console-sentry-smoke-test` event at init. See [Verifying it works](#verifying-it-works). |
+| `VITE_SENTRY_TRACES_SAMPLE_RATE` | Fraction of page loads traced, `0`–`1`. **Defaults to `0`**, which installs no tracing integration at all. See [tracing.md](tracing.md). |
+| `VITE_SENTRY_TRACE_PROPAGATION_TARGETS` | Extra origins that may receive `sentry-trace` headers, comma-separated. Same-origin always may. See [tracing.md](tracing.md). |
 | `VITE_BUILD_COMMIT` | The commit for the release tag, shortened to twelve characters. The frontend's spelling of `OPENCOMPANY_BUILD_COMMIT`. |
 
 There is no `VITE_SENTRY=off`: a bundle is built with a DSN or without one, and
@@ -150,8 +157,8 @@ from the debug info the default `dev`/`release` profiles keep.
 | Breadcrumbs | `warn!` and `info!` events — see the note below | `fetch`, `xhr` and history navigations |
 | Release, environment | yes | yes |
 | Instance identity | the random instance id from [data-root.md](data-root.md), and the storage backend, as tags | none |
-| Performance spans | **no** (`traces_sample_rate: 0`) | **no** |
-| Session replay | n/a | **no**, and the sample rates are pinned to zero as well as the integration left out |
+| Performance spans | **not unless asked for** — `0` by default; see [tracing.md](tracing.md) | **not unless asked for**, and the integration is not even installed at `0` |
+| Session replay | n/a | **no**, and not shippable behind a flag either — the sample rates are pinned to zero and the integration left out. The reasoning, with measurements, is in [tracing.md](tracing.md#session-replay-deliberately-not-shipped). |
 
 **Host breadcrumbs follow `RUST_LOG`.** The Sentry bridge sits under the same
 `EnvFilter` as the terminal formatter, and this crate's default filter is
@@ -249,6 +256,8 @@ option. `frontend/src/lib/sentry.ts` re-adds it by hand for that reason.
 | the `tracing` bridge | `observability::tracing_layer`, added to the subscriber | One seam for every `tracing::error!` in the tree, rather than a reporting call at each. |
 | scope identity | `observability::scope::identify`, from the `serve` arm after the port is bound | The instance id and the storage backend are not known until the companies are registered — the same reason `analytics::boot::install` runs there. |
 | flush | `src/bin/opencompany.rs`, after the bound host stops serving | The error that took the host down is queued at the moment it stops. Bounded at 2s (`observability::FLUSH_TIMEOUT`), sized like `analytics`'s: the collector is a third party, and a drain that overruns Kubernetes' 30s grace buys a `SIGKILL` in the middle of the shutdown those seconds protect. |
+| transaction scrubbing | `observability::ScrubbingTransport`, wrapping the SDK's own transport | `sentry` 0.47 has **no `before_send_transaction`** — `Transaction::finish` posts an envelope straight to the transport — so the guarantee is made at the last point before bytes leave the process, where it covers every envelope kind rather than the ones with a callback. See [tracing.md](tracing.md#scrubbing-a-transaction-and-why-it-is-not-a-before_send). |
+| HTTP transactions | `observability::instrument_http`, from `server::routes::router` | One place, added only when the live client is recording, so an install with tracing off carries no extra middleware. |
 | `Sentry.init` | `frontend/src/main.tsx`, before the first render | A crash during the first render is the one worth reporting, and a boundary armed after it would miss it. |
 | `ErrorBoundary` | `frontend/src/main.tsx`, outside every provider | The thing that crashes may be `ThemeProvider` itself, and a boundary inside a provider cannot catch that provider's own throw. `CrashFallback` therefore depends on no context. |
 
@@ -360,6 +369,8 @@ Named so they are countable rather than implied.
 - **Host cognition is not tagged per company.** A multi-company host reports one
   instance id for all of them. Which company an error belongs to is in the
   `tracing` fields on the event, not in a tag.
+- **Host spans stop at the HTTP boundary.** See
+  [tracing.md](tracing.md#known-limitations).
 - **`Authorization: Token <value>` with an unprefixed value is not scrubbed.**
   `token` is excluded from the no-separator key list because as an English word
   it would eat the next word of ordinary prose ("the token was rejected"). Every

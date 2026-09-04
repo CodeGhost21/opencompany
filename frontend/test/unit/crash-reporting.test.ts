@@ -12,8 +12,10 @@ import {
   REDACTED,
   resolveCrashReporting,
   sanitizeEvent,
+  sanitizeTransaction,
   scrubSecrets,
 } from "@/lib/crash-reporting";
+import type { TransactionEvent } from "@/lib/crash-reporting";
 import type { ErrorEvent } from "@sentry/react";
 
 const DSN = "https://examplePublicKey@o0.ingest.sentry.io/0";
@@ -55,7 +57,66 @@ describe("resolveCrashReporting", () => {
       environment: "production",
       release: RELEASE,
       smokeTest: false,
+      // Agreeing to crash reports is not agreeing to a per-page-load
+      // transaction feed, which is billed separately.
+      tracesSampleRate: 0,
+      tracesUnreadable: false,
+      tracePropagationTargets: [/^\//],
     });
+  });
+
+  it("traces nothing until a rate is asked for", () => {
+    for (const value of [undefined, "", "  ", "0", "0.0"]) {
+      const config = resolveCrashReporting(
+        { VITE_SENTRY_DSN: DSN, VITE_SENTRY_TRACES_SAMPLE_RATE: value },
+        RELEASE,
+      );
+      expect(config?.tracesSampleRate).toBe(0);
+      expect(config?.tracesUnreadable).toBe(false);
+    }
+  });
+
+  it("takes a rate between zero and one as asked", () => {
+    for (const [raw, expected] of [
+      ["1", 1],
+      ["0.1", 0.1],
+      [" 0.25 ", 0.25],
+    ] as const) {
+      const config = resolveCrashReporting(
+        { VITE_SENTRY_DSN: DSN, VITE_SENTRY_TRACES_SAMPLE_RATE: raw },
+        RELEASE,
+      );
+      expect(config?.tracesSampleRate).toBe(expected);
+      expect(config?.tracesUnreadable).toBe(false);
+    }
+  });
+
+  it("refuses a rate that is not a fraction rather than clamping it", () => {
+    // `100` almost certainly means "100%". Clamping it to 1 would trace every
+    // page load for someone who meant nothing of the kind.
+    for (const raw of ["100", "50%", "-1", "1.5", "abc", "0,5", "NaN", "Infinity"]) {
+      const config = resolveCrashReporting(
+        { VITE_SENTRY_DSN: DSN, VITE_SENTRY_TRACES_SAMPLE_RATE: raw },
+        RELEASE,
+      );
+      expect(config?.tracesSampleRate, raw).toBe(0);
+      expect(config?.tracesUnreadable, raw).toBe(true);
+    }
+  });
+
+  it("propagates trace headers same-origin only until a host is named", () => {
+    expect(resolveCrashReporting({ VITE_SENTRY_DSN: DSN }, RELEASE)?.tracePropagationTargets).toEqual(
+      [/^\//],
+    );
+    expect(
+      resolveCrashReporting(
+        {
+          VITE_SENTRY_DSN: DSN,
+          VITE_SENTRY_TRACE_PROPAGATION_TARGETS: " https://api.example.com , https://b.example ",
+        },
+        RELEASE,
+      )?.tracePropagationTargets,
+    ).toEqual([/^\//, "https://api.example.com", "https://b.example"]);
   });
 
   it("refuses a string that is not a Sentry DSN", () => {
@@ -276,5 +337,77 @@ describe("sanitizeEvent", () => {
     // A scrubber, not a filter: deciding which errors are worth seeing belongs
     // in the operator's own project, where they can see what they suppressed.
     expect(sanitizeEvent({ type: undefined })).not.toBeNull();
+  });
+
+  it("redacts a magic-link code from a navigation breadcrumb", () => {
+    // `clearMagicLinkFromUrl()` calls `history.replaceState` AFTER the SDK's
+    // history instrumentation is installed, so the breadcrumb holds the URL as
+    // it was — with a working sign-in code in it.
+    const sanitized = sanitizeEvent({
+      type: undefined,
+      breadcrumbs: [
+        {
+          category: "navigation",
+          data: {
+            from: "/login?company=acme&code=Xj7wQ2mNp4Lk9RtVb3Zc8Hy1Ds5Fg6Ae0Ui2Oq7Pw3",
+            to: "/",
+          },
+        },
+      ],
+    });
+    const rendered = JSON.stringify(sanitized);
+    expect(rendered).not.toContain("Xj7wQ2mNp4Lk9RtVb3Zc8Hy1Ds5Fg6Ae0Ui2Oq7Pw3");
+    // The route itself is the diagnostic and survives.
+    expect(rendered).toContain("/login?company=acme");
+  });
+});
+
+describe("sanitizeTransaction", () => {
+  /** One transaction carrying something it must not send in every field. */
+  function hostileTransaction(): TransactionEvent {
+    return {
+      type: "transaction",
+      transaction: "/companies/:company/desk",
+      server_name: "operator-laptop",
+      user: { email: "operator@example.com" },
+      request: { url: "https://console.example/?code=magic-link-code" },
+      extra: { state: "password=hunter2" },
+      tags: { origin: credentialShaped("th_live_", 20) },
+      spans: [
+        {
+          span_id: "a",
+          trace_id: "b",
+          start_timestamp: 0,
+          data: { "http.url": "https://host.example/api/v1?token=hunter2" },
+          description: "GET https://u:hunter2@host.example/api/v1?code=abc123",
+        },
+      ],
+      breadcrumbs: [{ message: "GET https://u:hunter2@host.example/api/v1" }],
+    } as unknown as TransactionEvent;
+  }
+
+  it("lets no credential or identity through a transaction", () => {
+    // `beforeSend` is never called for a transaction. Without this hook every
+    // span would leave unscrubbed, which is a bigger surface than the events
+    // the rest of this file is careful about.
+    const rendered = JSON.stringify(sanitizeTransaction(hostileTransaction()));
+    for (const leaked of [
+      "hunter2",
+      "magic-link-code",
+      "abc123",
+      "operator-laptop",
+      "operator@example.com",
+      "th_live_AAAA",
+    ]) {
+      expect(rendered, leaked).not.toContain(leaked);
+    }
+  });
+
+  it("keeps what makes a transaction worth reading", () => {
+    const sanitized = sanitizeTransaction(hostileTransaction());
+    // The route template — the whole point of a transaction name.
+    expect(sanitized?.transaction).toBe("/companies/:company/desk");
+    expect(sanitized?.spans?.[0]?.description).toContain("host.example");
+    expect(sanitized?.tags?.surface).toBe("console");
   });
 });

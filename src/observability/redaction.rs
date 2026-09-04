@@ -132,6 +132,18 @@ const SECRET_KEYS: &[&str] = &[
     "dsn",
 ];
 
+/// Query-parameter names whose value is a credential *in a URL*, on top of
+/// everything in [`SECRET_KEYS`].
+///
+/// Separate from [`SECRET_KEYS`] because these words are only unambiguous
+/// inside a query string. `code` is the magic-link sign-in code this crate
+/// mints and the console redeems, and a 43-character `?code=` that reaches a
+/// crash report is a working sign-in for whoever can read the operator's Sentry
+/// project — but `code` is also an ordinary English word and the key in
+/// `code=ECONNREFUSED`, so redacting it everywhere would eat diagnostics.
+/// Inside `?…=` there is no such ambiguity.
+const SECRET_QUERY_KEYS: &[&str] = &["code", "state", "sig", "signature"];
+
 /// HTTP authentication schemes, as *values*: the word before the credential,
 /// never the credential.
 ///
@@ -158,9 +170,18 @@ const SCHEME_KEYS: &[&str] = &["bearer", "basic", "digest", "negotiate"];
 /// Borrows when there is nothing to remove, which is the overwhelmingly common
 /// case: this runs on every string of every event, and most events carry none.
 pub fn scrub(text: &str) -> Cow<'_, str> {
+    // Three passes, in the only order that works: the URL passes have to run
+    // before the token pass, because `:`, `@`, `?` and `&` are the characters
+    // that pass treats as separators, so a URL's credential is invisible to it.
     match scrub_url_userinfo(text) {
-        Cow::Borrowed(borrowed) => scrub_tokens(borrowed),
-        Cow::Owned(owned) => Cow::Owned(scrub_tokens(&owned).into_owned()),
+        Cow::Borrowed(borrowed) => match scrub_url_query(borrowed) {
+            Cow::Borrowed(borrowed) => scrub_tokens(borrowed),
+            Cow::Owned(owned) => Cow::Owned(scrub_tokens(&owned).into_owned()),
+        },
+        Cow::Owned(owned) => {
+            let owned = scrub_url_query(&owned).into_owned();
+            Cow::Owned(scrub_tokens(&owned).into_owned())
+        }
     }
 }
 
@@ -312,12 +333,7 @@ fn scrub_url_userinfo(text: &str) -> Cow<'_, str> {
     while let Some(offset) = text[index..].find("://") {
         let authority_start = index + offset + 3;
         let authority_end = text[authority_start..]
-            .find(|c: char| {
-                matches!(
-                    c,
-                    '/' | '?' | '#' | '"' | '\'' | '<' | '>' | ')' | ',' | ';'
-                ) || c.is_whitespace()
-            })
+            .find(|c: char| matches!(c, '/' | '?' | '#') || ends_a_url(c))
             .map_or(text.len(), |n| authority_start + n);
         // `rfind`, not `find`: a password may itself contain an `@`, and the
         // last one is the delimiter the URL grammar means.
@@ -359,6 +375,69 @@ fn scrub_url_userinfo(text: &str) -> Cow<'_, str> {
 /// So the prefix — the part under test, and the part that has to stay
 /// readable — is written down, and only the body is assembled here. No
 /// credential-shaped literal is committed and no coverage is lost.
+/// The characters that end a URL when one is written inside prose or a log
+/// line. Shared by both URL passes so they agree on where a URL stops.
+fn ends_a_url(c: char) -> bool {
+    matches!(c, '"' | '\'' | '<' | '>' | ')' | ',' | ';') || c.is_whitespace()
+}
+
+/// The query pass: `?code=…&token=…` loses the values of the parameters that
+/// name a credential.
+///
+/// Separate from the token pass for the reason the userinfo pass is: `?` and
+/// `&` are separators there, so `?code=abc` is not a key and its value to it.
+/// Separate from the userinfo pass because it runs on a different span of the
+/// URL and answers a different question.
+fn scrub_url_query(text: &str) -> Cow<'_, str> {
+    let mut out = String::new();
+    let mut copied = 0usize;
+    let mut changed = false;
+    let mut index = 0usize;
+
+    while let Some(offset) = text[index..].find('?') {
+        let query_start = index + offset + 1;
+        let query_end = text[query_start..]
+            .find(|c: char| ends_a_url(c) || c == '#')
+            .map_or(text.len(), |n| query_start + n);
+
+        let mut pair_start = query_start;
+        while pair_start < query_end {
+            let pair_end = text[pair_start..query_end]
+                .find('&')
+                .map_or(query_end, |n| pair_start + n);
+            if let Some(equals) = text[pair_start..pair_end].find('=') {
+                let key = &text[pair_start..pair_start + equals];
+                let value_start = pair_start + equals + 1;
+                let normalized = normalize_key(key);
+                let names_a_secret = SECRET_QUERY_KEYS.contains(&normalized.as_str())
+                    || SECRET_KEYS.contains(&normalized.as_str());
+                // An empty value is already telling nobody anything, and
+                // replacing it would turn `?code=` into something that looks
+                // like a redacted credential that was never there.
+                if names_a_secret && value_start < pair_end {
+                    out.push_str(&text[copied..value_start]);
+                    out.push_str(REDACTED);
+                    copied = pair_end;
+                    changed = true;
+                }
+            }
+            pair_start = pair_end + 1;
+        }
+
+        index = query_end;
+        if index >= text.len() {
+            break;
+        }
+    }
+
+    if changed {
+        out.push_str(&text[copied..]);
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn credential_shaped(prefix: &str, body_len: usize) -> String {
     format!("{prefix}{}", "A".repeat(body_len))
@@ -506,6 +585,40 @@ mod test {
             scrub("connecting to https://db.internal:27017/oc"),
             "connecting to https://db.internal:27017/oc"
         );
+    }
+
+    #[test]
+    fn a_url_query_loses_the_parameters_that_name_a_credential() {
+        // The magic-link sign-in code. `App.tsx` clears it from the address bar
+        // with `history.replaceState`, but the navigation breadcrumb recorded
+        // the URL as it was, so this is the pass that has to catch it.
+        assert_eq!(
+            scrub("GET https://console.example/#/settings?code=abc123def456 -> 200"),
+            "GET https://console.example/#/settings?code=[redacted] -> 200"
+        );
+        // Every pair is considered, not just the first, and the rest of the
+        // URL — which is the diagnostic — survives.
+        assert_eq!(
+            scrub("https://h/api?company=acme&token=hunter2&code=xyz&page=2"),
+            "https://h/api?company=acme&token=[redacted]&code=[redacted]&page=2"
+        );
+        // A parameter with no value is left alone: replacing it would invent a
+        // credential that was never there.
+        assert_eq!(
+            scrub("https://h/api?code=&page=2"),
+            "https://h/api?code=&page=2"
+        );
+    }
+
+    #[test]
+    fn a_question_mark_in_prose_is_not_a_query_string() {
+        for input in [
+            "did the token expire?",
+            "what happened to company=acme?",
+            "is 2 > 1? yes",
+        ] {
+            assert_eq!(scrub(input), input, "{input} must survive untouched");
+        }
     }
 
     #[test]
