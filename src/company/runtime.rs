@@ -6122,10 +6122,20 @@ impl CompanyRuntime {
             self.grants.take_blocker_resolution(id);
             return Err(err);
         }
-        let receipt = CycleRunner::new(self)
+        let receipt = match CycleRunner::new(self)
             .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
-            .await?;
-        self.retire_if_expired(id, &receipt).await?;
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                self.grants.take_blocker_resolution(id);
+                return Err(err);
+            }
+        };
+        if let Err(err) = self.retire_if_expired(id, &receipt).await {
+            self.grants.take_blocker_resolution(id);
+            return Err(err);
+        }
         if !matches!(receipt, ResolveReceipt::Settled(_)) {
             self.grants.take_blocker_resolution(id);
             if let Err(err) = self.journal.record_blocker_resumed(id).await {
@@ -7049,6 +7059,7 @@ mod tests {
     struct RefusingJournalStore {
         inner: crate::ports::journal::MemoryJournalStore,
         armed: std::sync::atomic::AtomicBool,
+        allow_before_failing: std::sync::atomic::AtomicUsize,
     }
 
     #[cfg(feature = "openhuman")]
@@ -7062,6 +7073,14 @@ mod tests {
         fn disarm(&self) {
             self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
         }
+
+        /// Once armed, lets the next `n` appends land before refusing —
+        /// so the failure can be aimed at a later write in the same request
+        /// rather than the very first one.
+        fn allow_next(&self, n: usize) {
+            self.allow_before_failing
+                .store(n, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[cfg(feature = "openhuman")]
@@ -7074,9 +7093,17 @@ mod tests {
             durability: crate::ports::journal::Durability,
         ) -> crate::Result<()> {
             if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(crate::error::OpenCompanyError::Store(
-                    "RefusingJournalStore: the volume is full".to_string(),
-                ));
+                let remaining = self
+                    .allow_before_failing
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if remaining > 0 {
+                    self.allow_before_failing
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "RefusingJournalStore: the volume is full".to_string(),
+                    ));
+                }
             }
             self.inner.append_journal(id, line, durability).await
         }
@@ -9790,6 +9817,101 @@ mod tests {
             "a transient journal failure must not permanently strand the claim — the \
              retry must actually settle the blocker, not report AlreadyResolved forever: \
              {receipt:?}"
+        );
+    }
+
+    /// **Major review finding (CodeRabbit) on PR #2038.** The claim-release
+    /// fix above only covers `record_blocker_resolution`'s own failure.
+    /// `settle_approval` banks its own journal record right after
+    /// (`record_resolved`), and a volume that dies between the two fails
+    /// there instead — after the blocker's resolution is already durable,
+    /// but before the approval itself settles. That path returned via `?`
+    /// with the claim still taken.
+    ///
+    /// This asserts the claim itself (`peek_blocker_resolution`) rather than
+    /// a full successful retry, because `record_resolved` (like
+    /// `resolve_outcome` on the gate) removes the approval from
+    /// `journal.pending()` *before* its own append can fail — so a same-
+    /// process retry hits `claim_and_settle_blocker`'s independent
+    /// `still_parked` guard and reports `AlreadyResolved` regardless of
+    /// whether the claim was released. Releasing it here is still owed: an
+    /// orphaned entry in `grants.blocker_resolutions` for an id no live
+    /// resume will ever consume is exactly the state
+    /// `take_blocker_resolution` exists to prevent.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_journal_failure_inside_settle_also_releases_the_blocker_claim() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let journal = std::sync::Arc::new(RefusingJournalStore::default());
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .with_journal_store(journal.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks before the volume goes away");
+
+        // The volume dies after exactly one more append lands: that append
+        // is `record_blocker_resolution`, so the claim's own bank succeeds
+        // and the very next journal write --- `settle_approval`'s
+        // `record_resolved` --- is the one that fails.
+        journal.arm();
+        journal.allow_next(1);
+        let failed = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await;
+        assert!(
+            failed.is_err(),
+            "the armed journal store must fail settle_approval's own record and surface \
+             the error: {failed:?}"
+        );
+
+        assert!(
+            runtime.grants.peek_blocker_resolution(&id).is_none(),
+            "a settle_approval failure after the claim was banked must release it too, \
+             not just a record_blocker_resolution failure — otherwise \
+             grants.blocker_resolutions keeps an orphaned entry for an id no live \
+             resume will ever consume"
         );
     }
 
