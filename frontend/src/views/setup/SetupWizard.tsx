@@ -409,7 +409,16 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
         // their own, and no way to get one — the step should arrive answered.
-        if (s.inference.provider) setProvider(s.inference.provider);
+        // Only adopt a provider the step actually offers. The host reports the
+        // nothing-configured case as `managed`, which is not a tile here any
+        // more — adopting it would select nothing and leave the step looking
+        // answered when it is not.
+        if (
+          s.inference.provider &&
+          SETUP_INFERENCE_OPTIONS.some((option) => option.id === s.inference.provider)
+        ) {
+          setProvider(s.inference.provider);
+        }
         if (s.inference.base_url) setBaseUrl(s.inference.base_url);
       })
       .catch((err: unknown) => {
@@ -1381,7 +1390,19 @@ function PowerStep({
   const [override, setOverride] = useState(false);
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
-  const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // The house already holds one, and this operator may have no way to get their
+  // own — so the key box is optional rather than the point of the screen.
+  //
+  // The second arm is what keeps that true for a hosted tenant once a route
+  // stops being offered here. Its control plane injects the credential and the
+  // host reports itself ready on a provider this step has no tile for; matching
+  // on the tile alone then went false, and first-run setup started demanding a
+  // key from the one operator who cannot obtain one. Readiness is the host's
+  // fact, not a property of which tile happens to be selected.
+  const onTheHouse =
+    status.inference.ready &&
+    (provider === status.inference.provider ||
+      !SETUP_INFERENCE_OPTIONS.some((option) => option.id === status.inference.provider));
   // "Use my own" flips the gate: the host credential is only testable while
   // that is the operator's actual choice. Once they opt to supply their own
   // key, an empty box must not test anything — a test with no key probes the
