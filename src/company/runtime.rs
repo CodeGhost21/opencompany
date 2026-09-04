@@ -5752,36 +5752,48 @@ impl CompanyRuntime {
             .collect()
     }
 
-    /// Every pending blocker sharing `group_key` — the set one verdict fans
-    /// across (issue #1862).
+    /// Every pending blocker sharing both `group_key` and `step_kind` — the
+    /// set one verdict fans across (issue #1862).
     ///
     /// Ten cards stalled on one broken OAuth grant are one question, so
-    /// answering the card answers all of them. A blocker with no `group_key`
-    /// never reaches here (the caller resolves it alone), so a solo verdict can
-    /// never fan by accident. Oldest-first, the order
+    /// answering the card answers all of them — but a verdict does not mean
+    /// the same thing to every kind of stopped step (Skip re-dispatches a
+    /// board card; on a workflow node it produces nothing), so a root cause
+    /// that happens to stop both a task and a node is two questions, not one.
+    /// `step_kind` narrows the fan-out to `blocker_step_kind_of`'s own reading
+    /// of the addressed member, so the two kinds never mix. A blocker with no
+    /// `group_key` never reaches here (the caller resolves it alone), so a
+    /// solo verdict can never fan by accident. Oldest-first, the order
     /// [`pending`](crate::runtime::journal::Journal::pending) already returns.
     #[cfg(feature = "openhuman")]
-    pub(crate) fn blocker_group_members(&self, group_key: &str) -> Vec<ApprovalId> {
+    pub(crate) fn blocker_group_members(
+        &self,
+        group_key: &str,
+        step_kind: Option<&str>,
+    ) -> Vec<ApprovalId> {
         self.journal
             .pending()
             .into_iter()
-            .filter(|p| blocker_group_key_of(&p.effect).as_deref() == Some(group_key))
+            .filter(|p| {
+                blocker_group_key_of(&p.effect).as_deref() == Some(group_key)
+                    && blocker_step_kind_of(&p.effect).as_deref() == step_kind
+            })
             .map(|p| p.id)
             .collect()
     }
 
     /// The full group a single parked blocker belongs to — its root-cause
-    /// siblings, or itself alone when it carries no group key.
+    /// siblings that stopped the same kind of step, or itself alone when it
+    /// carries no group key.
     #[cfg(feature = "openhuman")]
     fn blocker_group_of(&self, id: &ApprovalId) -> Vec<ApprovalId> {
-        match self
-            .journal
-            .pending()
-            .into_iter()
-            .find(|p| &p.id == id)
-            .and_then(|p| blocker_group_key_of(&p.effect))
-        {
-            Some(key) => self.blocker_group_members(&key),
+        let Some(parked) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
+            return vec![id.clone()];
+        };
+        match blocker_group_key_of(&parked.effect) {
+            Some(key) => {
+                self.blocker_group_members(&key, blocker_step_kind_of(&parked.effect).as_deref())
+            }
             None => vec![id.clone()],
         }
     }
@@ -5833,7 +5845,10 @@ impl CompanyRuntime {
     }
 
     /// The parked blockers pending in one DM, folded into root-cause groups
-    /// (issue #1862). Oldest-first, the order `pending` already returns.
+    /// (issue #1862), split further by step kind so a connection failure that
+    /// stopped both a task and a workflow node never folds into one group —
+    /// a verdict does not mean the same thing to each, so a group must never
+    /// mix them. Oldest-first, the order `pending` already returns.
     #[cfg(feature = "openhuman")]
     fn pending_blocker_groups(&self, desk: &str) -> Vec<PendingBlockerGroup> {
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
@@ -5858,13 +5873,18 @@ impl CompanyRuntime {
                 .chars()
                 .take(80)
                 .collect();
+            let step_kind = payload.step.as_ref().map(blocker_step_kind_str);
             match &payload.group_key {
                 Some(key) => {
-                    if let Some(group) = groups.iter_mut().find(|g| g.key.as_deref() == Some(key)) {
+                    if let Some(group) = groups
+                        .iter_mut()
+                        .find(|g| g.key.as_deref() == Some(key) && g.step_kind == step_kind)
+                    {
                         group.ids.push(p.id);
                     } else {
                         groups.push(PendingBlockerGroup {
                             key: Some(key.clone()),
+                            step_kind,
                             ids: vec![p.id],
                             label,
                         });
@@ -5872,6 +5892,7 @@ impl CompanyRuntime {
                 }
                 None => groups.push(PendingBlockerGroup {
                     key: None,
+                    step_kind,
                     ids: vec![p.id],
                     label,
                 }),
@@ -6843,8 +6864,6 @@ fn blocker_group_key_of(effect: &crate::ports::types::Effect) -> Option<String> 
 /// word `skip`/`cancel` honestly — those verdicts do not do the same thing to
 /// a paused board card that they do to a stopped workflow node.
 fn blocker_step_kind_of(effect: &crate::ports::types::Effect) -> Option<String> {
-    use crate::ports::blockers::BlockerStep;
-
     if !effect.kind.starts_with(&format!(
         "{}.",
         crate::ports::blockers::BLOCKER_EFFECT_PREFIX
@@ -6855,13 +6874,19 @@ fn blocker_step_kind_of(effect: &crate::ports::types::Effect) -> Option<String> 
         serde_json::from_value::<crate::ports::blockers::BlockerPayload>(effect.payload.clone())
             .ok()?
             .step?;
-    Some(
-        match step {
-            BlockerStep::Task { .. } => "task",
-            BlockerStep::Node { .. } => "node",
-        }
-        .to_string(),
-    )
+    Some(blocker_step_kind_str(&step).to_string())
+}
+
+/// `"task"` or `"node"` for a [`BlockerStep`](crate::ports::blockers::BlockerStep),
+/// the single spelling both [`blocker_step_kind_of`] and
+/// [`CompanyRuntime::pending_blocker_groups`] read it into.
+fn blocker_step_kind_str(step: &crate::ports::blockers::BlockerStep) -> &'static str {
+    use crate::ports::blockers::BlockerStep;
+
+    match step {
+        BlockerStep::Task { .. } => "task",
+        BlockerStep::Node { .. } => "node",
+    }
 }
 
 /// One root-cause group of parked blockers pending in a single DM (issue
@@ -6871,6 +6896,9 @@ fn blocker_step_kind_of(effect: &crate::ports::types::Effect) -> Option<String> 
 struct PendingBlockerGroup {
     /// The shared `group_key`, or `None` for a lone ungrouped blocker.
     key: Option<String>,
+    /// The step kind every member stopped at — folded alongside `key` so a
+    /// group never mixes a task-step blocker with a node-step one.
+    step_kind: Option<&'static str>,
     /// Every approval in the group — the set a single verdict fans across.
     ids: Vec<ApprovalId>,
     /// The first line of the blocker's reason, for disambiguation copy.
@@ -10586,7 +10614,7 @@ mod tests {
                     .await
                     .expect("parks");
             }
-            let members = runtime.blocker_group_members("connection:slack");
+            let members = runtime.blocker_group_members("connection:slack", Some("task"));
             assert_eq!(
                 members.len(),
                 3,
@@ -10595,6 +10623,71 @@ mod tests {
             for summary in runtime.pending_approvals() {
                 assert_eq!(summary.group_key.as_deref(), Some("connection:slack"));
             }
+        }
+
+        /// **P1 review finding on PR #2038.** A connection failure can stop
+        /// both a board card and a workflow node, and both park with the same
+        /// `connection:<name>` group key — but Skip means "produces nothing"
+        /// to a node and "redispatch, run it again" to a task. Fanning one
+        /// verdict across the two step kinds silently applies the wrong
+        /// consequence to whichever wasn't addressed, so the fan-out group
+        /// must split by step kind even when the root cause is shared.
+        #[tokio::test]
+        async fn a_shared_cause_never_fans_a_verdict_across_step_kinds() {
+            let (runtime, _home) = runtime().await;
+            let task_id = runtime
+                .park_blocker(
+                    &blocker("t-1", Some("connection:slack")),
+                    "t-1",
+                    assignee("eng"),
+                )
+                .await
+                .expect("parks a task-step blocker");
+            let node_payload = BlockerPayload {
+                kind: BlockerKind::Infrastructure,
+                source: BlockerSource::Tool,
+                step: Some(BlockerStep::Node {
+                    run_id: "run-1".to_string(),
+                    node_id: "draft".to_string(),
+                }),
+                reason: "could not connect to mcp server for run-1".to_string(),
+                needed: "the integration reconnected from Apps".to_string(),
+                group_key: Some("connection:slack".to_string()),
+            };
+            let node_id = runtime
+                .park_blocker(&node_payload, "t-2", assignee("eng"))
+                .await
+                .expect("parks a node-step blocker on the same connection");
+
+            let fanned = runtime
+                .parked_blocker_group(&task_id)
+                .expect("the task blocker is still parked");
+            assert_eq!(
+                fanned,
+                vec![task_id.clone()],
+                "the task blocker's fan-out group must not include the node-step sibling \
+                 just because they share a connection: {fanned:?}"
+            );
+
+            let (_, follow_up) = runtime
+                .apply_blocker_reply_spawned(
+                    &fanned,
+                    &task_id,
+                    crate::ports::blockers::BlockerVerdict::Skip,
+                    "",
+                    None,
+                )
+                .await
+                .expect("resolves the task blocker alone");
+            crate::company::runtime::join_follow_up(follow_up)
+                .await
+                .expect("follow-up runs");
+
+            assert!(
+                runtime.pending_approvals().iter().any(|p| p.id == node_id),
+                "skipping the task card must not have also skipped the workflow node — \
+                 it is still stalled on the same connection and still needs its own answer"
+            );
         }
 
         /// A reply in a DM with a single pending blocker resolves it, and a
@@ -10695,7 +10788,10 @@ mod tests {
                 .expect("plan");
             match named {
                 BlockerReplyPlan::Resolve { ids, .. } => {
-                    assert_eq!(ids, runtime.blocker_group_members("connection:slack"));
+                    assert_eq!(
+                        ids,
+                        runtime.blocker_group_members("connection:slack", Some("task"))
+                    );
                 }
                 _ => panic!("naming the connection resolves only its group"),
             }
