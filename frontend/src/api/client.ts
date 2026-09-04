@@ -93,12 +93,21 @@ export interface RequestOptions {
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * The `/spec` capability a host advertises when `blocker_verdict` reaches a
+ * blocker resume rather than being ignored. Mirrors the string pushed in
+ * `AppState::capabilities` (`src/app/types.rs`); a host that does not name it
+ * lowers every four-way answer to its two-way form.
+ */
+const BLOCKER_VERDICT_CAPABILITY = "blocker-verdict";
+
 export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
   private readonly session: string | null;
   private readonly transport: Transport;
+  private capabilityProbe: Promise<string[] | undefined> | null = null;
 
   constructor(
     config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader">,
@@ -254,6 +263,31 @@ export class OpenCompanyClient {
   /** A typed GET, for surfaces that live outside this class (e.g. auth). */
   get<T>(path: string, options?: RequestOptions): Promise<T> {
     return this.request<T>("GET", path, undefined, undefined, options);
+  }
+
+  /**
+   * What this host advertises at `/spec`, read once and shared by every
+   * caller after that.
+   *
+   * `undefined` is the meaningful answer, not an error case: a host predating
+   * the field omits it, and that must read as "assume REST only" rather than
+   * as "supports nothing". A `/spec` that cannot be reached at all answers the
+   * same way — an unreachable capability is one this client must not rely on,
+   * and the request the caller actually wanted still gets to fail on its own
+   * terms rather than being masked by a probe failure.
+   */
+  private hostCapabilities(): Promise<string[] | undefined> {
+    this.capabilityProbe ??= this.get<Record<string, unknown>>("/spec")
+      .then((spec) =>
+        Array.isArray(spec.capabilities) ? (spec.capabilities as string[]) : undefined,
+      )
+      .catch(() => undefined);
+    return this.capabilityProbe;
+  }
+
+  /** Whether this host names `capability` in its `/spec`. */
+  async supports(capability: string): Promise<boolean> {
+    return (await this.hostCapabilities())?.includes(capability) ?? false;
   }
 
   /**
@@ -947,6 +981,11 @@ export class OpenCompanyClient {
        * The four-way answer to a parked blocker (#2028). It narrows `verdict`
        * rather than replacing it — the host refuses a pair that disagrees — and
        * `answer` is mandatory and non-blank on `amend`, refused on the rest.
+       *
+       * Negotiated before it is sent: `skip` and `amend` are the two whose
+       * lowered form asks an unaware host for a different action, so both are
+       * refused against a host that does not advertise `blocker-verdict`. See
+       * {@link refuseUnperformableBlockerVerdict}.
        */
       blocker?: { verdict: BlockerVerdict; answer?: string };
     } = {},
@@ -963,6 +1002,7 @@ export class OpenCompanyClient {
     // Sent as nothing at all when absent, for the reason `once` is: the
     // omitted-field form is what a host predating the field understands.
     if (options.blocker) {
+      await this.refuseUnperformableBlockerVerdict(options.blocker.verdict);
       body.blocker_verdict = options.blocker.verdict;
       if (options.blocker.verdict === "amend") {
         body.blocker_answer = options.blocker.answer ?? "";
@@ -983,6 +1023,32 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * Refuses a blocker verdict this host would carry out as a different action.
+   *
+   * A host predating `blocker_verdict` ignores the unknown field and resolves
+   * from the lowered two-way `verdict` alone. Two of the four survive that:
+   * `retry` rides an `approve` and `cancel` rides a `deny`, and an unaware host
+   * retries and cancels exactly as asked, so both are still sent. The other two
+   * do not. `skip` rides an `approve`, so an unaware host **re-runs the step it
+   * was asked to leave out**; `amend` rides one too, so it re-runs the step
+   * **without the operator's words**. Either way the console would report the
+   * four-way result it asked for while the host performed something else.
+   *
+   * Refusing is the point: a request that never leaves is a failure the
+   * operator can see and act on, where a lowered one is a wrong action nobody
+   * is told about.
+   */
+  private async refuseUnperformableBlockerVerdict(verdict: BlockerVerdict): Promise<void> {
+    if (verdict !== "skip" && verdict !== "amend") return;
+    if (await this.supports(BLOCKER_VERDICT_CAPABILITY)) return;
+    throw new Error(
+      `This host cannot ${verdict === "skip" ? "skip a stopped step" : "answer a stopped step in words"}: ` +
+        "it is running a version that would run the step again instead. " +
+        "Retry or Cancel it here, or update the host.",
+    );
   }
 
   /**

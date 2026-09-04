@@ -301,17 +301,28 @@ function setValue(el: HTMLTextAreaElement, value: string) {
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-/** A transport that answers one canned body and records what it was asked. */
+/**
+ * A transport that answers one canned body and records what it was asked.
+ *
+ * `/spec` is answered apart from the canned body, and is not recorded: these
+ * cases are about the resolve body a *capable* host receives, and the client
+ * declines to send `skip` or `amend` to one that does not advertise
+ * `blocker-verdict` (see `blocker-verdict-host-capability.test.ts`). Folding
+ * the probe into `sent` would also shift the resolve off `sent[0]`.
+ */
 function client(body: unknown) {
   const sent: { url: string; body: Record<string, unknown> }[] = [];
   const transport: Transport = {
     request: async ({ url, body: raw }: TransportRequest): Promise<TransportResponse> => {
-      sent.push({ url, body: raw ? JSON.parse(raw) : {} });
+      const spec = url.endsWith("/spec");
+      if (!spec) sent.push({ url, body: raw ? JSON.parse(raw) : {} });
       return {
         status: 200,
         statusText: "",
         url,
-        text: JSON.stringify(body),
+        text: JSON.stringify(
+          spec ? { capabilities: ["rest", "approvals", "blocker-verdict"] } : body,
+        ),
         header: () => null,
       };
     },
