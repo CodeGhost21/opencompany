@@ -536,6 +536,44 @@ describe("a hosted tenant whose inference comes from the house", () => {
     } as unknown as OpenCompanyClient;
   }
 
+  it("does not lend the house credential to a provider the host will not send it to", async () => {
+    // `resolve_endpoint` inherits the injected credential for the managed choice
+    // and for OpenRouter without an endpoint override — and for nothing else,
+    // because pairing it with an arbitrary endpoint would leak it there. So a
+    // custom endpoint must ask for a key rather than hide the field and enable
+    // Test on nothing, which sent an unauthenticated probe that could only fail.
+    const seen: { body?: unknown } = {};
+    await show(capturingClient(seen));
+
+    // The house's credential is claimed on the default selection...
+    expect(
+      container.querySelector('[data-testid="setup-key-on-the-house"]'),
+      "OpenRouter with no override is the one selection the host will send it to",
+    ).toBeTruthy();
+
+    // ...and not on one the host refuses to forward it to.
+    const custom = container.querySelector(
+      '[data-testid="setup-provider-openai_compatible"]',
+    ) as HTMLElement | null;
+    expect(custom, "the model step should offer a custom endpoint").toBeTruthy();
+    await act(async () => {
+      custom!.click();
+    });
+
+    expect(
+      container.querySelector('[data-testid="setup-key-on-the-house"]'),
+      "a custom endpoint must not claim a credential the host will not send",
+    ).toBeNull();
+    expect(
+      container.querySelector("#setup-key"),
+      "so it has to ask for its own key",
+    ).toBeTruthy();
+    const test = container.querySelector(
+      '[data-testid="setup-test-connection"]',
+    ) as HTMLButtonElement | null;
+    expect(test?.disabled, "and Test must not run on a key nobody supplied").toBe(true);
+  });
+
   it("stores no inference configuration when the key box was left empty", async () => {
     const seen: { body?: unknown } = {};
     await show(capturingClient(seen));

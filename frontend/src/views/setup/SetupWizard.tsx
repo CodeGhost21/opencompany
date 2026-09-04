@@ -213,6 +213,17 @@ interface Props {
  *   offer — the caller passes the very condition its submit uses, so the two
  *   cannot answer differently.
  */
+/**
+ * The provider the house's credential can ride.
+ *
+ * Mirrors `resolve_endpoint` (`src/company/inference.rs`): the injected
+ * credential is inherited for the managed choice, and for this provider only
+ * while no base URL overrides the endpoint. Everything else is sent without it,
+ * so a step that hides the key field for one of those promises a credential the
+ * host will not forward.
+ */
+const HOUSE_CREDENTIAL_PROVIDER = "openrouter";
+
 export function shouldSeedTemplate(input: {
   hasCompany: boolean;
   source: "model" | "fallback" | "preset" | null;
@@ -427,7 +438,18 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         ) {
           setProvider(s.inference.provider);
         }
-        if (s.inference.base_url) setBaseUrl(s.inference.base_url);
+        // Only for a provider that actually takes one. The host reports its own
+        // endpoint whatever the route, and dropping that into the form for a
+        // provider with no URL field left an invisible value that later read as
+        // a tenant override — which is precisely what withholds the injected
+        // credential (`resolve_endpoint`). Same rule the Inference card uses.
+        const seededProvider =
+          s.inference.provider &&
+          SETUP_INFERENCE_OPTIONS.some((option) => option.id === s.inference.provider)
+            ? s.inference.provider
+            : SETUP_INFERENCE_OPTIONS[0].id;
+        const seededSpec = INFERENCE_PROVIDERS.find((p) => p.id === seededProvider);
+        if (s.inference.base_url && seededSpec?.needsUrl) setBaseUrl(s.inference.base_url);
       })
       .catch((err: unknown) => {
         if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
@@ -1441,10 +1463,23 @@ function PowerStep({
   // on the tile alone then went false, and first-run setup started demanding a
   // key from the one operator who cannot obtain one. Readiness is the host's
   // fact, not a property of which tile happens to be selected.
+  //
+  // Scoped to a selection the credential actually serves. `resolve_endpoint`
+  // inherits the injected credential for the managed choice, and for
+  // `openrouter` only while nothing overrides the endpoint — "the platform
+  // credential rides only the platform's own endpoint", since pairing it with
+  // an arbitrary one would leak it there. Ollama and a custom endpoint get no
+  // inheritance at all. Claiming it for those hid the key field, enabled Test
+  // with nothing in it, and sent an unauthenticated probe that could only fail.
+  const houseProviderHidden = !SETUP_INFERENCE_OPTIONS.some(
+    (option) => option.id === status.inference.provider,
+  );
+  const houseCredentialServes =
+    provider === HOUSE_CREDENTIAL_PROVIDER && !baseUrl.trim();
   const onTheHouse =
     status.inference.ready &&
     (provider === status.inference.provider ||
-      !SETUP_INFERENCE_OPTIONS.some((option) => option.id === status.inference.provider));
+      (houseProviderHidden && houseCredentialServes));
   // "Use my own" flips the gate: the host credential is only testable while
   // that is the operator's actual choice. Once they opt to supply their own
   // key, an empty box must not test anything — a test with no key probes the

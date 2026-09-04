@@ -9,6 +9,7 @@ import type { ComposioStatus } from "@/api/composio";
 import type { InferenceStatus } from "@/api/inference";
 import { INFERENCE_PROVIDERS, SETUP_INFERENCE_OPTIONS } from "@/api/setup";
 import { HostSwitcher, hostSwitcherMenu } from "@/components/host-switcher";
+import { canCreateCompanies } from "@/components/create-company-dialog";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
@@ -263,14 +264,21 @@ describe("Composio offers this company's own account and nothing else", () => {
     expect(container.textContent).not.toContain("TinyHumans");
     expect(container.textContent).not.toContain("api.tinyhumans.ai");
   });
-  it("still lets a BYOK company clear its key, and does not name the hidden route", async () => {
-    // Clearing was reached by picking the managed tile. With no tile to pick, a
-    // company could rotate its key but never remove it — so the control has to
-    // stand on its own, without advertising where clearing lands.
-    await mountComposio(composioStatus({ mode: "byok" }));
+  it("offers a BYOK company no control that would move it off its own account", async () => {
+    // Clearing a key is not "the key goes away". The host derives the route from
+    // whether one exists, so an empty write puts the company back on the route
+    // this console no longer offers — and a company with any credential there
+    // resumes acting through it, a different account billed differently.
+    //
+    // A button here could only say that, naming the route, or not say it, which
+    // is the switch happening silently. Rotating stays; removing does not.
+    await mountComposio(composioStatus({ mode: "byok", credentialSource: "company" }));
 
-    expect(find("composio-clear-key")).not.toBeNull();
+    expect(find("composio-clear-key")).toBeNull();
+    expect(container.textContent).not.toContain("Clear key");
     expect(container.textContent).not.toContain("use OpenHuman-managed");
+    // Rotation is still reachable, so a compromised key is still replaceable.
+    expect(container.textContent).toContain("Rotate key");
   });
 });
 
@@ -417,5 +425,30 @@ describe("the roster's keyboard shortcuts go with the roster", () => {
     });
 
     expect(picked).toEqual([]);
+  });
+});
+
+describe("company creation is gone from every trigger, not just the switcher", () => {
+  /**
+   * Four triggers reach one dialog: the switcher's "New company", the picker's
+   * own button, the picker's per-card Reset, the no-company screen, and
+   * Settings' "Reset / Start clean" — which archives and re-provisions through
+   * the same flow. Gating them one at a time is how three stayed live after the
+   * first was hidden, so the question is asked once, where they all ask it.
+   */
+  it("answers no at the funnel every trigger goes through", () => {
+    const withBearer = { carriesPlatformBearer: true } as unknown as OpenCompanyClient;
+
+    expect(canCreateCompanies(withBearer)).toBe(false);
+  });
+
+  it("stays no even for a client that could reach the routes", () => {
+    // The platform credential is the other half of the condition, and on its own
+    // it used to be the whole of it at two call sites.
+    const platform = { carriesPlatformBearer: true } as unknown as OpenCompanyClient;
+    const person = { carriesPlatformBearer: false } as unknown as OpenCompanyClient;
+
+    expect(canCreateCompanies(platform)).toBe(false);
+    expect(canCreateCompanies(person)).toBe(false);
   });
 });
