@@ -333,7 +333,7 @@ describe("whether a finished wizard seeds a template or a designed company", () 
     rosterEdited: false,
     template: TEMPLATE.id,
     credentialTested: false,
-    provider: "openrouter",
+    writesInference: true,
   };
 
   it("seeds the template an operator picked and did not edit", () => {
@@ -353,11 +353,17 @@ describe("whether a finished wizard seeds a template or a designed company", () 
     expect(shouldSeedTemplate({ ...picked, credentialTested: true })).toBe(false);
   });
 
-  it("still seeds the template when the tested provider is managed", () => {
-    // The designed submit omits inference for `managed`, so the designed path
-    // would trade the template's roster, belt and prompts for nothing at all.
+  it("still seeds the template when nothing will be written anyway", () => {
+    // The submit omits inference where the host already reaches it, or where the
+    // credential that passed was the house's rather than this operator's — so
+    // the designed path would trade the template's roster, belt and prompts for
+    // nothing at all.
+    //
+    // Asked as `writesInference`, not `provider === "managed"`. That literal
+    // answered the same question only while the model step adopted a provider it
+    // no longer offers, and went quietly wrong when it stopped.
     expect(
-      shouldSeedTemplate({ ...picked, credentialTested: true, provider: "managed" }),
+      shouldSeedTemplate({ ...picked, credentialTested: true, writesInference: false }),
     ).toBe(true);
   });
 

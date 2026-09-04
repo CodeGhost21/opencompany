@@ -200,11 +200,18 @@ interface Props {
  *   provider onto the manifest and stores the key against the company; a
  *   template seed has nowhere to put either, and silently dropping a key the
  *   operator just watched pass is the worse trade.
- * - **Except `managed`, which carries nothing.** The designed submit omits
- *   inference entirely for that provider, because the host already reaches it.
- *   Taking the designed path there trades the template away for a credential
- *   that was never going to be written — a pure loss, and an invisible one,
- *   since the review screen shows the template's roster either way.
+ * - **Except when nothing will be carried.** Where the submit omits inference
+ *   anyway — the host already reaches it, or the credential that passed was the
+ *   house's rather than this operator's — the designed path trades the template
+ *   away for a credential that was never going to be written: a pure loss, and
+ *   an invisible one, since the review screen shows the template's roster either
+ *   way.
+ *
+ *   Asked as `writesInference` rather than `provider === "managed"`. That
+ *   literal was the same assumption spelled as a string, and it silently stopped
+ *   firing the moment the model step stopped adopting a provider it does not
+ *   offer — the caller passes the very condition its submit uses, so the two
+ *   cannot answer differently.
  */
 export function shouldSeedTemplate(input: {
   hasCompany: boolean;
@@ -212,13 +219,14 @@ export function shouldSeedTemplate(input: {
   rosterEdited: boolean;
   template: string;
   credentialTested: boolean;
-  provider: string;
+  /** Whether the submit will actually write inference for this company. */
+  writesInference: boolean;
 }): boolean {
   if (input.hasCompany) return false;
   if (input.source !== "preset") return false;
   if (input.rosterEdited) return false;
   if (!input.template.trim()) return false;
-  return !input.credentialTested || input.provider === "managed";
+  return !input.credentialTested || !input.writesInference;
 }
 
 /**
@@ -571,6 +579,15 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     !SETUP_INFERENCE_OPTIONS.some((option) => option.id === status.inference.provider);
   const operatorConfiguredInference =
     !houseSuppliesInference || !!values.tinyhumans_api_key?.trim();
+  /**
+   * Whether finishing will write inference onto this company.
+   *
+   * Read by both the submit payload and {@link shouldSeedTemplate}: the seed
+   * decision exists to avoid trading a template away for a credential that is
+   * never written, so it has to be asking the same question the payload answers.
+   */
+  const writesInference =
+    tested.kind === "ok" && provider !== "managed" && operatorConfiguredInference;
 
   /**
    * Ask the host to design a team, on the way into Review.
@@ -643,7 +660,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         rosterEdited,
         template,
         credentialTested: tested.kind === "ok",
-        provider,
+        writesInference,
       });
 
       const result = await submitSetup(client, {
@@ -665,17 +682,14 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                 // As reviewed, not as proposed.
                 agents: roster.agents,
                 adminEmail: email.trim() || null,
-                inference:
-                  tested.kind === "ok" &&
-                  provider !== "managed" &&
-                  operatorConfiguredInference
-                    ? {
-                        provider,
-                        baseUrl: tested.baseUrl,
-                        model: tested.model ?? null,
-                        key: values.tinyhumans_api_key?.trim() || null,
-                      }
-                    : null,
+                inference: writesInference
+                  ? {
+                      provider,
+                      baseUrl: tested.baseUrl,
+                      model: tested.model ?? null,
+                      key: values.tinyhumans_api_key?.trim() || null,
+                    }
+                  : null,
               }
             : null,
       });
