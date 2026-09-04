@@ -19,6 +19,28 @@ import type { ErrorEvent } from "@sentry/react";
 const DSN = "https://examplePublicKey@o0.ingest.sentry.io/0";
 const RELEASE = "opencompany@0.1.0+d31e532f7c8a";
 
+/**
+ * A credential-shaped string, assembled rather than written down.
+ *
+ * `looksLikeASecret` reads a token's prefix and its length and nothing else, so
+ * the high-entropy body a real credential carries is filler as far as these
+ * tests are concerned — what `scrubSecrets` is handed is identical either way.
+ *
+ * Written out as a literal, though, `ghp_AAAA…` is byte-for-byte what a leaked
+ * token looks like to everything that reads this repository: secret scanners
+ * flag the file on every push, and after a genuine incident somebody grepping
+ * the tree has to rule each fixture out by hand before they can believe it is
+ * clean. A scanner that is permanently red about a test fixture is a scanner
+ * nobody reads.
+ *
+ * So the prefix — the part under test, and the part that has to stay readable —
+ * is written down, and only the body is assembled here. Mirrors
+ * `credential_shaped` in `src/observability/redaction.rs`.
+ */
+function credentialShaped(prefix: string, bodyLength: number, fill = "A"): string {
+  return prefix + fill.repeat(bodyLength);
+}
+
 describe("resolveCrashReporting", () => {
   it("reports nothing when no DSN is configured", () => {
     // The state every local checkout and every CI run is in.
@@ -102,12 +124,23 @@ describe("scrubSecrets", () => {
   });
 
   it("removes a credential that identifies itself", () => {
+    // One per issuer prefix the host's `SECRET_PREFIXES` names, plus the JWT
+    // arm — the two lists are a deliberate port of each other, so they are
+    // covered alike. Assembled by `credentialShaped`, which says why.
     for (const secret of [
-      "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "xoxb-1111111111-2222222222-AAAAAAAAAAAA",
-      "th_live_AAAAAAAAAAAAAAAAAAAA",
-      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+      credentialShaped("sk-ant-api03-", 28),
+      credentialShaped("sk-proj-", 20),
+      credentialShaped("sk_live_", 20),
+      credentialShaped("ghp_", 36),
+      `${credentialShaped("github_pat_", 20)}_${credentialShaped("", 8, "B")}`,
+      credentialShaped("glpat-", 20),
+      `xoxb-${credentialShaped("", 10, "1")}-${credentialShaped("", 10, "2")}-${credentialShaped("", 12)}`,
+      credentialShaped("AKIA", 16),
+      credentialShaped("th_live_", 20),
+      credentialShaped("npm_", 28),
+      `${credentialShaped("SG.", 22)}.${credentialShaped("", 12, "B")}`,
+      // A JWT: `eyJ` and two dots are the whole of the rule.
+      `${credentialShaped("eyJ", 17)}.${credentialShaped("", 16, "B")}.c2ln`,
     ]) {
       const scrubbed = scrubSecrets(`the host said: ${secret} was rejected`);
       expect(scrubbed).not.toContain(secret);
@@ -162,7 +195,7 @@ describe("sanitizeEvent", () => {
         // Anything could be in here, so nothing is kept.
         redux: { store: "hunter2" },
       },
-      tags: { origin: "th_live_AAAAAAAAAAAAAAAAAAAA" },
+      tags: { origin: credentialShaped("th_live_", 20) },
       breadcrumbs: [
         {
           message: "GET https://u:hunter2@host.example/api/v1",
@@ -173,7 +206,7 @@ describe("sanitizeEvent", () => {
         values: [
           {
             type: "ApiError",
-            value: "token: ghp_AAAAAAAAAAAAAAAAAAAAAAAA rejected",
+            value: `token: ${credentialShaped("ghp_", 36)} rejected`,
             mechanism: { type: "generic", data: { secret: "hunter2" } },
             stacktrace: {
               frames: [

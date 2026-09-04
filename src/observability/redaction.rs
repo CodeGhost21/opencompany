@@ -342,6 +342,28 @@ fn scrub_url_userinfo(text: &str) -> Cow<'_, str> {
     }
 }
 
+/// A credential-shaped string for tests, assembled rather than written down.
+///
+/// [`looks_like_a_secret`] reads a token's prefix and its length and nothing
+/// else, so the high-entropy body a real credential carries is filler as far
+/// as these tests are concerned — what [`scrub`] is handed is identical either
+/// way.
+///
+/// Written out as a literal, though, `ghp_AAAA…` is byte-for-byte what a
+/// leaked token looks like to everything that reads this repository: secret
+/// scanners flag the file on every push, and after a genuine incident somebody
+/// grepping the tree has to rule each fixture out by hand before they can
+/// believe the tree is clean. A scanner that is permanently red about a test
+/// fixture is a scanner nobody reads.
+///
+/// So the prefix — the part under test, and the part that has to stay
+/// readable — is written down, and only the body is assembled here. No
+/// credential-shaped literal is committed and no coverage is lost.
+#[cfg(test)]
+pub(crate) fn credential_shaped(prefix: &str, body_len: usize) -> String {
+    format!("{prefix}{}", "A".repeat(body_len))
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -387,23 +409,37 @@ mod test {
 
     #[test]
     fn a_self_identifying_credential_needs_no_label() {
+        // One per issuer prefix in `SECRET_PREFIXES` that a scanner recognises,
+        // plus the JWT arm. Assembled by `credential_shaped`, which explains
+        // why they are not written out.
         for input in [
-            "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            "sk-proj-AAAAAAAAAAAAAAAAAAAA",
-            "sk_live_AAAAAAAAAAAAAAAAAAAA",
-            "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            "github_pat_AAAAAAAAAAAAAAAAAAAA_BBBBBBBB",
-            "glpat-AAAAAAAAAAAAAAAAAAAA",
-            "xoxb-1111111111-2222222222-AAAAAAAAAAAA",
-            "AKIAIOSFODNN7EXAMPLE",
-            "th_live_AAAAAAAAAAAAAAAAAAAA",
-            "npm_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            "SG.AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBB",
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+            credential_shaped("sk-ant-api03-", 28),
+            credential_shaped("sk-proj-", 20),
+            credential_shaped("sk_live_", 20),
+            credential_shaped("ghp_", 36),
+            format!("{}_{}", credential_shaped("github_pat_", 20), "B".repeat(8)),
+            credential_shaped("glpat-", 20),
+            format!(
+                "xoxb-{}-{}-{}",
+                "1".repeat(10),
+                "2".repeat(10),
+                "A".repeat(12)
+            ),
+            credential_shaped("AKIA", 16),
+            credential_shaped("th_live_", 20),
+            credential_shaped("npm_", 28),
+            format!("{}.{}", credential_shaped("SG.", 22), "B".repeat(12)),
+            // A JWT: `eyJ` and two dots are the whole of the rule.
+            format!(
+                "{}.{}.{}",
+                credential_shaped("eyJ", 17),
+                "B".repeat(16),
+                "c2ln"
+            ),
         ] {
             let sentence = format!("the provider said: {input} was rejected");
             let scrubbed = scrub(&sentence);
-            assert!(!scrubbed.contains(input), "{input} survived: {scrubbed}");
+            assert!(!scrubbed.contains(&input), "{input} survived: {scrubbed}");
             assert!(scrubbed.contains(REDACTED), "{scrubbed}");
             // Only the credential goes — the sentence around it is the
             // diagnostic and has to survive.
@@ -416,7 +452,8 @@ mod test {
         // The vendored runtime's `sk-[A-Za-z0-9]{20,}` left `[REDACTED]_uv`
         // behind on exactly this shape, because the character class stopped at
         // the underscore. A whole token cannot half-match.
-        let scrubbed = scrub("key sk-AAAAAAAAAAAAAAAAAAAA_uv-9 here");
+        let input = format!("key {}_uv-9 here", credential_shaped("sk-", 20));
+        let scrubbed = scrub(&input);
         assert_eq!(scrubbed, "key [redacted] here");
     }
 
@@ -480,10 +517,12 @@ mod test {
 
     #[test]
     fn several_credentials_in_one_string_all_go() {
-        let scrubbed = scrub(
+        let input = format!(
             "POST https://key:secret@ingest.example/1 \
-             api_key=hunter2 authorization: Bearer ghp_AAAAAAAAAAAAAAAAAAAA",
+             api_key=hunter2 authorization: Bearer {}",
+            credential_shaped("ghp_", 36)
         );
+        let scrubbed = scrub(&input);
         for leaked in ["secret", "hunter2", "ghp_AAAA"] {
             assert!(!scrubbed.contains(leaked), "{leaked} survived: {scrubbed}");
         }

@@ -421,6 +421,7 @@ mod test {
     #[cfg(feature = "crash-reporting")]
     mod gated {
         use super::*;
+        use crate::observability::redaction::credential_shaped;
         use sentry::protocol::{Breadcrumb, Event, Exception, LogEntry, Value};
 
         /// One event carrying a credential in every place an event can carry
@@ -438,11 +439,11 @@ mod test {
             };
             event.exception.values.push(Exception {
                 ty: "Error".into(),
-                value: Some("token: ghp_AAAAAAAAAAAAAAAAAAAAAAAA rejected".into()),
+                value: Some(format!("token: {} rejected", credential_shaped("ghp_", 36)).into()),
                 ..Default::default()
             });
             event.breadcrumbs.values.push(Breadcrumb {
-                message: Some("using sk-proj-AAAAAAAAAAAAAAAAAAAA".into()),
+                message: Some(format!("using {}", credential_shaped("sk-proj-", 20)).into()),
                 data: [(
                     "url".to_string(),
                     Value::String("https://u:hunter2@h/1".into()),
@@ -460,7 +461,7 @@ mod test {
             );
             event
                 .tags
-                .insert("origin".into(), "th_live_AAAAAAAAAAAAAAAAAAAA".into());
+                .insert("origin".into(), credential_shaped("th_live_", 20));
             event
         }
 
