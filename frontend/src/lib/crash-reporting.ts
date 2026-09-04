@@ -291,20 +291,43 @@ export function scrubSecrets(text: string): string {
  * see what they are suppressing.
  */
 /**
- * Scrubs the free-form `data` a context can carry, leaving its typed fields.
+ * Scrubs an arbitrary structure in place: every string leaf goes through
+ * [`scrubSecrets`], and every value under a key that *names* a credential is
+ * replaced outright, whatever its type.
  *
- * The `trace` context's `data` holds `url.full` — the address bar, verbatim,
- * including the magic-link `?code=` — so this is not a defensive measure. It
- * was found by capturing a real outbound envelope, which had it in clear while
- * the span descriptions beside it were correctly redacted.
+ * Two rules, because one is not enough:
+ *
+ * * **String leaves**, at any depth. The `trace` context's `data` holds
+ *   `url.full` — the address bar, verbatim, magic-link `?code=` included —
+ *   which is not a hypothetical: it was found in a captured outbound envelope
+ *   while the span descriptions beside it were correctly redacted.
+ * * **Keys**, because `scrubSecrets` reads text and `{ token: "hunter2" }` has
+ *   no text to read. The string rule sees `hunter2`, a word with no prefix and
+ *   no `key=` beside it, and leaves it alone. Structure carries the label that
+ *   the flat string form would have carried inline, so the structure has to be
+ *   read as well. A matching key takes the whole value — an object under
+ *   `credentials` is not made safe by scrubbing its leaves one at a time.
+ *
+ * Recursion is the point. The version this replaces looked at `context.data`
+ * and only at its top level, so `{ token: "…" }` directly on a context and
+ * `data: { request: { authorization: "…" } }` both went out untouched.
  */
-function scrubContextData<T extends Record<string, unknown>>(context: T): T {
-  const data = (context as { data?: Record<string, unknown> }).data;
-  if (!data) return context;
-  for (const [key, value] of Object.entries(data)) {
-    if (typeof value === "string") data[key] = scrubSecrets(value);
+function scrubDeep(value: unknown, key?: string): unknown {
+  if (key !== undefined && SECRET_KEYS.has(normalizeKey(key))) return REDACTED;
+  if (typeof value === "string") return scrubSecrets(value);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) value[i] = scrubDeep(value[i]);
+    return value;
   }
-  return context;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const [name, child] of Object.entries(record)) {
+      record[name] = scrubDeep(child, name);
+    }
+    return record;
+  }
+  // Numbers, booleans and null carry no credential and no free-form text.
+  return value;
 }
 
 export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
@@ -342,7 +365,7 @@ export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
     os: event.contexts?.os,
     browser: event.contexts?.browser,
     device: event.contexts?.device,
-    trace: event.contexts?.trace && scrubContextData(event.contexts.trace),
+    trace: event.contexts?.trace && (scrubDeep(event.contexts.trace) as typeof event.contexts.trace),
   };
 
   if (event.message) event.message = scrubSecrets(event.message);
@@ -369,11 +392,7 @@ export function sanitizeEvent(event: ErrorEvent): ErrorEvent {
   // the URL goes through the same scrubber as everything else.
   for (const breadcrumb of event.breadcrumbs ?? []) {
     if (breadcrumb.message) breadcrumb.message = scrubSecrets(breadcrumb.message);
-    for (const [key, value] of Object.entries(breadcrumb.data ?? {})) {
-      if (typeof value === "string" && breadcrumb.data) {
-        breadcrumb.data[key] = scrubSecrets(value);
-      }
-    }
+    if (breadcrumb.data) scrubDeep(breadcrumb.data);
   }
 
   const tags: Record<string, string> = {};
@@ -564,18 +583,12 @@ export function sanitizeTransaction(event: TransactionEvent): TransactionEvent |
 
   for (const span of event.spans ?? []) {
     if (span.description) span.description = scrubSecrets(span.description);
-    for (const [key, value] of Object.entries(span.data ?? {})) {
-      if (typeof value === "string" && span.data) span.data[key] = scrubSecrets(value);
-    }
+    if (span.data) scrubDeep(span.data);
   }
 
   for (const breadcrumb of event.breadcrumbs ?? []) {
     if (breadcrumb.message) breadcrumb.message = scrubSecrets(breadcrumb.message);
-    for (const [key, value] of Object.entries(breadcrumb.data ?? {})) {
-      if (typeof value === "string" && breadcrumb.data) {
-        breadcrumb.data[key] = scrubSecrets(value);
-      }
-    }
+    if (breadcrumb.data) scrubDeep(breadcrumb.data);
   }
 
   // Not allow-listed the way an error event's contexts are: a transaction's
@@ -584,9 +597,7 @@ export function sanitizeTransaction(event: TransactionEvent): TransactionEvent |
   // `contexts.trace.data["url.full"]` is why, since it is the address bar
   // verbatim, magic-link code and all.
   for (const context of Object.values(event.contexts ?? {})) {
-    if (context && typeof context === "object") {
-      scrubContextData(context as Record<string, unknown>);
-    }
+    if (context && typeof context === "object") scrubDeep(context);
   }
 
   const tags: Record<string, string> = {};

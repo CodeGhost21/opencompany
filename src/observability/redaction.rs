@@ -375,6 +375,22 @@ fn scrub_url_userinfo(text: &str) -> Cow<'_, str> {
 /// So the prefix — the part under test, and the part that has to stay
 /// readable — is written down, and only the body is assembled here. No
 /// credential-shaped literal is committed and no coverage is lost.
+/// Whether a *key* names a credential, so its value goes whatever shape it is.
+///
+/// The structured counterpart to what [`scrub`] does inside a string. `scrub`
+/// reads text, and a map entry `{"token": "hunter2"}` has no text to read:
+/// `hunter2` is a word with no issuer prefix and no `token=` beside it, so the
+/// string rule leaves it alone. The structure carries the label the flat form
+/// would have carried inline, so a caller walking structured data has to ask
+/// this question as well.
+///
+/// Exported because the callers are in [`super`], where the protocol types
+/// live, and the vocabulary belongs here with the rest of it — the same split
+/// that keeps this file free of `sentry::` types and testable in every build.
+pub fn key_names_a_secret(key: &str) -> bool {
+    SECRET_KEYS.contains(&normalize_key(key).as_str())
+}
+
 /// The characters that end a URL when one is written inside prose or a log
 /// line. Shared by both URL passes so they agree on where a URL stops.
 fn ends_a_url(c: char) -> bool {
@@ -585,6 +601,40 @@ mod test {
             scrub("connecting to https://db.internal:27017/oc"),
             "connecting to https://db.internal:27017/oc"
         );
+    }
+
+    #[test]
+    fn a_key_that_names_a_credential_is_recognised_whatever_its_spelling() {
+        // The same normalisation the inline rule uses, so a structured
+        // `{"api-key": …}` and a flat `api-key=…` cannot disagree.
+        for key in [
+            "token",
+            "api_key",
+            "api-key",
+            "apiKey",
+            "Authorization",
+            "client_secret",
+            "config.password",
+            "privateKey",
+            "dsn",
+        ] {
+            assert!(key_names_a_secret(key), "{key} should name a credential");
+        }
+        // And the ones that must not, or half of every structured log goes.
+        for key in [
+            "cancellation_token",
+            "next_page_token",
+            "idempotency_key",
+            "id",
+            "key",
+            "url",
+            "http.url",
+            "code",
+            "company",
+            "status_code",
+        ] {
+            assert!(!key_names_a_secret(key), "{key} must not name a credential");
+        }
     }
 
     #[test]

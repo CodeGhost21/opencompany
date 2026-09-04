@@ -357,6 +357,25 @@ describe("sanitizeEvent", () => {
     expect(frame?.filename).toBe("app.js");
   });
 
+  it("finds a credential nested in an error event's structured data", () => {
+    const rendered = JSON.stringify(
+      sanitizeEvent({
+        type: undefined,
+        breadcrumbs: [
+          {
+            data: {
+              token: "hunter2",
+              request: { headers: { authorization: "Bearer hunter2" } },
+              status_code: 500,
+            },
+          },
+        ],
+      } as unknown as ErrorEvent),
+    );
+    expect(rendered).not.toContain("hunter2");
+    expect(rendered).toContain("500");
+  });
+
   it("never drops an event", () => {
     // A scrubber, not a filter: deciding which errors are worth seeing belongs
     // in the operator's own project, where they can see what they suppressed.
@@ -434,6 +453,55 @@ describe("sanitizeTransaction", () => {
     ]) {
       expect(rendered, leaked).not.toContain(leaked);
     }
+  });
+
+  it("finds a credential nested deep inside a context", () => {
+    // The shape the previous helper missed twice over: it looked only at
+    // `context.data`, and only at its top level. A value directly on the
+    // context and a value two levels inside `data` both went out in clear.
+    const sanitized = sanitizeTransaction({
+      type: "transaction",
+      contexts: {
+        // Directly on the context, with no `data` key at all.
+        app: { token: "hunter2" },
+        // And nested two levels down inside `data`.
+        trace: {
+          trace_id: "ed12b4924c1b4fc3a1b87ba462a40b7c",
+          data: {
+            request: { authorization: "Bearer hunter2" },
+            list: [{ deeper: { secret: "hunter2" } }],
+            "url.path": "/companies/acme",
+          },
+        },
+      },
+    } as unknown as TransactionEvent);
+    const rendered = JSON.stringify(sanitized);
+    expect(rendered).not.toContain("hunter2");
+    // The trace id and the diagnostic beside the redaction survive.
+    expect(rendered).toContain("ed12b4924c1b4fc3a1b87ba462a40b7c");
+    expect(rendered).toContain("/companies/acme");
+  });
+
+  it("redacts by key where there is no text for the string rule to read", () => {
+    // `hunter2` alone is a word: no issuer prefix, no `token=` beside it. Only
+    // the KEY says what it is, so a scrubber that reads strings and ignores
+    // structure cannot catch this at any depth.
+    const sanitized = sanitizeTransaction({
+      type: "transaction",
+      spans: [
+        {
+          span_id: "a",
+          trace_id: "b",
+          start_timestamp: 0,
+          data: { password: "hunter2", "http.status_code": 500 },
+        },
+      ],
+      breadcrumbs: [{ data: { credentials: { anything: ["at", "any", "hunter2"] } } }],
+    } as unknown as TransactionEvent);
+    const rendered = JSON.stringify(sanitized);
+    expect(rendered).not.toContain("hunter2");
+    // A non-secret key with a non-string value is untouched.
+    expect(sanitized?.spans?.[0]?.data?.["http.status_code"]).toBe(500);
   });
 
   it("keeps what makes a transaction worth reading", () => {
