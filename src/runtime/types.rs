@@ -369,6 +369,22 @@ pub struct ApprovalSummary {
     /// blocker particular to its own step. A console groups those alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_key: Option<String>,
+    /// Which kind of stopped step a parked blocker names, as the wire token
+    /// `"task"` or `"node"` — read off [`BlockerPayload::step`](crate::ports::blockers::BlockerPayload::step).
+    ///
+    /// The console needs this to word a verdict's consequence honestly:
+    /// `skip` and `cancel` do different things to a paused board card than
+    /// they do to a workflow node (a card redispatches on skip and returns to
+    /// To-do on cancel; a node produces nothing on skip and stops the run on
+    /// cancel), so a single copy fragment cannot describe both without
+    /// promising one path's behaviour on the other's card.
+    ///
+    /// `None` — and omitted from the wire — for a non-blocker approval, a
+    /// blocker with no step behind it (a bare agent question), and a host
+    /// that predates the field. All three read the same to a console: no
+    /// step-specific claim can be made, so the generic wording applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker_step_kind: Option<String>,
 }
 
 #[cfg(test)]

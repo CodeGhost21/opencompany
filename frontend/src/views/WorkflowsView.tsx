@@ -55,7 +55,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import type {
   ApprovalSummary,
-  GrantScope,
+  DecideApproval,
   NotificationDto,
   TeamMemberDto,
   Verdict,
@@ -337,11 +337,7 @@ export function WorkflowsView({
    * renders exactly as it did before #1002: it says the run parked cards and
    * points at the queue, without offering to decide them.
    */
-  onDecideApproval?: (
-    approval: ApprovalSummary,
-    verdict: Verdict,
-    scope: GrantScope,
-  ) => void;
+  onDecideApproval?: DecideApproval;
 }) {
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);

@@ -26,7 +26,7 @@ import {
   type ApprovalSummary,
   type AttachmentDto,
   type CognitionState,
-  type GrantScope,
+  type DecideApproval,
   type OperatorChannelDto,
   type TeamMemberDto,
   type TurnStep,
@@ -349,7 +349,7 @@ interface Props {
    * witnessed verdict survives this view unmounting — the operator can walk to
    * Approvals and back mid-turn.
    */
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecideApproval?: DecideApproval;
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;

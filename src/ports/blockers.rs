@@ -381,6 +381,16 @@ impl BlockerVerdict {
     }
 }
 
+/// What each of [`BlockerVerdict`]'s four arms does to the step a blocker
+/// stopped, in the words an operator reads.
+///
+/// One fragment, shared by every surface that names the choice, so a reworded
+/// verdict cannot move on one surface and leave another promising something
+/// else — which is how the two workflow-node copy sites came to describe a
+/// two-verdict world after the fourth verdict landed.
+pub const BLOCKER_VERDICT_CHOICES: &str = "retry runs it again, an answer re-runs it with what you wrote, skip moves past it, and \
+     cancel stops the run";
+
 /// The operator's durable answer to a parked blocker (issue #1863).
 ///
 /// Banked before the detached resume spawns and re-armed at boot, so a restart
@@ -659,6 +669,32 @@ mod test {
             !BlockerVerdict::Cancel.resumes(),
             "cancel abandons the work and starts nothing"
         );
+    }
+
+    /// The shared operator-facing fragment names all four verdicts, and names
+    /// them by the tokens the wire uses. A renamed variant that left the words
+    /// behind would have a surface offering a choice the host cannot take.
+    #[test]
+    fn the_shared_choice_fragment_names_every_verdict() {
+        for verdict in [
+            BlockerVerdict::Retry,
+            BlockerVerdict::Amend,
+            BlockerVerdict::Skip,
+            BlockerVerdict::Cancel,
+        ] {
+            // Amend is the one arm an operator does not type by name: they type
+            // the answer, and the words say so.
+            let word = if verdict == BlockerVerdict::Amend {
+                "an answer"
+            } else {
+                verdict.as_str()
+            };
+            assert!(
+                BLOCKER_VERDICT_CHOICES.contains(word),
+                "{verdict:?} is offered by the host but not named to the operator: \
+                 {BLOCKER_VERDICT_CHOICES}"
+            );
+        }
     }
 
     /// The answer is additive: a resolution written with no words reads back

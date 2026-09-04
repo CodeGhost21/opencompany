@@ -47,7 +47,7 @@ import {
 } from "lucide-react";
 
 import type { Task, TaskPlan } from "@/api/tasks";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { DecideApproval, Verdict } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { withHostParam } from "@/hooks/use-host-route";
@@ -170,7 +170,7 @@ export function TaskItem({
    * a surface with no handler renders no decide controls rather than live
    * buttons that do nothing. Every board in this console is handed one.
    */
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: DecideApproval;
   onOpen: () => void;
   onResume: () => void;
 }) {

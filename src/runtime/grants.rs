@@ -717,6 +717,32 @@ impl GrantSet {
             .insert(id.clone(), resolution);
     }
 
+    /// Arms the operator's answer to a parked blocker **only if no answer is
+    /// armed for it yet**, reporting whether this caller is the one that armed
+    /// it.
+    ///
+    /// The test and the insert happen under one lock, so of two requests racing
+    /// the same blocker exactly one gets `true` — the blocker twin of
+    /// [`consume`](Self::consume), and the same reason that one matches and
+    /// removes together. First write wins, so arming *is* the claim: a caller
+    /// that loses learns it before it has written anything, rather than after
+    /// overwriting the winner's answer.
+    pub fn claim_blocker_resolution(&self, id: &ApprovalId, resolution: BlockerResolution) -> bool {
+        match self
+            .inner
+            .lock()
+            .expect("grant set poisoned")
+            .blocker_resolutions
+            .entry(id.clone())
+        {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(resolution);
+                true
+            }
+        }
+    }
+
     /// Reads a parked blocker's armed answer without consuming it.
     pub fn peek_blocker_resolution(&self, id: &ApprovalId) -> Option<BlockerResolution> {
         self.inner

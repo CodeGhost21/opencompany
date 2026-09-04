@@ -68,7 +68,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { listTasks, patchTask, type Task } from "@/api/tasks";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
 import { useAskerNames } from "@/components/approval-card";
@@ -215,11 +215,7 @@ interface Props {
   decidedApprovals?: Readonly<Record<string, DecidedApproval>>;
   failedApprovals?: Record<string, string>;
   /** Whether a detached approval continuation is still running for a card. */
-  onDecideApproval?: (
-    approval: ApprovalSummary,
-    verdict: Verdict,
-    scope: GrantScope,
-  ) => void;
+  onDecideApproval?: DecideApproval;
   /**
    * Re-reads the shared list (`useLedgerNav.refresh`) — called after the
    * switcher's in-place wizard declares a new one, so it shows up in the
@@ -1345,7 +1341,7 @@ function BoardMode({
   decided: Readonly<Record<string, DecidedApproval>>;
   failed: Record<string, string>;
   /** The shell's one resolve — absent when this board is read-only. */
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: DecideApproval;
   /** Re-dispatch a paused card. */
   onResume?: (entry: LedgerEntry) => void;
 }) {

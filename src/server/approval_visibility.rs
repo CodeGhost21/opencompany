@@ -178,6 +178,7 @@ mod tests {
             contents_hidden: false,
             batch: Some("turn-1".to_string()),
             group_key: None,
+            blocker_step_kind: None,
         }
     }
 
