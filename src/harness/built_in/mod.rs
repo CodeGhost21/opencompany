@@ -4390,6 +4390,7 @@ impl HarnessPool {
                 raw_message: message.to_string(),
                 events: events.clone(),
                 store: deps.store.clone(),
+                reader: agent_id.to_string(),
                 thread_root: chat.thread_root,
                 current_message_seq: chat.message_seq,
             }),
