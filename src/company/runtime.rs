@@ -2191,11 +2191,34 @@ impl CompanyRuntime {
         #[cfg(feature = "openhuman")]
         let _resolving = self.blocker_resolutions.lock().await;
         #[cfg(feature = "openhuman")]
-        self.arm_console_blocker_resolution(id, verdict).await?;
-        let receipt = CycleRunner::new(self)
+        let armed = self.arm_console_blocker_resolution(id, verdict).await?;
+        // A build with no blocker resume never arms one; the releases below are
+        // no-ops there rather than a second code path to keep in step.
+        #[cfg(not(feature = "openhuman"))]
+        let armed = false;
+        // Every exit below that leaves no resume behind it gives the claim back,
+        // the compensation `settle_claimed_blocker` makes for the four-way path.
+        // An error keeps the durable record, which is what the next boot re-arms
+        // and drives; a receipt that settled nothing retires it, because there is
+        // no park left for a boot to match it to.
+        let receipt = match CycleRunner::new(self)
             .settle_approval(id, verdict, by, scope)
-            .await?;
-        self.retire_if_expired(id, &receipt).await?;
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                self.release_console_blocker_claim(id, armed);
+                return Err(err);
+            }
+        };
+        if let Err(err) = self.retire_if_expired(id, &receipt).await {
+            self.release_console_blocker_claim(id, armed);
+            return Err(err);
+        }
+        #[cfg(feature = "openhuman")]
+        if armed && !matches!(receipt, ResolveReceipt::Settled(_)) {
+            self.retire_unresumed_console_claim(id).await;
+        }
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
@@ -2233,18 +2256,22 @@ impl CompanyRuntime {
     /// so the approval event recorded one verdict while the resume executed
     /// another. A claim that loses returns having written nothing, and one that
     /// wins but cannot bank releases the slot rather than orphaning it.
+    ///
+    /// Answers **whether this call was the one to arm it**, so the caller
+    /// releases only a claim it took: a slot the four-way path already filled,
+    /// or an id that is no parked blocker at all, is none of its business.
     #[cfg(feature = "openhuman")]
     async fn arm_console_blocker_resolution(
         self: &Arc<Self>,
         id: &ApprovalId,
         verdict: Verdict,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use crate::ports::blockers::{BlockerPayload, BlockerResolution, BlockerVerdict};
         let Some(parked) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
-            return Ok(());
+            return Ok(false);
         };
         if !crate::ports::blockers::is_blocker_effect(&parked.effect) {
-            return Ok(());
+            return Ok(false);
         }
         let step = serde_json::from_value::<BlockerPayload>(parked.effect.payload.clone())
             .ok()
@@ -2259,7 +2286,7 @@ impl CompanyRuntime {
             step,
         };
         if !self.grants.claim_blocker_resolution(id, resolution.clone()) {
-            return Ok(());
+            return Ok(false);
         }
         if let Err(err) = self
             .journal
@@ -2269,7 +2296,47 @@ impl CompanyRuntime {
             self.grants.take_blocker_resolution(id);
             return Err(err);
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Gives back a claim [`arm_console_blocker_resolution`](Self::arm_console_blocker_resolution)
+    /// took, on a path that ends with no resume behind it.
+    ///
+    /// The durable record deliberately stays: the approval is still parked when
+    /// a settle fails, so the next boot re-arms this answer and
+    /// [`schedule_replayed_blocker_resolutions`](Self::schedule_replayed_blocker_resolutions)
+    /// drives it. Erasing it here would turn a recoverable state into a lost
+    /// decision.
+    #[cfg(feature = "openhuman")]
+    fn release_console_blocker_claim(&self, id: &ApprovalId, armed: bool) {
+        if armed {
+            self.grants.take_blocker_resolution(id);
+        }
+    }
+
+    /// A build with no blocker resume arms nothing to give back.
+    #[cfg(not(feature = "openhuman"))]
+    fn release_console_blocker_claim(&self, _id: &ApprovalId, _armed: bool) {}
+
+    /// Retires a console-armed blocker claim whose settle produced no resume.
+    ///
+    /// `AlreadyResolved` and `Expired` both leave `spawn_follow_up` returning
+    /// early, so nothing will ever take the armed answer. The durable record
+    /// goes with it: unlike a failed settle — which leaves the approval parked
+    /// for [`schedule_replayed_blocker_resolutions`](Self::schedule_replayed_blocker_resolutions)
+    /// to drive on the next boot — these receipts mean the park is gone, so a
+    /// surviving `BlockerResolved` would be an orphan no boot could match.
+    #[cfg(feature = "openhuman")]
+    async fn retire_unresumed_console_claim(&self, id: &ApprovalId) {
+        self.grants.take_blocker_resolution(id);
+        if let Err(err) = self.journal.record_blocker_resumed(id).await {
+            tracing::warn!(
+                company = %self.id,
+                approval = %id,
+                error = %err,
+                "could not retire a blocker answer whose settle found nothing to resume"
+            );
+        }
     }
 
     /// Finishes the retirement a [`ResolveReceipt::Expired`] owes (issue #1449).
@@ -10250,6 +10317,193 @@ mod tests {
             "a banked-but-unsettled blocker answer must be driven on the next boot; it is \
              still parked with its resolution rehydrated, so claim_blocker_resolution will \
              refuse every later answer and this blocker can never be resolved by anyone"
+        );
+    }
+    /// A blocker parked far enough in the past to be past any TTL, seeded the
+    /// way `seed_parked` does so the deadline is arbitrary rather than "now".
+    #[cfg(feature = "openhuman")]
+    async fn park_expired_blocker(
+        runtime: &Arc<super::CompanyRuntime>,
+        id: &str,
+        payload: &crate::ports::blockers::BlockerPayload,
+    ) -> crate::ports::types::ApprovalId {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+        let approval = crate::ports::types::ApprovalId::new(id);
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+            agent: None,
+            run_id: None,
+        };
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), 0);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                0,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .expect("seed parked blocker");
+        approval
+    }
+
+    #[cfg(feature = "openhuman")]
+    fn stuck_payload() -> crate::ports::blockers::BlockerPayload {
+        crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn blocker_runtime() -> (Arc<super::CompanyRuntime>, tempfile::TempDir) {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+        (runtime, home)
+    }
+
+    /// **Major review finding (CodeRabbit) on PR #2038.** The console fallback
+    /// claims the slot before it settles, and `settle_approval` can answer
+    /// `Expired` or `AlreadyResolved` rather than failing outright. Neither
+    /// receipt gets a resume — `spawn_follow_up` returns early for both — so
+    /// the claim it armed is left in `grants.blocker_resolutions` with nothing
+    /// that will ever consume it. The four-way path already compensates this;
+    /// the fallback did not.
+    ///
+    /// An epoch-0 park is unambiguously past any TTL, which makes the
+    /// `Expired` arm reachable without racing a deadline.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_console_expiry_releases_the_blocker_claim_it_armed() {
+        let (runtime, _home) = blocker_runtime().await;
+        let payload = stuck_payload();
+        let id = park_expired_blocker(&runtime, "appr-expired-blocker", &payload).await;
+
+        let (receipt, _follow_up) = runtime
+            .resolve_approval_spawned(
+                &id,
+                crate::ports::types::Verdict::Approve,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: "owner".to_string(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("a late console click resolves as an expiry, not an error");
+        assert!(
+            receipt.expired(),
+            "an epoch-0 park must read as expired: {receipt:?}"
+        );
+
+        assert!(
+            runtime.grants.peek_blocker_resolution(&id).is_none(),
+            "the console fallback armed a claim and then settled to a receipt with no \
+             resume behind it; leaving the claim armed strands an entry no follow-up \
+             will ever take, and blocks every later answer to the same id"
+        );
+    }
+
+    /// The same finding's other half: a `settle_approval` that *fails* after the
+    /// fallback has claimed and banked must release the live claim too, exactly
+    /// as `settle_claimed_blocker` does for the four-way path.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_console_settle_failure_releases_the_blocker_claim_it_armed() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let journal = std::sync::Arc::new(RefusingJournalStore::default());
+        let runtime = Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .with_journal_store(journal.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+        let payload = stuck_payload();
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        // One more append lands — the fallback's own `record_blocker_resolution`
+        // — and `settle_approval`'s `record_resolved` is the write that fails.
+        journal.arm();
+        journal.allow_next(1);
+        assert!(
+            runtime
+                .resolve_approval_spawned(
+                    &id,
+                    crate::ports::types::Verdict::Approve,
+                    crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Operator,
+                        id: "owner".to_string(),
+                    },
+                    crate::runtime::grants::GrantScope::Once,
+                )
+                .await
+                .is_err(),
+            "the armed journal store must fail settle_approval's own record"
+        );
+
+        assert!(
+            runtime.grants.peek_blocker_resolution(&id).is_none(),
+            "a settle failure after the console fallback banked its answer must release \
+             the live claim, the same compensation claim_and_settle_blocker makes"
         );
     }
     /// **P1 review finding (Codex) on PR #2038.** The group lock and the
