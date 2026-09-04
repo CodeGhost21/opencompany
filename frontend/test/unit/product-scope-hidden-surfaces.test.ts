@@ -349,3 +349,22 @@ describe("the wizard's model step asks the operator to name a provider too", () 
     expect(INFERENCE_PROVIDERS.find((p) => p.id === "managed")?.label).toBe("TinyHumans");
   });
 });
+
+describe("the roster's keyboard shortcuts go with the roster", () => {
+  it("does not select a host on Cmd-1 when there is no roster to see", async () => {
+    // The listener is installed on `window` by the provider, not by the menu, so
+    // hiding the switcher does not remove it. Left live it would swallow the
+    // browser's own Cmd-1 and switch hosts with nothing on screen saying so.
+    const picked: string[] = [];
+    const value = { ...hosts([CONNECTION, SECOND]), onSelect: (id: string) => picked.push(id) };
+    await show(value as HostsValue);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "2", metaKey: true, bubbles: true }),
+      );
+    });
+
+    expect(picked).toEqual([]);
+  });
+});
