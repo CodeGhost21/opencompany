@@ -7,8 +7,11 @@ setup without which none of it does anything.
 
 The short version:
 
-- The desktop shell checks a signed manifest on the newest GitHub release, five
-  seconds after launch and every fifteen minutes after that.
+- The desktop shell reads a manifest on the newest GitHub release, five seconds
+  after launch and every fifteen minutes after that. The **manifest itself is
+  not signed** — what is signed is each platform's archive, and the signature
+  travels in the manifest beside its url. So the manifest is a directory, and
+  the trust is entirely in the bytes it points at.
 - When it finds something newer it **downloads it in the background, silently**,
   and only then puts a banner on screen — "Restart now" or "Later". The
   operator is never asked to start a download and never watches a progress bar.
@@ -41,11 +44,20 @@ There are eight states and three of them are visible:
 | `installing` | **banner** | Their own click, still running. The window is about to close. |
 | `error` | **banner** | Something they may want to retry. |
 
-Dismissing with "Later" hides it until the flow re-enters an actionable state —
-the next release, or an install they start themselves. A **repeating**
-background failure that they already dismissed does not come back; a different
-one does. Without that rule a release whose bundle 404s would put the same
-banner on screen four times an hour.
+Dismissing hides the banner until the flow re-enters an actionable state. A
+**repeating** background failure that was already dismissed does not come back;
+a different one does. Without that rule a release whose bundle 404s would put
+the same banner on screen four times an hour.
+
+**"Later" on a staged update means later than this session.** Once bytes are
+staged the hook stops probing — a re-check that found a newer release would
+throw ~100 MB of verified download away, and there is no menu item to bring the
+banner back by hand (see [what is deliberately not
+here](#what-is-deliberately-not-here)). Nothing is installed on quit either —
+the bytes live in memory and go with the process — so what "Later" actually
+buys is the offer again, five seconds into the next launch. Resurfacing within
+a session is reachable from the `error` states, where nothing is staged and the
+fifteen-minute probe keeps running.
 
 The rule itself is a pure function, `isActionable` in
 [`frontend/src/lib/app-update.ts`](../../../frontend/src/lib/app-update.ts), and
@@ -100,10 +112,12 @@ fact to the person using the application: there is nothing to do. The download
 only runs because a check just said there is something to fetch, so a failure
 there is real and worth showing.
 
-A mid-stream network failure during the download is retried twice, with a 2s
-then 4s backoff. A **signature** failure is never retried: re-fetching the same
-bytes cannot fix a bad signature, and looping on one would turn a tampered
-bundle into a drain on somebody's battery. The policy is a pure function in
+A download that did not arrive is retried twice, with a 2s then 4s backoff —
+both a dropped connection and an unsuccessful HTTP status, because a 503 from
+GitHub's asset CDN on release day is exactly the minute the retry exists for. A
+**signature** failure is never retried: re-fetching the same bytes cannot fix a
+bad signature, and looping on one would turn a tampered bundle into a drain on
+somebody's battery. The policy is a pure function in
 `src-tauri/src/update.rs` and is unit tested there.
 
 ### The restart stops the local hosts first
@@ -156,6 +170,28 @@ afterwards. A release published without a manifest pins every existing install
 to the build it already has — silently, with no error anywhere, permanently.
 That is why `publish` needs `updater-manifest`, and why the manifest script
 refuses to upload a partial manifest that names only one architecture.
+
+### A prerelease tag ships no update anybody can reach
+
+`release.yml` marks any tag carrying a hyphen — `v0.2.0-rc.1`, `-beta.2` — as a
+prerelease, so that it does not become the "Latest release" the repository's
+front page points at. `/releases/latest/download/` follows the same rule and
+skips prereleases outright.
+
+So an rc cut through this pipeline still builds, signs and uploads its
+`latest.json`, and **no client will ever resolve it**: every install keeps
+reading the manifest on the last stable release, which is the correct outcome
+and not an accident to fix. What is worth knowing is the two things that
+follow. Dispatching the desktop workflow with `create_release: true` on an rc
+tag spends the signing key and roughly a minute of the release for an asset
+nothing reads. And an rc cannot be *tested* through the updater from this
+endpoint — verifying an update end to end (below) needs two stable tags.
+
+Adding a second endpoint to `plugins.updater.endpoints` is **not** the fix if an
+rc channel is ever wanted. The plugin walks the list in order and stops at the
+first that parses, so every build would take the first entry and none of them
+would be opted in to anything — a channel is a property of the install, and
+`endpoints` is compiled into all of them alike.
 
 ## macOS only, and why that is the honest answer
 

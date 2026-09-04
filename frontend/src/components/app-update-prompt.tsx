@@ -9,7 +9,13 @@ import { cn } from "@/lib/utils";
 /**
  * The desktop update banner: bottom-right, and silent almost always.
  *
- * Mounted once, in `AppShell`, for the whole session. It renders nothing in a
+ * Mounted once, for the whole session, in `App.tsx` — inside `HostsProvider`
+ * and *beside* the console rather than within it, so switching or losing a host
+ * does not unmount it. `AppShell` is a different component and is not where
+ * this lives; putting it there would tie a banner about replacing the
+ * application to whether a company is on screen.
+ *
+ * It renders nothing in a
  * browser and nothing while the shell is checking, finding or downloading a new
  * build — see `lib/app-update.ts` for why those three states are deliberately
  * invisible. What it does render is the one moment there is a decision to make:
