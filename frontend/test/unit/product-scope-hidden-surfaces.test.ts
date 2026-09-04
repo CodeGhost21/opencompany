@@ -241,13 +241,25 @@ describe("Composio offers this company's own account and nothing else", () => {
     expect(find("composio-mode-byok")).not.toBeNull();
   });
 
-  it("still tells a company already on managed which route it is on", async () => {
-    // No tile can be marked Current for a route that is not rendered, so the
-    // card would otherwise read as "unconfigured" to a company that is working.
-    await mountComposio(composioStatus({ mode: "managed" }));
+  it("keeps a radio checked for a company on a route it does not offer", async () => {
+    // The a11y break this guards: with managed filtered out of the order array
+    // and a company still on it, `active` was false for every tile — the whole
+    // group reported `aria-checked="false"`, which states "nothing is chosen"
+    // rather than "this is not a route offered here".
+    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
-    expect(find("composio-current-mode")).not.toBeNull();
-    expect(find("composio-current-mode")!.textContent).toContain("through OpenHuman");
+    const checked = document.querySelectorAll('[role="radio"][aria-checked="true"]');
+    expect(checked).toHaveLength(1);
+    expect(checked[0].getAttribute("data-testid")).toBe("composio-mode-unconfigured");
+  });
+
+  it("names nothing about the hidden route on the tile that stands in for it", async () => {
+    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
+
+    const tile = find("composio-mode-unconfigured")!;
+    expect(tile.textContent).toContain("Not configured");
+    expect(tile.textContent).not.toContain("OpenHuman");
+    expect(container.textContent).not.toContain("OpenHuman-managed");
   });
 
   it("still lets a BYOK company clear its key, and does not name the hidden route", async () => {
@@ -325,17 +337,55 @@ describe("inference asks the operator to name a provider", () => {
     expect(options).toContain("OpenRouter");
   });
 
-  it("still labels a company whose stored provider is the hidden one", async () => {
-    // `LEGACY_MANAGED` resolves to the default provider on the host, so this
-    // company keeps working; the console must still say what it is on rather
-    // than printing the raw stored slug.
+  it("shows a value that is a real member of its own option set", async () => {
+    // The bug in one line: the trigger rendered a label out of the full
+    // descriptor table while the list was filtered, so the control displayed a
+    // provider none of its options matched.
     await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
 
-    expect(container.textContent).toContain("Managed (TinyHumans)");
-    expect(container.textContent).not.toMatch(/\bmanaged\b(?![\s)])/);
-  });
-});
+    const trigger = document.querySelector("#inference-provider") as HTMLElement;
+    expect(trigger.textContent).toContain("Not configured");
+    expect(trigger.textContent).not.toContain("Managed (TinyHumans)");
 
+    await act(async () => {
+      trigger.click();
+      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      trigger.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
+
+    const options = Array.from(document.querySelectorAll("[role='option']")).map((o) =>
+      o.textContent?.trim(),
+    );
+    expect(options.length, "the list did not open").toBeGreaterThan(0);
+    // Whatever the trigger says must be one of the rows below it.
+    expect(options).toContain("Not configured");
+    expect(options).not.toContain("Managed (TinyHumans)");
+  });
+
+  it("brands nothing on the card for a route it does not offer", async () => {
+    await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
+
+    expect(find("inference-current-provider")!.textContent).toBe("Not configured");
+    expect(find("inference-not-configured")).not.toBeNull();
+    // No brand, no source word naming the route, and not the platform endpoint.
+    expect(container.textContent).not.toContain("Managed (TinyHumans)");
+    expect(container.textContent).not.toContain("api.tinyhumans.ai");
+  });
+
+  it("does not paint an unconfigured company as one of the offered providers", async () => {
+    // The other way to make the value a member is to quietly move it onto the
+    // first real option. That reads as a configured company and is a lie of the
+    // same size as the one being removed.
+    await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
+
+    const trigger = document.querySelector("#inference-provider") as HTMLElement;
+    expect(trigger.textContent).not.toContain("OpenRouter");
+    expect((find("inference-save") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+
+});
 describe("the wizard's model step asks the operator to name a provider too", () => {
   it("does not offer the managed endpoint as the thing to think with", () => {
     // The wizard has its own provider list, and it is the FIRST screen of a
