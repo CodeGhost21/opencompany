@@ -66,6 +66,10 @@ impl CompanyRegistry {
         drop(map);
         if !shutting_down {
             runtime.schedule_replayed_continuations();
+            // Handles dropped for the same reason a replayed continuation's is:
+            // registration must not wait on a resume, and dropping a handle
+            // abandons the waiting rather than the work.
+            drop(runtime.schedule_replayed_blocker_resolutions());
         }
     }
 

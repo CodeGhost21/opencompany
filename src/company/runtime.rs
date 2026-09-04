@@ -469,6 +469,11 @@ pub struct CompanyRuntime {
     /// Set by a cold build when replay found explicit decision continuations;
     /// consumed once when the runtime enters the production registry.
     replay_continuations_on_register: AtomicBool,
+    /// The blocker twin of
+    /// [`replay_continuations_on_register`](Self::replay_continuations_on_register):
+    /// set when replay found a banked blocker answer whose approval is still
+    /// parked, so the pair is driven once this runtime is addressable.
+    replay_blockers_on_register: AtomicBool,
     /// WS4: the embedded openhuman harness pool, when wired via
     /// [`RuntimeBuilder::with_harness`](crate::runtime::RuntimeBuilder::with_harness).
     /// Feature-gated so the default build is unaffected.
@@ -606,6 +611,7 @@ impl CompanyRuntime {
             blocker_resolutions: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
             replay_continuations_on_register: AtomicBool::new(false),
+            replay_blockers_on_register: AtomicBool::new(false),
             #[cfg(feature = "openhuman")]
             harness: None,
             #[cfg(feature = "openhuman")]
@@ -5458,7 +5464,119 @@ impl CompanyRuntime {
         CycleRunner::new(self).recover().await?;
         self.arm_replayed_continuation_recovery();
         self.schedule_replayed_continuations();
+        self.arm_replayed_blocker_recovery();
+        self.schedule_replayed_blocker_resolutions();
         Ok(())
+    }
+
+    /// Arms boot recovery for a blocker answer replay left banked while its
+    /// approval is still parked.
+    ///
+    /// That pair is the signature of a settle that never landed: the answer is
+    /// durable, `record_resolved` is not, and replay therefore re-arms the
+    /// claim over an approval it also still shows as pending. Left alone the
+    /// two deadlock each other — `claim_blocker_resolution` refuses every later
+    /// answer because the slot is full, and nothing ever empties the slot
+    /// because settling is what would have.
+    ///
+    /// An answer whose approval *did* settle is skipped: its resume is the
+    /// continuation queue's business, and driving it here would settle an
+    /// approval twice.
+    pub(crate) fn arm_replayed_blocker_recovery(&self) {
+        if self.replayed_blockers_to_drive().is_empty() {
+            return;
+        }
+        self.replay_blockers_on_register
+            .store(true, Ordering::Release);
+    }
+
+    /// Every rehydrated blocker answer whose approval replay still shows
+    /// parked, paired with the verdict to settle it under.
+    #[cfg(feature = "openhuman")]
+    fn replayed_blockers_to_drive(
+        &self,
+    ) -> Vec<(ApprovalId, crate::ports::blockers::BlockerVerdict)> {
+        let pending = self.journal.pending();
+        self.journal
+            .replayed_blocker_resolutions()
+            .into_iter()
+            .filter(|(id, _)| {
+                pending.iter().any(|parked| {
+                    &parked.id == id && crate::ports::blockers::is_blocker_effect(&parked.effect)
+                })
+            })
+            .map(|(id, resolution)| (id, resolution.verdict))
+            .collect()
+    }
+
+    /// A build with no blocker resume has none of these to drive.
+    #[cfg(not(feature = "openhuman"))]
+    fn replayed_blockers_to_drive(&self) -> Vec<(ApprovalId, ())> {
+        Vec::new()
+    }
+
+    /// Settles and resumes every blocker answer replay left banked but never
+    /// settled, once the runtime is addressable.
+    ///
+    /// The blocker twin of
+    /// [`schedule_replayed_continuations`](Self::schedule_replayed_continuations),
+    /// and what makes `claim_and_settle_blocker`'s bank-before-settle ordering
+    /// mean what its doc says: a crash between the two replays as "still armed"
+    /// and is re-driven here, rather than stranding the blocker behind its own
+    /// rehydrated claim.
+    ///
+    /// The claim is already held by the rehydration, so this enters at
+    /// [`settle_claimed_blocker`](Self::settle_claimed_blocker) rather than
+    /// re-claiming. The group lock is taken per id for the same reason the live
+    /// paths take it — a boot and an operator can be answering at once.
+    ///
+    /// Settled under the operator channel, the same default a DM answer with no
+    /// named actor takes: the durable record carries the verdict and the words,
+    /// not who supplied them, and re-deriving an attribution the journal never
+    /// stored would be a worse answer than the one the DM path already gives.
+    ///
+    /// Hands back the driving tasks so a caller that needs them finished can
+    /// join them; the registry drops them, exactly as it drops a replayed
+    /// continuation's.
+    pub(crate) fn schedule_replayed_blocker_resolutions(self: &Arc<Self>) -> Vec<JoinHandle<()>> {
+        if !self
+            .replay_blockers_on_register
+            .swap(false, Ordering::AcqRel)
+        {
+            return Vec::new();
+        }
+        self.drive_replayed_blockers()
+    }
+
+    #[cfg(feature = "openhuman")]
+    fn drive_replayed_blockers(self: &Arc<Self>) -> Vec<JoinHandle<()>> {
+        self.replayed_blockers_to_drive()
+            .into_iter()
+            .map(|(id, verdict)| {
+                let rt = Arc::clone(self);
+                tokio::spawn(async move {
+                    let _resolving = rt.blocker_resolutions.lock().await;
+                    let actor = Actor {
+                        kind: ActorKind::Operator,
+                        id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                    };
+                    if let Err(err) = rt.settle_claimed_blocker(&id, verdict, &actor).await {
+                        tracing::warn!(
+                            company = %rt.id,
+                            approval = %id,
+                            error = %err,
+                            "could not drive a blocker answer replay left banked; it stays \
+                             durable for the next boot to retry"
+                        );
+                    }
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(not(feature = "openhuman"))]
+    fn drive_replayed_blockers(self: &Arc<Self>) -> Vec<JoinHandle<()>> {
+        Vec::new()
     }
 
     /// Arms cold-boot delivery when replay found an explicit decision whose
@@ -6139,6 +6257,30 @@ impl CompanyRuntime {
             self.grants.take_blocker_resolution(id);
             return Err(err);
         }
+        self.settle_claimed_blocker(id, verdict, actor).await
+    }
+
+    /// Settles a blocker whose answer is **already claimed and banked**, and
+    /// starts its resume.
+    ///
+    /// The tail of [`claim_and_settle_blocker`](Self::claim_and_settle_blocker),
+    /// split out because a boot reaches exactly this point by a different road:
+    /// [`schedule_replayed_blocker_resolutions`](Self::schedule_replayed_blocker_resolutions)
+    /// rehydrates a durable answer whose settle never landed, so the claim is
+    /// held and the record is banked before anything here runs. Re-claiming
+    /// there would lose to the rehydrated entry and report `AlreadyResolved`,
+    /// which is the whole bug that entry point exists to fix.
+    ///
+    /// A failure releases the live claim but deliberately leaves the durable
+    /// record alone: that record is what the next boot re-arms and drives, and
+    /// erasing it here would trade a retryable state for a lost decision.
+    #[cfg(feature = "openhuman")]
+    async fn settle_claimed_blocker(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        verdict: crate::ports::blockers::BlockerVerdict,
+        actor: &Actor,
+    ) -> Result<(ResolveReceipt, Option<JoinHandle<Result<CycleReport>>>)> {
         let receipt = match CycleRunner::new(self)
             .settle_approval(id, verdict.event_verdict(), actor.clone(), GrantScope::Once)
             .await
@@ -9985,6 +10127,129 @@ mod tests {
              not just a record_blocker_resolution failure — otherwise \
              grants.blocker_resolutions keeps an orphaned entry for an id no live \
              resume will ever consume"
+        );
+    }
+    /// **P1 review finding (Codex) on PR #2038.** Releasing the *live* claim
+    /// when `settle_approval` fails is only half the compensation: the durable
+    /// `BlockerResolved` record is already banked and survives. A boot
+    /// rehydrates it onto the grant set, the approval itself is still parked —
+    /// `record_resolved` never landed, so replay never saw it resolve — and
+    /// nothing drives the pair. Every later answer then loses
+    /// `claim_blocker_resolution` to the rehydrated entry and returns
+    /// `AlreadyResolved` without settling or resuming, so the blocker is
+    /// permanently unanswerable and stays that way across further restarts.
+    ///
+    /// `claim_and_settle_blocker`'s own doc already promised the opposite —
+    /// "a crash between the two still replays as still armed and re-resumes" —
+    /// and no code made that true. This is that promise, asserted: after the
+    /// restart the blocker must actually leave the pending set rather than sit
+    /// banked forever.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_banked_blocker_whose_settle_failed_is_driven_on_the_next_boot() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest = || {
+            toml::from_str::<crate::company::CompanyManifest>(
+                r#"
+                [company]
+                name = "Acme"
+
+                [[agent]]
+                id = "ceo"
+                role = "Chief"
+
+                [policy]
+                mode = "supervised"
+                "#,
+            )
+            .expect("manifest")
+        };
+        let journal = std::sync::Arc::new(RefusingJournalStore::default());
+        let booted = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .with_journal_store(journal.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = booted
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        // The volume dies after exactly one more append: `record_blocker_resolution`
+        // lands, so the answer is durable, and `settle_approval`'s own
+        // `record_resolved` is the write that fails.
+        journal.arm();
+        journal.allow_next(1);
+        assert!(
+            booted
+                .apply_blocker_reply_spawned(
+                    std::slice::from_ref(&id),
+                    &id,
+                    crate::ports::blockers::BlockerVerdict::Retry,
+                    "",
+                    None,
+                )
+                .await
+                .is_err(),
+            "the armed journal store must fail settle_approval's own record"
+        );
+        // The volume comes back, as it would have by the time anyone restarts.
+        journal.disarm();
+        drop(booted);
+
+        // The next boot: same home, same journal, replayed from scratch.
+        let rebooted = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .with_journal_store(journal.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+        assert!(
+            rebooted.grants.peek_blocker_resolution(&id).is_some(),
+            "the boot must rehydrate the banked answer — without that there is \
+             nothing for this test to drive"
+        );
+        assert!(
+            rebooted.journal.pending().iter().any(|p| p.id == id),
+            "and the approval must still be parked, since record_resolved never landed"
+        );
+
+        rebooted.recover().await.expect("replay");
+
+        // The resume runs on a spawned task, so give it room to land.
+        let mut settled = false;
+        for _ in 0..200 {
+            if !rebooted.journal.pending().iter().any(|p| p.id == id) {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            settled,
+            "a banked-but-unsettled blocker answer must be driven on the next boot; it is \
+             still parked with its resolution rehydrated, so claim_blocker_resolution will \
+             refuse every later answer and this blocker can never be resolved by anyone"
         );
     }
     /// **P1 review finding (Codex) on PR #2038.** The group lock and the

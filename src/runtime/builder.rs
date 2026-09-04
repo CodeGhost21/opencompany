@@ -4157,6 +4157,7 @@ impl RuntimeBuilder {
         // finds ready has somewhere real to resume to.
         if handover.is_none() {
             runtime.arm_replayed_continuation_recovery();
+            runtime.arm_replayed_blocker_recovery();
             runtime.reconcile_stranded_blocked_nodes().await;
         }
 
