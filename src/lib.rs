@@ -51,6 +51,13 @@ pub mod ledger;
 /// WS5: pure Usage & Finances projections over the runtime's accounting data
 /// (usage samples, ledger, `[budget]`). No I/O; WS2 wraps these in GraphQL.
 pub mod metering;
+/// Crash and error reporting to a Sentry project the OPERATOR owns
+/// (`docs/spec/runtime/crash-reporting.md`). Ungated on purpose: the
+/// enable/disable decision and the secret scrubber are the two parts that have
+/// to be provably right, so they compile — and are tested — in every build.
+/// Only the bodies that name a `sentry::` type sit behind the
+/// `crash-reporting` feature.
+pub mod observability;
 pub mod openhuman;
 /// PayPal wallet + transaction visibility (issue #789).
 #[cfg(feature = "paypal")]

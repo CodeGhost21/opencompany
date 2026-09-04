@@ -661,6 +661,25 @@ jobs:
       - name: Test the analytics surface
         run: scripts/ci/run-scoped-suite.sh "analytics" analytics analytics
 
+      # `crash-reporting`: the `before_send` hook, which is the only part of
+      # crash reporting that needs a `sentry::` type to exist at all.
+      #
+      # Same split as `analytics` above, for the same reason. The
+      # enable/disable decision (`observability::config`) and the secret
+      # scrubber (`observability::redaction`) are deliberately NOT gated — they
+      # name no `sentry::` type, they are the two parts that have to be provably
+      # right, and they run in the bare `cargo test` above. What this lane adds
+      # is the half that cannot be written without the protocol types compiled
+      # in: `no_credential_survives_the_hook` builds one event carrying a
+      # credential in every field an event can carry one in, runs it through the
+      # real `before_send`, serializes the result and greps it.
+      #
+      # It rides this job because the feature's only dependency is `sentry`
+      # itself, which brings a small `ureq` and the `rustls` already in the
+      # graph — no second HTTP client and no native TLS. See Cargo.toml.
+      - name: Test the crash-reporting surface
+        run: scripts/ci/run-scoped-suite.sh "crash reporting" crash-reporting observability
+
       # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
       # binary. Building one over there would mean a second submodule checkout
       # and a second cold Rust compile — minutes of wall clock to produce a

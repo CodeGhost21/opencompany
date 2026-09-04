@@ -1,12 +1,15 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ThemeProvider } from "next-themes";
+import { ErrorBoundary } from "@sentry/react";
 
 import { App } from "./App";
+import { CrashFallback } from "@/components/crash-fallback";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { purgeStoredSmtpPasswords } from "@/lib/domain";
 import { startScrollActivity } from "@/lib/scroll-activity";
+import { initSentry, isReporting } from "@/lib/sentry";
 import "./index.css";
 
 /**
@@ -24,15 +27,46 @@ function mount(): void {
   if (!root) throw new Error("missing #root element");
   createRoot(root).render(
     <StrictMode>
-      <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-        <TooltipProvider delay={200}>
-          <App />
-          <Toaster position="bottom-right" richColors closeButton />
-        </TooltipProvider>
-      </ThemeProvider>
+      {/*
+        Outermost, outside ThemeProvider and TooltipProvider, because the thing
+        that crashes may be one of them — a boundary inside a provider cannot
+        catch that provider's own throw, and the symptom is the white page this
+        exists to replace. `CrashFallback` depends on no context for the same
+        reason.
+      */}
+      <ErrorBoundary
+        fallback={({ error, resetError, eventId }) => (
+          <CrashFallback
+            error={error}
+            // Only when an event actually left. The SDK mints an id locally
+            // whether or not a DSN is configured; see `isReporting`.
+            eventId={isReporting() ? eventId : null}
+            onReset={resetError}
+          />
+        )}
+      >
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <TooltipProvider delay={200}>
+            <App />
+            <Toaster position="bottom-right" richColors closeButton />
+          </TooltipProvider>
+        </ThemeProvider>
+      </ErrorBoundary>
     </StrictMode>,
   );
 }
+
+// Crash reporting first, before anything else runs and well before the first
+// render — a crash during the first render is exactly the one worth reporting,
+// and a boundary armed after it would miss it. Silent unless
+// `VITE_SENTRY_DSN` is set: no console warning, no network, nothing to notice.
+// See `docs/spec/runtime/crash-reporting.md`.
+initSentry();
 
 // Started before the first render and never disposed: it is one capturing
 // listener for the life of the document, and every scroll container in the app

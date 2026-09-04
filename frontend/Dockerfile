@@ -11,6 +11,28 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# Crash reporting is a BUILD-time decision for the console: Vite substitutes
+# these into the bundle, so a variable set when the container runs arrives far
+# too late. Blank — the default — builds a bundle that never initializes the
+# SDK, which is what every build that does not pass them gets.
+# See `docs/spec/runtime/crash-reporting.md`.
+ARG VITE_SENTRY_DSN=
+ARG VITE_SENTRY_ENVIRONMENT=
+ARG VITE_SENTRY_TRACES_SAMPLE_RATE=
+ARG VITE_SENTRY_TRACE_PROPAGATION_TARGETS=
+# The commit half of the release tag. `.dockerignore` excludes `.git`, so the
+# build has no way to work out which revision it is compiling — without this
+# every image reports `opencompany@<version>` with no commit, which is a
+# release name that cannot tell two builds apart. That is the question a stack
+# trace raises, and `@sentry/vite-plugin` files source maps under the same
+# string, so a degraded tag also loses symbolication. The host image already
+# takes `OPENCOMPANY_BUILD_COMMIT` for exactly this; this is its console twin.
+ARG VITE_BUILD_COMMIT=
+ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
+    VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
+    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE \
+    VITE_SENTRY_TRACE_PROPAGATION_TARGETS=$VITE_SENTRY_TRACE_PROPAGATION_TARGETS \
+    VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT
 RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
