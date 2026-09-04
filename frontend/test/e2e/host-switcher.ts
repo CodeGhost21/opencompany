@@ -31,9 +31,19 @@ export async function expectHostMenuGone(page: Page): Promise<void> {
   const trigger = page.getByTestId("host-switcher");
   await expect(trigger).toBeVisible({ timeout: 30_000 });
   await trigger.click();
+
+  // Nothing opened, and nothing that would have.
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
   await expect(page.getByTestId("host-switcher-add")).toHaveCount(0);
   await expect(page.getByTestId("host-switcher-manage")).toHaveCount(0);
   await expect(page.getByTestId("switcher-new-company")).toHaveCount(0);
   await expect(page.locator('[data-testid^="host-row-"]')).toHaveCount(0);
+
+  // An absent menu is not the same fact as a trigger that stopped behaving like
+  // one. A control still announcing itself as a button with a popup — reachable
+  // by Tab, actionable by Enter, described to a screen reader as something that
+  // opens — is a promise the console no longer keeps, whatever the popup does.
+  await expect(trigger.locator("button")).toHaveCount(0);
+  await expect(trigger).not.toHaveAttribute("aria-haspopup", /.*/);
+  await expect(trigger).not.toHaveAttribute("aria-expanded", /.*/);
 }
