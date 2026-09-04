@@ -375,6 +375,14 @@ export interface WorkflowRunResult {
    * delivery failure, because the nodes really did run.
    */
   verdict?: WorkflowRunVerdict;
+  /**
+   * Whether the operator stopped this run before it settled (Codex review, PR
+   * #2053). The host has sent this on every settled body since before #981;
+   * added to the type now because deriving a legacy fallback verdict — see
+   * {@link legacyRunVerdict} — needs it and a `WorkflowRunVerdict | undefined`
+   * host predating #981 still sends it.
+   */
+  cancelled?: boolean;
 }
 
 /**
@@ -1298,19 +1306,38 @@ export function updateWorkflow(
  * Follows the same runtime-vs-source contract as `deleteDesk`: a workflow
  * defined by a file in the company source tree cannot be removed from the
  * console and returns `409`; an unknown id is `404`.
+ *
+ * Resolves to how many in-flight runs the host's post-delete sweep actually
+ * stopped (CodeRabbit review, PR #2053) — **not** whether the caller was
+ * watching a run before it asked. Those can disagree with no race required: a
+ * long run can settle on its own in the seconds between the operator
+ * confirming the delete and this request reaching the host, and the sweep
+ * then truthfully stops nothing. `stoppedRuns` is the one place the real
+ * answer lives; the console's delete flow reads it rather than its own
+ * pre-request guess.
+ *
+ * **Tolerates an older host** (Codex review, PR #2053): before B-121 this
+ * route answered `204` with an empty body, and `OpenCompanyClient`'s generic
+ * request reader turns that into `undefined` rather than `{}`. Destructuring
+ * `stoppedRuns` straight off that would throw — after the host had already
+ * deleted the workflow — which would misreport a successful delete as a
+ * failure and leave the removed workflow selected until a reload. An absent
+ * response reads as `stoppedRuns: 0`, the only honest answer an old host that
+ * never ran a sweep at all can give.
  */
-export function deleteWorkflow(
+export async function deleteWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   expectedVersion?: string | null,
-): Promise<void> {
+): Promise<{ stoppedRuns: number }> {
   const query = expectedVersion
     ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
     : "";
-  return client.del<void>(
+  const body = await client.del<{ stoppedRuns: number } | undefined>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}${query}`,
   );
+  return { stoppedRuns: body?.stoppedRuns ?? 0 };
 }
 
 /**

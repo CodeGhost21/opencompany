@@ -6391,6 +6391,49 @@ impl CompanyRuntime {
         }
     }
 
+    /// Fires the stop signal on every run of **one** workflow still in flight,
+    /// and answers how many it fired at (B-121).
+    ///
+    /// The sibling of [`stop_live_runs`](Self::stop_live_runs), narrowed to one
+    /// graph, for the single event that makes a run uncontrollable: deleting the
+    /// workflow it belongs to. Delete already tears the schedule and the
+    /// revisions down; the run is the piece it used to leave executing, and it
+    /// left it with nowhere to be stopped from — the console's only Stop button
+    /// lives on the workflow detail page that has just ceased to exist.
+    ///
+    /// Same mechanism and same guarantees as Pause's sweep and as the Stop
+    /// button itself (`run_supervisor().cancel`, issue #383): the engine checks
+    /// the token at the next node boundary, an executing node finishes and is
+    /// journaled, and a wedged one is hard-aborted after a bounded grace. So the
+    /// run settles `cancelled` with its partial trail intact, and its history
+    /// row outlives the workflow exactly as every other past run of it does.
+    ///
+    /// Best-effort in the one way everything that cancels here is: a run
+    /// registered on a superseded runtime (see `RuntimeHandover`) is not
+    /// reachable from this supervisor and still finishes on its own.
+    pub fn stop_runs_of_workflow(&self, workflow_id: &str) -> usize {
+        let stopping: Vec<String> = self
+            .run_supervisor
+            .live()
+            .into_iter()
+            .filter(|(_, wf)| wf == workflow_id)
+            .map(|(run_id, _)| run_id)
+            .collect();
+        if stopping.is_empty() {
+            return 0;
+        }
+        tracing::info!(
+            company = %self.id,
+            workflow = %workflow_id,
+            runs = stopping.len(),
+            "workflow deleted: cancelling the runs of it still in flight"
+        );
+        stopping
+            .iter()
+            .filter(|run_id| self.run_supervisor.cancel(run_id))
+            .count()
+    }
+
     // -- Emergency stop (issue #86) -----------------------------------------
 
     /// Whether the emergency stop is engaged.

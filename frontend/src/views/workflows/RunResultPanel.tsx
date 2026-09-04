@@ -25,7 +25,11 @@ import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { DeliveryRows } from "./RunHistoryPanel";
 // Issue #596: the per-node parse is now shared with the durable run inspector
 // and the pre-publish approvals card, so it lives in `run-output.ts`.
-import { type NodeResult, parseRunNodes } from "./run-output";
+import {
+  type NodeResult,
+  noNodeResultsNotice,
+  parseRunNodes,
+} from "./run-output";
 // Issue #1002: which of the company's parked cards this run is held on.
 import { blockingApprovals, runApprovals, type RunApproval } from "./run-approvals";
 // Issue #981: the one rung for "this report did not go out", shared with the
@@ -124,6 +128,12 @@ export function RunResultPanel({
   const nodeResults = useMemo(
     () => parseRunNodes(result.output, graph),
     [result.output, graph],
+  );
+  // B-005 / B-039: why there are no cards, said in terms of how this run
+  // actually ended. `null` when there are cards.
+  const noResults = useMemo(
+    () => noNodeResultsNotice(nodeResults, result.output, result.verdict),
+    [nodeResults, result.output, result.verdict],
   );
   const deliveries = result.deliveries ?? [];
   const pendingDeliveryCount = deliveries.filter(
@@ -327,23 +337,25 @@ export function RunResultPanel({
           />
         )}
 
-        {nodeResults && nodeResults.length > 0 ? (
+        {noResults ? (
+          <p
+            className="mb-2 text-xs text-muted-foreground"
+            data-testid="workflow-run-no-node-results"
+          >
+            {noResults.message}
+          </p>
+        ) : (
           <div
             className="mb-2 space-y-2"
             data-testid="workflow-run-node-results"
           >
-            {nodeResults.map((n) => (
+            {(nodeResults ?? []).map((n) => (
               <NodeResultCard key={n.id} node={n} />
             ))}
           </div>
-        ) : (
-          <p className="mb-2 text-xs text-muted-foreground">
-            The run finished, but its output didn't match the expected node
-            shape — see the raw output below.
-          </p>
         )}
 
-        <details open={!nodeResults || nodeResults.length === 0}>
+        <details open={noResults?.showRaw ?? false}>
           <summary className="cursor-pointer text-xs text-muted-foreground">
             Show raw engine output
           </summary>
