@@ -27,7 +27,7 @@ CortexDB v0.9.9 (released 2026-09-03, after this record was written) adds
 `{"status":"healthy"}` and `degraded: false` while underdelivering. Run against
 our deployment it answered immediately:
 
-```
+```text
 "enrichment": { "enabled": false, "mode": "off",
   "detail": "enrichment OFF: facts, beliefs and concepts will stay empty" }
 ```
@@ -50,11 +50,13 @@ vectors, no LLM lanes and no facts, so it measures our billing, not Cortex.
 
 **Status: the derived tier is unproven in both directions.** Re-measurement is
 pending provider credit. What survives unchanged is finding 2 — the isolation
-leak — which is what independently blocks the instance-per-tenant tier, and the
-concepts lane, which still fails with both routers verifiably up. The
-recommendation stands on the isolation finding; its "nothing over the
-incumbents" leg is suspended, not confirmed. Tracked on
-[#2072](https://github.com/tinyhumansai/opencompany/issues/2072).
+leak — which *forces* instance-per-tenant rather than blocking it: it removes
+the shared-instance-with-per-tenant-credentials row from the topology table, and
+instance-per-tenant needs no token scoping at all. The concepts lane also still
+fails, with both routers verifiably up. So the architecture conclusion is
+untouched; what is suspended is the "nothing over the incumbents" leg, which is
+the part that made declining look obvious rather than merely defensible.
+Tracked on [#2072](https://github.com/tinyhumansai/opencompany/issues/2072).
 
 ## Findings first
 
@@ -232,7 +234,10 @@ POST /v1/beliefs/build
  "reasons":{"no_belief_shaped_events":1,"no_facts_in_scope":1}}
 ```
 
-Beliefs are gated on Facts; Facts never extract; beliefs never build.
+Beliefs are gated on Facts; Facts did not extract; beliefs did not build. **This
+run is subject to the [Correction](#correction-2026-09-04) too** — `no_facts_in_scope`
+is exactly what an enrichment-off server reports, so this tests the same
+misconfiguration rather than belief revision.
 
 What recall does with the contradiction is adequate *by accident*: the correction
 ranks first on semantic similarity, while the superseded claim is still returned
@@ -438,9 +443,11 @@ Portability family. The existing runbook in `memory-engine.md` applies unchanged
 its per-tenant-credential caution is satisfied by the instance-per-tenant
 topology. Hosted-target enumeration cost still applies.
 
-**Phase 4 — revisit the derived layers**, only if the upstream defects are fixed.
-That is the point at which Cortex would offer something the incumbent drivers do
-not.
+**Phase 4 — revisit the derived layers.** Previously gated on upstream defects
+being fixed; per the [Correction](#correction-2026-09-04) it is now gated on
+re-measuring them on a correctly configured server, since whether there is an
+upstream defect at all is unproven. That is the point at which Cortex would
+offer something the incumbent drivers do not.
 
 ## Open questions
 
@@ -449,8 +456,9 @@ not.
 - Is the v1 minter's `scope` advisory rather than enforcing, or is the gap in
   finding 2 a defect? And what should a self-hosted multi-tenant deployment use
   instead — is `cortex-auth-ref` published, or is an external OIDC provider
-  expected, against what contract? This decides whether the strong isolation tier
-  is reachable at all, though the derived-layer finding still decides adoption.
+  expected, against what contract? This decides whether a *shared* instance can
+  ever reach the strong tier; instance-per-tenant reaches it without the minter.
+  Adoption was decided by the derived-layer finding, which is now withdrawn.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
