@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type AppUpdatePhase,
   isActionable,
+  probeIsSuperseded,
   shouldResurface,
   updateHeadline,
   updateSummary,
@@ -60,6 +61,36 @@ describe("when the update banner appears", () => {
     // reaches somebody's screen.
     expect(updateSummary(null)).not.toContain("null");
     expect(updateSummary(null).length).toBeGreaterThan(0);
+  });
+});
+
+describe("when a background probe may write its answer", () => {
+  it("lets an ordinary probe run and report", () => {
+    for (const phase of ["idle", "checking", "up-to-date", "error"] as const) {
+      expect(probeIsSuperseded(phase, false), `${phase} must be probeable`).toBe(false);
+    }
+  });
+
+  it("stands down once bytes are being fetched or are staged", () => {
+    // `busy` is the download's flag. It outlives the download, because staged
+    // bytes are what a later probe would throw away.
+    expect(probeIsSuperseded("checking", true)).toBe(true);
+    expect(probeIsSuperseded("idle", true)).toBe(true);
+  });
+
+  it("stands down for the two phases the operator is looking at", () => {
+    expect(probeIsSuperseded("ready", false)).toBe(true);
+    expect(probeIsSuperseded("installing", false)).toBe(true);
+  });
+
+  it("suppresses a stale answer that lands after a build was staged", () => {
+    // THE case this rule exists for, and it is a laptop rather than an
+    // exotic race. A probe in flight when the lid closes lands on wake; the
+    // interval fires its overdue tick on the same wake, and that one stages a
+    // build. Without the second check the first probe's "up-to-date" then
+    // overwrites "ready" — banner gone, bytes still in memory, `busy` still
+    // true so nothing probes again. Silence for the rest of the session.
+    expect(probeIsSuperseded("ready", true)).toBe(true);
   });
 });
 

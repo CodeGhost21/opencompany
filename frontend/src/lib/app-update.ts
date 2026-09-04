@@ -45,6 +45,28 @@ export function isActionable(phase: AppUpdatePhase): boolean {
   return phase === "ready" || phase === "installing" || phase === "error";
 }
 
+/**
+ * Whether a background probe must keep its hands off the phase.
+ *
+ * Asked twice per probe — before it starts, and again with its answer in hand
+ * — because the two are not the same question. A probe that was in flight when
+ * the laptop's lid closed lands whenever the machine wakes, and `setInterval`
+ * fires its overdue tick on the same wake: two checks in flight at once, from
+ * one timer that was never meant to overlap. If the second one stages a build
+ * while the first is still waiting, the first then writes `up-to-date` over
+ * `ready` — and that takes the banner off screen with ~100 MB of verified
+ * bytes still in memory and no further probe coming, because `busy` is now
+ * true. Silence for the rest of the session, which is exactly the failure the
+ * silence-by-default design makes hardest to notice.
+ *
+ * `busy` is the download's own flag: bytes are being fetched or are already
+ * staged. `ready` and `installing` are the phases a probe must not disturb even
+ * before that flag is set.
+ */
+export function probeIsSuperseded(phase: AppUpdatePhase, busy: boolean): boolean {
+  return busy || phase === "ready" || phase === "installing";
+}
+
 /** The banner's heading for a phase. Only actionable phases have one. */
 export function updateHeadline(phase: AppUpdatePhase): string {
   switch (phase) {
@@ -75,10 +97,17 @@ export function updateSummary(version: string | null): string {
 /**
  * Whether a banner that was dismissed should come back for this transition.
  *
- * "Later" means later, not never: dismissing a staged update hides it until the
- * flow moves on. It comes back when the phase re-enters an actionable state
- * from a non-actionable one — the next check that finds a newer build, or an
- * install the operator started themselves.
+ * A dismissed banner comes back when the phase re-enters an actionable state
+ * from a non-actionable one — a check that then stages a build, or an install
+ * the operator started themselves.
+ *
+ * Which is reachable from `error` and not from `ready`, and that asymmetry is
+ * in `useAppUpdate` rather than here: once bytes are staged the hook stops
+ * probing, so nothing moves the phase again and "Later" on a staged update
+ * means later than this session. That is the deliberate half — a re-check that
+ * found a newer release would discard ~100 MB of verified download — and
+ * `docs/spec/runtime/desktop-updates.md` says so where an operator will read
+ * it. This function stays a pure rule about transitions and does not know it.
  *
  * The one exception is an error the operator has already dismissed. A failing
  * background download retries on the same cadence as the check, so re-showing
