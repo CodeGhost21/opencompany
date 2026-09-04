@@ -294,6 +294,7 @@ function Console() {
     // A browser has nothing to ask, so it is resolved before it starts.
     resolved: !isDesktopRuntime(),
     id: null,
+    roster: false,
     instances: [],
   }));
 
@@ -315,7 +316,7 @@ function Console() {
       // Adopted once. A second call would re-run the prune against a set it has
       // already reconciled, for a value this one already has.
       const id = host ? adoptLocalHosts([host])[0] : null;
-      setEmbedded({ resolved: true, id, instances: [] });
+      setEmbedded({ resolved: true, id, roster: false, instances: [] });
       return;
     }
 
@@ -346,6 +347,7 @@ function Console() {
       // every machine that has not deliberately stopped it. What the desktop
       // opens on when nothing else is selected.
       id: ids[0] ?? null,
+      roster: true,
       instances,
     });
   }, []);
@@ -361,7 +363,15 @@ function Console() {
    */
   const runHere = useCallback(async (): Promise<void> => {
     const instances = await localInstances();
-    const target = instances?.find((instance) => !instance.running) ?? instances?.[0];
+    if (instances === null) {
+      // A shell predating the roster answers no instances to start, so there is
+      // nothing this can do. It is not offered there — see `canStartHere` — and
+      // saying so is better than a press that silently changes nothing.
+      throw new Error(
+        "This version of the application cannot start a host for you. Quit any other copy that is holding its data, then reopen this one.",
+      );
+    }
+    const target = instances.find((instance) => !instance.running) ?? instances[0];
     if (target) await startLocalInstance(target.id);
     await refreshLocal();
   }, [refreshLocal]);
@@ -705,6 +715,7 @@ function Console() {
               starting={!embedded.resolved}
               desktop={isDesktopRuntime()}
               onRunHere={runHere}
+              canStartHere={embedded.roster}
             />
           </ConsoleChrome>
         )}
@@ -754,6 +765,15 @@ interface EmbeddedState {
    */
   id: ConnectionId | null;
   /**
+   * Whether this shell answers the instance roster at all.
+   *
+   * `false` on a shell predating it, which is a supported degrade — and not the
+   * same fact as a roster that came back empty. Only the roster can start an
+   * instance, so this is what separates "nothing is running, and this app can
+   * start it" from "nothing is running, and it cannot".
+   */
+  roster: boolean;
+  /**
    * Every local instance the core knows about, running or not.
    *
    * The stopped ones are here and nowhere else: they have no address, so they
@@ -802,10 +822,20 @@ function NoConnection({
   starting,
   desktop,
   onRunHere,
+  canStartHere,
 }: {
   starting: boolean;
   desktop: boolean;
   onRunHere: () => Promise<void>;
+  /**
+   * Whether this shell can start a host at all.
+   *
+   * False on one predating the instance roster: it answers no list, so there is
+   * nothing to start and a button would be a control whose only outcome is
+   * nothing happening. The remedy there is the operator's, so the screen says
+   * what it is instead of offering to do it.
+   */
+  canStartHere: boolean;
 }) {
   const { setAddingHost } = useHosts();
   const copy = firstHostCopy(desktop);
@@ -836,7 +866,12 @@ function NoConnection({
         <div className="max-w-sm space-y-3" data-testid="no-connection">
           <p className="text-sm font-medium">{copy.title}</p>
           <p className="text-sm text-muted-foreground">{copy.body}</p>
-          {desktop ? (
+          {desktop && !canStartHere ? (
+            <p className="text-sm text-muted-foreground" data-testid="no-connection-cannot-start">
+              This version of the application cannot start it for you. Quit the other copy, then
+              reopen this one.
+            </p>
+          ) : desktop ? (
             <Button
               data-testid="no-connection-run-here"
               disabled={busy}
