@@ -772,6 +772,154 @@ mod cognee {
     }
 }
 
+/// CortexDB — an append-only event log, not a keyed store.
+///
+/// This double is deliberately thin. The fidelity double lives upstream in
+/// `tinymemory-remote`'s own conformance tests, where it reproduces the
+/// duplicated listing, the cursor paging and the forget interlocks; duplicating
+/// that here would be two copies to keep honest. What this one has to get right
+/// is the pair of behaviours the *binding* depends on:
+///
+/// - `/v1/experience` is accepted and immediately readable. The real engine
+///   indexes asynchronously and the driver waits for its own write, so a double
+///   that never becomes readable would hang that wait rather than fail it.
+/// - `/v1/recall` renders content with the speaker prefixed while `/v1/events`
+///   returns it as stored. A driver that parses only the stored form lists
+///   correctly and searches to nothing, which is the failure this catches.
+mod cortex {
+    use super::*;
+
+    type Log = Arc<Mutex<Vec<Value>>>;
+
+    async fn cx_experience(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
+        let mut log = log.lock().expect("store lock");
+        let id = format!("evt_{}", log.len() + 1);
+        let offset = (log.len() as u64 + 1) * 2;
+        log.push(json!({
+            "id": id,
+            "scope": body.get("scope").cloned().unwrap_or(Value::Null),
+            "wal_offset": offset,
+            "content": { "text": body.pointer("/content/text").cloned().unwrap_or(Value::Null) },
+            "context": { "recorded_at": "2026-09-04T00:00:00Z" },
+        }));
+        Json(json!({ "event_id": id, "status": "captured" }))
+    }
+
+    async fn cx_events(
+        State(log): State<Log>,
+        Query(params): Query<BTreeMap<String, String>>,
+    ) -> Json<Value> {
+        let log = log.lock().expect("store lock");
+        let scope = params.get("scope").cloned().unwrap_or_default();
+        let items: Vec<Value> = log
+            .iter()
+            .rev()
+            .filter(|e| e.get("scope").and_then(Value::as_str) == Some(scope.as_str()))
+            .cloned()
+            .collect();
+        Json(json!({ "items": items, "has_more": false, "next_cursor": Value::Null }))
+    }
+
+    async fn cx_recall(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
+        let log = log.lock().expect("store lock");
+        let scope = body
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let query = body
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let hits: Vec<Value> = log
+            .iter()
+            .filter(|e| e.get("scope").and_then(Value::as_str) == Some(scope))
+            .filter(|e| {
+                query.is_empty()
+                    || e.pointer("/content/text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t.to_lowercase().contains(&query.to_lowercase()))
+            })
+            .map(|e| {
+                // The engine renders for a reader; the listing does not.
+                let mut hit = e.clone();
+                if let Some(text) = e.pointer("/content/text").and_then(Value::as_str) {
+                    hit["content"]["text"] = json!(format!("[user] {text}"));
+                }
+                hit
+            })
+            .collect();
+        Json(json!({ "layers": { "events": hits } }))
+    }
+
+    async fn cx_forget(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
+        let mut log = log.lock().expect("store lock");
+        let ids: Vec<String> = body
+            .pointer("/selector/memory_ids")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let before = log.len();
+        log.retain(|e| {
+            !ids.contains(
+                &e.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        Json(json!({ "deleted": { "events": before - log.len() } }))
+    }
+
+    async fn cx_scopes(State(log): State<Log>) -> Json<Value> {
+        let log = log.lock().expect("store lock");
+        let mut paths: Vec<String> = log
+            .iter()
+            .filter_map(|e| e.get("scope").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Json(json!({
+            "items": paths.into_iter().map(|p| json!({ "path": p })).collect::<Vec<_>>()
+        }))
+    }
+
+    async fn cortex_backend() -> String {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/experience", post(cx_experience))
+            .route("/v1/events", get(cx_events))
+            .route("/v1/recall", post(cx_recall))
+            .route("/v1/forget", post(cx_forget))
+            .route("/v1/scopes/list", get(cx_scopes))
+            .route(
+                "/v1/admin/health",
+                get(|| async { Json(json!({ "status": "healthy" })) }),
+            )
+            .with_state(log);
+        serve(app).await
+    }
+
+    #[tokio::test]
+    async fn the_cortex_driver_this_host_binds_upholds_the_contract() {
+        let endpoint = cortex_backend().await;
+        let (provider, _) = open(&remote_config("cortex", &endpoint));
+        assert_retains_then_conforms(provider).await;
+    }
+
+    #[tokio::test]
+    async fn the_cortex_driver_round_trips_the_facades() {
+        let endpoint = cortex_backend().await;
+        let (provider, class) = open(&remote_config("cortex", &endpoint));
+        facade_round_trip(provider, class).await;
+    }
+}
+
 // ── The same suites, against the REAL hosted services ────────────────────────
 
 /// Everything above runs against doubles: HTTP servers this repo writes to the
@@ -930,6 +1078,25 @@ mod live_hosted {
             return;
         };
         facade_round_trip(provider, class).await;
+    }
+
+    /// CortexDB, which unlike the others is one *we* host — so this lane can
+    /// reach a self-hosted instance, and `RemoteDeployment::Managed` above is
+    /// still right because its `self_hosted` constructor is an alias for `api`.
+    ///
+    /// ```sh
+    /// OPENCOMPANY_TEST_CORTEX_URL=http://127.0.0.1:3141 \
+    /// OPENCOMPANY_TEST_CORTEX_KEY=... \
+    ///   cargo test --lib live_hosted
+    /// ```
+    #[tokio::test]
+    async fn the_live_cortex_service_upholds_the_provider_contract() {
+        live_provider_contract("cortex").await;
+    }
+
+    #[tokio::test]
+    async fn the_live_cortex_service_upholds_the_host_ports() {
+        live_host_ports("cortex").await;
     }
 
     #[tokio::test]
