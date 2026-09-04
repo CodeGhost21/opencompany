@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 
 use crate::company::CompanyManifest;
 use crate::company::credentials::Credential;
-use crate::harness::brain::ITERATION_CAP_PAUSE_NOTICE;
+use crate::harness::brain::iteration_cap_pause_notice;
 use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::memory_loop;
 use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
@@ -79,7 +79,7 @@ const CAP: usize = crate::harness::build::MAX_TOOL_ITERATIONS;
 const CHECKPOINT: &str = "Done so far: read the standards and the prior spec. \
 Next steps: draft the spec and publish it.";
 
-/// A slice of [`ITERATION_CAP_PAUSE_NOTICE`] unique to the platform's voice.
+/// A slice of [`iteration_cap_pause_notice`] unique to the platform's voice.
 ///
 /// Used to prove the notice is *absent* from memory. A substring rather than
 /// the whole notice because an absence assertion on the full string would pass
@@ -538,10 +538,22 @@ async fn a_capped_chat_turn_says_so_in_a_second_bubble() {
     assert_eq!(bubbles[0].text.trim(), CHECKPOINT);
     assert_eq!(bubbles[0].agent.as_deref(), Some(AGENT));
 
-    // The system's notice, attributed to nobody.
-    assert_eq!(bubbles[1].text, ITERATION_CAP_PAUSE_NOTICE);
-    assert!(
-        bubbles[1].agent.is_none(),
+    // The system's notice: authored by the system, and naming whose turn capped.
+    assert_eq!(bubbles[1].text, iteration_cap_pause_notice(AGENT));
+    // Still the property this always asserted — the platform's words are not
+    // the agent's. It was spelled `agent.is_none()`, which *meant* that and did
+    // not achieve it: an authorless reply journals as `agent_id: "operator"`,
+    // matches no roster member, and the console falls back to the channel's
+    // voice, so the notice rendered under the orchestrator's own name. Naming
+    // the system author is what delivers the intent, so that is what is pinned.
+    assert_eq!(
+        bubbles[1].agent.as_deref(),
+        Some(crate::ports::SYSTEM_AUTHOR),
+        "the notice must be authored by the system, not left for a fallback to name"
+    );
+    assert_ne!(
+        bubbles[1].agent.as_deref(),
+        Some(AGENT),
         "the platform's words must not be put in the agent's mouth"
     );
     assert!(
@@ -550,7 +562,7 @@ async fn a_capped_chat_turn_says_so_in_a_second_bubble() {
     );
 
     // It has to actually say the three things the operator needs.
-    let notice = ITERATION_CAP_PAUSE_NOTICE;
+    let notice = iteration_cap_pause_notice(AGENT);
     assert!(notice.contains("pause"), "it must name the pause: {notice}");
     assert!(
         notice.contains("Nothing errored"),

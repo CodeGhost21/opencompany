@@ -29,8 +29,9 @@ and `null` remain.
 Whether Cortex could return as a *hosted* engine under `remote` — the opposite
 question from #1568 — is investigated in
 [`memory-engine-cortex.md`](memory-engine-cortex.md), which records what a
-deployed CortexDB instance actually provides. Nothing there is implemented; it
-is a design record with open decisions. A companion,
+deployed CortexDB instance actually provides. The driver is now registered and
+`cortex` is selectable, but that record argues against choosing it and its open
+decisions still stand. A companion,
 [`memory-engine-cortex-driver.md`](memory-engine-cortex-driver.md), records what a
 driver against v0.9.8 has to do and what each call costs.
 
@@ -38,7 +39,7 @@ driver against v0.9.8 has to do and what each call costs.
 
 | Env var | Required | Notes |
 |---|---|---|
-| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, or `cognee`. No default — see below. |
+| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, `cognee`, or `cortex`. No default — see below. Read [`memory-engine-cortex.md`](memory-engine-cortex.md) before choosing `cortex`. |
 | `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
 | `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
 

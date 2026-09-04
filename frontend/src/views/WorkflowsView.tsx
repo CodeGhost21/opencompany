@@ -135,7 +135,11 @@ import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 // Issue #981: which nodes produced a report that never went out, so the canvas
 // card can say so beside the DONE badge instead of leaving it to a banner.
-import { undeliveredNodes } from "@/views/workflows/run-health";
+import {
+  legacyRunVerdict,
+  settledRunNotice,
+  undeliveredNodes,
+} from "@/views/workflows/run-health";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
@@ -1557,8 +1561,36 @@ export function WorkflowsView({
             description:
               "Your test run executed real effects (teammate turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
+        } else if (dryRun) {
+          // CodeRabbit review (PR #2053): a dry run still drives the real
+          // engine (issue #542) and can fail or degrade exactly like a real
+          // one, so this used to say "nothing was sent" even over a dry run
+          // that failed — the same false green B-039 fixed below for the
+          // non-dry-run path, just for this one too. Success only for a
+          // clean run — a legacy host that sent no verdict at all is read
+          // via `legacyRunVerdict` (Codex review, PR #2053) rather than
+          // assumed clean.
+          const verdict = res.verdict ?? legacyRunVerdict(res);
+          if (verdict !== "ok") {
+            const settled = settledRunNotice(verdict);
+            toast[settled.tone](settled.message);
+          } else {
+            toast.success("Test run complete — nothing was sent.");
+          }
         } else {
-          toast.success(dryRun ? "Test run complete — nothing was sent." : "Workflow ran.");
+          // B-039: read the host's verdict rather than asserting a clean run.
+          // This line used to be an unconditional "Workflow ran.", which a run
+          // the operator had just STOPPED got too — so the same screen called
+          // one run stopped and ran at the same time.
+          //
+          // Codex review (PR #2053): `res.verdict` alone maps EVERY legacy
+          // host (predating issue #981, no `verdict` key on the wire) to the
+          // green fallback below, even one whose response shows it blocked,
+          // dropped a report, or was stopped — `legacyRunVerdict` derives the
+          // same reading `verdictOf` gives a history row from those other
+          // fields instead of assuming clean.
+          const settled = settledRunNotice(res.verdict ?? legacyRunVerdict(res));
+          toast[settled.tone](settled.message);
         }
       }
       // A dry run journals NOTHING (#542), so there is no history row to pull
@@ -1681,7 +1713,14 @@ export function WorkflowsView({
     const removedName = graph.name;
     setDeleting(true);
     try {
-      await deleteWorkflow(client, company, selectedId, graph.version);
+      // CodeRabbit review (PR #2053): the confirmation dialog's "a run is
+      // going right now" is a pre-request guess (`watchingRun`, read where
+      // this is called) and the toast below reads the sweep's own count
+      // instead of that same guess — they can legitimately disagree with no
+      // race at all: a run this view was watching can settle on its own in
+      // the seconds between the operator confirming and this request
+      // reaching the host, and the sweep then truthfully stops nothing.
+      const { stoppedRuns } = await deleteWorkflow(client, company, selectedId, graph.version);
       // Drop it locally rather than re-listing: the host has confirmed, and a
       // re-list would flash an empty picker. A list request already in flight
       // predates this and would put the entry back — hence the bump.
@@ -1705,7 +1744,20 @@ export function WorkflowsView({
       setResult(null);
       setSelectedNodeId(null);
       setConflict(null);
-      toast.success(`Deleted “${removedName}”.`);
+      // B-121: the run(s) went with it, and saying so is the whole point of
+      // having warned. The host stops EVERY run of a deleted workflow still
+      // in flight, not just the one this view happened to be watching — a
+      // manual run overlapping a scheduled one, or several manual triggers,
+      // are all live at once up to the company's concurrency ceiling (Codex
+      // review, PR #2053) — before that they were left executing with the
+      // only Stop button in the product on the page this delete just
+      // unmounted.
+      setActiveRunId(null);
+      toast.success(
+        stoppedRuns > 0
+          ? `Deleted “${removedName}” and stopped ${stoppedRuns === 1 ? "the run" : `${stoppedRuns} runs`} in flight.`
+          : `Deleted “${removedName}”.`,
+      );
     } catch (e) {
       // A 409 is the one failure the operator can actually act on, and acting
       // on it means reloading — so it gets the persistent banner, not a toast.
@@ -2895,10 +2947,37 @@ export function WorkflowsView({
                         <AlertDialogTitle>Delete “{graph?.name ?? selectedId}”?</AlertDialogTitle>
                         {/* Say exactly what goes and what stays. "Stops its schedule"
                             is the consequence an operator most needs spelled out, and
-                            "past runs stay" stops them hesitating over losing history. */}
-                        <AlertDialogDescription>
-                          This removes the workflow and stops it running on its schedule. Past runs
-                          stay in the run history. This can&apos;t be undone.
+                            "past runs stay" stops them hesitating over losing history.
+
+                            B-121: and when a run is in flight, say THAT — it was
+                            the one consequence this dialog never mentioned, while
+                            being word for word the sentence an idle workflow gets.
+                            Deleting stops that run, which is a bigger thing to
+                            agree to than stopping a schedule.
+
+                            Codex review (PR #2053): `watchingRun` is this VIEW's
+                            own belief, current only as of its last history poll
+                            or SSE frame — a run a scheduler or another operator
+                            just started can be genuinely in flight server-side
+                            with nothing here having heard about it yet. Delete
+                            stops it either way (the host's own sweep, not this
+                            view's knowledge, decides that — see the toast below,
+                            which reads the sweep's real count rather than this
+                            guess), so the "nothing running" branch hedges rather
+                            than promising a fact this view cannot actually see.
+
+                            Codex review (PR #2053), second round: manual and
+                            scheduled runs of the SAME workflow can overlap —
+                            the host admits several at once up to the company's
+                            concurrency ceiling — and the sweep stops every one
+                            of them, not just the one this view happens to be
+                            watching. "that run" (singular) undersold it; say
+                            "every run … still going" so the warning is accurate
+                            whether one is in flight or several. */}
+                        <AlertDialogDescription data-testid="workflow-delete-consequence">
+                          {watchingRun
+                            ? "A run of this workflow is going right now. Deleting it stops every run of it still going — the steps each one finished stay in the run history — and stops it running on its schedule. This can't be undone."
+                            : "This removes the workflow, stops it running on its schedule, and stops any run of it still going that hasn't shown up here yet. Past runs stay in the run history. This can't be undone."}
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>

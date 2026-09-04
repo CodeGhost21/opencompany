@@ -1042,18 +1042,30 @@ struct DeleteWorkflowQuery {
 /// the workflow did, and that stays true after it is gone — `GET
 /// …/workflows/runs` keeps serving them. See the module doc.
 ///
+/// **A run still in flight is stopped** (B-121). Delete tore down the schedule
+/// and the revisions and left the run executing — and left it *uncontrollable*,
+/// because the only Stop button in the product lives on the workflow detail page
+/// this request removes. So the run went on calling models and spending with
+/// nothing anywhere able to reach it, while `GET …/workflows/runs` kept
+/// reporting it `running: true` under a workflow that no longer existed. See
+/// [`stop_runs_of_workflow`](crate::company::runtime::CompanyRuntime::stop_runs_of_workflow).
+///
 /// `expectedVersion` is **required** (issue #1013), for the same reason it is on
 /// `PUT`: an absent token used to mean an unconditional delete, so a console
 /// holding a stale graph could remove a workflow that changed underneath it. A
 /// missing `?expectedVersion=` is now a `400`.
 ///
-/// `204` on success. `400` for a missing `expectedVersion`; `404` for an unknown
-/// id; `409` for a source-defined or body-less id, or a stale `expectedVersion`.
+/// `200` with [`DeleteWorkflowResponse`] on success — **not** `204` (CodeRabbit
+/// review, PR #2053): the sweep's own count is the only truthful source for
+/// "was a run actually stopped", and a `204` has nowhere to carry it. See that
+/// type's doc for why the console cannot derive the same answer itself. `400`
+/// for a missing `expectedVersion`; `404` for an unknown id; `409` for a
+/// source-defined or body-less id, or a stale `expectedVersion`.
 async fn delete_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Query(query): Query<DeleteWorkflowQuery>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<DeleteWorkflowResponse>, ApiError> {
     if !safe_wid(&wid) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "workflow {wid}"
@@ -1082,7 +1094,34 @@ async fn delete_workflow(
     )
     .await
     .map_err(ApiError)?;
-    Ok(StatusCode::NO_CONTENT)
+    // B-121: after the durable delete, never before. The workflow has to be gone
+    // first, or a run cancelled here could be replaced by one racing in behind
+    // it through a route that still resolves the graph — the same ordering
+    // Pause's sweep takes for the same reason.
+    let stopped_runs = company.runtime.stop_runs_of_workflow(&wid);
+    Ok(Json(DeleteWorkflowResponse { stopped_runs }))
+}
+
+/// The `DELETE …/workflows/{wid}` response body (CodeRabbit review, PR #2053).
+///
+/// The console used to guess "did this delete stop a run" from its own
+/// pre-request state (whether it was watching a run when the operator clicked
+/// Delete) and print that guess in the confirmation toast. That guess and this
+/// count can disagree in the most ordinary way possible, no race required: a
+/// long run the console was watching can finish **on its own**, normally, in
+/// the seconds between the operator clicking the confirm button and this
+/// request reaching the sweep — at which point [`stop_runs_of_workflow`]
+/// truthfully stops nothing, while the console's pre-request guess still says
+/// it did. `stopped_runs` is the sweep's own count, the only place that
+/// answer actually lives.
+///
+/// [`stop_runs_of_workflow`]: crate::company::runtime::CompanyRuntime::stop_runs_of_workflow
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteWorkflowResponse {
+    /// How many in-flight runs of this workflow the sweep fired a stop at.
+    /// Zero is a completely ordinary answer — see the type doc.
+    stopped_runs: usize,
 }
 
 /// The `PUT …/workflows/{wid}/enabled` body.
@@ -10120,7 +10159,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
 
             // Gone from the picker…
             let response = router(state.clone())
@@ -10177,7 +10216,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
 
             let response = router(state)
                 .oneshot(request(
@@ -10314,7 +10353,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         /// A manifest-`enabled` id with no saved graph is listed but NOT
@@ -10706,6 +10745,25 @@ label = "ok"
                 .unwrap()
         }
 
+        fn get_workflow_request() -> Request<Body> {
+            Request::builder()
+                .uri("/api/v1/company/workflows/demo")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        fn delete_workflow_request(version: &str) -> Request<Body> {
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/v1/company/workflows/demo?expectedVersion={version}"
+                ))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
         async fn json_body(response: axum::response::Response) -> serde_json::Value {
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
@@ -10956,6 +11014,123 @@ label = "ok"
             assert!(
                 !c.completed.load(Ordering::SeqCst),
                 "the run must not have completed its work"
+            );
+        }
+
+        /// **B-121: deleting a workflow stops the run of it still in flight.**
+        ///
+        /// Delete used to take the schedule and the revisions and leave the run
+        /// executing — and, worse, leave it *uncontrollable*: the only Stop
+        /// button in the product is on the workflow detail page the delete
+        /// removes, so the run went on calling models and spending with nothing
+        /// anywhere able to reach it, still reporting `running: true` under a
+        /// workflow that no longer existed.
+        ///
+        /// The assertion that carries the weight is `completed`: the stalled
+        /// runner finishes its work only when released, so a run that reaches
+        /// its own completion here is one the delete failed to stop.
+        #[tokio::test]
+        async fn deleting_a_workflow_stops_the_run_of_it_still_in_flight() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+
+            let response = c
+                .app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "detach": true })))
+                .await
+                .unwrap();
+            let run_id = json_body(response).await["runId"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            c.entered.notified().await;
+            assert_eq!(
+                c.runtime.run_supervisor().live().len(),
+                1,
+                "the run has to be genuinely live, or this proves nothing"
+            );
+
+            let response = c.app.clone().oneshot(get_workflow_request()).await.unwrap();
+            let version = json_body(response).await["version"]
+                .as_str()
+                .expect("the graph carries its version token")
+                .to_string();
+            let response = c
+                .app
+                .clone()
+                .oneshot(delete_workflow_request(&version))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            // CodeRabbit review (PR #2053): the count the console's toast now
+            // reads has to be the sweep's own answer, not a client-side guess —
+            // pin it here so a regression back to "no body" or a miscounted
+            // sweep shows up as a body assertion rather than only as a wrong
+            // toast nobody is testing.
+            assert_eq!(json_body(response).await["stoppedRuns"], 1);
+
+            let CompanyEvent::WorkflowRunFinished {
+                cancelled,
+                error,
+                run_id: journaled_id,
+                ..
+            } = await_finished(&c.runtime)
+                .await
+                .expect("the deleted workflow's run settles rather than running on")
+            else {
+                unreachable!()
+            };
+            assert!(
+                cancelled,
+                "the run of a deleted workflow settles stopped, on the Stop button's own path"
+            );
+            assert!(
+                error.is_none(),
+                "a stop that follows from a delete is not a failure: {error:?}"
+            );
+            assert_eq!(
+                journaled_id.as_deref(),
+                Some(run_id.as_str()),
+                "the same run the run route handed back — no second identifier"
+            );
+            assert!(
+                !c.completed.load(Ordering::SeqCst),
+                "the run must not have gone on to finish the work of a workflow that no \
+                 longer exists"
+            );
+        }
+
+        /// The mirror: a delete with **no** run in flight cancels nothing.
+        /// Without it the sweep above could quietly grow into "delete stops
+        /// something" for a company that had nothing to stop.
+        #[tokio::test]
+        async fn deleting_an_idle_workflow_stops_nothing() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+
+            assert!(c.runtime.run_supervisor().live().is_empty());
+            let response = c.app.clone().oneshot(get_workflow_request()).await.unwrap();
+            let version = json_body(response).await["version"]
+                .as_str()
+                .expect("version")
+                .to_string();
+            let response = c
+                .app
+                .clone()
+                .oneshot(delete_workflow_request(&version))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            // CodeRabbit review (PR #2053): the response body is what the
+            // console's toast now reads, so pin the zero here too — the same
+            // reason the in-flight case above pins its 1.
+            assert_eq!(json_body(response).await["stoppedRuns"], 0);
+            assert_eq!(
+                c.runtime.stop_runs_of_workflow("demo"),
+                0,
+                "nothing was in flight, so nothing was stopped"
             );
         }
 

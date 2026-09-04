@@ -266,8 +266,8 @@ describe("shouldClearReceipt", () => {
   it("refuses to clear when the request carries no generation (fail-safe)", () => {
     // issue #1935 review, codex 3892702774 — reversed from the original
     // "clears unconditionally" reading of an omitted generation. That
-    // reading assumed `Conversation` never races a company switch; it does
-    // (see the cross-surface test below), and treating "no generation" as
+    // reading assumed a send surface never races a company switch; it does
+    // (see the stale-settle test below), and treating "no generation" as
     // "clear anyway" is exactly the loophole that let it. A caller with no
     // generation cannot prove which send armed the receipt it is trying to
     // clear, so the safe default is to leave it alone — the worst a future
@@ -306,37 +306,6 @@ describe("shouldClearReceipt", () => {
 
     // Company B's own completion, naming its own generation, still may.
     expect(shouldClearReceipt(currentReceipt, armedForCompanyB)).toBe(true);
-  });
-
-  it("does not delete a ChatView receipt when a Conversation send from the old company settles late", () => {
-    // issue #1935 review, codex 3892702774 — the sibling of the test above,
-    // through the OTHER door. `#/conversation` is a second, still-routable
-    // send surface (`ROUTABLE.conversation` in console-routes.ts) that stays
-    // mounted across a company switch exactly like `ChatView` does, and
-    // shares the same `receiptByThread` map in `AppShell`.
-    //
-    // Sequence: operator is on `#/conversation` for company A and sends on
-    // the "main" thread (gen 1 armed, captured from `onSendStart`'s return).
-    // Before that POST resolves, the operator switches to company B and
-    // switches to `#/chat`, sending on B's own "main" thread (gen 2 re-arms
-    // the slot). Conversation's slow POST for company A finally settles and
-    // its `onSendEnd` fires with the generation IT captured (1) — not
-    // whatever is currently on file — exactly like `ChatView`'s own case,
-    // just originating from `useConversationRuntime` instead of `ChatView.send`.
-    const armedByConversationForCompanyA = 1;
-    const armedByChatViewForCompanyB = 2;
-    const currentReceipt: ChatReceipt = {
-      startedAt: 5_000,
-      lastFrameAt: 5_000,
-      gen: armedByChatViewForCompanyB,
-    };
-
-    // Conversation's late company-A completion must not win against
-    // ChatView's newer company-B receipt on the same reused thread id.
-    expect(shouldClearReceipt(currentReceipt, armedByConversationForCompanyA)).toBe(false);
-
-    // ChatView's own completion, naming its own generation, still may.
-    expect(shouldClearReceipt(currentReceipt, armedByChatViewForCompanyB)).toBe(true);
   });
 
   it("is a no-op (not a throw) when nothing is armed for the thread at all", () => {

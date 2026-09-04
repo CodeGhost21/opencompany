@@ -105,7 +105,14 @@ pub struct Field {
     /// A short line saying what belongs here, shown to whoever writes the row.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    /// Whether an entry missing this field is a reported fault.
+    /// Whether an entry must carry this field.
+    ///
+    /// Enforced at the write by [`crate::company::ledgers::record`] and
+    /// reported at the read by [`Check::RequiredField`] — both only when the
+    /// spec declares that check. The read half still matters after the write
+    /// half exists: a ledger amended to require a field it did not before has
+    /// rows that predate the requirement, and those are reported rather than
+    /// hidden.
     #[serde(default)]
     pub required: bool,
 }

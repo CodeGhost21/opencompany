@@ -10,6 +10,7 @@
 import type {
   DeliveryReport,
   WorkflowRunOutcome,
+  WorkflowRunResult,
   WorkflowRunVerdict,
 } from "@/api/workflows";
 
@@ -373,6 +374,40 @@ export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
   return "ok";
 }
 
+/**
+ * A legacy fallback verdict for a **settled run response** — the body
+ * `POST …/workflows/{wid}/run` answers with, not a history row — from a host
+ * predating issue #981 (Codex review, PR #2053): that response still carries
+ * `pendingApprovals`, `deliveries`, `blockedNodes`, `nodes` and `cancelled`,
+ * fields enough to say the run was NOT clean even with no `verdict` key on the
+ * wire. Reading only `res.verdict` maps every one of those non-clean legacy
+ * shapes to the green "Workflow ran." fallback — precisely the contradiction
+ * B-039 exists to close, just for an older host.
+ *
+ * A narrower {@link verdictOf}, because a `WorkflowRunResult` is a narrower
+ * shape than a `WorkflowRunOutcome`: it never carries `running` or `error` (a
+ * settled `200` is by construction neither — a failed run never reaches this
+ * body at all, it throws instead), so those arms are dropped; and it has no
+ * `strandedApprovals` for {@link isStranded} to read, since that reconciliation
+ * is a fact about a run somebody comes back to, not one microseconds old —
+ * the backend's own doc for this response enumerates its possible readings as
+ * exactly `stopped`, `blocked`, `undelivered`, `awaiting-approval`, `degraded`
+ * and `ok`, which is this ladder.
+ */
+export function legacyRunVerdict(res: WorkflowRunResult): WorkflowRunVerdict {
+  if (res.cancelled) return "stopped";
+  if ((res.blockedNodes?.length ?? 0) > 0) return "blocked";
+  if (undeliveredCount(res.deliveries ?? []) > 0) return "undelivered";
+  if (
+    (res.pendingApprovals?.length ?? 0) > 0 ||
+    pendingCount(res.deliveries ?? []) > 0
+  ) {
+    return "awaiting-approval";
+  }
+  if (res.nodes?.some((node) => node.status === "error")) return "degraded";
+  return "ok";
+}
+
 /** The status dot for a whole run.
  *
  * A lookup on {@link verdictOf} rather than a ladder of its own (issue #981).
@@ -441,6 +476,81 @@ export function runSummaryLine(
     else also.push(`${pending} ${AWAITING_APPROVAL}`);
   }
   return [head, ...also].join(" · ");
+}
+
+/**
+ * What to tell the operator the instant a run they pressed Run on settles
+ * (B-039).
+ *
+ * The console used to answer this with one line — `toast.success("Workflow
+ * ran.")` — for every run whose body came back, which is every run that did not
+ * throw. A run the operator had just **stopped** got it, so one screen said
+ * "stopped", "Workflow ran." and an output-shape error about a single run at
+ * once. So did a run that failed at its first node, and one parked on an
+ * approval.
+ *
+ * The reading comes from the host's `verdict` (issue #981), like every other
+ * reader of a run's outcome. `tone` is the sonner method to call, so a caller
+ * cannot pair a green tick with a red word.
+ *
+ * `undefined` — a host predating #981 — keeps the old sentence, deliberately.
+ * That host sends nothing to read, and the alternative is inventing a reading
+ * for it, which is the habit this exists to remove.
+ */
+export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
+  tone: "success" | "info" | "error";
+  message: string;
+} {
+  switch (verdict) {
+    case "stopped":
+      // Idle, not red: a stop somebody asked for is not a fault — the same
+      // reading `VERDICT_TONE` gives it.
+      return { tone: "info", message: "Run stopped." };
+    case "failed":
+      return { tone: "error", message: "The workflow run failed." };
+    case "undelivered":
+      return {
+        tone: "error",
+        message: "The workflow ran, but a report did not go out.",
+      };
+    case "blocked":
+    case "awaiting-approval":
+      // Not "before it can finish" (PR #2053 review): this run has already
+      // settled — the synchronous body only arrives once it has. Approving
+      // spawns a NEW run with no link back to this one (see `stranded`'s own
+      // comment above), so promising THIS run will finish is a claim the host
+      // never makes. "Parked" is the same word `parkedApprovalCount` and the
+      // card badges already use for the same state.
+      return {
+        tone: "info",
+        message: "The run parked, waiting on your approval.",
+      };
+    case "stranded":
+      return {
+        tone: "info",
+        message: "The run stopped for an approval that is no longer in the queue.",
+      };
+    case "degraded":
+      return { tone: "info", message: "The workflow ran, with a step in error." };
+    case "running":
+      // Reachable only from a host that settled a body while still calling the
+      // run live. Say the true half rather than either terminal claim.
+      return { tone: "info", message: "The workflow is still running." };
+    case "ok":
+    case undefined:
+      // `undefined` is a host predating issue #981: it sends nothing to read,
+      // and the old sentence is the only honest one for it. `"ok"` is a real,
+      // checked success.
+      return { tone: "success", message: "Workflow ran." };
+    default:
+      // CodeRabbit review (PR #2053): a word this console has never heard of.
+      // Unreachable through the closed `WorkflowRunVerdict` type above, but
+      // `verdict` is host-controlled at runtime — a host can grow an eighth
+      // word this build predates, the same case `verdictOf`'s own `in
+      // VERDICT_TONE` check exists to catch. Never paint an unrecognised word
+      // green; say only that the run is done, not that it went well.
+      return { tone: "info", message: "Workflow ran." };
+  }
 }
 
 /**

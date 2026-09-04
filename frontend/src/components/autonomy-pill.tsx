@@ -9,7 +9,7 @@
 // **The tier is one of four, not two.** `POLICY_MODES` in
 // `src/company/types.rs:96` is `["readonly", "supervised", "auto", "full"]`.
 // Flattening that to "Auto / not Auto" would report `readonly` — agents that
-// change nothing and spend nothing — and `full` — the broadest autonomy this
+// change nothing, contact nobody and use no connected account — and `full` — the
 // runtime has — as the same thing. The menu therefore lists whatever
 // `status.tiers` holds and never a list of four written here.
 //

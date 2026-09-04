@@ -42,7 +42,6 @@ export type View =
   | "overview"
   | "company"
   | "chat"
-  | "conversation"
   | "inbox"
   | "tasks"
   | "ledgers"
@@ -95,14 +94,6 @@ const ROUTABLE: Record<View, true> = {
   overview: true,
   company: true,
   chat: true,
-  /**
-   * No nav row: the surface the Chat workspace replaces. Everything it can do
-   * chat can do in one screen — including the teammate budget controls
-   * `MembersPane` ported from Team (issue #360) — but it keeps answering
-   * `#/conversation` until chat covers the last of what it still does better (a
-   * desk's persisted transcript).
-   */
-  conversation: true,
   /** No nav row: parked by issue #302, host routes and per-agent store intact. */
   inbox: true,
   /**
@@ -212,14 +203,13 @@ export const DEFAULT_VIEW: View = "chat";
 /**
  * Whether a sidebar destination owns the current view.
  *
- * The three views with no row of their own but an obvious owner. Each is a
+ * The two views with no row of their own but an obvious owner. Each is a
  * Rule-6 deep-link destination (`docs/spec/runtime/ledgers-console-ia.md`):
  * routable, linked to from all over the console, and not a place you navigate
  * to from the sidebar.
  *
  * - A task card (`#/tasks/<id>`) is a card on the board Work draws.
  * - A teammate (`#/team/<id>`) is a seat on the org chart Agents draws.
- * - A desk transcript (`#/conversation`) is the surface Room replaces.
  *
  * Without this the sidebar empties the moment an operator opens one of them:
  * the row they came from goes dark, and — since the restructure into sections —
@@ -230,6 +220,5 @@ export function isNavigationActive(item: View, view: View): boolean {
   if (item === view) return true;
   if (item === "ledgers" && view === "tasks") return true;
   if (item === "company" && view === "team") return true;
-  if (item === "chat" && view === "conversation") return true;
   return false;
 }

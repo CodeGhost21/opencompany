@@ -272,6 +272,15 @@ const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
 const EMPTY_DECIDED: Readonly<Record<string, DecidedApproval>> = {};
 const EMPTY_FAILED: Record<string, string> = {};
 
+/**
+ * How many faults the alert states outright before the rest go behind "more".
+ *
+ * Enough that the usual case — one row, one reason — is simply readable, and
+ * few enough that a batch of them cannot grow the alert past the content it
+ * sits under (issue #1347).
+ */
+const FAULTS_STATED = 3;
+
 /** The task ledger is operated as a board; declared ledgers are read as rows. */
 export function defaultLedgerMode(
   ledger: LedgerSummary | null,
@@ -354,6 +363,26 @@ export function LedgersView({
   const ledger = useMemo(
     () => (sub ? (ledgers.find((held) => held.slug === sub) ?? null) : null),
     [ledgers, sub],
+  );
+
+  /**
+   * The open list's summary, preferring the copy that came back with the rows
+   * on screen.
+   *
+   * `useLedgerNav` reads once per company and again only when a list is
+   * declared or retired — never when a row is recorded — so its `open` count
+   * is the number this list held when the screen was first opened. Record a
+   * risk and the row appears while the count beside the title still says zero,
+   * because the two came from different requests.
+   *
+   * The read that fetched the rows carries a summary counted over the very
+   * fold those rows came out of, so it is the one number that cannot disagree
+   * with what is rendered beneath it. The slug guard keeps a read still in
+   * flight for the previous list from being counted against this one.
+   */
+  const counted = useMemo(
+    () => (read?.ledger.slug === ledger?.slug ? (read?.ledger ?? ledger) : ledger),
+    [read, ledger],
   );
 
   /**
@@ -780,7 +809,7 @@ export function LedgersView({
                         the same ambiguity `filteredEmptyNotice` exists to
                         rule out elsewhere in this file. */}
                     <span className="text-xs text-muted-foreground">
-                      {held.open}
+                      {held.slug === counted?.slug ? counted.open : held.open}
                     </span>
                   </DropdownMenuItem>
                 ))}
@@ -813,12 +842,13 @@ export function LedgersView({
            that changes, and the one the switcher already shows for every
            *other* list while saying nothing about the open one. */
         trailing={
-          ledger && (
+          counted && (
             <span
-              title={`${ledger.open} open`}
+              data-testid="ledger-open-count"
+              title={`${counted.open} open`}
               className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground"
             >
-              {ledger.open}
+              {counted.open}
             </span>
           )
         }
@@ -1114,31 +1144,44 @@ export function LedgersView({
                 </p>
               )}
 
-              {/* One row, not one per fault (issue #1347).
-                  
-                  A ledger whose rows are written by agents produces faults in
-                  batches — a required field one pass forgot is missing from
-                  every row that pass wrote — so this was seven full-width
-                  alerts, 364px of the same sentence with a different id in it,
-                  stacked below the board and out-weighing the content they are
-                  about. The count is the whole headline; the ids are what you
-                  open when you go looking. */}
+              {/* One alert, not one per fault (issue #1347): a ledger whose
+                  rows are written by agents produces faults in batches, and
+                  seven full-width alerts was 364px of the same sentence with a
+                  different id in it, out-weighing the content they are about.
+
+                  The count alone was not enough, though. Every fault the host
+                  sends already names the row and what is wrong with it — the
+                  same sentence the workspace's rendered copy prints — and
+                  behind a closed disclosure the screen said only that some row
+                  somewhere could not be read, which is not something anybody
+                  can act on. So the first few are stated outright and the
+                  bound moves to the list rather than to the alert. */}
               {read?.faults && read.faults.length > 0 && (
                 <Alert data-testid="ledger-faults">
                   <AlertTriangle className="size-4" />
                   <AlertDescription>
-                    <details>
-                      <summary className="w-fit cursor-pointer select-none">
-                        {read.faults.length === 1
-                          ? "1 row could not be read"
-                          : `${read.faults.length} rows could not be read`}
-                      </summary>
-                      <ul className="mt-2 space-y-1">
-                        {read.faults.map((fault) => (
-                          <li key={fault}>{inlineCode(fault)}</li>
-                        ))}
-                      </ul>
-                    </details>
+                    <p>
+                      {read.faults.length === 1
+                        ? "1 row could not be read"
+                        : `${read.faults.length} rows could not be read`}
+                    </p>
+                    <ul className="mt-2 space-y-1">
+                      {read.faults.slice(0, FAULTS_STATED).map((fault) => (
+                        <li key={fault}>{inlineCode(fault)}</li>
+                      ))}
+                    </ul>
+                    {read.faults.length > FAULTS_STATED && (
+                      <details className="mt-1">
+                        <summary className="w-fit cursor-pointer select-none">
+                          {read.faults.length - FAULTS_STATED} more
+                        </summary>
+                        <ul className="mt-2 space-y-1">
+                          {read.faults.slice(FAULTS_STATED).map((fault) => (
+                            <li key={fault}>{inlineCode(fault)}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                   </AlertDescription>
                 </Alert>
               )}

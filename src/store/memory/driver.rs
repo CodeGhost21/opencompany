@@ -159,6 +159,12 @@ fn remote_provider(
             }
             .map_err(open_failed)?,
         )),
+        // CortexDB takes the same credential either way — `self_hosted` is an
+        // alias for `api` upstream — so `managed` only picks the endpoint, and
+        // `url` already carries it. One arm covers both deployments.
+        tinymemory_remote::CORTEX_DRIVER_ID => Arc::new(tinymemory_remote::cortex_provider(
+            tinymemory_remote::CortexMemory::api(url, key).map_err(open_failed)?,
+        )),
         other => {
             return Err(MemoryDriverError(format!(
                 "no HTTP adapter is compiled for memory driver `{other}`"
@@ -173,5 +179,14 @@ fn open_failed(error: anyhow::Error) -> OpenCompanyError {
         "could not open the configured memory engine: {error}. Check OPENCOMPANY_MEMORY_URL."
     ))
 }
-pub const SUPPORTED_REMOTE_DRIVERS: [&str; 3] =
-    [SUPERMEMORY_DRIVER_ID, MEM0_DRIVER_ID, COGNEE_DRIVER_ID];
+pub const SUPPORTED_REMOTE_DRIVERS: [&str; 4] = [
+    SUPERMEMORY_DRIVER_ID,
+    MEM0_DRIVER_ID,
+    COGNEE_DRIVER_ID,
+    // `cortex` is not in `DriverRegistry::builtin()`'s reserved table, which is
+    // fine: `admit` takes an unreserved id when the host declares the class,
+    // and this host declares every remote driver `External` with `TRUSTED`.
+    // The class stays host-decided rather than self-reported, which is the
+    // property the reserved table exists to protect.
+    tinymemory_remote::CORTEX_DRIVER_ID,
+];

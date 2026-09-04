@@ -69,8 +69,8 @@ export function isGeneralChannel(id: string): boolean {
  *
  * Also resolves a `dm:`-prefixed **channel** id standing in for its thread:
  * the map is keyed on the bare teammate id (`dmThreadId`), so an origin
- * recorded in the console-local channel form (a direct API caller, not this
- * console's own "Add to board") missed it on an exact match even though that
+ * recorded in the console-local channel form (a direct API caller rather than
+ * the host) missed it on an exact match even though that
  * teammate's DM is reachable. Folded case-insensitively, the same way the
  * host's own `resolve_roster_agent_id` resolves a `dm:`-addressed teammate —
  * an origin stamped from a caller's differently-cased address (`dm:DESIGNER`
@@ -87,6 +87,81 @@ export function generalAwareChannel(
   if (map[bareId]) return map[bareId];
   const key = Object.keys(map).find((k) => k.toLowerCase() === bareId.toLowerCase());
   return key ? map[key] : null;
+}
+
+/**
+ * The key a live turn frame's rows are filed under, from the thread id the
+ * frame carries.
+ *
+ * The console's live-state maps — `liveStepsByThread`, `receiptByThread` — are
+ * keyed in the **host-thread** namespace: `ChatView` reads them by
+ * `dmThreadId(member)` and `onSendStart` arms them under that same id. So the
+ * default is to pass the frame's own id through untouched, and only General
+ * spellings are resolved.
+ *
+ * # Why General is the exception
+ *
+ * The host folds the company-wide line under whatever casing the caller
+ * addressed and echoes that spelling back, so an API client posting to
+ * `General` has its frames emitted under `General` while the console armed
+ * these maps at the built-in channel's id — `MAIN_THREAD_ID`, since
+ * `generalChannel` is `{ id: MAIN_THREAD_ID, name: GENERAL_CHANNEL }`. Rows
+ * written under a spelling no reader looks at are rows the operator never sees
+ * (issue #1743).
+ *
+ * # Why nothing else is
+ *
+ * {@link generalAwareChannel} answers a bare member id with the DM *channel*
+ * id, `dm:<id>` — but `dmThreadId` stays the bare id for any teammate whose own
+ * id is not a General spelling, so routing every id through the map moves DM
+ * live state to a key nothing reads (PR #2068 review).
+ *
+ * # Why the fallback is `MAIN_THREAD_ID` and not the raw alias
+ *
+ * The map is built from the desk list, so it is empty until that loads. Falling
+ * back to the alias made this resolver *unstable across a turn*: a `tool_call`
+ * arriving before the desks landed keyed `General`, its `tool_result` after
+ * keyed `main`, and since a result whose call is not in its bucket is dropped,
+ * the call row stayed `running` for good in a bucket nothing renders (CodeRabbit
+ * on #2068). `MAIN_THREAD_ID` is the built-in General channel's own id, so it is
+ * both the stable answer and the one the map itself returns for an ordinary
+ * company — the two agree, and the transition stops mattering.
+ */
+export function liveFrameThreadKey(
+  map: Readonly<Record<string, string>>,
+  frameThreadId: string,
+): string {
+  if (!isGeneralChannel(frameThreadId)) return frameThreadId;
+  return generalAwareChannel(map, frameThreadId) ?? MAIN_THREAD_ID;
+}
+
+/**
+ * The author the host projects for a line it wrote itself, rather than one an
+ * agent spoke. Mirrors `crate::ports::SYSTEM_AUTHOR`.
+ */
+export const SYSTEM_AUTHOR = "system";
+
+/**
+ * Whose voice a company-side reply is in, from the author the host attributed
+ * it to.
+ *
+ * A host-authored line — the iteration-cap pause, a spend halt — is neither
+ * yours nor an agent's, and renders as a centred pill instead of a bubble.
+ * {@link fromHistory} has always applied that rule, but the **live** renderers
+ * did not: both built a `company` message unconditionally and used the author
+ * only as the channel. So a host line rendered as an agent bubble while the
+ * turn was watched, and as a system row for anyone who loaded the transcript
+ * afterwards — and `mergeHistoryInOrder` keeps the existing live object for a
+ * matching durable id, so hydration never corrected the first view. Two
+ * operators, two different readings of one settled turn, permanently (Codex
+ * review on #2068).
+ *
+ * Exported so the live path, the synchronous POST path and history all decide
+ * it the same way; the divergence existed because each of them decided it
+ * separately.
+ */
+export function replyVoice(author: string | undefined | null): "company" | "system" {
+  return author === SYSTEM_AUTHOR ? "system" : "company";
 }
 
 /** One person's reaction on one line. Mirrors `ChatReactionDto` on the host. */
@@ -154,9 +229,9 @@ export interface ChatMessage {
    */
   steps?: TurnStep[];
   /**
-   * The board card this line is about (issue #246): one the turn opened, or one
-   * created from this message by "Add to board". Renders as a chip linking to
-   * `#/tasks/<id>`.
+   * The board card this line opened (issue #246). Journaled onto the reply by
+   * the turn that raised it, so it survives a transcript reload; renders as a
+   * chip linking to `#/tasks/<id>`.
    */
   taskId?: string;
   /**
@@ -437,7 +512,7 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
     // so without this check a rehydrated marker came back as a company message
     // and a settle read like something an agent had said.
     const from: ChatMessage["from"] =
-      entry.author === "system" ? "system" : entry.mine ? "you" : "company";
+      entry.author === SYSTEM_AUTHOR ? "system" : entry.mine ? "you" : "company";
     return {
       id: hostMessageId(entry.id),
       from,
@@ -549,17 +624,16 @@ export function reconcileIds(
 /**
  * Forget the board card `taskId` on every line that carries it (issue #984).
  *
- * The dismissal half of "Add to board": #442 justified opening cards from chat
- * on the grounds that *"a spurious card can be dismissed in one click"*, and
- * the chat surfaces offered no such click — the chip was a bare link to the
- * card's detail screen. Deleting the card on the host is only half of it; this
+ * #442 justified opening cards from chat on the grounds that *"a spurious card
+ * can be dismissed in one click"*, and the chat surfaces offered no such click
+ * — the chip was a bare link to the card's detail screen. Deleting the card on the host is only half of it; this
  * is what stops the console still drawing a chip for a card that is gone.
  *
  * Keyed on the **card**, not on the message the operator clicked, and that is
  * the reason this is a named function rather than two lines inside a
  * `setState`. One card can be named by more than one line — a turn journals the
- * id onto its reply, and "Add to board" writes it onto the operator's own
- * message — so clearing only the clicked bubble would leave the other chips
+ * id onto every reply that raised it — so clearing only the clicked bubble
+ * would leave the other chips
  * pointing at a card the host no longer has, i.e. a link to a 404. A dismissal
  * that leaves a stale chip on screen reads as the delete having failed.
  *
