@@ -111,12 +111,26 @@ pub fn backoff_for(attempt: u32) -> Duration {
 
 /// Whether an updater error is a network failure worth repeating.
 ///
-/// Only the `reqwest` variant qualifies. A signature failure, a missing target
-/// or a filesystem error cannot be fixed by fetching the same bytes again, and
+/// The line is *fetching* versus *what was fetched*. A transport failure and an
+/// unsuccessful HTTP status are both the download not arriving, and asking
+/// again is the whole remedy. A signature failure, a missing target or a
+/// filesystem error cannot be fixed by fetching the same bytes again, and
 /// looping on a failed *signature* check is the one retry that would turn a
 /// tampered bundle into a denial-of-service against the user's battery.
+///
+/// Two variants sit on the transport side, and both matter. `Reqwest` is a
+/// connection that dropped or never opened. `Network` is the one the plugin
+/// raises for **every** non-2xx response to the download request — it carries
+/// only a formatted string, so a 503 from GitHub's asset CDN cannot be told
+/// apart from a 404 for an asset that was never uploaded. Treating the whole
+/// variant as transient costs three attempts and six seconds against a 404, and
+/// buys the retry for the failure it was written for: matching `Reqwest` alone
+/// meant a release-day 503 gave up after one attempt.
 pub fn is_transient(err: &tauri_plugin_updater::Error) -> bool {
-    matches!(err, tauri_plugin_updater::Error::Reqwest(_))
+    matches!(
+        err,
+        tauri_plugin_updater::Error::Reqwest(_) | tauri_plugin_updater::Error::Network(_)
+    )
 }
 
 #[cfg(test)]
@@ -192,6 +206,43 @@ mod test {
             RetryDecision::GiveUp
         );
         assert_eq!(classify(1, 1, true), RetryDecision::GiveUp);
+    }
+
+    /// An unsuccessful HTTP status is a download that did not arrive.
+    ///
+    /// The plugin maps every non-2xx response to the download request onto
+    /// `Error::Network`, so this is what a 503 from GitHub's asset CDN on
+    /// release day looks like by the time it reaches us — the busiest minute
+    /// this feature has, and the one the retry exists for. It is a formatted
+    /// string and nothing else, so a 404 lands in the same variant and is
+    /// retried too; three attempts and six seconds is the whole price of not
+    /// being able to tell them apart.
+    #[test]
+    fn an_unsuccessful_http_status_is_worth_asking_again() {
+        let unavailable = tauri_plugin_updater::Error::Network(
+            "Download request failed with status: 503 Service Unavailable".into(),
+        );
+        assert!(is_transient(&unavailable));
+        assert_eq!(
+            classify(1, MAX_DOWNLOAD_ATTEMPTS, is_transient(&unavailable)),
+            RetryDecision::Retry
+        );
+    }
+
+    /// Everything that is not the transport stays fatal.
+    ///
+    /// The pairing matters more than either assertion: `TargetNotFound` is the
+    /// answer a Windows client gets from a macOS-only manifest, and a signature
+    /// failure is the answer a tampered bundle gets. Retrying either is work
+    /// that cannot succeed, and on the second it is work an attacker chooses.
+    #[test]
+    fn a_manifest_or_signature_failure_is_still_fatal() {
+        assert!(!is_transient(&tauri_plugin_updater::Error::TargetNotFound(
+            "windows-x86_64".into()
+        )));
+        assert!(!is_transient(&tauri_plugin_updater::Error::SignatureUtf8(
+            "not base64".into()
+        )));
     }
 
     #[test]
