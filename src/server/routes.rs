@@ -892,6 +892,32 @@ mod tests {
         assert!(body.get("display_name").is_none());
     }
 
+    /// **P1 review finding (Codex) on PR #2038.** A console offering the
+    /// four-way blocker answer to a host predating it sends `blocker_verdict`,
+    /// that host ignores the unknown field and resolves from the lowered
+    /// two-way verdict alone — a skip becomes a retry, an amend re-runs
+    /// without the operator's words — while the console reports the four-way
+    /// result it believes it asked for. A console can only decline to send
+    /// what a host cannot carry out if the host says which it is, and this
+    /// capability is that statement.
+    ///
+    /// Feature-gated because the answer is: `blocker_verdict` handling lives
+    /// behind `openhuman`, and a build without it refuses the field outright
+    /// (`operator::blocker_verdict`). Advertising it unconditionally would
+    /// promise a resume this build has no code for.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn spec_advertises_the_four_way_blocker_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+        let caps = body["capabilities"].as_array().expect("capabilities");
+        assert!(
+            caps.iter().any(|c| c == "blocker-verdict"),
+            "a build that answers blocker_verdict must advertise it — otherwise a console              cannot tell it apart from one that will silently lower a skip to a retry: {caps:?}"
+        );
+    }
+
     #[tokio::test]
     async fn spec_names_the_build_commit_beside_the_version() {
         // `version` has read `0.1.0` for thousands of commits, so it alone
