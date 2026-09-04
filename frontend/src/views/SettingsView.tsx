@@ -52,7 +52,7 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 import { forgetSession } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { lifecycleAffordances } from "@/lib/lifecycle-controls";
-import { canCreateCompanies } from "@/components/create-company-dialog";
+import { offersCompanyCreation } from "@/components/create-company-dialog";
 import { personName } from "@/lib/person";
 
 interface Props {
@@ -328,7 +328,7 @@ export function LifecycleControls({
   // company and re-provisions it through the same dialog "New company" opens, so
   // it is company creation wearing another label and has to answer the same
   // question the other triggers do.
-  const platform = canCreateCompanies(client);
+  const platform = offersCompanyCreation(client);
   const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
     lifecycleAffordances(state, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
