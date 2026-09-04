@@ -155,7 +155,7 @@ async function pickTemplate(id: string) {
   });
 }
 
-/** model -> business -> sign-in (none) -> advanced -> review. */
+/** model -> business -> sign-in (none) -> review. */
 async function walkToReview(client: OpenCompanyClient, template: string | null) {
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
@@ -171,7 +171,6 @@ async function walkToReview(client: OpenCompanyClient, template: string | null) 
   await act(async () => {
     (container.querySelector('[data-testid="auth-mode-none"]') as HTMLElement).click();
   });
-  await next(); // -> advanced (or account, on a host that signs people in)
   await next(); // -> review
 }
 
@@ -248,16 +247,15 @@ describe("what a finished wizard says the company is", () => {
     ).toBe(TEMPLATE.name);
 
     // Back to Business, a different template, forward again.
-    for (let i = 0; i < 3; i += 1) {
-      // review -> advanced -> sign-in -> business.
+    for (let i = 0; i < 2; i += 1) {
+      // review -> sign-in -> business.
       await act(async () => {
         button("Back").click();
       });
     }
     await pickTemplate(OTHER_TEMPLATE.id);
-    // business -> sign-in -> advanced -> review. The sign-in answer survives
-    // going back, so the address step stays absent.
-    await next();
+    // business -> sign-in -> review. The sign-in answer survives going back, so
+    // the address step stays absent.
     await next();
     await next();
     await act(async () => {
@@ -281,16 +279,15 @@ describe("what a finished wizard says the company is", () => {
     await walkToReview(client, TEMPLATE.id);
     await fill("setup-company-name", "Northwind Studio");
 
-    for (let i = 0; i < 3; i += 1) {
-      // review -> advanced -> sign-in -> business.
+    for (let i = 0; i < 2; i += 1) {
+      // review -> sign-in -> business.
       await act(async () => {
         button("Back").click();
       });
     }
     await pickTemplate(OTHER_TEMPLATE.id);
-    // business -> sign-in -> advanced -> review. The sign-in answer survives
-    // going back, so the address step stays absent.
-    await next();
+    // business -> sign-in -> review. The sign-in answer survives going back, so
+    // the address step stays absent.
     await next();
     await next();
     await act(async () => {
@@ -336,7 +333,7 @@ describe("whether a finished wizard seeds a template or a designed company", () 
     rosterEdited: false,
     template: TEMPLATE.id,
     credentialTested: false,
-    provider: "openrouter",
+    writesInference: true,
   };
 
   it("seeds the template an operator picked and did not edit", () => {
@@ -356,11 +353,17 @@ describe("whether a finished wizard seeds a template or a designed company", () 
     expect(shouldSeedTemplate({ ...picked, credentialTested: true })).toBe(false);
   });
 
-  it("still seeds the template when the tested provider is managed", () => {
-    // The designed submit omits inference for `managed`, so the designed path
-    // would trade the template's roster, belt and prompts for nothing at all.
+  it("still seeds the template when nothing will be written anyway", () => {
+    // The submit omits inference where the host already reaches it, or where the
+    // credential that passed was the house's rather than this operator's — so
+    // the designed path would trade the template's roster, belt and prompts for
+    // nothing at all.
+    //
+    // Asked as `writesInference`, not `provider === "managed"`. That literal
+    // answered the same question only while the model step adopted a provider it
+    // no longer offers, and went quietly wrong when it stopped.
     expect(
-      shouldSeedTemplate({ ...picked, credentialTested: true, provider: "managed" }),
+      shouldSeedTemplate({ ...picked, credentialTested: true, writesInference: false }),
     ).toBe(true);
   });
 

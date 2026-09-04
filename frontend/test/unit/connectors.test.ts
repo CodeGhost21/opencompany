@@ -215,10 +215,21 @@ describe("somebody with no host at all", () => {
     expect(copy.body).toContain("Choose where your company runs");
   });
 
-  it("offers the choice in both, rather than naming a control elsewhere", () => {
+  it("gives both a control, rather than naming one elsewhere", () => {
     // What this screen used to do was point at the switcher. A dead end that
     // describes its own exit is still a dead end.
-    expect(firstHostCopy(true).action).toBe("Choose where to run");
+    expect(firstHostCopy(true).action).toBeTruthy();
+    expect(firstHostCopy(false).action).toBeTruthy();
+  });
+
+  it("offers the desktop an action, not a choice of somewhere else to run", () => {
+    // One machine runs one host, so "where should this run" has a single answer
+    // there — and the body must stop offering the alternative it no longer has.
+    const copy = firstHostCopy(true);
+    expect(copy.action).toBe("Start the host on this computer");
+    expect(copy.body).not.toContain("somewhere else");
+    // The hub still chooses: it runs no host of its own, so the answer is
+    // genuinely elsewhere and the picker stays.
     expect(firstHostCopy(false).action).toBe("Choose where to run");
   });
 });

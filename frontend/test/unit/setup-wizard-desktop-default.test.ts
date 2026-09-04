@@ -115,6 +115,12 @@ function labelled(...wanted: string[]): HTMLButtonElement {
   return match as HTMLButtonElement;
 }
 
+/** The wizard's own progress line, e.g. `Review · step 4 of 4`. */
+function stepLabel(): string {
+  const match = container.textContent?.match(/(\w[\w -]*) · step \d+ of \d+/);
+  return match ? match[0] : "";
+}
+
 const next = async () =>
   act(async () => {
     labelled("Next", "Looks good").click();
@@ -166,17 +172,14 @@ describe("the sign-in a desktop install starts from", () => {
     // The consequence of the seeded answer, and the reason it is seeded: the
     // address step is gone from the bar before the operator has pressed
     // anything, rather than appearing and then being taken away.
-    expect(slots()).toEqual([
-      "step-power",
-      "step-business",
-      "step-signin",
-      "step-advanced",
-      "step-review",
-    ]);
+    expect(slots()).toEqual(["step-power", "step-business", "step-signin", "step-review"]);
 
     await next();
+    // Review, asserted first: both checks below are absences, and an absence on
+    // a screen the press never left says nothing at all.
+    expect(stepLabel(), "the press should have reached Review").toMatch(/^Review · step/);
     expect(find("setup-field-email")).toBeNull();
-    expect(find("setup-advanced")).toBeTruthy();
+    expect(find("setup-advanced")).toBeNull();
   });
 
   it("still lets a desktop operator turn a sign-in on", async () => {

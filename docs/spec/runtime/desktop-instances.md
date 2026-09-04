@@ -55,22 +55,37 @@ case would be worse than the single-host one it replaces.
 
 ### Which empty root gets a company, and which gets the wizard
 
-The two hosts differ in exactly one decision, `embedded::FirstRun`:
+**None of them.** Every instance the desktop starts takes
+`embedded::FirstRun::RunSetupWizard`: it adopts what its root already holds and
+seeds nothing, the one at the data root included. `local::start_at` hard-codes
+that arm, and `embedded::FirstRun::SeedStarterCompany` survives only for callers
+that want a populated host without walking a wizard — the test suites.
 
-- **The instance at the data root** seeds a starter company from the default
-  preset (`SeedStarterCompany`). That is [issue #632](https://github.com/tinyhumansai/opencompany/issues/632):
-  a double-clicked application must be enterable with no terminal and no
-  decisions.
-- **An instance an operator created** does not (`RunSetupWizard`). They are
-  standing in front of the application having just named a company, so the
-  decisions the first-run wizard asks for — template, sign-in mode, brain
-  credential — are ones they are already making.
+That reversed an earlier split, in which the instance at the data root seeded a
+starter company from the default preset and only an operator-created instance
+got the wizard. Commit `a37854eaf`, *"fix(desktop): open the first-run wizard
+instead of seeding a company"*, records why: seeding made `/spec` report
+`setup_complete`, `ConnectionConsole` enters its setup phase from that field and
+nothing else, and no settings link re-opens the wizard — so the one install that
+most needs onboarding became the one install that could never reach it.
 
-Seeding is not merely "adds a company". `AppSpec` reports
-`setup_complete: stamp || !registry.is_empty()`, and the console opens
+[Issue #632](https://github.com/tinyhumansai/opencompany/issues/632)'s guarantee
+survives as a guarantee about *reachability* rather than about seeding: the
+wizard is anonymous on loopback while the registry is empty, its model step is
+skippable, and finishing it seeds a template. Still enterable with no terminal
+and no credential — it asks first, which is the point.
+
+An install that already has a company is unaffected either way: seeding was only
+ever the fallback half of `bootstrap_companies`, reached when adoption came back
+empty.
+
+Seeding was never merely "adds a company", which is why it went. `AppSpec`
+reports `setup_complete: stamp || !registry.is_empty()`, and the console opens
 `views/setup/SetupWizard.tsx` only on `setup_complete: false` — so a seeded
-company **suppresses the wizard permanently**. Both halves are pinned by a test
-that reads `/spec` over HTTP rather than counting companies.
+company **suppresses the wizard permanently**, one silent answer to every
+question it would have asked. Two tests in `local.rs` pin the current behaviour
+by reading `/spec` over HTTP rather than counting companies, including one for
+the instance at the data root.
 
 `RunSetupWizard` skips the *seed* half of `bootstrap_companies` and keeps the
 *adopt* half (`desktop::adopt_companies`). Adoption is not optional for either
@@ -86,8 +101,10 @@ behaviour instead of to an unhandled command.
 ### First run
 
 On the `SeedStarterCompany` branch — `embedded::start`, which is the wrapper
-`start_with` exposes for it — `opencompany::desktop::bootstrap_companies` runs
-before the bind, because a host with an empty registry cannot be signed into
+`start_with` exposes for it, and which **no launched application takes** (see
+above; it is there for the test suites) —
+`opencompany::desktop::bootstrap_companies` runs before the bind, because a host
+with an empty registry cannot be signed into
 ([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)). Sign-in
 is per-company — `/api/v1/companies/{id}/auth/…`, or the sole-company alias —
 so an empty registry leaves the console rendering a login form for a company
