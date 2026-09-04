@@ -84,6 +84,13 @@ WORKDIR /console
 # builds no client without a DSN, and `sentryRelease()` falls back to the bare
 # version without a commit. A local `docker build` therefore needs neither.
 #
+# `VITE_SENTRY_ENVIRONMENT` has to be passed for the same reason, and is easy to
+# miss because both surfaces default to something plausible and different: the
+# host falls back to its deployment kind (`hosted-tenant`), a browser bundle
+# cannot know that and falls back to `production`. Left unset, one tenant's
+# reports split across two `environment` values and no filter shows both. The
+# manager's `OPENCOMPANY_SENTRY_ENVIRONMENT` is the value to match.
+#
 # `VITE_BUILD_COMMIT` is the frontend's spelling of the builder stage's
 # `OPENCOMPANY_BUILD_COMMIT`, not a second source of truth — `vite.config.ts`
 # shortens it to the same twelve characters `src/build_stamp.rs` normalizes to,
@@ -101,8 +108,10 @@ RUN npm ci
 # `node_modules`.
 ARG VITE_SENTRY_DSN=""
 ARG VITE_BUILD_COMMIT=""
+ARG VITE_SENTRY_ENVIRONMENT=""
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
-    VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT
+    VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT \
+    VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT
 
 COPY frontend/ ./
 RUN npm run build && npm run build:pages-sdk
