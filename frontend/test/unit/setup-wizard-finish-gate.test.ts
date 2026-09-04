@@ -484,3 +484,101 @@ describe("finishing setup with no companies on the host", () => {
   });
 
 });
+
+describe("a hosted tenant whose inference comes from the house", () => {
+  /**
+   * The regression this guards, in one line: testing the HOUSE credential must
+   * not store the provider selected beside it.
+   *
+   * On a hosted tenant the control plane injects the credential and the host
+   * reports itself ready on a route this step does not offer. The key box is
+   * optional there — that is the whole point of `onTheHouse` — so a blank-key
+   * test passes against the host's own credential. It says the house works, not
+   * that the selected provider does.
+   *
+   * The old guard was `provider !== "managed"`, which held only because the step
+   * adopted the host's provider verbatim. Once the step stopped adopting a route
+   * it does not offer, `provider` became a real one and that check stopped
+   * firing — writing `openrouter` at the managed endpoint with no key, over a
+   * configuration that was already working.
+   */
+  const hosted = () => ({
+    ...status(),
+    companies: [],
+    inference: {
+      ready: true,
+      provider: "managed",
+      base_url: "https://api.tinyhumans.ai/openai/v1",
+    },
+  });
+
+  function capturingClient(seen: { body?: unknown }): OpenCompanyClient {
+    const s = hosted();
+    return {
+      get: async () => s,
+      post: async (path: string, body: unknown) => {
+        if (path.includes("/inference/test")) {
+          // The house credential answers, because that is what an empty key
+          // probes on this host.
+          return { ok: true, baseUrl: s.inference.base_url, model: "some-model" };
+        }
+        if (path.includes("/setup/roster")) {
+          return { agents: [{ id: "ops", role: "Operations" }] };
+        }
+        seen.body = body;
+        return {
+          complete: true,
+          config_path: s.config_path,
+          restart_required: [],
+          seeded_company: null,
+        };
+      },
+    } as unknown as OpenCompanyClient;
+  }
+
+  it("stores no inference configuration when the key box was left empty", async () => {
+    const seen: { body?: unknown } = {};
+    await show(capturingClient(seen));
+
+    // Test the house credential with nothing typed — allowed here, and the
+    // reason this path exists at all.
+    await act(async () => {
+      (
+        container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
+      ).click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      container.querySelector('[data-testid="setup-test-ok"]'),
+      "the house credential should test clean",
+    ).toBeTruthy();
+
+    await next(); // -> business
+    await fill("setup-field-industry", "E-commerce — homeware");
+    await next(); // -> sign-in
+    await next(); // -> account
+    await fill("setup-field-email", "ada@example.com");
+    await next(); // -> review
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const finish = container.querySelector('[data-testid="setup-finish"]') as HTMLElement | null;
+    expect(finish, "the wizard should be able to finish").toBeTruthy();
+    await act(async () => {
+      finish!.click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const body = seen.body as { company?: { inference?: unknown } } | undefined;
+    expect(body, "setup should have been applied").toBeTruthy();
+    expect(
+      body?.company?.inference ?? null,
+      "a house-credential pass must not be stored as this company's own provider",
+    ).toBeNull();
+  });
+});

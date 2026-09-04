@@ -549,6 +549,30 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   }, [status, changed]);
 
   /**
+   * Whether the house is supplying inference rather than this operator.
+   *
+   * The credential the model step tests is the HOST's whenever the operator
+   * leaves the key box empty, so a pass there says the house works — not that
+   * the provider selected beside it does.
+   *
+   * This used to be spelled `provider !== "managed"` at the two call sites
+   * below, and it held only because the step adopted the host's provider
+   * verbatim: a hosted tenant selected `managed`, that check withheld the
+   * config, and the platform default went on applying. The step no longer
+   * adopts a route it does not offer, so `provider` is now a real one and the
+   * literal check stopped firing — testing the house credential with a blank
+   * key would write `openrouter` at the managed endpoint with no key over a
+   * configuration that was working.
+   *
+   * A key the operator actually typed is theirs, so it stays configuration.
+   */
+  const houseSuppliesInference =
+    !!status?.inference.ready &&
+    !SETUP_INFERENCE_OPTIONS.some((option) => option.id === status.inference.provider);
+  const operatorConfiguredInference =
+    !houseSuppliesInference || !!values.tinyhumans_api_key?.trim();
+
+  /**
    * Ask the host to design a team, on the way into Review.
    *
    * Never throws upward: the host answers with its curated team rather than an
@@ -567,8 +591,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         automate: draft.automate,
         template: template || null,
         inferenceKey: values.tinyhumans_api_key || null,
-        inferenceProvider: tested.kind === "ok" ? provider : null,
-        inferenceBaseUrl: tested.kind === "ok" ? tested.baseUrl : null,
+        inferenceProvider:
+          tested.kind === "ok" && operatorConfiguredInference ? provider : null,
+        inferenceBaseUrl:
+          tested.kind === "ok" && operatorConfiguredInference ? tested.baseUrl : null,
         inferenceModel: tested.kind === "ok" ? tested.model : null,
       });
       // The host is contracted never to answer with an empty roster, so a
@@ -640,7 +666,9 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                 agents: roster.agents,
                 adminEmail: email.trim() || null,
                 inference:
-                  tested.kind === "ok" && provider !== "managed"
+                  tested.kind === "ok" &&
+                  provider !== "managed" &&
+                  operatorConfiguredInference
                     ? {
                         provider,
                         baseUrl: tested.baseUrl,
