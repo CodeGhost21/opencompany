@@ -439,7 +439,9 @@ pub struct CompanyRuntime {
     pub(crate) task_writes: Arc<TokioMutex<()>>,
     /// Held across a blocker group's resolve loop so the group settles as a
     /// unit: two operators answering different members of one group cannot
-    /// interleave their verdicts across it.
+    /// interleave their verdicts across it. The console's two-value path takes
+    /// it too, so a legacy Approve/Deny and a four-way answer to the same
+    /// blocker serialise rather than interleaving their claim and settle.
     ///
     /// **Not what makes a single blocker's answer safe.** That is
     /// `claim_blocker_resolution`, which arms the answer only into an empty
@@ -2181,6 +2183,8 @@ impl CompanyRuntime {
     ) -> Result<(ResolveReceipt, JoinHandle<Result<CycleReport>>)> {
         self.ensure_accepting()?;
         #[cfg(feature = "openhuman")]
+        let _resolving = self.blocker_resolutions.lock().await;
+        #[cfg(feature = "openhuman")]
         self.arm_console_blocker_resolution(id, verdict).await?;
         let receipt = CycleRunner::new(self)
             .settle_approval(id, verdict, by, scope)
@@ -2204,16 +2208,25 @@ impl CompanyRuntime {
     ///
     /// Runs **before** the settle, the restart-durable ordering
     /// `apply_blocker_reply` keeps, and reads the step off the still-parked
-    /// payload before the settle scrubs it. Three guards keep it from touching
+    /// payload before the settle scrubs it. Two guards keep it from touching
     /// anything else:
-    /// * a resolution already armed — the DM path banked its richer answer
-    ///   (an amend carries the operator's words) before reaching here — is left
-    ///   alone;
     /// * an id that is not a genuinely-parked blocker arms nothing, so an
     ///   ordinary approval, an already-resolved id or an expired one is
     ///   untouched — and a resolution is never left banked for a settle that
     ///   returns `AlreadyResolved`/`Expired` and so never consumes it, which a
-    ///   later boot would otherwise re-arm and resume a second time.
+    ///   later boot would otherwise re-arm and resume a second time;
+    /// * [`claim_blocker_resolution`](crate::runtime::grants::GrantSet::claim_blocker_resolution)
+    ///   is what arms, so a slot the four-way path already filled — its richer
+    ///   answer, since an amend carries the operator's words — is left alone.
+    ///
+    /// The claim is the same one `claim_and_settle_blocker` takes, and for the
+    /// same reason: testing the slot and filling it must be one atomic step.
+    /// Reading it empty, awaiting the journal write and then inserting
+    /// unconditionally let a four-way request claim and settle inside that
+    /// await, and this path overwrote the winner's resolution on the way out —
+    /// so the approval event recorded one verdict while the resume executed
+    /// another. A claim that loses returns having written nothing, and one that
+    /// wins but cannot bank releases the slot rather than orphaning it.
     #[cfg(feature = "openhuman")]
     async fn arm_console_blocker_resolution(
         self: &Arc<Self>,
@@ -2221,9 +2234,6 @@ impl CompanyRuntime {
         verdict: Verdict,
     ) -> Result<()> {
         use crate::ports::blockers::{BlockerPayload, BlockerResolution, BlockerVerdict};
-        if self.grants.peek_blocker_resolution(id).is_some() {
-            return Ok(());
-        }
         let Some(parked) = self.journal.pending().into_iter().find(|p| &p.id == id) else {
             return Ok(());
         };
@@ -2242,10 +2252,17 @@ impl CompanyRuntime {
             answer: String::new(),
             step,
         };
-        self.journal
+        if !self.grants.claim_blocker_resolution(id, resolution.clone()) {
+            return Ok(());
+        }
+        if let Err(err) = self
+            .journal
             .record_blocker_resolution(id, &resolution)
-            .await?;
-        self.grants.arm_blocker_resolution(id, resolution);
+            .await
+        {
+            self.grants.take_blocker_resolution(id);
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -7130,6 +7147,62 @@ mod tests {
             self.inner.complete_import(id, lines).await
         }
     }
+    /// A journal that lets a **competing** request run to completion inside the
+    /// next append, so a race needing one caller suspended mid-`await` is
+    /// exercised deterministically rather than by hoping two tasks interleave.
+    #[cfg(feature = "openhuman")]
+    #[derive(Default)]
+    struct RacingJournalStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        interleave: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    #[cfg(feature = "openhuman")]
+    impl RacingJournalStore {
+        /// Runs `run` once, inside the next append.
+        fn interleave_next(&self, run: impl FnOnce() + Send + 'static) {
+            *self.interleave.lock().expect("interleave poisoned") = Some(Box::new(run));
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RacingJournalStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            let racer = self.interleave.lock().expect("interleave poisoned").take();
+            if let Some(racer) = racer {
+                racer();
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
 
     use super::{
         CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
@@ -9912,6 +9985,119 @@ mod tests {
              not just a record_blocker_resolution failure — otherwise \
              grants.blocker_resolutions keeps an orphaned entry for an id no live \
              resume will ever consume"
+        );
+    }
+    /// **P1 review finding (Codex) on PR #2038.** The group lock and the
+    /// atomic claim covered the four-way path only. The console's still-supported
+    /// two-value fallback armed through `peek_blocker_resolution`, an awaited
+    /// journal write, and an unconditional `arm_blocker_resolution` insert — so a
+    /// legacy Approve/Deny could read the slot empty, suspend on its own journal
+    /// write while a four-way request claimed the blocker, and then overwrite the
+    /// winner's resolution on the way out. The approval event recorded one verdict
+    /// while the resume executed another.
+    ///
+    /// Whoever wins `claim_blocker_resolution` owns the slot, so this asserts the
+    /// two agree rather than pinning a particular winner: the interleaved request
+    /// reports whether it took the slot, and the armed resolution must be that
+    /// caller's either way.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn the_console_fallback_never_overwrites_a_blocker_claim_it_lost() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let journal = std::sync::Arc::new(RacingJournalStore::default());
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .with_journal_store(journal.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        // The four-way request lands *inside* the console path's awaited journal
+        // write — the exact window the peek-then-insert pair left open.
+        let rival_won = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let grants = runtime.grants.clone();
+            let id = id.clone();
+            let rival_won = rival_won.clone();
+            journal.interleave_next(move || {
+                let rival = crate::ports::blockers::BlockerResolution {
+                    verdict: crate::ports::blockers::BlockerVerdict::Skip,
+                    answer: String::new(),
+                    step: Some(crate::ports::blockers::BlockerStep::Task {
+                        task_id: "t-1".to_string(),
+                    }),
+                };
+                rival_won.store(
+                    grants.claim_blocker_resolution(&id, rival),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            });
+        }
+
+        runtime
+            .resolve_approval_spawned(
+                &id,
+                crate::ports::types::Verdict::Approve,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("the console resolve lands");
+
+        let armed = runtime
+            .grants
+            .peek_blocker_resolution(&id)
+            .expect("a resolution stays armed for the resume to consume");
+        let winner = rival_won.load(std::sync::atomic::Ordering::SeqCst);
+        let expected = if winner {
+            crate::ports::blockers::BlockerVerdict::Skip
+        } else {
+            crate::ports::blockers::BlockerVerdict::Retry
+        };
+        assert_eq!(
+            armed.verdict, expected,
+            "the caller that won claim_blocker_resolution must own the armed slot \
+             (rival won the claim: {winner}); the console fallback overwrote a \
+             resolution it did not claim, so the approval event and the resume \
+             disagree about what the operator decided"
         );
     }
 
