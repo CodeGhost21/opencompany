@@ -71,8 +71,57 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # already carries it into the runtime image with no second COPY needed.
 FROM node:22-slim AS console
 WORKDIR /console
+
+# Console crash reporting (`docs/spec/runtime/crash-reporting.md`).
+#
+# These are read by Vite at BUILD time and inlined into the bundle, so unlike
+# the host's `OPENCOMPANY_SENTRY_DSN` they cannot be injected into the running
+# container: by the time k8s sets env, the bundle is already built. Without
+# them there is no path for a console DSN to reach a hosted tenant at all, and
+# setting one on the StatefulSet is a silent no-op.
+#
+# Both default to empty, which is the shipped behaviour: `resolveCrashReporting`
+# builds no client without a DSN, and `sentryRelease()` falls back to the bare
+# version without a commit. A local `docker build` therefore needs neither.
+#
+# `VITE_SENTRY_ENVIRONMENT` has to be passed for the same reason, and is easy to
+# miss because both surfaces default to something plausible and different: the
+# host falls back to its deployment kind (`hosted-tenant`), a browser bundle
+# cannot know that and falls back to `production`. Left unset, one tenant's
+# reports split across two `environment` values and no filter shows both. The
+# manager's `OPENCOMPANY_SENTRY_ENVIRONMENT` is the value to match.
+#
+# `VITE_SENTRY_TRACES_SAMPLE_RATE` is here for the same build-time reason, and
+# is deliberately given NO default: absent means `0`, which installs no tracing
+# integration at all. That is the shipped choice, not an oversight — errors and
+# transactions bill separately, and a transaction is emitted per page load
+# rather than only when something breaks, so a rate chosen on an operator's
+# behalf is a recurring bill they did not ask for.
+#
+# `VITE_BUILD_COMMIT` is the frontend's spelling of the builder stage's
+# `OPENCOMPANY_BUILD_COMMIT`, not a second source of truth — `vite.config.ts`
+# shortens it to the same twelve characters `src/build_stamp.rs` normalizes to,
+# so both surfaces compute one `opencompany@<version>+<commit>` release string.
+# Passed the same value, a console event and a host event from this image line
+# up in one filter; passed different ones, they silently never join.
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
+
+# Declared AFTER `npm ci` on purpose. `ENV` invalidates every layer beneath it
+# and `VITE_BUILD_COMMIT` changes on every commit, so hoisting these above the
+# install would re-run a full `npm ci` for each build — the same cache argument
+# the builder stage makes for `OPENCOMPANY_BUILD_COMMIT`, which is cheap there
+# only because the cargo `target` mount survives it. Nothing survives a lost
+# `node_modules`.
+ARG VITE_SENTRY_DSN=""
+ARG VITE_BUILD_COMMIT=""
+ARG VITE_SENTRY_ENVIRONMENT=""
+ARG VITE_SENTRY_TRACES_SAMPLE_RATE=""
+ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
+    VITE_BUILD_COMMIT=$VITE_BUILD_COMMIT \
+    VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
+    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE
+
 COPY frontend/ ./
 RUN npm run build && npm run build:pages-sdk
 
