@@ -319,6 +319,20 @@ fn parse_dsn(raw: &str) -> Option<Dsn> {
     Some(Dsn::new(raw))
 }
 
+/// [`parse_dsn`], reachable from the gated tests in [`super`].
+///
+/// Those tests pin this grammar against the SDK's own parser
+/// (`the_two_dsn_parsers_agree`), which needs to call it from a module that
+/// has `sentry::` in scope — and this module deliberately does not.
+//
+// Gated on the feature as well as on `cfg(test)`: the only caller is the
+// `the_two_dsn_parsers_agree` test, which needs `sentry::` in scope, so in a
+// default build this would be an unused function and `-D dead-code` is on.
+#[cfg(all(test, feature = "crash-reporting"))]
+pub(crate) fn parse_dsn_for_test(raw: &str) -> Option<Dsn> {
+    parse_dsn(raw)
+}
+
 /// Resolves this process's crash-reporting decision from the environment.
 ///
 /// The order is the order of the switches' authority, and only the first

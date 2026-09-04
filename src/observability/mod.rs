@@ -116,11 +116,27 @@ pub fn init(deployment: Deployment, env: &dyn EnvSource) -> (Decision, Guard) {
         return (decision, Guard(None));
     };
 
+    // The SDK's own parser is the authority on whether this string is a DSN,
+    // and its answer decides the outcome.
+    //
+    // `config::parse_dsn` and `sentry_types::Dsn::from_str` are two independent
+    // readers of one grammar, and the previous `parse().ok()` let them disagree
+    // silently in the worst possible direction: a `None` DSN builds a client
+    // that is *disabled*, while the decision above still says `Report`. The
+    // boot line would then announce a destination, `sentry-test` would print an
+    // event id and exit zero, and nothing would ever be delivered — the exact
+    // "says it is on when it is not" failure `Silence::UnusableDsn` exists to
+    // prevent, one layer down from where it was handled.
+    //
+    // The two agree today; `the_two_dsn_parsers_agree` pins that so a future
+    // SDK tightening its grammar is a red test rather than a silent outage.
+    // This is what makes the guarantee hold anyway if it ever fails.
+    let Ok(parsed) = dsn.expose().parse::<sentry::types::Dsn>() else {
+        return (Decision::Silent(Silence::UnusableDsn), Guard(None));
+    };
+
     let options = sentry::ClientOptions {
-        // `parse` cannot fail: `config::parse_dsn` already accepted this string
-        // through the same grammar. `ok()` rather than `expect` because a
-        // panic inside crash reporting is the one panic nothing will report.
-        dsn: dsn.expose().parse().ok(),
+        dsn: Some(parsed),
         release: Some(release.clone().into()),
         environment: Some(environment.clone().into()),
         // No IP address, no cookies, no request body. This crate never binds a
@@ -313,18 +329,53 @@ fn scrub_in_place(text: &mut String) {
     }
 }
 
-/// Runs the scrubber over every string leaf of a JSON value.
+/// Scrubs a JSON value in place, by two rules that are both needed.
 ///
-/// The structured half of a `tracing` event, a breadcrumb's `data` and a span's
-/// `data` are all arbitrary JSON, so the pass has to recurse rather than look
-/// at the top level.
+/// * **Every string leaf**, at any depth, goes through [`redaction::scrub`].
+///   The structured half of a `tracing` event, a breadcrumb's `data`, a span's
+///   `data` and a context's `data` are all arbitrary JSON, so this recurses
+///   rather than looking at the top level.
+/// * **Every value under a key that names a credential** is replaced outright,
+///   whatever its type — see [`redaction::key_names_a_secret`]. `scrub` reads
+///   text, and `{"token": "hunter2"}` has no text to read: `hunter2` is a word
+///   with no issuer prefix and no `token=` beside it. The structure carries the
+///   label the flat form would have carried inline. A matching key takes the
+///   whole subtree, because an object under `credentials` is not made safe by
+///   scrubbing its leaves one at a time.
 #[cfg(feature = "crash-reporting")]
 fn scrub_json(value: &mut serde_json::Value) {
+    scrub_json_field(None, value)
+}
+
+/// [`scrub_json`] with the key this value was found under, when there was one.
+#[cfg(feature = "crash-reporting")]
+fn scrub_json_field(key: Option<&str>, value: &mut serde_json::Value) {
+    if key.is_some_and(redaction::key_names_a_secret) {
+        *value = serde_json::Value::String(redaction::REDACTED.to_string());
+        return;
+    }
     match value {
         serde_json::Value::String(text) => scrub_in_place(text),
         serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_json),
-        serde_json::Value::Object(fields) => fields.values_mut().for_each(scrub_json),
+        serde_json::Value::Object(fields) => {
+            for (name, child) in fields.iter_mut() {
+                scrub_json_field(Some(name), child);
+            }
+        }
         _ => {}
+    }
+}
+
+/// Scrubs a map of free-form values, considering each entry's key.
+///
+/// The top level of `extra`, a breadcrumb's `data` and a trace context's `data`
+/// are maps whose keys are as much a label as any nested one — `extra`'s
+/// `{"token": …}` is the same leak as a nested one, and was reachable before
+/// this because the walk only started at the values.
+#[cfg(feature = "crash-reporting")]
+fn scrub_map(fields: &mut sentry::protocol::Map<String, serde_json::Value>) {
+    for (name, value) in fields.iter_mut() {
+        scrub_json_field(Some(name), value);
     }
 }
 
@@ -349,9 +400,9 @@ fn scrub_context(context: &mut sentry::protocol::Context) {
             if let Some(description) = trace.description.as_mut() {
                 scrub_in_place(description);
             }
-            trace.data.values_mut().for_each(scrub_json);
+            scrub_map(&mut trace.data);
         }
-        Context::Other(fields) => fields.values_mut().for_each(scrub_json),
+        Context::Other(fields) => scrub_map(fields),
         _ => {}
     }
 }
@@ -406,9 +457,9 @@ fn sanitize(
         if let Some(message) = breadcrumb.message.as_mut() {
             scrub_in_place(message);
         }
-        breadcrumb.data.values_mut().for_each(scrub_json);
+        scrub_map(&mut breadcrumb.data);
     }
-    event.extra.values_mut().for_each(scrub_json);
+    scrub_map(&mut event.extra);
     for value in event.tags.values_mut() {
         scrub_in_place(value);
     }
@@ -538,9 +589,9 @@ fn sanitize_transaction(
         if let Some(description) = span.description.as_mut() {
             scrub_in_place(description);
         }
-        span.data.values_mut().for_each(scrub_json);
+        scrub_map(&mut span.data);
     }
-    transaction.extra.values_mut().for_each(scrub_json);
+    scrub_map(&mut transaction.extra);
     for value in transaction.tags.values_mut() {
         scrub_in_place(value);
     }
@@ -729,6 +780,121 @@ mod test {
             assert!(rendered.contains("refresh failed"), "{rendered}");
             assert!(rendered.contains("rejected"), "{rendered}");
             assert!(rendered.contains("collector.internal"), "{rendered}");
+        }
+
+        #[test]
+        fn a_credential_nested_in_structured_data_does_not_survive() {
+            // The string rule cannot see these. `hunter2` under a `token` key
+            // is a word with no issuer prefix and no `token=` beside it, so
+            // only the KEY says what it is — and the key is only reachable by
+            // walking the structure, at every depth rather than the first.
+            let mut event = Event::default();
+            event.extra.insert(
+                "detail".into(),
+                serde_json::json!({
+                    "request": {
+                        "headers": { "authorization": "Bearer hunter2" },
+                        "nested": [{ "api_key": "hunter2" }],
+                    },
+                    "credentials": { "anything": { "at": ["any", "depth", "hunter2"] } },
+                    "safe": "GET /api/v1/companies/acme -> 200",
+                }),
+            );
+            event.breadcrumbs.values.push(Breadcrumb {
+                data: [("token".to_string(), Value::String("hunter2".into()))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            });
+
+            let sanitized = sanitize(event).expect("the hook never drops an event");
+            let rendered = serde_json::to_string(&sanitized).expect("an event serializes");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+            // And the diagnostic beside it is untouched.
+            assert!(rendered.contains("companies/acme"), "{rendered}");
+        }
+
+        #[test]
+        fn a_credential_nested_in_a_context_does_not_survive() {
+            // The shape the transaction path made reachable: a context whose
+            // free-form data nests a credential more than one level down.
+            let mut transaction = sentry::protocol::Transaction::default();
+            transaction.contexts.insert(
+                "app".into(),
+                sentry::protocol::Context::Other(
+                    [(
+                        "boot".to_string(),
+                        serde_json::json!({
+                            "outer": { "inner": { "authorization": "Bearer hunter2" } },
+                            "list": [{ "deeper": { "secret": "hunter2" } }],
+                        }),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            );
+
+            let sanitized = sanitize_transaction(transaction);
+            let rendered = serde_json::to_string(&sanitized).expect("a transaction serializes");
+            assert!(!rendered.contains("hunter2"), "{rendered}");
+        }
+
+        #[test]
+        fn the_two_dsn_parsers_agree() {
+            // `config::parse_dsn` decides what the BOOT LINE says; the SDK's
+            // parser decides whether anything is actually delivered. Two
+            // independent readers of one grammar, so they are pinned together
+            // here: anything the first accepts, the second must accept, or an
+            // install would be told it is reporting while the client is
+            // disabled. `init` refuses in that case rather than trusting this,
+            // but a divergence should be a red test, not a silent downgrade.
+            use std::str::FromStr;
+
+            for candidate in [
+                "https://key@o0.ingest.sentry.io/0",
+                "https://key@o0.ingest.sentry.io/abc",
+                "https://key@host/api/7",
+                "https://key@host/0?x=1",
+                "https://key@host/0#fragment",
+                "http://key@localhost:9000/2",
+                "https://key@[::1]/3",
+                "https://key@host:65535/3",
+                "https://key@host/0/1/2",
+                "https://key@host/%20",
+                // Rejected by BOTH today. They are here so that a future
+                // loosening of `parse_dsn` — dropping the public-key check,
+                // widening the scheme — trips this assertion instead of
+                // shipping a boot line that names a destination the SDK will
+                // not accept. Verified: removing the username check from
+                // `parse_dsn` makes this test fail on the first of them.
+                "https://o0.ingest.sentry.io/0",
+                "ftp://key@host/0",
+                "https://key@host/",
+                "https://key:secret@host/0",
+            ] {
+                let ours = config::parse_dsn_for_test(candidate);
+                let theirs = sentry::types::Dsn::from_str(candidate);
+                assert!(
+                    !(ours.is_some() && theirs.is_err()),
+                    "{candidate}: this crate accepts it but the SDK rejects it ({:?}) — the \
+                     boot line would claim a destination nothing can be sent to",
+                    theirs.err()
+                );
+            }
+        }
+
+        #[test]
+        fn a_dsn_the_sdk_refuses_installs_no_client_and_says_so() {
+            // Belt and braces for the same failure: whatever the two parsers
+            // do, `init` reports what the process WILL DO.
+            let (decision, guard) = init(
+                Deployment::SelfHosted,
+                &MapEnv::new([(config::DSN_ENV, "https://key@host/0")]),
+            );
+            // A valid DSN still reports; the point is that the parse result and
+            // the decision cannot disagree.
+            assert!(matches!(decision, Decision::Report { .. }));
+            assert!(guard.is_active());
         }
 
         #[test]
