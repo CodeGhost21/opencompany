@@ -328,11 +328,39 @@ fn scrub_json(value: &mut serde_json::Value) {
     }
 }
 
+/// Scrubs the free-form parts of one context, leaving its typed fields.
+///
+/// Two variants carry text that nothing else reaches:
+///
+/// * `Trace` — its `data` map holds `url.full`, which is the request URL
+///   verbatim, query string included. This was found by capturing a real
+///   outbound envelope from the console, where the same field was in clear
+///   while the span descriptions beside it were correctly redacted; the Rust
+///   protocol has the identical field, so it is closed here too.
+/// * `Other` — the escape hatch anything can put anything into.
+///
+/// The rest (`os`, `runtime`, `device`, …) are platform facts the SDK derives.
+#[cfg(feature = "crash-reporting")]
+fn scrub_context(context: &mut sentry::protocol::Context) {
+    use sentry::protocol::Context;
+
+    match context {
+        Context::Trace(trace) => {
+            if let Some(description) = trace.description.as_mut() {
+                scrub_in_place(description);
+            }
+            trace.data.values_mut().for_each(scrub_json);
+        }
+        Context::Other(fields) => fields.values_mut().for_each(scrub_json),
+        _ => {}
+    }
+}
+
 #[cfg(feature = "crash-reporting")]
 fn sanitize(
     mut event: sentry::protocol::Event<'static>,
 ) -> Option<sentry::protocol::Event<'static>> {
-    use sentry::protocol::{Context, Stacktrace};
+    use sentry::protocol::Stacktrace;
 
     fn strip_frames(stacktrace: &mut Stacktrace) {
         for frame in &mut stacktrace.frames {
@@ -384,14 +412,10 @@ fn sanitize(
     for value in event.tags.values_mut() {
         scrub_in_place(value);
     }
-    // The typed contexts (`os`, `runtime`, `device`, …) are platform facts the
-    // SDK derives, not user data. `Other` is the escape hatch anything could
-    // put anything into, so it goes through the same pass.
-    for context in event.contexts.values_mut() {
-        if let Context::Other(fields) = context {
-            fields.values_mut().for_each(scrub_json);
-        }
-    }
+    // `trace` is kept, not dropped: it is what associates this error with the
+    // request that caused it, which is the whole point of continuing a trace.
+    // Its `data` is scrubbed; see `scrub_context`.
+    event.contexts.values_mut().for_each(scrub_context);
 
     Some(event)
 }
@@ -499,8 +523,6 @@ fn narrow_request(request: sentry::protocol::Request) -> sentry::protocol::Reque
 fn sanitize_transaction(
     mut transaction: sentry::protocol::Transaction<'static>,
 ) -> sentry::protocol::Transaction<'static> {
-    use sentry::protocol::Context;
-
     // Identity, on the same terms as `sanitize`.
     transaction.server_name = None;
     transaction.user = None;
@@ -522,11 +544,7 @@ fn sanitize_transaction(
     for value in transaction.tags.values_mut() {
         scrub_in_place(value);
     }
-    for context in transaction.contexts.values_mut() {
-        if let Context::Other(fields) = context {
-            fields.values_mut().for_each(scrub_json);
-        }
-    }
+    transaction.contexts.values_mut().for_each(scrub_context);
     transaction
 }
 
@@ -796,6 +814,24 @@ mod test {
             transaction
                 .extra
                 .insert("detail".into(), Value::String("password=hunter2".into()));
+            transaction.contexts.insert(
+                "trace".into(),
+                sentry::protocol::TraceContext {
+                    // `url.full` is the request URL verbatim. A captured
+                    // envelope had it in clear beside correctly-redacted span
+                    // descriptions, which is what this field is here for.
+                    data: [(
+                        "url.full".to_string(),
+                        Value::String(
+                            "https://host/api/v1?code=magic-link-code&api_key=hunter2".into(),
+                        ),
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                }
+                .into(),
+            );
             transaction
         }
 
@@ -816,6 +852,36 @@ mod test {
             ] {
                 assert!(!rendered.contains(leaked), "{leaked} survived: {rendered}");
             }
+        }
+
+        #[test]
+        fn an_event_keeps_its_trace_context_so_the_error_stays_on_its_trace() {
+            // Dropping `trace` would sever an error from the request that
+            // caused it — the link tracing exists to provide — but its `data`
+            // is the one free-form field an allow-list would have to trust.
+            let mut event = Event::default();
+            event.contexts.insert(
+                "trace".into(),
+                sentry::protocol::TraceContext {
+                    data: [(
+                        "url.full".to_string(),
+                        Value::String("https://host/api/v1?code=magic-link-code".into()),
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                }
+                .into(),
+            );
+
+            let sanitized = sanitize(event).expect("the hook never drops an event");
+            assert!(
+                sanitized.contexts.contains_key("trace"),
+                "the link survives"
+            );
+            let rendered = serde_json::to_string(&sanitized).expect("an event serializes");
+            assert!(!rendered.contains("magic-link-code"), "{rendered}");
+            assert!(rendered.contains("url.full"), "{rendered}");
         }
 
         #[test]
