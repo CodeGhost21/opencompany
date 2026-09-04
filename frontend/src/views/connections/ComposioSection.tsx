@@ -445,19 +445,21 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
           ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : onByok
             ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — nothing is proxied and nothing is billed elsewhere. Connect providers in the grid below; they are connected in that account."
-            : attested
-              ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
+            : // Two facts, and they had been collapsed into one sentence. The
+              // route a company is on today is not what the form beneath does,
+              // and while the form is fixed to this company's own account those
+              // two can disagree — an operator was told there was nothing to
+              // paste directly above a field asking them to paste it.
+              //
+              // So: name what is wired now, then say what saving would change.
+              // A company already reaching providers is switching accounts, not
+              // filling a blank, and the grid it is looking at belongs to the
+              // account it is leaving.
+              attested
+              ? "Your teammates reach providers through Composio today, linked through this instance's own cluster identity — nothing is stored here for that. Saving an API key below moves this company onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
               : companyKey
-                ? "Your teammates reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every teammate in the company can then use what you connect."
-                : // The last arm is the only one that *instructs*, and the
-                  // instruction is route-specific — so it follows the route the
-                  // operator is looking at rather than the one still stored.
-                  // Telling someone to paste a backend token underneath a
-                  // Composio API key field is how copy comes to contradict the
-                  // form directly beneath it.
-                  mode === "byok"
-                  ? "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account."
-                  : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
+                ? "Your teammates reach providers through Composio today, on the account this company's stored credential authorizes. Saving an API key below moves it onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
+                : "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account."}
       </p>
 
       {load === "loading" ? (
@@ -708,20 +710,22 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                           )}
                           {onByok ? "Rotate key" : "Save key"}
                         </Button>
-                        {/* Clearing used to be reached by picking the other tile.
-                            With no other tile there is nothing to pick, and a
-                            company could rotate its key but never remove it. */}
-                        {onByok && COMPOSIO_MANAGED_HIDDEN && (
-                          <Button
-                            variant="outline"
-                            disabled={busy !== null}
-                            data-testid="composio-clear-key"
-                            onClick={() => void clearApiKey()}
-                          >
-                            <Trash2 className="size-4" />
-                            Clear key
-                          </Button>
-                        )}
+                        {/* No Clear control here, deliberately.
+                            Clearing is not "the key goes away": the host derives
+                            the route from whether a key exists, so
+                            `store_api_key("")` writes the mode back to the one
+                            this console no longer offers, and a company with any
+                            credential on that route resumes acting through it —
+                            a different account, billed differently.
+                            Reaching that used to require picking the other tile,
+                            which named it. With no tile to pick, a button here
+                            could only either say what it does — naming the route
+                            — or not say it, which is the switch happening
+                            silently. The status read carries no signal for
+                            whether that route has a credential, so the control
+                            cannot be offered only where clearing is inert
+                            either. Rotating a key stays; removing one needs a
+                            host that can express "no key, no route". */}
                       </>
                     ) : (
                       onByok && (
