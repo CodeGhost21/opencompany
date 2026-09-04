@@ -60,10 +60,25 @@ const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string
 /** The routes in render order — also the order the arrow keys walk. */
 const ALL_MODE_ORDER: ComposioMode[] = ["managed", "byok"];
 
-/** The routes on offer. Managed stays in {@link MODES} to label a company on it. */
+/** The routes on offer. {@link MODES} keeps every descriptor; only this list is filtered. */
 const MODE_ORDER: ComposioMode[] = ALL_MODE_ORDER.filter(
   (mode) => mode !== "managed" || !COMPOSIO_MANAGED_HIDDEN,
 );
+
+/** Whether this console offers `mode` as something to choose. */
+function isOffered(mode: ComposioMode): boolean {
+  return MODE_ORDER.includes(mode);
+}
+
+/**
+ * What a route this console does not offer is called on screen.
+ *
+ * Says nothing about the route it stands in for. `MODES` still holds that
+ * route's own name, which is a brand for a choice this console does not
+ * present — so the tile that stands in for it says only what is true of every
+ * value that lands there: nothing is configured here.
+ */
+const NOT_CONFIGURED = "Not configured";
 
 /**
  * The route to render for whatever the host said.
@@ -417,7 +432,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
         {!canManage
           ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : onByok
-            ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — OpenHuman proxies nothing and bills nothing. Connect providers in the grid below; they are connected in that account."
+            ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — nothing is proxied and nothing is billed elsewhere. Connect providers in the grid below; they are connected in that account."
             : attested
               ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
               : companyKey
@@ -429,7 +444,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                   // Composio API key field is how copy comes to contradict the
                   // form directly beneath it.
                   mode === "byok"
-                  ? "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account rather than OpenHuman's."
+                  ? "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account."
                   : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
       </p>
 
@@ -510,21 +525,37 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     operator is trying to evaluate. Same radiogroup shape
                     `policy-settings` uses for approval tiers, roving tabindex
                     included. */}
-                {/* A route this console no longer offers is still a route a
-                    company can be on, and no tile below will be marked Current
-                    for it. Say which, rather than reading as unconfigured. */}
-                {!MODE_ORDER.includes(persistedMode) && (
-                  <p className="text-sm text-muted-foreground" data-testid="composio-current-mode">
-                    This company reaches Composio through OpenHuman. Add an API key below to use
-                    its own Composio account instead.
-                  </p>
-                )}
                 <div
                   role="radiogroup"
                   aria-label="Which Composio account this company uses"
                   className={cn("grid gap-2", MODE_ORDER.length > 1 && "sm:grid-cols-2")}
                   onKeyDown={handleModeKeyDown}
                 >
+                  {/* A stored route the list does not offer still gets a tile.
+                      Without one no radio in the group is checked — every tile
+                      reports `aria-checked="false"` and the control claims the
+                      company has chosen nothing, which is a different (and
+                      wrong) statement from "it is on a route not offered here".
+
+                      Disabled: it is the state the company is in, not a route to
+                      go back to. */}
+                  {!isOffered(mode) && (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked
+                      tabIndex={0}
+                      disabled
+                      data-testid="composio-mode-unconfigured"
+                      className="rounded-md border border-primary bg-primary/5 p-3 text-left disabled:cursor-not-allowed"
+                    >
+                      <span className="text-sm font-medium">{NOT_CONFIGURED}</span>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        No Composio account is configured for this company. Add an API key below to
+                        connect one.
+                      </p>
+                    </button>
+                  )}
                   {MODE_ORDER.map((m, index) => {
                     const active = mode === m;
                     return (
@@ -610,12 +641,12 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       className="inline-flex items-center gap-2 text-xs font-medium"
                     >
                       <AlertTriangle className="size-3.5 shrink-0" />
-                      Providers connected through OpenHuman stay there
+                      Providers connected before this stay where they are
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      They live in OpenHuman&apos;s Composio account, not in this one, so the grid
-                      below will look empty until you connect them again here. Clearing the key puts
-                      this company back where it is now.
+                      They live in the Composio account this company reached before, not in this
+                      one, so the grid below will look empty until you connect them again here.
+                      Clearing the key puts this company back where it is now.
                     </p>
                     <div className="flex flex-wrap gap-2">
                       <Button
