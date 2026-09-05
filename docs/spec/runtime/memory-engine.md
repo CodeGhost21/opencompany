@@ -30,9 +30,10 @@ and `null` remain.
 
 | Env var | Required | Notes |
 |---|---|---|
-| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, or `cognee`. No default — see below. |
+| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, `cognee`, or `cortexdb`. No default — see below. |
 | `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
 | `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
+| `OPENCOMPANY_MEMORY_ACTOR` | no (`cortexdb` only) | The `X-Cortex-Actor` header value. CortexDB hard-refuses a request whose actor does not match the bearer token's subject; unset falls back to the token's own `sub` JWT claim, then to `opencompany`. |
 
 ### `remote` is conformance-backed
 
