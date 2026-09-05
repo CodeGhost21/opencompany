@@ -43,7 +43,7 @@ use crate::harness::orchestrator::Delegation;
 use crate::harness::run_turn::HarnessRunTurn;
 use crate::harness::{HarnessDeps, HarnessPool};
 use crate::runtime::assignee;
-use crate::runtime::delegation::{self, DelegationRunner, RunTurn};
+use crate::runtime::delegation::{self, ChatTarget, DelegationRunner, RunTurn};
 
 /// The most operator redirects honored within a single task dispatch (issue
 /// #111). A redirect re-runs the turn in-loop with the fresh instruction
@@ -205,8 +205,9 @@ use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
 use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
 use crate::ports::types::{
-    CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect, EffectGroup,
-    OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
+    CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect,
+    EffectGroup, EventSeq, OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
+    Verdict,
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
