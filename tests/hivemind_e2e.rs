@@ -556,19 +556,22 @@ fn converging_script() -> Responder {
         let grounds = ask.seq_of(&format!("!propose #{TOPIC}"));
         let line = match (ask.who(), grounds) {
             (THEORIST, None) => propose,
-            (_, None) => "!question I need the opening position before I can back anything."
-                .to_owned(),
+            (who, None) => {
+                format!("!question {who} needs the opening position before it can back anything.")
+            }
             (who, Some(seq)) if ask.prompt.contains("The room has reached quorum") => {
                 format!("!commit #{TOPIC} ^{seq} {who} records the room's decision.")
             }
-            (THEORIST, Some(seq)) => {
-                format!("!evidence #{TOPIC} ^{seq} The recurrence closes at 42 for every base case.")
-            }
+            (THEORIST, Some(seq)) => format!(
+                "!evidence #{TOPIC} ^{seq} theorist checked base cases 1..5 and the recurrence \
+                 closes at 42 for each."
+            ),
             (who, Some(seq)) if !ask.i_said("!support") => {
                 format!("!support #{TOPIC} ^{seq} {who} checked the derivation and it holds.")
             }
-            (_, Some(_)) => "!question Nothing further from me until somebody else moves."
-                .to_owned(),
+            (who, Some(_)) => {
+                format!("!question {who} has nothing further until somebody else moves.")
+            }
         };
         Reply::Say(line)
     })
