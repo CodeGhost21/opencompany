@@ -512,7 +512,8 @@ pub struct StorageSettings {
     /// the safe default.
     pub allow_ephemeral_memory: bool,
     /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
-    /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
+    /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`,
+    /// `cortexdb`.
     ///
     /// Instance-level, never per-company: one engine per instance, like
     /// `OPENCOMPANY_STORAGE`, while manifests are per-company — a
