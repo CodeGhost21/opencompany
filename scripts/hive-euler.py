@@ -22,8 +22,10 @@ written next to the summary (``--out``) for reading afterwards.
 from __future__ import annotations
 
 import argparse
+import html
 import http.cookiejar
 import json
+import os
 import re
 import sys
 import threading
@@ -31,10 +33,45 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
+from pathlib import Path
 
 SCOPE = "/api/v1/company"
 ADMIN_EMAIL = "harness-e2e@tinyhumans.ai"
 HIVE_REPORT_AUTHOR = "hive-report"
+
+# `https://projecteuler.net/minimal=<N>` returns the problem's own HTML
+# fragment with no title, no chrome, and no rate-limit worth working around
+# for a script that runs one lab, not a scraper. Cached forever once fetched
+# — a problem statement never changes.
+FETCH_URL = "https://projecteuler.net/minimal={n}"
+DEFAULT_CACHE_DIR = Path(os.path.expanduser("~/.cache/opencompany/euler"))
+
+# Mirrors the block tags `minimal=<N>` actually emits (`<p>`, and Euler's own
+# `<div class="note">` asides); a boundary here becomes a paragraph break.
+_BLOCK_TAGS = {"p", "div", "li", "br"}
+# `!<kind> [#topic] [>target] [^cite ...]`, matching the grammar
+# `tinyhivemind-hive::trace::parse_line` reads a marker line under
+# (`vendor/tinyhivemind/crates/tinyhivemind-hive/src/trace/mod.rs`) plus the
+# `!pin` / `!unpin` markers `tinyhivemind::pins` reads separately. Only the
+# marker line is ever journaled (`docs/spec/runtime/hivemind.md`), so a turn's
+# `text` is already just this line.
+MOVE_KINDS = (
+    "propose",
+    "support",
+    "object",
+    "evidence",
+    "question",
+    "defer",
+    "commit",
+    "pin",
+)
+_MARKER_RE = re.compile(
+    r"^!(propose|support|object|refute|evidence|question|defer|commit|pin|unpin)\b"
+)
+_TOPIC_RE = re.compile(r"(?:^|\s)#(\S+)")
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_.-]+)")
+_CITE_RE = re.compile(r"\^(\d+)")
 
 # The ladder. Statements are given in full because the lab holds no `web`
 # grant; answers are the published ones (projecteuler-solutions).
