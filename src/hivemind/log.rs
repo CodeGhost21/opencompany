@@ -175,7 +175,7 @@ impl SessionLog for EventLogSessionLog {
             let mut messages: Vec<LogMessage> = Vec::new();
             let mut scanned = 0_usize;
 
-            while messages.len() < limit && scanned < RAW_SCAN {
+            while scanned < RAW_SCAN {
                 let chunk = RAW_CHUNK.min(RAW_SCAN - scanned);
                 let raw = self
                     .events
@@ -190,7 +190,13 @@ impl SessionLog for EventLogSessionLog {
                     });
                 }
                 scanned += raw.len();
-                let exhausted = raw.len() < chunk;
+                // A short chunk is the tail of the journal. Read before the
+                // rows are consumed, and acted on only *after* the limit check
+                // below: a chunk that both filled the caller's page and ran out
+                // is still a page with rows left behind it, and reporting no
+                // cursor there would silently truncate the transcript at
+                // whatever the page happened to end on.
+                let tail = raw.len() < chunk;
                 // Newest-first, so the last entry read is the oldest one seen.
                 cursor = raw.last().map(|stored| stored.seq);
                 for stored in raw {
@@ -201,7 +207,10 @@ impl SessionLog for EventLogSessionLog {
                         messages.push(row);
                     }
                 }
-                if exhausted {
+                if messages.len() == limit {
+                    break;
+                }
+                if tail {
                     return Ok(SessionPage {
                         messages,
                         next_before: None,
