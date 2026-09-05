@@ -65,10 +65,7 @@ pub fn line_kind(line: &str) -> Option<&'static str> {
 /// never filled in than a deliberate vow of silence, and the alternative reading
 /// hands somebody the floor with nothing legal to say.
 #[must_use]
-pub fn allowed_for<'a>(moves: &BTreeMap<String, Vec<String>>, member: &'a str) -> Vec<&'a str>
-where
-    'static: 'a,
-{
+pub fn allowed_for(moves: &BTreeMap<String, Vec<String>>, member: &str) -> Vec<&'static str> {
     match moves.get(member) {
         Some(declared) if !declared.is_empty() => MOVE_KINDS
             .iter()
