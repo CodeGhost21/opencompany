@@ -117,6 +117,17 @@ repetition_cap = 1
 # two independent numbers on the floor is structurally impossible, and a
 # proposal only carries once instruments other than the programmer have
 # grounded it.
+#
+# The table gates the *deliberation* markers only. `commit`, `question` and
+# `defer` belong to every seat whatever a list says, so the `commit` entries
+# below describe nothing and the `defer` entries describe nothing — both are
+# kept for readability and ignored. That is deliberate: the fold hands the
+# Commit phase to whoever the attention market picks, and a live episode of
+# this desk reached quorum at the third evidential `!support` and then gave
+# the floor to three seats a restricted `commit` had left with nothing legal
+# to say, spending eight turns before reporting itself exhausted on an answer
+# it had already carried. Recording a topic the room has carried re-derives
+# nothing, so there is no seat too cheap to do it.
 [group_chat.hive.moves]
 theorist = ["support", "object", "evidence", "question", "pin", "defer"]
 programmer = ["propose", "evidence", "support", "commit", "defer"]
