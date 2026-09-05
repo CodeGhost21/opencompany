@@ -488,8 +488,7 @@ def wait_for_report(
     return None, [m for m in host.history(desk) if int(m.get("id", "0")) > after_id]
 
 
-def run_problem(host: Host, desk: str, pid: str, timeout: float, log) -> dict:
-    problem = PROBLEMS[pid]
+def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, log) -> dict:
     before = host.history(desk, limit=1)
     after_id = int(before[-1]["id"]) if before else 0
     text = (
