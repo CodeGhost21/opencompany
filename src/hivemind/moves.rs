@@ -14,6 +14,12 @@
 //! member that cannot propose has to do something with the floor other than
 //! restate the answer.
 //!
+//! What the table gates is the *deliberation* kinds only. `commit`, `question`
+//! and `defer` ([`UNGATED_KINDS`]) belong to every seat however narrow its
+//! entry: recording a topic the room has already carried re-derives nothing,
+//! and a member with nothing to add must always have something to say that is
+//! not prose. See [`UNGATED_KINDS`] for the live run that made this a rule.
+//!
 //! Enforcement is deliberately two-stage and never fatal: a first violation is
 //! a one-line correction and a second attempt, and a second violation is
 //! journaled with its leading `!` removed. A demoted line still says whatever
