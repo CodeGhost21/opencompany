@@ -561,30 +561,90 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default="http://127.0.0.1:8080")
     ap.add_argument("--desk", default="solvers")
-    ap.add_argument("--problems", default="1,5,12,31,60,100")
+    ap.add_argument(
+        "--problems",
+        default="1,5,12,31,60,100",
+        help="comma-separated ids and ranges, e.g. '200-210,233,301'",
+    )
     ap.add_argument("--timeout", type=float, default=1500, help="seconds per problem")
     ap.add_argument("--out", default="hive-euler-results.json")
+    ap.add_argument(
+        "--fetch",
+        dest="fetch",
+        action="store_true",
+        default=True,
+        help="pull statements from projecteuler.net/minimal=<N> when not cached (default on)",
+    )
+    ap.add_argument(
+        "--no-fetch",
+        dest="fetch",
+        action="store_false",
+        help="offline: only the hard-coded PROBLEMS table and the local cache",
+    )
+    ap.add_argument(
+        "--cache-dir",
+        default=str(DEFAULT_CACHE_DIR),
+        help="where fetched statements are cached (default ~/.cache/opencompany/euler)",
+    )
+    ap.add_argument(
+        "--answers",
+        default=None,
+        help="a Solutions.md-shaped file of '<n>. <answer>' lines to grade against",
+    )
+    ap.add_argument(
+        "--stop-after-failures",
+        type=int,
+        default=0,
+        help="stop the ladder after this many non-correct verdicts in a row (0 = never)",
+    )
     args = ap.parse_args()
 
     def log(line: str) -> None:
         print(line, flush=True)
 
+    answers = load_answers(args.answers)
+    cache_dir = Path(args.cache_dir)
     host = Host(args.base)
     host.sign_in()
     results = []
-    for pid in [p.strip() for p in args.problems.split(",") if p.strip()]:
-        if pid not in PROBLEMS:
-            log(f"!! unknown problem {pid}; known: {', '.join(PROBLEMS)}")
+    consecutive_failures = 0
+    for pid in parse_problem_spec(args.problems):
+        problem = resolve_problem(pid, answers, cache_dir, args.fetch, log)
+        if problem is None:
             continue
-        results.append(run_problem(host, args.desk, pid, args.timeout, log))
+        outcome = run_problem(host, args.desk, pid, problem, args.timeout, log)
+        results.append(outcome)
         with open(args.out, "w") as fh:
             json.dump(results, fh, indent=2)
+        if outcome["verdict"] == "correct":
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if args.stop_after_failures and consecutive_failures >= args.stop_after_failures:
+                log(
+                    f"!! stopping after {consecutive_failures} non-correct verdicts in a row "
+                    f"(--stop-after-failures {args.stop_after_failures})"
+                )
+                break
 
     log("")
-    log("problem | verdict   | turns | seconds")
-    log("--------|-----------|-------|--------")
+    header = (
+        "problem | verdict                  | turns | seconds | speakers | "
+        + " | ".join(m[:4] for m in MOVE_KINDS)
+        + " | @men | ^cit | diverse"
+    )
+    log(header)
+    log("-" * len(header))
     for r in results:
-        log(f"{r['problem']:>7} | {r['verdict']:<9} | {r['turns']:>5} | {r['elapsed_s']}")
+        moves = r.get("moves", {})
+        move_cols = " | ".join(f"{moves.get(k, 0):>4}" for k in MOVE_KINDS)
+        diverse = r.get("carried_supporters_other_than_proposer")
+        diverse_s = "yes" if diverse is True else "no" if diverse is False else "-"
+        log(
+            f"{r['problem']:>7} | {r['verdict']:<24} | {r['turns']:>5} | {r['elapsed_s']:>7} | "
+            f"{r.get('distinct_speakers', 0):>8} | {move_cols} | {r.get('mentions', 0):>4} | "
+            f"{r.get('citations', 0):>4} | {diverse_s:>7}"
+        )
     return sum(1 for r in results if r["verdict"] != "correct")
 
 
