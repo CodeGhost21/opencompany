@@ -68,6 +68,8 @@ struct Ask {
     prompt: String,
     /// Every `tool` message already in this conversation, oldest first.
     tool_outputs: Vec<String>,
+    /// The tool result this request is the continuation of, when it is one.
+    pending_tool: Option<String>,
     /// The whole message array, for assertions that need the roles.
     messages: Vec<Value>,
 }
@@ -100,10 +102,22 @@ impl Ask {
             .filter_map(|message| message.get("content").and_then(Value::as_str))
             .map(str::to_owned)
             .collect();
+        // The result this request is a continuation OF, as opposed to every
+        // tool result still sitting in the agent's conversation. The pool keeps
+        // one live agent per teammate for the whole company's lifetime, so a
+        // second episode's opening request already carries the first episode's
+        // tool messages; "has this turn called a tool yet" has to be read off
+        // the tail, not off the pile.
+        let pending_tool = messages
+            .last()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+            .and_then(|message| message.get("content").and_then(Value::as_str))
+            .map(str::to_owned);
         Self {
             speaker,
             prompt,
             tool_outputs,
+            pending_tool,
             messages,
         }
     }
@@ -1044,7 +1058,7 @@ fn remembering_script() -> Responder {
             .first()
             .map_or(1, |(seq, _, _)| *seq);
         if ask.task() == ASK_ONE {
-            if ask.tool_outputs.is_empty() {
+            if ask.pending_tool.is_none() {
                 return Reply::Call {
                     tool: "memory_store",
                     args: json!({ "title": "small-case table", "body": FACT }),
@@ -1055,7 +1069,7 @@ fn remembering_script() -> Responder {
             ));
         }
         if ask.task() == ASK_TWO {
-            if ask.tool_outputs.is_empty() {
+            if ask.pending_tool.is_none() {
                 return Reply::Call {
                     tool: "memory_recall",
                     args: json!({ "query": "small-case table for the recurrence" }),
@@ -1064,9 +1078,9 @@ fn remembering_script() -> Responder {
             // Cite what memory actually handed back, not a constant: if the
             // recall came back empty this line cannot be written.
             let recalled = ask
-                .tool_outputs
-                .iter()
-                .find(|output| output.contains(FACT_KEY))
+                .pending_tool
+                .as_deref()
+                .filter(|output| output.contains(FACT_KEY))
                 .map_or_else(
                     || "nothing came back from memory".to_owned(),
                     |_| FACT_KEY.to_owned(),
