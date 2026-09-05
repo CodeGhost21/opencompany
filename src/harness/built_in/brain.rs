@@ -3405,7 +3405,7 @@ impl HarnessBrain {
         }
 
         let mut channel_responses = Vec::new();
-        for event in &req.events {
+        for (index, event) in req.events.iter().enumerate() {
             match event {
                 CompanyEvent::OperatorMessage {
                     text,
@@ -3463,6 +3463,80 @@ impl HarnessBrain {
                         // is handled separately from an ordinary copilot
                         // reply here.
                         channel_responses.push(confined_turn_bubble(outcome));
+                        continue;
+                    }
+                    // Issue: hive-mind desks. A desk with somebody to
+                    // deliberate WITH answers as a room rather than through one
+                    // responder — `tinyhivemind_hive::step` decides who speaks
+                    // next, that teammate runs an ordinary turn, its line is
+                    // journaled on the desk, and the loop continues until the
+                    // room converges, deadlocks, or spends its budget.
+                    //
+                    // It sits ABOVE the responder ladder below and BELOW the
+                    // mention rung, which is the same explicit-beats-implicit
+                    // ordering the rest of the ladder already applies: naming
+                    // one teammate in a room addresses that teammate, not the
+                    // room, so a `@mention` still runs exactly one turn.
+                    // `desk_episode` declines everything else that must keep
+                    // the single-turn path — an unaddressed message, a General
+                    // spelling, a DM, a key that names no desk, a desk with
+                    // fewer than two effective roster members, and a desk that
+                    // opted out — so a company with one teammate per desk is
+                    // unaffected byte-for-byte. A copilot thread never reaches
+                    // here at all: it returned above.
+                    //
+                    // The episode journals its own turns, and deliberately
+                    // pushes NO bubble onto `channel_responses`: the REST
+                    // chat route journals every response it is handed as an
+                    // `AgentReply`, so a bubble here would write a second row
+                    // for a line the driver has already made durable. The
+                    // console still sees each turn arrive live — the operator
+                    // SSE feed projects journal rows — and a reload reads the
+                    // same transcript the room itself folded.
+                    //
+                    // Skipped when the journal is not wired: the episode reads
+                    // its own turns back out of it to fold the next step, so a
+                    // driver with nowhere to append could not deliberate at
+                    // all, and falling through answers exactly as before.
+                    if crate::runtime::mentions::mention_responder(&self.record(), mentions)
+                        .is_none()
+                        && let Some(events) = self.deps.events.clone()
+                        && let Some(desk) =
+                            crate::hivemind::desk_episode(&self.record(), chat.as_deref())
+                    {
+                        // The operator message's own sequence: the episode's
+                        // watermark, so the room folds what was said after it
+                        // was asked and merely reads what came before. A
+                        // request built without seqs falls back to the message
+                        // itself being the whole of the room's history.
+                        let trigger = req
+                            .event_seqs
+                            .get(index)
+                            .copied()
+                            .unwrap_or_else(|| EventSeq::new(0));
+                        let runner = HiveTurn {
+                            run_turn: self.run_turn(),
+                            company: self.record().id.clone(),
+                            chat_id: chat.clone(),
+                            thread_root: *parent,
+                        };
+                        let outcome = crate::hivemind::EpisodeDriver::new(
+                            self.record().id.clone(),
+                            desk,
+                            events,
+                            &runner,
+                            composed.clone(),
+                        )
+                        .in_thread(*parent)
+                        .run(trigger)
+                        .await?;
+                        tracing::info!(
+                            company = %self.record().id,
+                            chat = %chat.as_deref().unwrap_or_default(),
+                            ending = %outcome.ending.label(),
+                            turns = outcome.turns,
+                            "[hive] a desk answered as a room"
+                        );
                         continue;
                     }
                     // Route to the teammate the message named, else to the
