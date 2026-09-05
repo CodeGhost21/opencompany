@@ -47,26 +47,77 @@ models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "ma
 # ---------------------------------------------------------------------------
 # The one desk that matters.
 #
-# Three members, three different instruments: the theorist reduces, the
-# programmer computes, the verifier attacks. A quorum of two means an answer
-# carries once a second, differently-equipped member has grounded support for
-# it — which is exactly the parent lab's "two independent routes agreed" rule,
-# now enforced by the fold rather than by an orchestrator remembering to ask.
+# Six members, six different instruments, three of them cheap. The theorist
+# reduces, the programmer is the only one who may put a number on the floor,
+# the verifier attacks it from an independent implementation, the skeptic
+# attacks the *reading* rather than the arithmetic, the brute forcer is the
+# one check with no clever step to be wrong about, and the archivist is the
+# desk's memory — recalling what this lab has already solved before anybody
+# starts, and writing the method down once a number survives. A quorum of
+# three means an answer needs grounded support from three differently
+# equipped members, not just two identical proposals — see
+# `docs/spec/runtime/hivemind.md` for the moves each is restricted to and
+# `agents/prompts/*.md` for why.
 # ---------------------------------------------------------------------------
 
 [[group_chat]]
 id = "solvers"
 name = "Solvers desk"
-description = "One problem at a time. Reduce it, program it, try to break the number, and commit only what survived."
-members = ["theorist", "programmer", "verifier"]
+description = "One problem at a time. Reduce it, program it, read it literally, brute-force it, remember it, and commit only what survived all four."
+members = [
+    "theorist",
+    "programmer",
+    "verifier",
+    "skeptic",
+    "brute_forcer",
+    "archivist",
+]
 
 [group_chat.hive]
 enabled = true
-# Three members × four turns each. The benchmark's rule of thumb is three per
-# member; a solve needs a program run in the middle, so one more each.
-turn_budget = 12
-quorum = 2
+# Six members x three turns each: enough for an opening position, a reply to
+# the room, and a commit — the shortest sequence that can actually reach a
+# quorum of three grounded, distinct supporters.
+turn_budget = 18
+quorum = 3
 blind_round = true
+# A `!support`/`!object` with no `^citation` does not count towards quorum.
+# Without this a room can converge on a proposal nobody actually checked —
+# exactly the failure the live run showed: two identical `!propose`s and no
+# `!evidence` behind either.
+require_evidential = true
+
+# The following four keys are read by `tinyhivemind_hive` as it lands
+# (concurrent with this bundle); `check` on this manifest may not yet enforce
+# them. Left in deliberately rather than waiting: a manifest that already
+# says what it wants is how the fold's own tests know what "wants" means.
+#
+#   - `refutation_cap`: how many live `!object`s a single option can carry
+#     before the room is required to treat it as refuted rather than merely
+#     contested. Two: a lone objection is a disagreement, a second one from a
+#     different instrument is a pattern.
+#   - `dominance_cap`: how far ahead of the field a proposal's supporter count
+#     may run before the episode stops accepting *more* of the same kind of
+#     support (identical instruments piling on is not more evidence). Three.
+#   - `repetition_cap`: how many turns in a row a member may restate a
+#     position that added no new citation before the episode discounts it.
+#     One — the prompt already shows a member its own last line.
+refutation_cap = 2
+dominance_cap = 3
+repetition_cap = 1
+
+# Per-member move budget, enforced by the driver. This is the actual fix for
+# the live run's symptom: nobody but the programmer may ever `!propose`, so
+# two independent numbers on the floor is structurally impossible, and a
+# proposal only carries once instruments other than the programmer have
+# grounded it.
+[group_chat.hive.moves]
+theorist = ["support", "object", "evidence", "question", "pin", "defer"]
+programmer = ["propose", "evidence", "support", "commit", "defer"]
+verifier = ["support", "object", "evidence", "commit", "defer"]
+skeptic = ["question", "object", "evidence", "defer"]
+brute_forcer = ["evidence", "object", "defer"]
+archivist = ["evidence", "question", "pin", "defer"]
 
 # The records desk is kept so an accepted answer still has somewhere to be
 # written down. One member, so it answers as it always did.
