@@ -723,7 +723,7 @@ fn the_unspoken_block_is_rendered_from_the_builder() {
         agent_id: "planner".into(),
         phase: tinyhivemind_hive::Phase::Deliberate,
         visibility: tinyhivemind_hive::Visibility::Full,
-        reason: tinyhivemind_hive::BidReason::Urge,
+        reason: tinyhivemind_hive::BidReason::Salience,
         next_state: tinyhivemind_hive::EpisodeState::opened(
             tinyhivemind_hive::Conversation {
                 desk_id: "eng".into(),
