@@ -10,6 +10,7 @@ use tinymemory::registry::{
 use tinymemory_api::null::NullMemoryProvider;
 use tinymemory_api::provider::MemoryProvider;
 
+use super::cortexdb::{CORTEXDB_DRIVER_ID, CortexdbMemory};
 use crate::Result;
 use crate::error::OpenCompanyError;
 
