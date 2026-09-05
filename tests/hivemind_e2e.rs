@@ -1004,3 +1004,123 @@ async fn a_single_member_desk_answers_with_one_ordinary_turn() {
         "no room opened, so no room reported: {rows:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4: the room reasons with memory
+// ---------------------------------------------------------------------------
+
+/// What one episode deliberately remembers.
+const FACT: &str =
+    "The lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.";
+/// The half of it a later episode has to actually use.
+const FACT_KEY: &str = "n=3 -> 7";
+/// The operator's first message: the episode that stores.
+const ASK_ONE: &str = "Establish the small-case table for the recurrence.";
+/// The operator's second message: the episode that has to remember.
+const ASK_TWO: &str = "What does the small-case table give for n=3?";
+
+/// Two short episodes: the first stores a fact with `memory_store`, the second
+/// asks for it back with `memory_recall` and cites what it got.
+///
+/// Every turn of episode one stores, and every turn of episode two recalls, so
+/// the claim does not depend on which member the library hands the floor to.
+fn remembering_script() -> Responder {
+    Arc::new(|ask: &Ask| {
+        let grounds = ask
+            .transcript()
+            .first()
+            .map_or(1, |(seq, _, _)| *seq);
+        if ask.prompt.contains(ASK_ONE) {
+            if ask.tool_outputs.is_empty() {
+                return Reply::Call {
+                    tool: "memory_store",
+                    args: json!({ "title": "small-case table", "body": FACT }),
+                };
+            }
+            return Reply::Say(format!(
+                "!propose #table ^{grounds} Work the small cases out once and write them down."
+            ));
+        }
+        if ask.prompt.contains(ASK_TWO) {
+            if ask.tool_outputs.is_empty() {
+                return Reply::Call {
+                    tool: "memory_recall",
+                    args: json!({ "query": "small-case table for the recurrence" }),
+                };
+            }
+            // Cite what memory actually handed back, not a constant: if the
+            // recall came back empty this line cannot be written.
+            let recalled = ask
+                .tool_outputs
+                .iter()
+                .find(|output| output.contains(FACT_KEY))
+                .map_or_else(
+                    || "nothing came back from memory".to_owned(),
+                    |_| FACT_KEY.to_owned(),
+                );
+            return Reply::Say(format!(
+                "!evidence #table ^{grounds} From the desk's own memory: {recalled}."
+            ));
+        }
+        Reply::Say(format!("!question {} has nothing to add.", ask.who()))
+    })
+}
+
+/// Short episodes, so two of them fit inside one test without a long run.
+const SHORT: &str = "{ enabled = true, turn_budget = 3, quorum = 2, blind_round = true }";
+
+/// Every tool result the endpoint was shown for the episode answering `task`.
+fn tool_results_for(script: &Script, task: &str) -> Vec<String> {
+    script
+        .hive_asks()
+        .into_iter()
+        .filter(|ask| ask.prompt.contains(task))
+        .flat_map(|ask| ask.tool_outputs)
+        .collect()
+}
+
+/// **Agents reason with memory.**
+///
+/// The default `store` engine: what `memory_store` wrote in episode one is what
+/// `memory_recall` reads in episode two, and the line the room journals is
+/// written from what came back.
+#[tokio::test]
+async fn a_desk_reasons_with_what_it_stored_in_an_earlier_episode() {
+    let home = tempfile::tempdir().unwrap();
+    let (base_url, script) = spawn_script(remembering_script()).await;
+    let (address, runtime) = boot(home.path(), &base_url, SHORT, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(DESK, ASK_ONE).await;
+    client.say(DESK, ASK_TWO).await;
+
+    // Episode one really wrote: the tool's own success echo came back into the
+    // turn, which only happens once the chunk is in the store.
+    let stored = tool_results_for(&script, ASK_ONE);
+    assert!(
+        stored.iter().any(|result| result.contains("Remembered as")),
+        "no memory_store result reached a turn in episode one: {stored:?}"
+    );
+
+    // Episode two really read it back.
+    let recalled = tool_results_for(&script, ASK_TWO);
+    assert!(
+        recalled.iter().any(|result| result.contains(FACT_KEY)),
+        "memory_recall did not serve the fact episode one stored: {recalled:?}"
+    );
+
+    // And the room's own line used it. This is the part a store-level test
+    // cannot reach: the fact has to survive the tool, the turn, `marker_line`
+    // and the journal to end up here.
+    let rows = replies(&runtime, DESK).await;
+    let used: Vec<_> = turns(&rows)
+        .into_iter()
+        .filter(|(_, text)| text.contains(FACT_KEY))
+        .collect();
+    assert!(
+        !used.is_empty(),
+        "no journaled line cites what the desk remembered: {rows:?}"
+    );
+    assert!(used[0].1.starts_with("!evidence"), "{used:?}");
+}
