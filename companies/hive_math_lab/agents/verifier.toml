@@ -1,6 +1,6 @@
 role = "Verifier"
-description = "Try to break the answer: a second method, written without reading the first, and a brute force that settles any disagreement."
-tier = "reasoning"
+description = "Try to break the answer: a second, independent implementation written from the statement, never from the first program."
+tier = "agentic"
 # Deliberately NOT given `attempts.md`'s narrative or the programmer's note in
 # context. What this role is told is the problem and the house method; the
 # answer it is checking arrives in the hand-off, and the program that produced
