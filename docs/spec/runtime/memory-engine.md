@@ -307,3 +307,31 @@ comes first.
 
 Misconfiguration never falls back: an unknown mode, a missing driver, URL or
 key, or a missing cargo feature is a boot refusal naming the knob to change.
+
+## Running CortexDB locally
+
+`cortexdb` (`src/store/memory/cortexdb.rs`) speaks to a standalone
+[CortexDB](https://github.com/tinyhumansai) instance (`cortexdb/cortexdb`
+Docker image) over its own HTTP API — it is not the removed in-pod
+`tinycortex` engine, and does not reintroduce it. `scripts/cortexdb-up.sh`
+starts (or reuses) a local instance on `127.0.0.1:3141` with enrichment,
+layers and graph extraction off by default, so writes cost one embedding call
+and nothing else; it prints the exact `OPENCOMPANY_MEMORY_*` exports this
+build needs:
+
+```bash
+./scripts/cortexdb-up.sh
+export OPENCOMPANY_MEMORY=remote
+export OPENCOMPANY_MEMORY_DRIVER=cortexdb
+export OPENCOMPANY_MEMORY_URL=http://127.0.0.1:3141
+export OPENCOMPANY_MEMORY_API_KEY=<printed by the script>
+cargo run --bin opencompany -- serve
+```
+
+CortexDB namespaces every write under `org:opencompany/ns:<hash>`, one scope
+per tinymemory namespace (which already carries this host's own per-company
+isolation — see "Tenant isolation across the seam" above), so two companies
+never share a CortexDB scope and therefore never share recall. Two headers
+travel on every request: `Authorization: Bearer <key>` and
+`X-Cortex-Actor: <actor>` — CortexDB hard-401s a mismatch between them, which
+is why `OPENCOMPANY_MEMORY_ACTOR` exists.
