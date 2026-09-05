@@ -1,6 +1,13 @@
 role = "Verifier"
 description = "Try to break the answer: a second, independent implementation written from the statement, never from the first program."
-tier = "agentic"
+# The manifest's own tier vocabulary (`company::types::TIERS`) is orchestrator
+# / reasoning / frontend / compress / subconscious — there is no "agentic"
+# value to write. `src/harness/built_in/build.rs::model_for_tier` maps both
+# `orchestrator` and `frontend` to the `agentic-v1` workload; `orchestrator` is
+# reserved for the company lead the routing logic looks up by that tag, so
+# `frontend` is this bundle's way to buy the same, strongest model for a role
+# that isn't it.
+tier = "frontend"
 # Deliberately NOT given `attempts.md`'s narrative or the programmer's note in
 # context. What this role is told is the problem and the house method; the
 # answer it is checking arrives in the hand-off, and the program that produced
