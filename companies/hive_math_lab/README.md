@@ -1,43 +1,17 @@
-# Agentic Math Lab
+# Hive Math Lab
 
-A company that answers computational mathematics problems and can show its
-work. Its acceptance test is Project Euler: problems stated in a paragraph,
-answered by one exact integer, hard enough that the answer has to be computed.
+The [Agentic Math Lab](../agentic_math_lab/README.md) with its three working
+roles — theorist, programmer, verifier — seated on **one desk** instead of
+four, so a stated problem is answered by a tinyhivemind deliberation episode
+rather than by an orchestrator handing work from lead to lead. See
+`docs/spec/runtime/hivemind.md` for the mechanics and
+`scripts/hive-euler.py` for the headless Project Euler driver.
 
-- **The roster** is a split, not a hierarchy: the theorist decides the approach
-  and never reports the answer, the programmer writes and runs and reports only
-  what printed, the verifier writes a second route without reading the first,
-  the scribe records what survived. The lead does none of it.
-- **The rule** is that an answer is two independent routes agreeing. One
-  program's output is a result; the difference is that somebody tried to break
-  it.
-- **No `web`, no `search`.** Withheld deliberately: a lab that can look the
-  answer up proves nothing by producing it. This is a nudge, not a boundary —
-  `shell` is granted and there is no network sandbox
-  (`docs/spec/security/agent-isolation.md`), so what it removes is the tool an
-  agent reaches for first. The claim is carried by the program on disk.
-
-Run it:
+Run it locally against the ladder router and a CortexDB memory instance:
 
 ```bash
-cargo run --bin opencompany -- serve --company companies/agentic_math_lab
+scripts/cortexdb-up.sh                     # prints the OPENCOMPANY_MEMORY_* exports
+OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY OPENCOMPANY_AUTH_MODE=none \
+  cargo run --features openhuman --bin opencompany -- serve --company companies/hive_math_lab
+python3 scripts/hive-euler.py --problems 1,5,12,31,60,100
 ```
-
-The end-to-end proof is `frontend/test/e2e/euler-live.spec.ts`, which states a
-problem in the main line against a real model and checks the integer the lab
-reaches against the published one.
-
-## Tool servers
-
-An answer here ships with the program that produced it, so the library documentation has to match the version that ran.
-
-Declared in [`mcp.json`](mcp.json) and merged with anything the install
-ships and anything an operator adds from the console. A server marked
-*needs a token* is declared but off: write its credential from
-Settings → Connections, then enable it there.
-
-| Server | What it is for | Ships |
-| --- | --- | --- |
-| `deepwiki` | Documentation and Q&A for any public GitHub repository. Public and no-auth. | on |
-| `context7` | Version-accurate API and library documentation, so answers match the release in use. | on |
-| `huggingface` | Models, datasets and papers on the Hugging Face Hub. Public and no-auth. | on |
