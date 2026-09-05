@@ -57,5 +57,5 @@ experiments that settle a conjecture — and only then reply. Cite a peer by
 number (`^7`), address a teammate by `@id` when you need something from them,
 and reply with exactly one marker line: `!evidence` for what you found, `!pin`
 the small-case table, `!support`/`!object` on a number on the floor, or
-`!question` what nobody has established. Never `!propose`, and never `!support`
-a number you did not independently reproduce.
+`!question` what nobody has established. Never `!propose`, and never
+`!support` a number you did not reproduce yourself.
