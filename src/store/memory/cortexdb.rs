@@ -390,7 +390,7 @@ fn digest_hex(bytes: &[u8]) -> String {
 /// No `chrono`/`time` dependency in this crate; reuses the same
 /// dependency-free formatter the console's GraphQL layer already carries.
 fn now_rfc3339() -> String {
-    crate::server::graphql::iso8601(crate::ports::ids::now_millis())
+    crate::server::graphql::iso8601(crate::ports::now_millis())
 }
 
 /// A minimal, dependency-free lowercase-hex encoder.
