@@ -645,6 +645,24 @@ impl CompanyManifest {
                     ));
                 }
             }
+
+            // The two hive bounds a fold refuses outright, caught here where
+            // the author can still read the reason. A `quorum` of zero would
+            // settle every topic the moment it was proposed; a `turn_budget` of
+            // zero opens a room that is exhausted before anybody speaks. Both
+            // are rejected rather than clamped: an operator who wrote a number
+            // meant it, and silently substituting a different one is how a desk
+            // ends up behaving in a way its manifest does not describe.
+            if chat.hive.quorum == Some(0) {
+                problems.push(format!(
+                    "{label} sets `hive.quorum = 0` — a topic needs at least one grounded supporter to carry."
+                ));
+            }
+            if chat.hive.turn_budget == Some(0) {
+                problems.push(format!(
+                    "{label} sets `hive.turn_budget = 0` — an episode with no turns can never reach a decision; use `hive = {{ enabled = false }}` to keep the desk on a single responder."
+                ));
+            }
         }
 
         // Delegation allowlists (issue #176): every `delegates_to` entry must
