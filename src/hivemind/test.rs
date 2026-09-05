@@ -18,12 +18,12 @@ use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, Stor
 /// things under test and a default that reads the whole log would hide a cursor
 /// bug rather than expose it.
 #[derive(Default)]
-struct MemoryLog {
+pub(super) struct MemoryLog {
     events: Mutex<Vec<StoredEvent>>,
 }
 
 impl MemoryLog {
-    fn company() -> CompanyId {
+    pub(super) fn company() -> CompanyId {
         CompanyId::new("acme")
     }
 
@@ -32,7 +32,7 @@ impl MemoryLog {
     }
 
     /// Every `AgentReply` on `chat`, as `(author, text)` in journal order.
-    fn replies(&self, chat: &str) -> Vec<(String, String)> {
+    pub(super) fn replies(&self, chat: &str) -> Vec<(String, String)> {
         self.rows()
             .into_iter()
             .filter_map(|stored| match stored.event {
@@ -145,7 +145,7 @@ impl HiveTurnRunner for ScriptedRunner {
     }
 }
 
-fn record(manifest: &str) -> CompanyRecord {
+pub(super) fn record(manifest: &str) -> CompanyRecord {
     let manifest: crate::company::CompanyManifest =
         toml::from_str(manifest).expect("test manifest parses");
     CompanyRecord {
@@ -185,7 +185,7 @@ fn three_member_manifest() -> String {
         .to_string()
 }
 
-fn desk_of(manifest: &str, chat: &str) -> Option<HiveDesk> {
+pub(super) fn desk_of(manifest: &str, chat: &str) -> Option<HiveDesk> {
     desk_episode(&record(manifest), Some(chat))
 }
 

@@ -58,6 +58,8 @@ pub mod prompt;
 pub mod types;
 
 #[cfg(test)]
+mod moves_test;
+#[cfg(test)]
 mod test;
 
 pub use episode::{EpisodeDriver, HiveTurnRunner};
