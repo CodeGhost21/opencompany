@@ -508,6 +508,12 @@ tinymemory = [
     # `anyhow::Result`, so anything implementing or calling it has to name
     # `anyhow` directly. Already an optional dep for other features.
     "dep:anyhow",
+    # `src/store/memory/cortexdb.rs` speaks the CortexDB HTTP API directly
+    # (the vendored `tinymemory-remote` dialects are `pub(crate)` there and
+    # not reusable from this crate), so this feature needs its own `reqwest`
+    # rather than relying on `oauth`/`documents` pulling it into the default
+    # set. Already an optional dep, already in `Cargo.lock`.
+    "dep:reqwest",
 ]
 # Node sidecar brain for self-hosters (bring-your-own-inference). Adds
 # `SidecarBrain`, which speaks the same `/orchestration/v1` wire frames as the
