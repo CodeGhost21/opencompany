@@ -40,29 +40,136 @@ hive = { moves = { solver = ["propose", "support", "commit"],
   of silence, and the other reading hands a seat the floor with nothing legal
   to say.
 - `pin` covers `!unpin` too: both write the same board.
-- At least one seat must keep `commit`, or the room reaches quorum with nobody
-  able to record it. Refused at validation.
+- `commit`, `question` and `defer` are **ungated**: every seat keeps them
+  however narrow its entry, and an entry naming one is accepted and ignored
+  rather than refused — it describes what the seat could already do. See
+  [What no table can take away](#what-no-table-can-take-away).
 - An unknown kind and an unknown member id are refused at validation, because
   both fail **open** at runtime — the member silently keeps every move and the
   desk goes on voting, which is the exact symptom the table exists to fix.
 
+### What no table can take away
+
+`commit` is bookkeeping, not authorship. The library authorizes a commit turn by
+setting the phase, and the *attention market* picks who holds the floor when it
+does — not the manifest. A six-member `hive_math_lab` desk (`quorum = 3`,
+`require_evidential = true`) reached quorum at the third evidential `!support`,
+flipped to `Commit`, and the fold then gave the floor to the skeptic, the brute
+forcer and the archivist for the remaining eight turns. None of them held
+`commit`, so each was shown a no-move block, wrote prose ("the answer is ready
+for someone to commit"), and the room reported itself **exhausted** on an answer
+it had already decided. Recording a topic the room has carried re-derives
+nothing, so no seat is too cheap to do it.
+
+`question` and `defer` are the two honest things a member with nothing to add
+can say. A seat barred from both has only silence or a guess left, and prose
+deposits no trace while still costing the room a turn.
+
+So `hive.moves` gates the deliberation kinds only — `propose`, `support`,
+`object`, `refute`, `evidence`, `pin` — and never these three.
+
+### The Commit phase names the topic
+
+Because the committing seat is regularly not one of the seats that carried the
+topic, the Commit block names the id outright rather than describing it:
+
+```text
+The room has reached quorum and carried `#euler12-triangle`; record it. Reply
+with ONE line only:
+!commit #euler12-triangle ^N  then why, citing the evidence it rests on
+…This is bookkeeping, not a fresh judgement: record the topic the room actually
+settled on rather than the one you would have preferred, and do not re-derive
+the answer.
+```
+
+The id comes from the same fold the floor block is rendered from, so a seat can
+never be told to record a topic its own standings do not show.
+
+## Topic-id discipline
+
+One live episode coined `#euler12`, `#euler12-triangle` and
+`#euler12-triangular` for a single number. Support split across three names adds
+up to nothing, and the room spent its budget one supporter short of a quorum it
+had really reached three times over.
+
+The driver therefore derives **one** canonical id per task and repeats it in
+every deliberating prompt:
+
+| Input | Id |
+| --- | --- |
+| a `topic: #foo` line anywhere in the operator's message | `foo` — the operator naming it beats any derivation |
+| `Project Euler 12: Highly divisible triangular number` | `euler12` — the short head before the colon, framing words dropped, a trailing number folded onto the word before it |
+| `Decide the rollout.` | `decide-rollout` |
+| nothing sluggable | `answer` |
+
+```text
+Topic id for this task's answer: `#euler12`. Every !propose, !support and
+!evidence about the answer uses exactly this id. Only a genuinely different
+candidate value gets a different id (`#euler12-2`). Never invent a synonym for
+an id already on the floor.
+```
+
+The floor block still lists the ids actually on the floor with their standings;
+the line above it says what the room should have called this one in the first
+place.
+
+## Citation discipline under `require_evidential`
+
+Under `require_evidential` the fold counts a `!support` only when its citation
+chain reaches an `!evidence`. Two properties of that walk are easy to miss, and
+the live run missed both: a `!propose` is **not** evidence, so `!support
+#euler12 ^2` naming the proposal is well-formed, reads as grounded and counts
+for nothing; and topic ids are **not** compared during the walk, which is by
+sequence only.
+
+A support that counts for nothing is worse than a missing turn, because the
+transcript reads as though it counted. So:
+
+- the rules block tells a desk that requires it that a `!support` must cite an
+  `!evidence` line, or a support that does, and that citing a `!propose` alone
+  counts for nothing;
+- the driver checks the same chain the fold will, over what this turn could
+  see, and hands back **one** correction — the same one-retry mechanism a
+  barred move gets:
+
+```text
+Your `!support` reaches no `!evidence`, so this desk counts it for nothing:
+citing a `!propose` is not grounds. Evidence on the floor: ^3, ^7. Reply again
+with ONE line citing one of those, or deposit your own fact with
+`!evidence #topic ^N`.
+```
+
+With no evidence on the floor at all the correction says so and points at
+`!evidence` / `!question` instead of naming an empty list.
+
+The second attempt is journaled **as-is**, never demoted: the host does not get
+a veto over what a member is allowed to think, and the fold decides what the
+line is worth. Only the move grammar demotes.
+
 ### What the prompt shows
 
 Only the markers this seat holds, phase-gated on top: `commit` is the library's
-to authorize (it is absent while the room deliberates, present alone in the
-Commit phase), and every other marker is the desk's to assign. A seat that was
-actually narrowed is also told so, once:
+to authorize (it is absent while the room deliberates, present for **every**
+seat in the Commit phase), and the deliberation markers are the desk's to
+assign. A seat that was actually narrowed is also told so, once:
 
 ```text
 Reply with ONE line only, beginning with exactly one of these markers:
 !object >N ^M  then why, objecting to message N and citing message M
 !evidence #topic ^N  then a fact, adding grounds without taking a side; …
-<the rules those moves are read under>
+!question  then what you need that nobody has established
+!defer #topic  then who should answer instead, when this is not your area
+<the rules those moves are read under, ending>
+If you have nothing to add, reply !defer #topic naming who should act next, or
+!question. Prose without a marker counts for nothing and costs the room a turn.
 These are the ONLY markers this desk gives you. A line opening with any other
 marker is handed back to you once for correction, and on a second attempt it is
 journaled with its marker stripped — it will say what you wrote and count for
 nothing.
 ```
+
+`!question` and `!defer` are in that list whatever the table said, so the block
+always offers a way out that is not prose.
 
 ### What enforcement does
 
