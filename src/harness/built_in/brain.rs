@@ -4290,7 +4290,14 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
                 &self.company,
                 agent_id,
                 prompt,
-                ChatTarget::in_thread(self.chat_id.as_deref(), self.thread_root),
+                // `deliberating`, not `in_thread`: the episode prompt already
+                // carries this desk's transcript, attributed and filtered to
+                // what this turn is allowed to see. Seeding the desk's recent
+                // history on top would hand the same lines back unattributed
+                // and in the assistant role — a peer's opening position
+                // reaching a *blind* turn, and every peer line reading as
+                // something this member had itself said.
+                ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root),
             )
             .await?;
         Ok(outcome.reply)
