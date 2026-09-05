@@ -160,6 +160,10 @@ fn remote_provider(
             }
             .map_err(open_failed)?,
         )),
+        CORTEXDB_DRIVER_ID => Arc::new(tinymemory::mandatory::MemoryTraitProvider::new(
+            Arc::new(CortexdbMemory::api(url, key, cortexdb_actor(key)).map_err(open_failed)?),
+            CORTEXDB_DRIVER_ID,
+        )),
         other => {
             return Err(MemoryDriverError(format!(
                 "no HTTP adapter is compiled for memory driver `{other}`"
