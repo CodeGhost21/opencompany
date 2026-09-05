@@ -510,3 +510,216 @@ fn reports(rows: &[(u64, String, String)]) -> Vec<String> {
         .map(|(_, _, text)| text.clone())
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// 1 + 2: deliberation converges through the fold, and attribution holds
+// ---------------------------------------------------------------------------
+
+/// The topic the room settles on in the convergence tests.
+const TOPIC: &str = "answer42";
+
+/// The convergence script.
+///
+/// It is a state machine over what each speaker can *see*, not a queue: the
+/// theorist opens an option, and a peer backs it only once it can read the
+/// proposal's sequence number out of the transcript it was handed. A queue
+/// would pass whatever the prompt said; this cannot.
+fn converging_script() -> Responder {
+    Arc::new(|ask: &Ask| {
+        let propose = format!("!propose #{TOPIC} The closed form of the recurrence is 42.");
+        // A citation is only available once the proposal is visible. In the
+        // blind round it is not, which is exactly what the blind round means.
+        let grounds = ask.seq_of(&format!("!propose #{TOPIC}"));
+        let line = match (ask.who(), grounds) {
+            (THEORIST, None) => propose,
+            (_, None) => "!question I need the opening position before I can back anything."
+                .to_owned(),
+            (who, Some(seq)) if ask.prompt.contains("The room has reached quorum") => {
+                format!("!commit #{TOPIC} ^{seq} {who} records the room's decision.")
+            }
+            (THEORIST, Some(seq)) => {
+                format!("!evidence #{TOPIC} ^{seq} The recurrence closes at 42 for every base case.")
+            }
+            (who, Some(seq)) if !ask.i_said("!support") => {
+                format!("!support #{TOPIC} ^{seq} {who} checked the derivation and it holds.")
+            }
+            (_, Some(_)) => "!question Nothing further from me until somebody else moves."
+                .to_owned(),
+        };
+        Reply::Say(line)
+    })
+}
+
+/// A desk of three that must all back a topic with grounds before it carries.
+const UNANIMOUS: &str = "{ enabled = true, turn_budget = 12, quorum = 3, blind_round = true }";
+
+/// **Deliberation converges through the fold.**
+///
+/// One operator message, three teammates, and an outcome the room can name.
+#[tokio::test]
+async fn a_desk_deliberates_and_converges_through_the_fold() {
+    let home = tempfile::tempdir().unwrap();
+    let (base_url, script) = spawn_script(converging_script()).await;
+    let (address, runtime) = boot(home.path(), &base_url, UNANIMOUS, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(DESK, "Settle the closed form of the recurrence.").await;
+
+    let rows = replies(&runtime, DESK).await;
+    let turns = turns(&rows);
+    assert!(
+        turns.len() >= 3,
+        "a room of three takes at least one turn each: {rows:?}"
+    );
+    // Every deliberation row is authored by the teammate that took the turn,
+    // and carries the ONE line the room counts — never a paragraph.
+    for (author, text) in &turns {
+        assert!(
+            [THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str()),
+            "{rows:?}"
+        );
+        assert!(text.starts_with('!'), "not a marker line: {text}");
+        assert!(!text.contains('\n'), "more than one line: {text}");
+    }
+
+    // One closing row, under the reserved author, naming the topic and every
+    // member whose grounded support carried it.
+    let reports = reports(&rows);
+    assert_eq!(reports.len(), 1, "exactly one closing row: {rows:?}");
+    let report = &reports[0];
+    assert!(report.contains(&format!("#{TOPIC}")), "{report}");
+    assert!(report.contains("settled on"), "{report}");
+    for member in [THEORIST, PROGRAMMER, VERIFIER] {
+        assert!(
+            report.contains(member),
+            "the room needed all three to carry #{TOPIC}, so all three are named: {report}"
+        );
+    }
+
+    // No single-responder bubble: the desk's only authored rows are the
+    // episode's own turns and its report. In particular the orchestrator never
+    // answered on top of the room.
+    let strays: Vec<_> = rows
+        .iter()
+        .filter(|(_, author, _)| {
+            author != HIVE_REPORT_AUTHOR
+                && !["theorist", "programmer", "verifier"].contains(&author.as_str())
+                && ["ceo", "greeter"].contains(&author.as_str())
+        })
+        .collect();
+    assert!(strays.is_empty(), "a second responder answered too: {strays:?}");
+
+    // One model call per turn, and the calls are the turns: the speakers the
+    // endpoint was asked for are exactly the authors the journal recorded, in
+    // order.
+    let openers = script.turn_openers();
+    let asked: Vec<String> = openers.iter().map(|ask| ask.who().to_owned()).collect();
+    let journaled: Vec<String> = turns.iter().map(|(author, _)| author.clone()).collect();
+    assert_eq!(
+        asked, journaled,
+        "one model call per journaled turn, in the same order"
+    );
+    assert_eq!(
+        script.hive_asks().len(),
+        openers.len(),
+        "no hive turn needed a second model call: nothing on this path uses a tool"
+    );
+}
+
+/// **Attribution and the blind round.**
+///
+/// Asserted from the captured request bodies, which is the only place the
+/// claim actually lives: the journal cannot tell you what a member was *shown*.
+#[tokio::test]
+async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
+    let home = tempfile::tempdir().unwrap();
+    let (base_url, script) = spawn_script(converging_script()).await;
+    let (address, _runtime) = boot(home.path(), &base_url, UNANIMOUS, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(DESK, "Settle the closed form of the recurrence.").await;
+
+    let openers = script.turn_openers();
+    assert!(openers.len() >= 4, "a blind round plus at least one open turn");
+
+    let blind: Vec<&Ask> = openers.iter().filter(|ask| ask.blind()).collect();
+    assert_eq!(
+        blind.len(),
+        3,
+        "the opening round is one blind turn per member"
+    );
+    for ask in &blind {
+        let me = ask.who().to_owned();
+        let peers: Vec<_> = ask
+            .transcript()
+            .into_iter()
+            .filter(|(_, author, _)| {
+                author != &me && [THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str())
+            })
+            .collect();
+        assert!(
+            peers.is_empty(),
+            "a peer's position leaked into a blind turn for @{me}: {peers:?}"
+        );
+    }
+
+    // Later turns see the room, attributed by id, with the sequence that makes
+    // the line citable.
+    let seeing: Vec<&Ask> = openers.iter().filter(|ask| !ask.blind()).collect();
+    assert!(!seeing.is_empty(), "the blind round is not the whole episode");
+    let mut saw_attributed_peer = false;
+    let mut saw_own_line = false;
+    for ask in &seeing {
+        let me = ask.who().to_owned();
+        for (seq, author, content) in ask.transcript() {
+            if author == me || !["theorist", "programmer", "verifier"].contains(&author.as_str()) {
+                continue;
+            }
+            saw_attributed_peer = true;
+            // Rendered exactly as `[seq] <peer id>: …`.
+            assert!(
+                ask.prompt.contains(&format!("[{seq}] {author}: {content}")),
+                "a peer's line is not attributed the way the citation grammar needs: {content}"
+            );
+            // And never presented as this viewer's own words — not in the
+            // assistant role, and not under the "you already said this" block.
+            for message in &ask.messages {
+                if message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && let Some(text) = message.get("content").and_then(Value::as_str)
+                {
+                    assert!(
+                        !text.contains(&content),
+                        "@{me} was handed @{author}'s line as its own assistant turn: {text}"
+                    );
+                }
+            }
+            if let Some((_, own)) = ask.prompt.split_once(ALREADY_SAID) {
+                let own = own.split(TRANSCRIPT_HEADING).next().unwrap_or(own);
+                assert!(
+                    !own.contains(&content),
+                    "@{author}'s line was rendered to @{me} as something @{me} had said"
+                );
+            }
+        }
+        // A member that has spoken is shown its own last line, so it does not
+        // restate it.
+        if let Some((_, mine)) = ask.transcript().into_iter().rev().find_map(|(_, a, c)| {
+            (a == me).then_some((a, c))
+        }) {
+            saw_own_line = true;
+            let block = ask
+                .prompt
+                .split_once(ALREADY_SAID)
+                .map(|(_, rest)| rest.split(TRANSCRIPT_HEADING).next().unwrap_or(rest).to_owned())
+                .unwrap_or_default();
+            assert!(
+                block.contains(&mine),
+                "@{me} was not shown its own last line: {block}"
+            );
+        }
+    }
+    assert!(saw_attributed_peer, "no open turn ever saw a peer");
+    assert!(saw_own_line, "no open turn was shown its own previous line");
+}
