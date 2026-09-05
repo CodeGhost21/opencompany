@@ -57,6 +57,30 @@ pub trait HiveTurnRunner: Send + Sync {
     async fn speak(&self, agent_id: &str, prompt: &str) -> Result<String>;
 }
 
+/// How many `!pin` lines one closing note carries.
+const MAX_NOTE_PINS: usize = 3;
+
+/// The system line a failed turn leaves on the desk.
+///
+/// Authored by `hive-report`, the same reserved id the closing row uses, so the
+/// log adapter reads it back as a **system** row: it can never be counted as a
+/// supporter, and it stays visible through a blind round. It carries no marker,
+/// so it folds to no trace at all — the room sees that a seat was asked and did
+/// not answer, and nothing more.
+fn failure_note(agent_id: &str, error: &dyn std::fmt::Display) -> String {
+    let error = error.to_string();
+    let first = error
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no detail");
+    // Stripped of a leading marker for the same reason a demoted line is: this
+    // row must never fold as a trace, and an error message that happens to
+    // begin with `!` would.
+    let first = first.trim_start_matches('!').trim();
+    format!("@{agent_id}'s turn did not finish: {first}")
+}
+
 /// One deliberation episode on one desk.
 pub struct EpisodeDriver<'a> {
     company: CompanyId,
@@ -372,6 +396,195 @@ impl<'a> EpisodeDriver<'a> {
         self.remember(&outcome, &lines).await;
         outcome.report_seq = self.report(&outcome).await;
         Ok(outcome)
+    }
+
+    /// Run one turn and return the line the transcript should keep, enforcing
+    /// this seat's move grammar on the way.
+    ///
+    /// Two stages, and never fatal:
+    ///
+    /// 1. The reply's marker line is read. A marker this seat may make (or no
+    ///    marker at all) is the line, unchanged.
+    /// 2. A marker it may not make is handed back once, with a one-line
+    ///    correction appended to the same prompt — the same prompt so the
+    ///    member is not re-reading a truncated version of the room, and one
+    ///    correction so a member that has misunderstood the grammar cannot
+    ///    spend the desk's whole budget being told about it.
+    /// 3. A second violation is journaled with its leading `!` removed. The
+    ///    words survive, the trace does not: `resolve` reads a marker at the
+    ///    start of a line and nowhere else, so a demoted line can never be
+    ///    folded as support for anything. That is the property the whole
+    ///    mechanism turns on — a barred move that still counted would be a rule
+    ///    the fold does not enforce.
+    async fn line_from(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        violations: &mut Vec<MoveViolation>,
+    ) -> Result<String> {
+        let allowed = self.desk.config.moves_for(agent_id);
+        let line = marker_line(&self.runner.speak(agent_id, prompt).await?);
+        let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
+            return Ok(line);
+        };
+        let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
+        let line = marker_line(&self.runner.speak(agent_id, &corrected).await?);
+        let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
+            return Ok(line);
+        };
+        tracing::info!(
+            company = %self.company,
+            desk = %self.desk.id,
+            agent = %agent_id,
+            attempted = %kind,
+            "[hive] a member used a move its seat does not have, twice; the line was demoted"
+        );
+        violations.push(MoveViolation {
+            agent_id: agent_id.to_owned(),
+            attempted: kind.to_owned(),
+        });
+        Ok(moves::demote(&line))
+    }
+
+    /// What the desk remembers about the operator's task, best-effort.
+    async fn recall(&self) -> Vec<HiveMemoryHit> {
+        match self.memory.recall(&self.task, RECALL_LIMIT).await {
+            Ok(hits) => hits,
+            Err(error) => {
+                tracing::warn!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    error = %error,
+                    "[hive] the desk's memory could not be recalled; the room opens without it"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Write the one note this episode leaves for the next similar question.
+    ///
+    /// A converged episode leaves the thing that would actually shorten the
+    /// next one: what carried, who backed it, every fact anybody put on the
+    /// record, whatever the room pinned, and the line that recorded the
+    /// decision. An episode that did not converge leaves a shorter note naming
+    /// the options that competed — knowing a desk has already argued #stage
+    /// against #ship without settling it is worth having, and pretending it
+    /// concluded something would be worse than saying nothing.
+    ///
+    /// An [`EpisodeEnding::Idle`] episode writes nothing at all: nobody spoke,
+    /// so there is nothing to have learned.
+    ///
+    /// Best-effort in both directions. A failed write is logged and the episode
+    /// finishes: the decision is already durable in the transcript above it.
+    async fn remember(&self, outcome: &EpisodeOutcome, lines: &[(EventSeq, String, String)]) {
+        let task_line = self
+            .task
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("(no task)");
+        let cited = |marker: &str| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|(_, _, line)| line.trim_start().starts_with(marker))
+                .map(|(seq, agent, line)| format!("- [{}] @{agent}: {line}", seq.value()))
+                .collect()
+        };
+        let note = match &outcome.ending {
+            EpisodeEnding::Idle => return,
+            EpisodeEnding::Converged { topic, supporters } => {
+                let mut body = format!(
+                    "Task: {task_line}\nCarried: #{topic}\nSupporters: {}\n",
+                    if supporters.is_empty() {
+                        "(none recorded)".to_owned()
+                    } else {
+                        supporters.join(", ")
+                    },
+                );
+                let evidence = cited("!evidence");
+                if !evidence.is_empty() {
+                    body.push_str(&format!("Evidence:\n{}\n", evidence.join("\n")));
+                }
+                // The *last* pins, not every one: a pin is the room saying
+                // "this outlives the window", and the later one supersedes the
+                // earlier when both name the same thing.
+                let mut pinned = cited("!pin");
+                if pinned.len() > MAX_NOTE_PINS {
+                    pinned.drain(..pinned.len() - MAX_NOTE_PINS);
+                }
+                if !pinned.is_empty() {
+                    body.push_str(&format!("Pinned:\n{}\n", pinned.join("\n")));
+                }
+                let commits = cited("!commit");
+                if let Some(last) = commits.last() {
+                    body.push_str(&format!("Committed:\n{last}\n"));
+                }
+                HiveMemoryNote {
+                    desk_id: self.desk.id.clone(),
+                    title: format!("{task_line} — #{topic}"),
+                    body,
+                }
+            }
+            EpisodeEnding::Deadlocked { topics } => HiveMemoryNote {
+                desk_id: self.desk.id.clone(),
+                title: format!("Unresolved: {task_line}"),
+                body: format!(
+                    "Task: {task_line}\nUnresolved after {} turns: the desk deadlocked between \
+                     {}. Nothing carried.\n",
+                    outcome.turns,
+                    topics
+                        .iter()
+                        .map(|topic| format!("#{topic}"))
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                ),
+            },
+            EpisodeEnding::Exhausted => {
+                let competing = self.competing_topics(lines);
+                HiveMemoryNote {
+                    desk_id: self.desk.id.clone(),
+                    title: format!("Unresolved: {task_line}"),
+                    body: format!(
+                        "Task: {task_line}\nUnresolved after {} turns: the desk spent its budget. \
+                         Options that competed: {competing}.\n",
+                        outcome.turns,
+                    ),
+                }
+            }
+        };
+        if let Err(error) = self.memory.remember(note).await {
+            tracing::warn!(
+                company = %self.company,
+                desk = %self.desk.id,
+                error = %error,
+                "[hive] the episode's note could not be stored; the transcript still holds it"
+            );
+        }
+    }
+
+    /// Every `#topic` this episode's own lines named, in first-seen order.
+    fn competing_topics(&self, lines: &[(EventSeq, String, String)]) -> String {
+        let mut topics: Vec<String> = Vec::new();
+        for (_, _, line) in lines {
+            for word in line.split_whitespace() {
+                if let Some(topic) = word.strip_prefix('#')
+                    && !topic.is_empty()
+                    && !topics.iter().any(|seen| seen == topic)
+                {
+                    topics.push(topic.to_owned());
+                }
+            }
+        }
+        if topics.is_empty() {
+            "none were named".to_owned()
+        } else {
+            topics
+                .iter()
+                .map(|topic| format!("#{topic}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     }
 
     /// Journal the closing row, under [`HIVE_REPORT_AUTHOR`].
