@@ -246,7 +246,7 @@ hive = { enabled = true, turn_budget = 9, quorum = 2, blind_round = true,
 | `turn_budget` | `3 × members` | hard cap on turns; the episode reports itself exhausted at it |
 | `quorum` | `(n / 2 + 1).min(n - 1)` | distinct grounded supporters a topic needs. Clamped into `1..=members` on read |
 | `blind_round` | `true` | whether the opening round hides peers' positions |
-| `moves` | every member, every move | member id → the markers that seat may open a line with. See [the per-member move grammar](#the-per-member-move-grammar) |
+| `moves` | every member, every move | member id → the markers that seat may open a line with. See [`hivemind-deliberation.md`](hivemind-deliberation.md) |
 | `require_evidential` | `false` | support counts only when its citation chain reaches an `!evidence`, and an objection silences nobody unless its author deposited evidence in the window. Implies `require_grounded` |
 | `refutation_cap` | unset (off) | distinct grounded refuters that cap a topic out of contention. Left off by default because tinyhivemind's own benchmark measured it costing accuracy — a refutation is global where an objection is local |
 | `dominance_cap` | `50` | turns one member may take before the attention market damps its bids |
@@ -294,8 +294,7 @@ can read is a room that cannot continue. The turns already appended stay in the
 transcript — they are real — and no closing report claims a decision the room
 did not reach.
 
-A **member's turn** that fails does not; see [when a member's turn
-fails](#when-a-members-turn-fails).
+A **member's turn** that fails does not; see [`hivemind-deliberation.md`](hivemind-deliberation.md).
 
 A closing report that cannot be appended is logged and swallowed: the decision
 is already durable in the turns above it. So is a memory note.
@@ -354,4 +353,5 @@ left for a reader to assume:
   a live model that ignores the commit protocol is exactly how a real room gets
   there.
 
-See also [`docs/modules/hivemind/README.md`](../../modules/hivemind/README.md).
+See also [`hivemind-deliberation.md`](hivemind-deliberation.md) and
+[`docs/modules/hivemind/README.md`](../../modules/hivemind/README.md).
