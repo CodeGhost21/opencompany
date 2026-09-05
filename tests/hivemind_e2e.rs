@@ -766,3 +766,241 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
     assert!(saw_attributed_peer, "no open turn ever saw a peer");
     assert!(saw_own_line, "no open turn was shown its own previous line");
 }
+
+// ---------------------------------------------------------------------------
+// 3: cross-inhibition
+// ---------------------------------------------------------------------------
+
+const WRONG: &str = "wrongpath";
+const RIGHT: &str = "rightpath";
+
+/// A desk that reaches a decision on two grounded supporters and sees the whole
+/// room from the first turn.
+///
+/// The blind round is off here on purpose: cross-inhibition needs a member to
+/// back a *specific message* before another member can object to it, and a
+/// blind opening round is exactly the window in which no such message is
+/// visible. The blind round has its own test.
+const OPEN_PAIR: &str = "{ enabled = true, turn_budget = 12, quorum = 2, blind_round = false }";
+
+/// **Cross-inhibition, end to end.**
+///
+/// The theorist opens the wrong option, the programmer backs it — which is
+/// enough to carry it — the verifier objects to the programmer's *message*, and
+/// the option the room finally records is the other one, with the objected
+/// author nowhere in its supporters.
+#[tokio::test]
+async fn an_objection_silences_an_advocate_and_a_second_topic_carries() {
+    let home = tempfile::tempdir().unwrap();
+    let responder: Responder = Arc::new(|ask: &Ask| {
+        let wrong = ask.seq_of(&format!("!propose #{WRONG}"));
+        let backing = ask.seq_by(PROGRAMMER, &format!("!support #{WRONG}"));
+        let right = ask.seq_of(&format!("!propose #{RIGHT}"));
+        let line = match ask.who() {
+            // Opens the wrong option, then — once it has been objected to —
+            // opens the one the room actually records.
+            THEORIST => match (wrong, right) {
+                (None, _) => format!("!propose #{WRONG} Brute-force every case at run time."),
+                (Some(_), None) if backing.is_some() && ask.i_said("!propose") => {
+                    format!("!propose #{RIGHT} Precompute the table once and look it up.")
+                }
+                (Some(seq), None) => format!(
+                    "!evidence #{WRONG} ^{seq} theorist has nothing new while the floor is open."
+                ),
+                (_, Some(seq)) => {
+                    format!("!commit #{RIGHT} ^{seq} theorist records the option that carried.")
+                }
+            },
+            // Backs the wrong option once, and never backs anything again —
+            // its support is what the objection takes away.
+            PROGRAMMER => match wrong {
+                Some(seq) if !ask.i_said("!support") => format!(
+                    "!support #{WRONG} ^{seq} programmer measured it and brute force is fine."
+                ),
+                _ => "!question programmer is standing aside until the objection is settled."
+                    .to_owned(),
+            },
+            // Objects to the programmer's backing message, then backs the
+            // option that replaces it.
+            VERIFIER => match (backing, wrong, right) {
+                (Some(at), Some(seq), _) if !ask.i_said("!object") => format!(
+                    "!object >{at} ^{seq} verifier ran it at n=10^6 and brute force times out."
+                ),
+                (_, _, Some(seq)) if !ask.i_said("!support") => format!(
+                    "!support #{RIGHT} ^{seq} verifier checked the precomputed table against the \
+                     brute force for n<=10^4."
+                ),
+                (_, _, Some(seq)) => {
+                    format!("!commit #{RIGHT} ^{seq} verifier records the option that carried.")
+                }
+                _ => "!question verifier is waiting for a position to weigh.".to_owned(),
+            },
+            _ => "!question nothing to add.".to_owned(),
+        };
+        Reply::Say(line)
+    });
+    let (base_url, _script) = spawn_script(responder).await;
+    let (address, runtime) = boot(home.path(), &base_url, OPEN_PAIR, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client
+        .say(DESK, "Pick the approach for the table lookup.")
+        .await;
+
+    let rows = replies(&runtime, DESK).await;
+    let turns = turns(&rows);
+    // The objection is really in the transcript, naming a message rather than a
+    // person — that is what makes it cross-inhibition and not a downvote.
+    let objection = turns
+        .iter()
+        .find(|(_, text)| text.starts_with("!object"))
+        .unwrap_or_else(|| panic!("nobody objected: {rows:?}"));
+    assert_eq!(objection.0, VERIFIER);
+    assert!(objection.1.contains(" >"), "an objection names a message: {objection:?}");
+
+    let reports = reports(&rows);
+    assert_eq!(reports.len(), 1, "{rows:?}");
+    let report = &reports[0];
+    assert!(
+        report.contains(&format!("#{RIGHT}")),
+        "the room recorded the wrong topic: {report}"
+    );
+    assert!(
+        !report.contains(&format!("#{WRONG}")),
+        "the objected-to option still carried: {report}"
+    );
+    // The whole claim: the author whose backing was objected to is not counted
+    // among the supporters of what finally carried.
+    assert!(
+        !report.contains(PROGRAMMER),
+        "the silenced advocate is still named as a supporter: {report}"
+    );
+    assert!(report.contains(VERIFIER), "{report}");
+}
+
+// ---------------------------------------------------------------------------
+// 5: terminal outcomes are honest
+// ---------------------------------------------------------------------------
+
+/// **A room that settles on nothing says so.**
+#[tokio::test]
+async fn a_room_that_settles_on_nothing_reports_itself_exhausted() {
+    let home = tempfile::tempdir().unwrap();
+    let responder: Responder = Arc::new(|ask: &Ask| {
+        Reply::Say(format!(
+            "!question {} cannot answer this without the benchmark nobody has run.",
+            ask.who()
+        ))
+    });
+    let (base_url, _script) = spawn_script(responder).await;
+    let hive = "{ enabled = true, turn_budget = 3, quorum = 2, blind_round = true }";
+    let (address, runtime) = boot(home.path(), &base_url, hive, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(DESK, "Which sort should we ship?").await;
+
+    let rows = replies(&runtime, DESK).await;
+    assert_eq!(
+        turns(&rows).len(),
+        3,
+        "the budget is the bound and nothing else is: {rows:?}"
+    );
+    let reports = reports(&rows);
+    assert_eq!(reports.len(), 1, "{rows:?}");
+    assert_eq!(
+        reports[0], "The desk spent its 3-turn budget without reaching a decision.",
+        "the report says what happened rather than inventing a decision"
+    );
+}
+
+const ALPHA: &str = "alpha";
+const BETA: &str = "beta";
+
+/// **Two carrying topics and nobody to break the tie is a deadlock.**
+///
+/// Every member ends up backing one of the two, so there is no free dissenter
+/// left — which is the library's own condition for calling it terminal rather
+/// than giving the floor to whoever could still settle it.
+#[tokio::test]
+async fn two_carrying_topics_and_no_objection_deadlock() {
+    let home = tempfile::tempdir().unwrap();
+    let responder: Responder = Arc::new(|ask: &Ask| {
+        let alpha = ask.seq_of(&format!("!propose #{ALPHA}"));
+        let beta = ask.seq_of(&format!("!propose #{BETA}"));
+        let line = match (ask.who(), alpha, beta) {
+            // Each opens its own option in the blind round, then crosses over:
+            // the theorist backs the programmer's, and everybody else backs the
+            // theorist's. Nobody objects to anything.
+            (THEORIST, None, _) => format!("!propose #{ALPHA} Ship the streaming rewrite."),
+            (PROGRAMMER, _, None) => format!("!propose #{BETA} Ship the batch rewrite."),
+            (THEORIST, _, Some(seq)) if !ask.i_said("!support") => {
+                format!("!support #{BETA} ^{seq} theorist agrees batch is defensible too.")
+            }
+            (who, Some(seq), _) if who != THEORIST && !ask.i_said("!support") => {
+                format!("!support #{ALPHA} ^{seq} {who} agrees streaming is defensible too.")
+            }
+            (who, _, _) => format!("!question {who} has nothing further; the room is split."),
+        };
+        Reply::Say(line)
+    });
+    let (base_url, _script) = spawn_script(responder).await;
+    let hive = "{ enabled = true, turn_budget = 12, quorum = 2, blind_round = true }";
+    let (address, runtime) = boot(home.path(), &base_url, hive, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(DESK, "Streaming or batch?").await;
+
+    let rows = replies(&runtime, DESK).await;
+    let reports = reports(&rows);
+    assert_eq!(reports.len(), 1, "{rows:?}");
+    let report = &reports[0];
+    assert!(report.contains("deadlocked"), "{report}");
+    assert!(report.contains(&format!("#{ALPHA}")), "{report}");
+    assert!(report.contains(&format!("#{BETA}")), "{report}");
+    assert!(
+        report.contains("nobody broke the tie"),
+        "a deadlock is reported as a deadlock, not as a decision: {report}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6: a desk of one is untouched
+// ---------------------------------------------------------------------------
+
+/// **A one-member desk answers exactly as it did before.**
+#[tokio::test]
+async fn a_single_member_desk_answers_with_one_ordinary_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let responder: Responder = Arc::new(|ask: &Ask| {
+        assert!(
+            ask.speaker.is_none(),
+            "a desk of one must never be handed an episode prompt: {}",
+            ask.prompt
+        );
+        Reply::Say("Noted — the front desk has it.".to_owned())
+    });
+    let (base_url, _script) = spawn_script(responder).await;
+    let (address, runtime) = boot(home.path(), &base_url, UNANIMOUS, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(SOLO_DESK, "Anything waiting at the front?").await;
+
+    let rows = replies(&runtime, SOLO_DESK).await;
+    let authored: Vec<_> = rows
+        .iter()
+        .filter(|(_, author, _)| author == "greeter")
+        .collect();
+    assert_eq!(
+        authored.len(),
+        1,
+        "a desk of one answers with one ordinary turn: {rows:?}"
+    );
+    assert!(
+        reports(&rows).is_empty(),
+        "no room opened, so no room reported: {rows:?}"
+    );
+}
