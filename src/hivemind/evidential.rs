@@ -90,10 +90,9 @@ fn reaches_evidence(cites: &[Sequence], indexed: &BTreeMap<Sequence, Vec<Trace>>
 pub fn evidence_sequences(visible: &[&SessionMessage]) -> Vec<u64> {
     let mut sequences: Vec<u64> = Vec::new();
     for message in visible {
-        let carries_evidence =
-            resolve(&message.content, None, &message.author, message.sequence)
-                .iter()
-                .any(|trace| trace.kind == TraceKind::Evidence);
+        let carries_evidence = resolve(&message.content, None, &message.author, message.sequence)
+            .iter()
+            .any(|trace| trace.kind == TraceKind::Evidence);
         if carries_evidence && !sequences.contains(&message.sequence.0) {
             sequences.push(message.sequence.0);
         }

@@ -96,10 +96,8 @@ fn the_commit_prompt_names_the_carried_topic() {
         message(2, "scout", "!support #euler12-triangle ^1 It checks out."),
     ];
     let visible: Vec<&tinyhivemind_hive::SessionMessage> = messages.iter().collect();
-    let prompt = EpisodePrompt::new(&member, &desk, "Project Euler 12.", quorum, &[]).render(
-        &turn("critic", tinyhivemind_hive::Phase::Commit),
-        &visible,
-    );
+    let prompt = EpisodePrompt::new(&member, &desk, "Project Euler 12.", quorum, &[])
+        .render(&turn("critic", tinyhivemind_hive::Phase::Commit), &visible);
 
     assert!(
         prompt.contains("carried `#euler12-triangle`"),
@@ -137,12 +135,13 @@ fn an_exclusive_table_still_leaves_question_and_defer() {
 
     let member = desk.member("scout").expect("scout is seated").clone();
     let quorum = desk.policy().quorum;
-    let prompt = EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[]).render(
-        &turn("scout", tinyhivemind_hive::Phase::Deliberate),
-        &[],
-    );
+    let prompt = EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
+        .render(&turn("scout", tinyhivemind_hive::Phase::Deliberate), &[]);
     assert!(prompt.contains("!question  then what you need"), "{prompt}");
-    assert!(prompt.contains("!defer #topic  then who should"), "{prompt}");
+    assert!(
+        prompt.contains("!defer #topic  then who should"),
+        "{prompt}"
+    );
     assert!(
         prompt.contains(
             "If you have nothing to add, reply !defer #topic naming who should act next, or \
@@ -267,7 +266,11 @@ fn a_support_citing_only_a_proposal_reaches_no_evidence() {
     ];
     let visible: Vec<&tinyhivemind_hive::SessionMessage> = messages.iter().collect();
     assert!(
-        evidential::support_misses_evidence("!support #euler12 ^1 It looks right.", "critic", &visible),
+        evidential::support_misses_evidence(
+            "!support #euler12 ^1 It looks right.",
+            "critic",
+            &visible
+        ),
         "citing the proposal reaches no fact"
     );
     assert!(
@@ -325,7 +328,10 @@ async fn a_support_that_reaches_no_evidence_is_re_prompted_once() {
     .expect("the episode runs");
 
     let prompts = runner.prompts_for("critic");
-    assert!(prompts.len() >= 2, "critic must be re-prompted: {prompts:?}");
+    assert!(
+        prompts.len() >= 2,
+        "critic must be re-prompted: {prompts:?}"
+    );
     assert!(
         prompts[1].contains("Your `!support` reaches no `!evidence`"),
         "{}",
@@ -360,7 +366,10 @@ async fn the_second_attempt_is_journaled_even_when_it_still_misses() {
     let runner = Runner::new(&[
         ("planner", "!propose #stage Stage the rollout."),
         ("scout", "!support #stage ^2 I agree with the planner."),
-        ("scout", "!support #stage ^2 I still agree with the planner."),
+        (
+            "scout",
+            "!support #stage ^2 I still agree with the planner.",
+        ),
     ]);
     EpisodeDriver::new(
         MemoryLog::company(),

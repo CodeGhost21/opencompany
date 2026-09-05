@@ -35,7 +35,8 @@
 //! from the transcript plus the turn's own visibility.
 
 use tinyhivemind_hive::{
-    HiveTurn, Phase, QuorumPolicy, Sequence, SessionAuthor, SessionMessage, Visibility, pins::Pin,
+    HiveTurn, Phase, QuorumPolicy, Sequence, SessionAuthor, SessionMessage, Visibility,
+    pins::Pin,
     quorum::{TopicStanding, standings},
     trace::resolve,
 };
@@ -557,7 +558,11 @@ fn declared_topic(task: &str) -> Option<String> {
                 .strip_prefix("topic:")
                 .or_else(|| line.strip_prefix("Topic:"))
                 .or_else(|| line.strip_prefix("TOPIC:"))?;
-            let word = rest.trim().trim_start_matches('#').split_whitespace().next()?;
+            let word = rest
+                .trim()
+                .trim_start_matches('#')
+                .split_whitespace()
+                .next()?;
             let slug: String = word
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
