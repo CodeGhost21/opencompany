@@ -397,11 +397,14 @@ impl<'a> EpisodePrompt<'a> {
         format!("\nPinned on this desk, whatever else has scrolled away:\n{lines}\n")
     }
 
-    /// The topics on the floor, with the standing the library gives each.
+    /// This turn's standings, folded with the same [`standings`] the episode
+    /// itself uses, so the numbers a member reads are the numbers the room will
+    /// decide on.
     ///
-    /// Folded here with the same [`standings`] the episode itself uses, so the
-    /// numbers a member reads are the numbers the room will decide on.
-    fn floor(&self, visible: &[&SessionMessage]) -> String {
+    /// An unfoldable transcript yields nothing rather than an error: the floor
+    /// block and the carried topic both degrade to their "nothing yet" shapes,
+    /// which is a worse prompt and not a failed turn.
+    fn standings(&self, visible: &[&SessionMessage]) -> Vec<TopicStanding> {
         let traces: Vec<_> = visible
             .iter()
             .flat_map(|message| resolve(&message.content, None, &message.author, message.sequence))
@@ -409,9 +412,11 @@ impl<'a> EpisodePrompt<'a> {
         let at = visible
             .last()
             .map_or(Sequence(0), |message| message.sequence);
-        let Ok(standings) = standings(&traces, at, &self.quorum) else {
-            return String::new();
-        };
+        standings(&traces, at, &self.quorum).unwrap_or_default()
+    }
+
+    /// The topics on the floor, with the standing the library gives each.
+    fn floor(&self, standings: &[TopicStanding]) -> String {
         if standings.is_empty() {
             return format!(
                 "No option is on the floor yet. The topic id you coin becomes the room's name \
