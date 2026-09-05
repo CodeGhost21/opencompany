@@ -399,11 +399,6 @@ fn message(sequence: u64, agent: &str, content: &str) -> tinyhivemind_hive::Sess
             label: agent.to_owned(),
         },
         content: content.to_owned(),
-        conversation: tinyhivemind_hive::Conversation {
-            desk_id: "eng".to_owned(),
-            desk_name: "Engineering".to_owned(),
-            thread_root: None,
-        },
     }
 }
 
@@ -413,7 +408,7 @@ fn turn(agent: &str, phase: tinyhivemind_hive::Phase) -> tinyhivemind_hive::Hive
         agent_id: agent.to_owned(),
         phase,
         visibility: tinyhivemind_hive::Visibility::Full,
-        reason: tinyhivemind_hive::BidReason::default(),
+        reason: tinyhivemind_hive::BidReason::Addressed,
         next_state: tinyhivemind_hive::EpisodeState::opened(
             tinyhivemind_hive::Conversation {
                 desk_id: "eng".to_owned(),
