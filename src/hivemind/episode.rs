@@ -181,6 +181,26 @@ impl<'a> EpisodeDriver<'a> {
         let mut turns = 0_u32;
         let mut first_seq: Option<EventSeq> = None;
         let mut last_seq: Option<EventSeq> = None;
+        let mut violations: Vec<MoveViolation> = Vec::new();
+        // Every line this episode journaled, in order, so the closing note is
+        // written from what the room actually deposited rather than from a
+        // second read of the journal that could disagree with it.
+        let mut lines: Vec<(EventSeq, String, String)> = Vec::new();
+        let mut spoken: Vec<String> = Vec::new();
+        let mut last_speaker: Option<String> = None;
+        let mut failed_turns = 0_u32;
+        // Consecutive failures, reset by any turn that comes back. The cap is
+        // members x 2: a room where every seat has failed twice in a row is not
+        // a room having a bad turn, it is a harness that is down, and spending
+        // the rest of the budget on it buys nothing.
+        let mut consecutive_failures = 0_usize;
+        let failure_cap = self.desk.members.len().saturating_mul(2).max(2);
+
+        // Recalled once, before the first turn, and rendered into every prompt
+        // of this episode. Once rather than per turn because the answer cannot
+        // change mid-episode, and best-effort because a store that is briefly
+        // unreachable is not a reason to refuse the operator's message.
+        let recall = self.recall().await;
 
         let ending = loop {
             let transcript = tinyhivemind_hive::project_session(
@@ -231,10 +251,78 @@ impl<'a> EpisodeDriver<'a> {
                     self.desk.id, turn.agent_id,
                 ))
             })?;
+            // Speaker diversity, as a *prompt* and never as an override. The
+            // fold picked this speaker under invariants this host does not get
+            // to break, so when it hands the floor straight back to whoever
+            // just held it while somebody has not used theirs at all, the
+            // repair available is to name the missing members and let the
+            // speaker `!question` or `!defer` to them.
+            let unspoken: Vec<String> = if last_speaker.as_deref() == Some(turn.agent_id.as_str()) {
+                self.desk
+                    .member_ids()
+                    .into_iter()
+                    .filter(|id| !spoken.contains(id))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let prompt = EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
+                .with_recall(&recall)
+                .with_unspoken(&unspoken)
                 .render(&turn, &visible);
 
-            let reply = self.runner.speak(&turn.agent_id, &prompt).await?;
+            let line = match self.line_from(&turn.agent_id, &prompt, &mut violations).await {
+                Ok(line) => {
+                    consecutive_failures = 0;
+                    line
+                }
+                // A member's turn failing is not the room failing (the live
+                // case: one turn hit the harness's per-turn wall-clock ceiling
+                // and a `?` here threw away three good turns and answered the
+                // operator with a 500). The transcript records the miss as a
+                // system row — trace-less, so it folds to nothing and can
+                // never be counted as support — the budget still advances, and
+                // the next speaker is chosen from a transcript that shows what
+                // happened.
+                Err(error) => {
+                    failed_turns = failed_turns.saturating_add(1);
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    tracing::warn!(
+                        company = %self.company,
+                        desk = %self.desk.id,
+                        agent = %turn.agent_id,
+                        error = %error,
+                        "[hive] a member's turn did not finish; the room continues"
+                    );
+                    let seq = self
+                        .events
+                        .append(
+                            &self.company,
+                            CompanyEvent::AgentReply {
+                                chat_id: self.desk.id.clone(),
+                                agent_id: super::HIVE_REPORT_AUTHOR.to_string(),
+                                text: failure_note(&turn.agent_id, &error),
+                                steps: Vec::new(),
+                                task_id: None,
+                                parent: self.thread_root,
+                                mentions: Vec::new(),
+                                mention_depth: 0,
+                            },
+                        )
+                        .await?;
+                    last_seq = Some(seq);
+                    state = turn.next_state;
+                    turns = turns.saturating_add(1);
+                    last_speaker = Some(turn.agent_id.clone());
+                    if consecutive_failures >= failure_cap {
+                        return Err(OpenCompanyError::Config(format!(
+                            "hive episode on desk `{}`: {consecutive_failures} turns in a row                              failed, which is every seat twice over — the room stopped rather                              than spending the rest of its budget on a harness that is down:                              {error}",
+                            self.desk.id,
+                        )));
+                    }
+                    continue;
+                }
+            };
             let seq = self
                 .events
                 .append(
@@ -242,7 +330,7 @@ impl<'a> EpisodeDriver<'a> {
                     CompanyEvent::AgentReply {
                         chat_id: self.desk.id.clone(),
                         agent_id: turn.agent_id.clone(),
-                        text: marker_line(&reply),
+                        text: line.clone(),
                         // The episode's own turns carry no step timeline: the
                         // room is reading one line per turn, and a tool trace
                         // belongs to the turn's own bubble, which this path
@@ -261,6 +349,11 @@ impl<'a> EpisodeDriver<'a> {
                 .await?;
             first_seq.get_or_insert(seq);
             last_seq = Some(seq);
+            lines.push((seq, turn.agent_id.clone(), line));
+            if !spoken.contains(&turn.agent_id) {
+                spoken.push(turn.agent_id.clone());
+            }
+            last_speaker = Some(turn.agent_id.clone());
             // Durably appended, so — and only now — the state the library
             // returned may be taken up.
             state = turn.next_state;
@@ -273,7 +366,10 @@ impl<'a> EpisodeDriver<'a> {
             first_seq,
             last_seq,
             report_seq: None,
+            violations,
+            failed_turns,
         };
+        self.remember(&outcome, &lines).await;
         outcome.report_seq = self.report(&outcome).await;
         Ok(outcome)
     }
