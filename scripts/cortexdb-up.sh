@@ -84,7 +84,7 @@ echo "Waiting for CortexDB to report ready on http://127.0.0.1:${HOST_PORT}/v1/a
 attempt=0
 until curl -fsS -o /dev/null \
     -H "Authorization: Bearer ${CORTEX_API_KEY}" \
-    -H "X-Cortex-Actor: opencompany" \
+    -H "X-Cortex-Actor: service:opencompany" \
     "http://127.0.0.1:${HOST_PORT}/v1/admin/ready"; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 60 ]; then
@@ -101,5 +101,5 @@ export OPENCOMPANY_MEMORY=remote
 export OPENCOMPANY_MEMORY_DRIVER=cortexdb
 export OPENCOMPANY_MEMORY_URL=http://127.0.0.1:${HOST_PORT}
 export OPENCOMPANY_MEMORY_API_KEY=${CORTEX_API_KEY}
-export OPENCOMPANY_MEMORY_ACTOR=opencompany
+export OPENCOMPANY_MEMORY_ACTOR=service:opencompany
 EOF
