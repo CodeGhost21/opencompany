@@ -34,14 +34,14 @@ admins = ["harness-e2e@tinyhumans.ai"]
 # parent bundle for the full argument.
 allow = ["files", "docs", "shell", "code", "workspace", "workspace.*"]
 
-# Inference is routed through the local llm-ladder-router so a live run costs
-# marketplace rates rather than a hosted subscription. The ladder's model ids
-# are tiers of its own (`flash`, `reasoning`, `max-reasoning`); the key comes
-# from `OPENCOMPANY_INFERENCE_KEY`. Override the URL with
-# `OPENCOMPANY_INFERENCE_URL` when the router lives elsewhere.
+# A live run routes inference through the local llm-ladder-router, so it costs
+# marketplace rates rather than a hosted subscription: point the managed
+# endpoint at it with `OPENCOMPANY_INFERENCE_URL=http://127.0.0.1:6969/v1` and
+# `OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY`. The tier map below names the
+# ladder's own model ids (`flash`, `reasoning`, `max-reasoning`); it applies
+# whichever endpoint answers, so a hosted run needs the map removed or
+# re-pointed at real model slugs.
 [inference]
-provider = "openai_compatible"
-base_url = "http://127.0.0.1:6969/v1"
 models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "max-reasoning", "vision-v1" = "flash" }
 
 # ---------------------------------------------------------------------------
