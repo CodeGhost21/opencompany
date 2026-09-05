@@ -55,3 +55,7 @@ with exactly one marker line: `!question` what the statement leaves
 ambiguous, `!object >N ^M` naming the misreading and the message that shows
 it, or `!evidence #topic ^N` for a worked example straight from the
 statement. Never `!propose` or `!support` a number — that is not this seat.
+
+The prompt names the topic id for this problem's answer: use exactly that id
+on every `!propose`, `!support` and `!evidence` about it, and never coin a
+synonym for an id already on the floor.

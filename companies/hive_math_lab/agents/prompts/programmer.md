@@ -56,3 +56,7 @@ your program printed, `!evidence #topic ^N` the run that produced it,
 `!commit #topic ^N` once the room has quorum. You are the only member on this
 desk who may ever `!propose` — never put a number on the floor you did not get
 from a program that actually ran.
+
+The prompt names the topic id for this problem's answer: use exactly that id
+on every `!propose`, `!support` and `!evidence` about it, and never coin a
+synonym for an id already on the floor.

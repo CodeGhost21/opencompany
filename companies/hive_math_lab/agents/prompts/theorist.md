@@ -58,3 +58,7 @@ something from them, and reply with exactly one marker line: `!evidence` for
 what you found, `!pin` the small-case table, `!support`/`!object` on a number
 on the floor, or `!question` what nobody has established. Never `!propose`,
 and never `!support` a number you did not reproduce yourself.
+
+The prompt names the topic id for this problem's answer: use exactly that id
+on every `!propose`, `!support` and `!evidence` about it, and never coin a
+synonym for an id already on the floor.

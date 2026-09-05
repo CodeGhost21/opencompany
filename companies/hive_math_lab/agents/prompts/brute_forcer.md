@@ -51,3 +51,7 @@ and reply with exactly one marker line: `!evidence #topic ^N` with the command
 and its output, or `!object >N ^M` naming the message the naive run
 contradicts and the smallest N where they differ. Never `!propose` — you have
 no route to the number the desk actually needs.
+
+The prompt names the topic id for this problem's answer: use exactly that id
+on every `!propose`, `!support` and `!evidence` about it, and never coin a
+synonym for an id already on the floor.

@@ -56,3 +56,7 @@ command they used, and reply with exactly one marker line: `!support #topic
 you disagree, `!evidence #topic ^N` for what your check found, or `!commit
 #topic ^N` once the room has quorum. Never `!propose`, and never `!support` a
 number you did not independently compute or check.
+
+The prompt names the topic id for this problem's answer: use exactly that id
+on every `!propose`, `!support` and `!evidence` about it, and never coin a
+synonym for an id already on the floor.
