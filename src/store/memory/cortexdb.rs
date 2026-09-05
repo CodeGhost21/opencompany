@@ -308,10 +308,10 @@ impl DecodedRecord {
 /// unreadable hit must not discard the whole recall.
 fn decode_events(response: &Value) -> Vec<DecodedRecord> {
     let mut items: Vec<&Value> = Vec::new();
-    if let Some(layers) = response.get("layers").and_then(Value::as_object) {
-        if let Some(events) = layers.get("events").and_then(Value::as_array) {
-            items.extend(events.iter());
-        }
+    if let Some(layers) = response.get("layers").and_then(Value::as_object)
+        && let Some(events) = layers.get("events").and_then(Value::as_array)
+    {
+        items.extend(events.iter());
     }
     if items.is_empty() {
         for key in ["results", "items"] {
