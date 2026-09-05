@@ -388,10 +388,3 @@ async fn the_bind_time_capability_audit_passes() {
     tinymemory_api::provider::audit_provider(provider.as_ref())
         .expect("advertised capabilities must match the implemented surface");
 }
-
-/// Empty helper kept next to the map import so the compiler does not flag it
-/// as unused when this file's test set changes shape.
-#[allow(dead_code)]
-fn _unused_map_marker() -> HashMap<(), ()> {
-    HashMap::new()
-}
