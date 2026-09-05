@@ -3514,7 +3514,7 @@ impl HarnessBrain {
                             .get(index)
                             .copied()
                             .unwrap_or_else(|| EventSeq::new(0));
-                        let runner = HiveTurn {
+                        let runner = HiveDeskRunner {
                             run_turn: self.run_turn(),
                             company: self.record().id.clone(),
                             chat_id: chat.clone(),
