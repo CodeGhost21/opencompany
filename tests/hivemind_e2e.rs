@@ -38,9 +38,7 @@
 //! path asks for `shell`, so nothing parks for approval and no test depends on
 //! an approval policy that would make it hang.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,7 +49,6 @@ use serde_json::{Value, json};
 use opencompany::CompanyRuntime;
 use opencompany::company::CompanyManifest;
 use opencompany::hivemind::HIVE_REPORT_AUTHOR;
-use opencompany::ports::events::EventLog;
 use opencompany::ports::types::{CompanyEvent, EventSeq};
 use opencompany::runtime::{RuntimeBuilder, company_id_from_name};
 use opencompany::{AppConfig, AppState};
@@ -388,7 +385,7 @@ async fn boot(
         .with_id(company_id.clone())
         .with_harness(Arc::new(opencompany::harness::HarnessPool::new()));
     if let Some(overlay) = memory {
-        builder = builder.with_memory_overlay(overlay);
+        builder = builder.with_memory_overlay(&overlay);
     }
     let runtime = Arc::new(builder.build().await.expect("the company builds"));
     state
