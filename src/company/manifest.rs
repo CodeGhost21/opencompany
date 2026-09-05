@@ -663,6 +663,54 @@ impl CompanyManifest {
                     "{label} sets `hive.turn_budget = 0` — an episode with no turns can never reach a decision; use `hive = {{ enabled = false }}` to keep the desk on a single responder."
                 ));
             }
+            for (key, value) in [
+                ("dominance_cap", chat.hive.dominance_cap),
+                ("repetition_cap", chat.hive.repetition_cap),
+                ("refutation_cap", chat.hive.refutation_cap),
+            ] {
+                if value == Some(0) {
+                    problems.push(format!(
+                        "{label} sets `hive.{key} = 0` — a cap of zero fires before anybody has                          done anything; omit the key to leave it at its default."
+                    ));
+                }
+            }
+
+            // The per-member move grammar. Both halves fail **open** when they
+            // are wrong — an unknown kind is simply never matched, and an
+            // unknown member id names nobody — so the desk keeps every move and
+            // goes on voting exactly as it did before the table was written.
+            // A typo therefore has to be a validation error, because its
+            // runtime symptom is silence.
+            for (member, kinds) in &chat.hive.moves {
+                if !chat.members.iter().any(|seated| seated == member) {
+                    problems.push(format!(
+                        "{label} assigns `hive.moves` to `{member}`, who is not a member of this                          desk — list the desk's own member ids."
+                    ));
+                }
+                for kind in kinds {
+                    if !crate::hivemind::MOVE_KINDS.contains(&kind.as_str()) {
+                        problems.push(one_of(
+                            &format!("{label} `hive.moves.{member}` entry"),
+                            crate::hivemind::MOVE_KINDS,
+                            kind,
+                        ));
+                    }
+                }
+            }
+            // Somebody has to be able to record the decision. A desk that bars
+            // every seat from `commit` reaches quorum and then spends the rest
+            // of its budget having every commit line demoted, which reads from
+            // the transcript as a room that could not make up its mind.
+            if !chat.members.is_empty()
+                && chat
+                    .members
+                    .iter()
+                    .all(|member| !chat.hive.may(member, "commit"))
+            {
+                problems.push(format!(
+                    "{label} bars every member from `!commit` in `hive.moves` — the room would                      reach quorum with nobody able to record it; leave `commit` on at least one                      seat."
+                ));
+            }
         }
 
         // Delegation allowlists (issue #176): every `delegates_to` entry must
