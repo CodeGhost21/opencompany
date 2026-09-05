@@ -532,13 +532,19 @@ impl Memory for CortexdbMemory {
         let Some(record) = self.latest(namespace, key).await? else {
             return Ok(false);
         };
-        // Every named layer, since a generic driver cannot know which of them
-        // CortexDB actually let this envelope reach — see the module docs on
-        // why raw-event retraction is not guaranteed.
+        // `selector.memory_ids` plus `cascade: "redact_events"` names exactly
+        // one record and asks for the raw event itself, not only its derived
+        // layers — verified against a live CortexDB instance, which otherwise
+        // refuses `{"by": "id", ...}` (not this server's `ForgetSelector`
+        // shape at all: `about_subject` / `about_entity` / `predicate` /
+        // `memory_ids`) and refuses an *empty* selector without
+        // `confirm_all: true`. Every named layer travels too, since a generic
+        // driver cannot know which of them this envelope reached.
         let body = json!({
             "scope": Self::scope_for(namespace),
             "layers": ["events", "episodes", "facts", "beliefs", "understanding"],
-            "selector": { "by": "id", "id": record.id },
+            "selector": { "memory_ids": [record.id] },
+            "cascade": "redact_events",
         });
         let response = self
             .request(Method::POST, FORGET_PATH)
@@ -549,10 +555,12 @@ impl Memory for CortexdbMemory {
                 anyhow::anyhow!("cortexdb request to {FORGET_PATH} failed: {source}")
             })?;
         let value = Self::check_status(response, FORGET_PATH).await?;
+        // `{"deleted": {"events": n, "episodes": n, ...}, "matched": n, ...}`.
         let removed = value
-            .get("removed")
-            .or_else(|| value.get("count"))
-            .and_then(Value::as_u64)
+            .get("deleted")
+            .and_then(Value::as_object)
+            .map(|layers| layers.values().filter_map(Value::as_u64).sum::<u64>())
+            .or_else(|| value.get("matched").and_then(Value::as_u64))
             .unwrap_or(0);
         Ok(removed > 0)
     }
