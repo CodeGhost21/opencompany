@@ -258,6 +258,17 @@ fn catalog() -> Vec<EngineOption> {
             durable: true,
         },
         EngineOption {
+            id: "cortexdb",
+            label: "CortexDB",
+            description: "A self-hosted memory engine. Your company's memory is stored by a \
+                          CortexDB instance you run, under this instance's namespace.",
+            available: tinymemory,
+            unavailable_reason: feature(tinymemory, "tinymemory"),
+            requires_url: true,
+            requires_key: true,
+            durable: true,
+        },
+        EngineOption {
             id: "null",
             label: "No memory",
             description: "Every write is accepted and discarded, every read is empty. For \
