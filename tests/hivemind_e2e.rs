@@ -525,11 +525,13 @@ fn converging_script() -> Responder {
     Arc::new(|ask: &Ask| {
         if std::env::var("HIVE_DEBUG").is_ok() {
             eprintln!(
-                "[ASK] who={} blind={} grounds={:?} transcript={:?}",
+                "[ASK] who={} blind={} n={} roles={:?} lastlen={} last80={:?}",
                 ask.who(),
                 ask.blind(),
-                ask.seq_of(&format!("!propose #{TOPIC}")),
-                ask.transcript()
+                ask.messages.len(),
+                ask.messages.iter().map(|m| m.get("role").and_then(Value::as_str).unwrap_or("?").to_owned()).collect::<Vec<_>>(),
+                ask.messages.last().and_then(|m| m.get("content")).and_then(Value::as_str).map(str::len).unwrap_or(0),
+                ask.messages.last().and_then(|m| m.get("content")).and_then(Value::as_str).map(|c| c.chars().take(90).collect::<String>()).unwrap_or_default()
             );
         }
         let propose = format!("!propose #{TOPIC} The closed form of the recurrence is 42.");
