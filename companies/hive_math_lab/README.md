@@ -15,3 +15,17 @@ OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY OPENCOMPANY_AUTH_MODE=none \
   cargo run --features openhuman --bin opencompany -- serve --company companies/hive_math_lab
 python3 scripts/hive-euler.py --problems 1,5,12,31,60,100
 ```
+## Tool servers
+
+An answer here ships with the program that produced it, so the library documentation has to match the version that ran.
+
+Declared in [`mcp.json`](mcp.json) and merged with anything the install
+ships and anything an operator adds from the console. A server marked
+*needs a token* is declared but off: write its credential from
+Settings → Connections, then enable it there.
+
+| Server | What it is for | Ships |
+| --- | --- | --- |
+| `deepwiki` | Documentation and Q&A for any public GitHub repository. Public and no-auth. | on |
+| `context7` | Version-accurate API and library documentation, so answers match the release in use. | on |
+| `huggingface` | Models, datasets and papers on the Hugging Face Hub. Public and no-auth. | on |
