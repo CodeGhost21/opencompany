@@ -9,7 +9,14 @@
 //!   still deliberating, because the library authorizes a commit turn by
 //!   setting the phase — a `!commit` deposited before that adds no supporter to
 //!   anything, and a room that reaches for it early spends its whole budget
-//!   recording a decision it never reached.
+//!   recording a decision it never reached. In the Commit phase it is present
+//!   for **every** seat, and the block names the carried topic outright: the
+//!   fold hands the floor to whoever the attention market picks, so the seat
+//!   asked to record a decision is regularly not the seat that reached it.
+//! - **The task's topic id is stated.** A room that coins `#euler12`,
+//!   `#euler12-triangle` and `#euler12-triangular` for one number splits its
+//!   own support three ways and never carries anything. The id is derived once
+//!   from the operator's message and every prompt of the episode repeats it.
 //! - **The floor is rendered with its standings.** Models coin a fresh topic id
 //!   for an idea the room already has one for (`#rollout` and
 //!   `#rollout-strategy` in one episode), and support split across two names
@@ -77,8 +84,22 @@ not write !commit: the room has not reached a decision yet, and a commit line \
 now counts for nothing. !defer costs you this turn and adds no support to \
 anything. Use it when the question on the floor turns on something you do not \
 hold and somebody here does: a confident guess from outside your area is \
-worse for the room than saying so and standing aside. Write nothing before or \
-after the single marker line.";
+worse for the room than saying so and standing aside. If you have nothing to \
+add, reply !defer #topic naming who should act next, or !question. Prose \
+without a marker counts for nothing and costs the room a turn. Write nothing \
+before or after the single marker line.";
+
+/// The extra sentence a room under `require_evidential` is given.
+///
+/// Rendered only when the desk actually requires it, because on a desk that
+/// does not, citing a proposal is a perfectly good support and a rule saying
+/// otherwise would be false.
+const EVIDENTIAL_RULE: &str = "\
+This desk counts a !support only when its ^citation reaches an !evidence line \
+— either the evidence itself, or a support that cites it. A !support that \
+cites only a !propose counts for nothing, however well argued: the room needs \
+a fact under the option, not a second opinion about it. If no evidence is on \
+the floor yet, put one there with !evidence #topic ^N.";
 
 /// The extra sentence a seat with an assigned grammar is given.
 ///
@@ -91,26 +112,25 @@ marker is handed back to you once for correction, and on a second attempt it \
 is journaled with its marker stripped — it will say what you wrote and count \
 for nothing.";
 
-/// The move available once the room has reached quorum.
-const COMMIT_PROTOCOL: &str = "\
-The room has reached quorum. Reply with ONE line only, recording the option \
-that carried:
-!commit #topic ^N  then why, citing message N
-Keep the # on the topic and the ^ on the citation; without them the line \
-records nothing. Angle brackets are not part of the line — write the sentence \
-itself. Use the topic the room actually settled on, not the one you would have \
-preferred. Write nothing before or after the single marker line.";
-
-/// What a seat is told when the phase it is in offers it no legal marker.
+/// The move every seat has once the room has reached quorum, naming the topic
+/// that carried.
 ///
-/// Reachable only on a desk whose `moves` table barred this member from the one
-/// move the phase authorizes. Rendered rather than left blank so the turn still
-/// has an instruction: an empty protocol block reads as "say anything", which
-/// is the one thing that would then be demoted.
-const NO_MOVE_AVAILABLE: &str = "\
-This desk gives you no marker for this phase. Reply with ONE line of plain \
-prose saying what you would have said; write no marker, since any marker you \
-write will be stripped.";
+/// The topic is named rather than described because the seat holding the floor
+/// in the Commit phase is regularly not one of the seats that carried it: the
+/// attention market picks the speaker, so the cheapest member on the desk can
+/// be the one asked to do the bookkeeping. Told *which* id to record, it needs
+/// to re-derive nothing.
+fn commit_protocol(topic: &str) -> String {
+    format!(
+        "The room has reached quorum and carried `#{topic}`; record it. Reply with ONE line \
+         only:\n!commit #{topic} ^N  then why, citing the evidence it rests on\nKeep the # on the \
+         topic and the ^ on the citation; without them the line records nothing. Angle brackets \
+         are not part of the line — write the sentence itself. This is bookkeeping, not a fresh \
+         judgement: record the topic the room actually settled on rather than the one you would \
+         have preferred, and do not re-derive the answer. Write nothing before or after the \
+         single marker line."
+    )
+}
 
 /// Everything about one seat in a room except how its answer is fetched.
 #[derive(Debug)]
