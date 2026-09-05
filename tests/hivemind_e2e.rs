@@ -539,17 +539,6 @@ const TOPIC: &str = "answer42";
 /// would pass whatever the prompt said; this cannot.
 fn converging_script() -> Responder {
     Arc::new(|ask: &Ask| {
-        if std::env::var("HIVE_DEBUG").is_ok() {
-            eprintln!(
-                "[ASK] who={} blind={} n={} roles={:?} lastlen={} last80={:?}",
-                ask.who(),
-                ask.blind(),
-                ask.messages.len(),
-                ask.messages.iter().map(|m| m.get("role").and_then(Value::as_str).unwrap_or("?").to_owned()).collect::<Vec<_>>(),
-                ask.messages.last().and_then(|m| m.get("content")).and_then(Value::as_str).map(str::len).unwrap_or(0),
-                ask.messages.last().and_then(|m| m.get("content")).and_then(Value::as_str).map(|c| c.chars().take(90).collect::<String>()).unwrap_or_default()
-            );
-        }
         let propose = format!("!propose #{TOPIC} The closed form of the recurrence is 42.");
         // A citation is only available once the proposal is visible. In the
         // blind round it is not, which is exactly what the blind round means.
@@ -671,27 +660,6 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
     let openers = script.turn_openers();
     assert!(openers.len() >= 4, "a blind round plus at least one open turn");
 
-    if std::env::var("HIVE_DEBUG").is_ok() {
-        for (i, ask) in openers.iter().enumerate() {
-            let whole: String = ask
-                .messages
-                .last()
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let me = ask.who().to_owned();
-            if me != THEORIST && whole.contains("!propose #answer42") {
-                eprintln!("[PROPLEAK] opener {i} @{me} blind={} sees the proposal", ask.blind());
-            }
-            for peer in [THEORIST, PROGRAMMER, VERIFIER] {
-                if peer != me && whole.contains(&format!("!question {peer}")) {
-                    eprintln!("[LEAK] opener {i} @{me} blind={} sees @{peer}", ask.blind());
-                }
-                let _ = peer;
-            }
-        }
-    }
     let blind: Vec<&Ask> = openers.iter().filter(|ask| ask.blind()).collect();
     assert_eq!(
         blind.len(),
