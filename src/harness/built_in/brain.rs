@@ -3527,6 +3527,16 @@ impl HarnessBrain {
                             chat_id: chat.clone(),
                             thread_root: *parent,
                         };
+                        // The desk's own memory, over the same `ContextStore`
+                        // the per-turn memory loop and the `memory_recall` belt
+                        // read — so a hosted-memory overlay (CortexDB under
+                        // `OPENCOMPANY_MEMORY=remote`) applies to what a room
+                        // remembers exactly as it does to what a teammate does.
+                        let memory = Arc::new(HiveDeskMemory {
+                            context: Arc::clone(&self.deps.context),
+                            company: self.record().id.clone(),
+                            desk_id: desk.id.clone(),
+                        });
                         let outcome = crate::hivemind::EpisodeDriver::new(
                             self.record().id.clone(),
                             desk,
@@ -3535,6 +3545,7 @@ impl HarnessBrain {
                             composed.clone(),
                         )
                         .in_thread(*parent)
+                        .with_memory(memory)
                         .run(trigger)
                         .await?;
                         tracing::info!(
@@ -3542,6 +3553,8 @@ impl HarnessBrain {
                             chat = %chat.as_deref().unwrap_or_default(),
                             ending = %outcome.ending.label(),
                             turns = outcome.turns,
+                            failed_turns = outcome.failed_turns,
+                            demoted = outcome.violations.len(),
                             "[hive] a desk answered as a room"
                         );
                         room_answered = true;
@@ -4301,6 +4314,94 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
             )
             .await?;
         Ok(outcome.reply)
+    }
+}
+
+/// A deliberating desk's own memory, over the company's real context store.
+///
+/// Namespaced by desk — every note is labelled `hive/<desk id>/<slug>` — beside
+/// the way an agent's private memories are labelled `agent-memory/<agent id>/…`
+/// (`memory_tools.rs`). One desk's deliberations are therefore listable on their
+/// own, never collide with another desk's, and are not mixed into a teammate's
+/// private memories.
+///
+/// Both halves go through [`ContextStore`], which is the overlay seam: with
+/// `OPENCOMPANY_MEMORY=remote` this is CortexDB, exactly as it is for the
+/// per-turn retrieve→inject→store loop and the `memory_recall` tool.
+struct HiveDeskMemory {
+    context: Arc<dyn ContextStore>,
+    company: CompanyId,
+    desk_id: String,
+}
+
+/// How many search hits to ask for before narrowing them to this desk.
+///
+/// [`ContextStore::search`] ranks company-wide and returns no label, so the
+/// desk scope is applied by intersecting its hits with the addresses actually
+/// stored under this desk's prefix. Over-fetching is what makes that
+/// intersection likely to be non-empty on a company whose memory is mostly
+/// task outcomes and agent notes.
+const HIVE_SEARCH_FANOUT: usize = 8;
+
+#[async_trait]
+impl crate::hivemind::HiveMemory for HiveDeskMemory {
+    async fn recall(&self, query: &str, limit: usize) -> Result<Vec<crate::hivemind::HiveMemoryHit>> {
+        let prefix = crate::hivemind::desk_prefix(&self.desk_id);
+        let mine = self.context.list(&self.company, &prefix).await?;
+        if mine.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Relevance first: the store's own ranking, narrowed to this desk.
+        let hits = self
+            .context
+            .search(&self.company, query, limit.saturating_mul(HIVE_SEARCH_FANOUT))
+            .await?;
+        let mut addrs: Vec<crate::ports::types::ChunkAddr> = hits
+            .into_iter()
+            .filter(|hit| mine.iter().any(|meta| meta.addr == hit.addr))
+            .map(|hit| hit.addr)
+            .take(limit)
+            .collect();
+        // Recency as the fallback, not as a supplement: a search that matched
+        // nothing on this desk means the ranking has no opinion here, and the
+        // most recent thing the desk concluded is a better answer than nothing.
+        // Mixing the two would let a stale note outrank a relevant one.
+        if addrs.is_empty() {
+            let mut recent = mine.clone();
+            recent.sort_by_key(|meta| std::cmp::Reverse(meta.stored_at_millis));
+            addrs = recent
+                .into_iter()
+                .map(|meta| meta.addr)
+                .take(limit)
+                .collect();
+        }
+        let bodies = self.context.peek_many(&self.company, &addrs).await?;
+        Ok(bodies
+            .into_iter()
+            .flatten()
+            .map(|snippet| crate::hivemind::HiveMemoryHit { snippet })
+            .collect())
+    }
+
+    async fn remember(&self, note: crate::hivemind::HiveMemoryNote) -> Result<()> {
+        // Redacted on the way in, at the note's single construction point, for
+        // the same reason `memory_loop::outcome_chunk` redacts: a deliberation
+        // line can quote a tool's captured output, and this path bypasses
+        // `OcMemory::store` entirely.
+        let title = super::memory::redact_secrets(&note.title);
+        self.context
+            .put(
+                &self.company,
+                ContextChunk {
+                    label: crate::hivemind::note_label(&note.desk_id, &title),
+                    // Title on the first line, so the body is self-describing
+                    // wherever it surfaces — a recall snippet, the Brain view,
+                    // the next episode's "The desk remembers:" block.
+                    body: format!("{title}\n\n{}", super::memory::redact_secrets(&note.body)),
+                },
+            )
+            .await?;
+        Ok(())
     }
 }
 
