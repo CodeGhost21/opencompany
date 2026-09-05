@@ -1,0 +1,20 @@
+role = "Skeptic"
+description = "Read the statement literally and hunt the misreading everybody else's fluent answer is quietly resting on."
+# No tier: this role attacks the *reading*, not the arithmetic, and does not
+# need the strongest model bought to notice "below" is not "up to".
+context = ["GOAL.md", "brief.md"]
+
+tools = ["files", "shell", "workspace.read"]
+
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+    { name = "risks", access = "record" },
+    { name = "commitments", access = "read" },
+    { name = "learnings", access = "record" },
+    { name = "attempts", access = "record" },
+    { name = "answers", access = "read" },
+]
+
+prompt_files = ["prompts/skeptic.md"]
