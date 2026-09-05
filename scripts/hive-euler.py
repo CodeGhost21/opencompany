@@ -26,6 +26,7 @@ import http.cookiejar
 import json
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -227,12 +228,17 @@ def integers_in(text: str) -> list[str]:
     return [t.replace(",", "") for t in INT.findall(text)]
 
 
-def wait_for_report(host: Host, desk: str, after_id: int, timeout: float, log) -> tuple[dict | None, list[dict]]:
+def wait_for_report(
+    host: Host, desk: str, after_id: int, timeout: float, log, poster=None, failure=None
+) -> tuple[dict | None, list[dict]]:
     """Poll the desk until a hive-report bubble newer than `after_id` lands."""
     deadline = time.time() + timeout
     seen: set[str] = set()
     approved_total: list[str] = []
     while time.time() < deadline:
+        if failure:
+            log(f"    !! chat POST failed: {failure[0]}")
+            return None, [m for m in host.history(desk) if int(m.get("id", "0")) > after_id]
         approved = host.approve_all()
         if approved:
             approved_total.extend(approved)
@@ -262,8 +268,21 @@ def run_problem(host: Host, desk: str, pid: str, timeout: float, log) -> dict:
     )
     log(f"== Problem {pid} ({problem['title']}) — expecting {problem['answer']}")
     started = time.time()
-    host.say(desk, text)
-    report, messages = wait_for_report(host, desk, after_id, timeout, log)
+    # The chat POST holds open for the whole episode (the cycle runs it
+    # synchronously), and `shell` parks for approval inside it — so the
+    # operator's two jobs have to run concurrently: state the problem on a
+    # thread, and pump approvals from here while it runs.
+    failure: list[BaseException] = []
+
+    def state() -> None:
+        try:
+            host.say(desk, text)
+        except BaseException as err:  # noqa: BLE001 — surfaced below
+            failure.append(err)
+
+    poster = threading.Thread(target=state, daemon=True)
+    poster.start()
+    report, messages = wait_for_report(host, desk, after_id, timeout, log, poster, failure)
     elapsed = round(time.time() - started, 1)
     turns = [m for m in messages if m.get("author") not in (HIVE_REPORT_AUTHOR,) and not m.get("mine")]
     outcome = {
