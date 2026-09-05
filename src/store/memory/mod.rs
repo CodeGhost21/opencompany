@@ -68,6 +68,8 @@
 //! migration surface is ever added, it must carry its own operator-auth and
 //! per-tenant scoping; do not lift this function onto a route as-is.
 
+#[cfg(feature = "tinymemory")]
+pub mod cortexdb;
 pub mod driver;
 pub mod facades;
 pub mod migrate;
