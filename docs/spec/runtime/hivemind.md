@@ -262,4 +262,46 @@ logged and swallowed: the decision is already durable in the turns above it.
 | `src/hivemind/episode.rs` | `EpisodeDriver`, `HiveTurnRunner` |
 | `src/harness/built_in/brain.rs` | the routing hook and `HiveDeskRunner` |
 
+## Testing
+
+`src/hivemind/test.rs` pins the fold with a `HiveTurnRunner` that returns
+strings — the manifest knob, the log adapter, the driver's authors, the blind
+projection, and `marker_line`. It deliberately runs no model, so it can say
+nothing about whether a *company* deliberates.
+
+`tests/hivemind_e2e.rs` (gated `openhuman`, run by the `rust-gated` lane's
+`cargo test --features openhuman --tests`) is that half. It boots a real
+company — `RuntimeBuilder`, the embedded harness, the filesystem store, the
+HTTP surface, loopback sign-in — and drives it through `POST
+/api/v1/company/chat`, the route the console posts to. Only the model is
+scripted, and the scripted endpoint is **content-aware**: it reads the prompt
+each turn was handed, works out who is speaking and what that member can see,
+and answers from that. A member citing `^N` has to find `N` in the transcript
+it was given, which is the property a fixed reply queue cannot prove.
+
+| Test | What it proves |
+| --- | --- |
+| `a_desk_deliberates_and_converges_through_the_fold` | one operator message, three members, one `AgentReply` per turn under the teammate that took it, one closing `hive-report` naming the topic and its supporters, no second responder, and exactly one model call per journaled turn in the same order |
+| `the_opening_round_is_blind_and_every_later_line_is_attributed` | the opening round is one blind turn per member and no peer line reaches it — through the transcript, the memory preamble, or the assistant history; later turns render peers as `[seq] <id>: …`, never as the viewer's own words, and each member is shown its own last line |
+| `an_objection_silences_an_advocate_and_a_second_topic_carries` | cross-inhibition end to end: a backed option is objected to by message, and the option the room records is the other one — with the silenced advocate absent from its supporters |
+| `a_desk_reasons_with_what_it_stored_in_an_earlier_episode` | two episodes: `memory_store` in the first, `memory_recall` in the second, and the journaled line written from what came back |
+| `a_desk_reasons_with_memory_held_in_a_remote_engine` | the same claim with the memory ports bound to a CortexDB mock through `StorageSettings`: the write lands on `/v1/experience`, the read is served from `/v1/recall` |
+| `a_room_that_settles_on_nothing_reports_itself_exhausted` | the budget is the only bound, and the report says the budget was spent rather than inventing a decision |
+| `two_carrying_topics_and_no_objection_deadlock` | two options carry, nobody is left to break the tie, and the close says `Deadlocked` |
+| `a_single_member_desk_answers_with_one_ordinary_turn` | the same company's desk of one is never handed an episode prompt: one reply, no `hive-report` |
+
+Two things the file asserts around rather than through, said here rather than
+left for a reader to assume:
+
+- **The memory loop's automatic injection is not asserted to contain the
+  stored fact.** Its query is the whole incoming message — a multi-kilobyte
+  episode prompt — and `store::lexical` ranks by term rarity against it, so
+  which memories surface is the ranker's business. The deliberate
+  `memory_recall` call is the load-bearing assertion, because it is the path an
+  agent controls.
+- **The deadlock script keeps supporting during the commit phase.** Two options
+  can only carry at once if support keeps arriving after the first one has, and
+  a live model that ignores the commit protocol is exactly how a real room gets
+  there.
+
 See also [`docs/modules/hivemind/README.md`](../../modules/hivemind/README.md).
