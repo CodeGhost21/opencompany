@@ -91,7 +91,7 @@ fn the_commit_prompt_names_the_carried_topic() {
     .expect("a room");
     let member = desk.member("critic").expect("critic is seated").clone();
     let quorum = desk.policy().quorum;
-    let messages = vec![
+    let messages = [
         message(1, "planner", "!propose #euler12-triangle 76576500"),
         message(2, "scout", "!support #euler12-triangle ^1 It checks out."),
     ];
@@ -260,7 +260,7 @@ fn every_deliberating_prompt_states_the_topic_id() {
 
 #[test]
 fn a_support_citing_only_a_proposal_reaches_no_evidence() {
-    let messages = vec![
+    let messages = [
         message(1, "planner", "!propose #euler12 76576500"),
         message(2, "scout", "!evidence #euler12 ^1 The 12375th triangular."),
     ];
