@@ -320,6 +320,8 @@ async fn a_support_that_reaches_no_evidence_is_re_prompted_once() {
     .await
     .expect("the episode runs");
 
+    eprintln!("REPLIES {:#?}", log.replies("eng"));
+    eprintln!("ASKED {:#?}", runner.asked().iter().map(|(a,_)| a.clone()).collect::<Vec<_>>());
     let prompts = runner.prompts_for("critic");
     assert!(prompts.len() >= 2, "critic must be re-prompted: {prompts:?}");
     assert!(
