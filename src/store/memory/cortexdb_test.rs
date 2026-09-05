@@ -138,14 +138,21 @@ async fn forget(
             Json(json!({"error": "unauthorized"})),
         );
     }
-    let Some(id) = body.pointer("/selector/id").and_then(Value::as_str) else {
-        return (StatusCode::OK, Json(json!({ "removed": 0 })));
-    };
+    let ids: Vec<String> = body
+        .pointer("/selector/memory_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
     let mut events = state.events.lock().unwrap();
     let before = events.len();
-    events.retain(|event| event.id != id);
+    events.retain(|event| !ids.contains(&event.id));
     let removed = before - events.len();
-    (StatusCode::OK, Json(json!({ "removed": removed })))
+    (
+        StatusCode::OK,
+        Json(json!({ "deleted": { "events": removed }, "matched": removed })),
+    )
 }
 
 /// Serves the mock on loopback and returns its base URL plus the shared state.
