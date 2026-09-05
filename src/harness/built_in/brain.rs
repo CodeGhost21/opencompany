@@ -204,10 +204,11 @@ use crate::ports::blockers::{BlockerPayload, BlockerStep};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
 use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
+use crate::ports::context::ContextStore;
 use crate::ports::types::{
-    CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, Effect,
-    EffectGroup, EventSeq, OutboundMessage, TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
-    Verdict,
+    CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, CycleRequest,
+    CycleResult, Effect, EffectGroup, EventSeq, OutboundMessage, TokenUsage, TurnStep,
+    TurnStepKind, TurnStepStatus, Verdict,
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
