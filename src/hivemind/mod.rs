@@ -43,6 +43,8 @@
 //!
 //! - [`episode`] — the host loop, and the one-function turn seam.
 //! - [`log`] — the company journal read as a `tinyhivemind` session log.
+//! - [`memory`] — what the desk remembers between episodes, and the seam.
+//! - [`moves`] — the per-member move grammar, and how a barred move is handled.
 //! - [`prompt`] — what one authorized turn is shown, and how its answer is read.
 //! - [`types`] — the manifest knob, the desk snapshot, and the outcome.
 //!
@@ -50,6 +52,8 @@
 
 pub mod episode;
 pub mod log;
+pub mod memory;
+pub mod moves;
 pub mod prompt;
 pub mod types;
 
@@ -58,6 +62,11 @@ mod test;
 
 pub use episode::{EpisodeDriver, HiveTurnRunner};
 pub use log::EventLogSessionLog;
+pub use memory::{
+    HIVE_MEMORY_LABEL_PREFIX, HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory,
+    desk_prefix, note_label,
+};
+pub use moves::{MOVE_KINDS, MoveViolation};
 pub use prompt::{EpisodePrompt, marker_line};
 pub use types::{
     EpisodeEnding, EpisodeOutcome, HiveConfig, HiveDesk, HiveMember, HivePolicy, desk_episode,

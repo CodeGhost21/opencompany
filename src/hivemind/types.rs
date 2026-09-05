@@ -314,6 +314,14 @@ pub struct EpisodeOutcome {
     /// members are being unhelpful, and the operator is the only one who can
     /// tell the two apart.
     pub violations: Vec<super::moves::MoveViolation>,
+    /// Turns whose member did not answer at all.
+    ///
+    /// A failed turn does not end the room — the live case was one member
+    /// hitting the harness's per-turn wall-clock ceiling, which propagated and
+    /// threw away three good turns — so the episode records the miss on the
+    /// desk and steps on. Counted here so the operator is told the answer was
+    /// reached with a seat missing rather than left to infer it.
+    pub failed_turns: u32,
 }
 
 impl EpisodeOutcome {
@@ -325,7 +333,23 @@ impl EpisodeOutcome {
     /// conversation that already has one.
     #[must_use]
     pub fn summary(&self) -> String {
-        format!("{}{}", self.ending_summary(), self.violation_summary())
+        format!(
+            "{}{}{}",
+            self.ending_summary(),
+            self.failure_summary(),
+            self.violation_summary()
+        )
+    }
+
+    /// The sentence naming turns that did not finish, or nothing when they all
+    /// did.
+    #[must_use]
+    pub fn failure_summary(&self) -> String {
+        match self.failed_turns {
+            0 => String::new(),
+            1 => " 1 turn did not finish and the room continued without it.".to_owned(),
+            count => format!(" {count} turns did not finish and the room continued without them."),
+        }
     }
 
     /// The sentence naming demoted lines, or nothing when there were none.
