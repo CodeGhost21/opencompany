@@ -48,6 +48,29 @@ pub fn line_kind(line: &str) -> Option<&'static str> {
     }
 }
 
+/// The kinds no `moves` table can take away from a seat.
+///
+/// Each one is a move whose absence costs the room a turn and buys it nothing:
+///
+/// - `commit` is **bookkeeping, not authorship**. The library authorizes a
+///   commit turn by setting the phase, and it hands the floor to whoever the
+///   attention market picks — not to whoever the manifest thought would be
+///   holding it. The live evidence: a six-member desk reached quorum at the
+///   third evidential `!support`, the phase flipped to `Commit`, and the fold
+///   then gave the floor to three seats a `moves` table had barred from
+///   `commit`. Each was shown the no-move block, wrote prose, and the room
+///   reported `Exhausted` on an answer it had already decided. Recording a
+///   topic the room has already carried re-derives nothing, so there is no
+///   seat too cheap to do it.
+/// - `question` and `defer` are the two honest things a member with nothing to
+///   add can say. A seat barred from both has only silence or a guess, and
+///   prose costs the room a turn while depositing no trace.
+///
+/// A `moves` entry naming one of these is therefore accepted and ignored: it
+/// describes what the seat could already do, so it is a no-op rather than an
+/// error.
+pub const UNGATED_KINDS: &[&str] = &["question", "defer", "commit"];
+
 /// The moves `member` may open a line with, in [`MOVE_KINDS`] order.
 ///
 /// A member the map does not name may make every move, which is what makes an
@@ -56,13 +79,19 @@ pub fn line_kind(line: &str) -> Option<&'static str> {
 /// silent member is: an empty list is far more likely to be a table written and
 /// never filled in than a deliberate vow of silence, and the alternative reading
 /// hands somebody the floor with nothing legal to say.
+///
+/// [`UNGATED_KINDS`] are always in the result, whether the table named them or
+/// not: `moves` gates the deliberation kinds — what a seat may put *on* the
+/// floor — and never the room's bookkeeping or its two ways of saying "not me".
 #[must_use]
 pub fn allowed_for(moves: &BTreeMap<String, Vec<String>>, member: &str) -> Vec<&'static str> {
     match moves.get(member) {
         Some(declared) if !declared.is_empty() => MOVE_KINDS
             .iter()
             .copied()
-            .filter(|kind| declared.iter().any(|named| named == kind))
+            .filter(|kind| {
+                UNGATED_KINDS.contains(kind) || declared.iter().any(|named| named == kind)
+            })
             .collect(),
         _ => MOVE_KINDS.to_vec(),
     }
