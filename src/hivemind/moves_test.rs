@@ -346,9 +346,10 @@ async fn the_prompt_renders_only_the_moves_a_member_has() {
     let planner = runner.prompts_for("planner");
     let planner = planner.first().expect("planner spoke");
     assert!(planner.contains("!propose #topic"), "{planner}");
-    // `commit` is phase-gated on top of the grammar, so it is absent while the
-    // room deliberates even though the seat holds it.
-    assert!(!planner.contains("!commit"), "{planner}");
+    // `commit` is phase-gated on top of the grammar, so its move line is absent
+    // while the room deliberates even though the seat holds it. (The rules
+    // block still names the marker, to say not to write it.)
+    assert!(!planner.contains("!commit #topic ^N"), "{planner}");
     assert!(!planner.contains("!support #topic"), "{planner}");
     assert!(
         planner.contains("These are the ONLY markers this desk gives you"),

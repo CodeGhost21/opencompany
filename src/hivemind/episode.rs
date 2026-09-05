@@ -340,7 +340,7 @@ impl<'a> EpisodeDriver<'a> {
                     last_speaker = Some(turn.agent_id.clone());
                     if consecutive_failures >= failure_cap {
                         return Err(OpenCompanyError::Config(format!(
-                            "hive episode on desk `{}`: {consecutive_failures} turns in a row                              failed, which is every seat twice over — the room stopped rather                              than spending the rest of its budget on a harness that is down:                              {error}",
+                            "hive episode on desk `{}`: {consecutive_failures} turns in a row failed, which is every seat twice over — the room stopped rather than spending the rest of its budget on a harness that is down: {error}",
                             self.desk.id,
                         )));
                     }
