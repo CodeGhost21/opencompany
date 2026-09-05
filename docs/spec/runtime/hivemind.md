@@ -164,7 +164,7 @@ A marker is recognised at the start of a line, outside fenced code blocks.
 | `!evidence #topic ^N …` | adds grounds without taking a side |
 | `!question …` | asks for what nobody has established |
 | `!defer #topic …` | stands aside; costs the turn, adds no support |
-| `!commit #topic ^N …` | records the decision — **commit phase only** |
+| `!commit #topic ^N …` | records the decision — **commit phase only**, and available to every seat in it |
 | `!pin` / `!unpin ^N` | folds the desk's pinboard |
 
 The `#` and the `^` are part of the grammar: `!propose canary …` names nothing
@@ -176,11 +176,18 @@ A room whose members may all make every move is a room that votes: on a live
 `companies/hive_math_lab` run, every episode was three independent `!propose`s
 of the same number followed by `!commit`, because in `tinyhivemind` a proposal
 already counts as its own author's support. `hive.moves` assigns each seat the
-markers it may open a line with, the prompt renders only those, and the driver
-enforces them — one correction, then the line is journaled with its `!` stripped
-so it folds to no trace at all.
+deliberation markers it may open a line with, the prompt renders only those, and
+the driver enforces them — one correction, then the line is journaled with its
+`!` stripped so it folds to no trace at all.
 
-The table, the prompt it produces, the enforcement rules, what the desk
+`commit`, `question` and `defer` are never gated. The fold picks the speaker in
+the Commit phase, so a desk that could bar a seat from recording a decision
+reaches quorum and then hands the floor to somebody with nothing legal to say —
+which is what a six-member desk did for eight turns before reporting itself
+exhausted on an answer it had already carried.
+
+The table, the prompt it produces, the enforcement rules, the canonical topic id
+each task gets, the citation correction `require_evidential` adds, what the desk
 remembers between episodes, the speaker-diversity line, and what happens when a
 member's turn fails are all in
 [`hivemind-deliberation.md`](hivemind-deliberation.md).
@@ -246,7 +253,7 @@ hive = { enabled = true, turn_budget = 9, quorum = 2, blind_round = true,
 | `turn_budget` | `3 × members` | hard cap on turns; the episode reports itself exhausted at it |
 | `quorum` | `(n / 2 + 1).min(n - 1)` | distinct grounded supporters a topic needs. Clamped into `1..=members` on read |
 | `blind_round` | `true` | whether the opening round hides peers' positions |
-| `moves` | every member, every move | member id → the markers that seat may open a line with. See [`hivemind-deliberation.md`](hivemind-deliberation.md) |
+| `moves` | every member, every move | member id → the *deliberation* markers that seat may open a line with. `commit`, `question` and `defer` are ungated: every seat keeps them, and an entry naming one is accepted and ignored. See [`hivemind-deliberation.md`](hivemind-deliberation.md) |
 | `require_evidential` | `false` | support counts only when its citation chain reaches an `!evidence`, and an objection silences nobody unless its author deposited evidence in the window. Implies `require_grounded` |
 | `refutation_cap` | unset (off) | distinct grounded refuters that cap a topic out of contention. Left off by default because tinyhivemind's own benchmark measured it costing accuracy — a refutation is global where an objection is local |
 | `dominance_cap` | `50` | turns one member may take before the attention market damps its bids |
