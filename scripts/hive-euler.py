@@ -298,7 +298,9 @@ def run_problem(host: Host, desk: str, pid: str, timeout: float, log) -> dict:
         outcome["verdict"] = "timeout"
     else:
         rtext = report.get("text", "")
-        converged = "Converged" in rtext or "converged" in rtext
+        # `EpisodeOutcome::summary()` says "settled on #topic" for a converged
+        # room; the other endings say deadlocked / ran out of turns / idle.
+        converged = "settled on" in rtext or "onverged" in rtext
         found = integers_in(rtext)
         # The report names the carried topic; a topic is usually the number
         # itself (`#233168`) but a room may name it otherwise, so fall back to
