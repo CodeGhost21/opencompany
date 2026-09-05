@@ -26,6 +26,10 @@ use tinyhivemind_hive::{
 };
 
 use super::log::EventLogSessionLog;
+use super::memory::{
+    HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT,
+};
+use super::moves::{self, MoveViolation};
 use super::prompt::{EpisodePrompt, marker_line};
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
 use crate::Result;
@@ -61,6 +65,7 @@ pub struct EpisodeDriver<'a> {
     runner: &'a dyn HiveTurnRunner,
     task: String,
     thread_root: Option<EventSeq>,
+    memory: Arc<dyn HiveMemory>,
 }
 
 impl std::fmt::Debug for EpisodeDriver<'_> {
@@ -91,7 +96,19 @@ impl<'a> EpisodeDriver<'a> {
             runner,
             task: task.into(),
             thread_root: None,
+            memory: Arc::new(NullHiveMemory),
         }
+    }
+
+    /// Give the desk a memory: recalled once before the first turn, written
+    /// once when the episode ends.
+    ///
+    /// Defaults to [`NullHiveMemory`], so an episode driven without one is
+    /// byte-identical to the one this driver ran before desk memory existed.
+    #[must_use]
+    pub fn with_memory(mut self, memory: Arc<dyn HiveMemory>) -> Self {
+        self.memory = memory;
+        self
     }
 
     /// Run the episode inside the thread rooted at `thread_root`.
