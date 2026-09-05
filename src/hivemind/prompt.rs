@@ -28,10 +28,8 @@
 //! from the transcript plus the turn's own visibility.
 
 use tinyhivemind_hive::{
-    HiveTurn, Phase, QuorumPolicy, Sequence, SessionAuthor, SessionMessage, Visibility,
-    pins::Pin,
-    quorum::standings,
-    trace::resolve,
+    HiveTurn, Phase, QuorumPolicy, Sequence, SessionAuthor, SessionMessage, Visibility, pins::Pin,
+    quorum::standings, trace::resolve,
 };
 
 use super::types::{HiveDesk, HiveMember};

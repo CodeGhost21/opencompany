@@ -139,7 +139,6 @@ impl EventLogSessionLog {
             _ => None,
         }
     }
-
 }
 
 /// Reserved reply authors this host journals under, which no roster id can

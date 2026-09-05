@@ -123,11 +123,7 @@ impl CortexdbMemory {
     ///
     /// Returns an error when `endpoint` is not an absolute `http(s)` URL, or
     /// `api_key` is blank.
-    pub fn new(
-        endpoint: &str,
-        api_key: &str,
-        actor: impl Into<String>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(endpoint: &str, api_key: &str, actor: impl Into<String>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             endpoint.starts_with("http://") || endpoint.starts_with("https://"),
             "cortexdb endpoint {endpoint:?} must be an absolute http(s) url"
@@ -205,8 +201,12 @@ impl CortexdbMemory {
             .json(&body)
             .send()
             .await
-            .map_err(|source| anyhow::anyhow!("cortexdb request to {EXPERIENCE_PATH} failed: {source}"))?;
-        Self::check_status(response, EXPERIENCE_PATH).await.map(|_| ())
+            .map_err(|source| {
+                anyhow::anyhow!("cortexdb request to {EXPERIENCE_PATH} failed: {source}")
+            })?;
+        Self::check_status(response, EXPERIENCE_PATH)
+            .await
+            .map(|_| ())
     }
 
     /// Recalls the raw events filed in `namespace`'s scope.
@@ -227,17 +227,18 @@ impl CortexdbMemory {
             .json(&body)
             .send()
             .await
-            .map_err(|source| anyhow::anyhow!("cortexdb request to {RECALL_PATH} failed: {source}"))?;
+            .map_err(|source| {
+                anyhow::anyhow!("cortexdb request to {RECALL_PATH} failed: {source}")
+            })?;
         let value = Self::check_status(response, RECALL_PATH).await?;
         Ok(decode_events(&value))
     }
 
     async fn check_status(response: reqwest::Response, path: &str) -> anyhow::Result<Value> {
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|source| anyhow::anyhow!("reading cortexdb's response to {path} failed: {source}"))?;
+        let text = response.text().await.map_err(|source| {
+            anyhow::anyhow!("reading cortexdb's response to {path} failed: {source}")
+        })?;
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             anyhow::bail!(
                 "cortexdb rejected the token or the X-Cortex-Actor header for {path} \
@@ -251,8 +252,9 @@ impl CortexdbMemory {
         if text.trim().is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text)
-            .map_err(|source| anyhow::anyhow!("cortexdb answered {path} with an unreadable body: {source}"))
+        serde_json::from_str(&text).map_err(|source| {
+            anyhow::anyhow!("cortexdb answered {path} with an unreadable body: {source}")
+        })
     }
 
     /// The single record most-recently observed for `(namespace, key)`, if
@@ -425,8 +427,15 @@ impl Memory for CortexdbMemory {
         category: MemoryCategory,
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.store_with_taint(namespace, key, content, category, session_id, MemoryTaint::Internal)
-            .await
+        self.store_with_taint(
+            namespace,
+            key,
+            content,
+            category,
+            session_id,
+            MemoryTaint::Internal,
+        )
+        .await
     }
 
     async fn store_with_taint(
@@ -455,7 +464,9 @@ impl Memory for CortexdbMemory {
         limit: usize,
         opts: tinymemory_api::types::RecallOpts<'_>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let namespace = opts.namespace.unwrap_or(tinymemory_api::types::GLOBAL_NAMESPACE);
+        let namespace = opts
+            .namespace
+            .unwrap_or(tinymemory_api::types::GLOBAL_NAMESPACE);
         let mut records = self.recall_raw(namespace, query).await?;
         records.sort_by(|a, b| b.observed_at.cmp(&a.observed_at));
         // Newest write per key wins — the read-side half of upsert semantics
@@ -479,7 +490,10 @@ impl Memory for CortexdbMemory {
     }
 
     async fn get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
-        Ok(self.latest(namespace, key).await?.map(DecodedRecord::into_entry))
+        Ok(self
+            .latest(namespace, key)
+            .await?
+            .map(DecodedRecord::into_entry))
     }
 
     async fn list(
@@ -531,7 +545,9 @@ impl Memory for CortexdbMemory {
             .json(&body)
             .send()
             .await
-            .map_err(|source| anyhow::anyhow!("cortexdb request to {FORGET_PATH} failed: {source}"))?;
+            .map_err(|source| {
+                anyhow::anyhow!("cortexdb request to {FORGET_PATH} failed: {source}")
+            })?;
         let value = Self::check_status(response, FORGET_PATH).await?;
         let removed = value
             .get("removed")
@@ -555,7 +571,10 @@ impl Memory for CortexdbMemory {
     }
 
     async fn health_check(&self) -> bool {
-        matches!(self.health_probe().await, Some(tinymemory_api::health::MemoryHealth::Ready))
+        matches!(
+            self.health_probe().await,
+            Some(tinymemory_api::health::MemoryHealth::Ready)
+        )
     }
 
     async fn health_probe(&self) -> Option<tinymemory_api::health::MemoryHealth> {
@@ -567,7 +586,9 @@ impl Memory for CortexdbMemory {
                 )));
             }
         };
-        if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        if response.status() == StatusCode::UNAUTHORIZED
+            || response.status() == StatusCode::FORBIDDEN
+        {
             return Some(tinymemory_api::health::MemoryHealth::down(
                 "cortexdb rejected the token or the X-Cortex-Actor header",
             ));

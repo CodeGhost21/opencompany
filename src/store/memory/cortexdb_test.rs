@@ -62,7 +62,10 @@ async fn experience(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     if !authorized(&headers, &state) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
     }
     let scope = body
         .get("scope")
@@ -97,7 +100,10 @@ async fn recall(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     if !authorized(&headers, &state) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
     }
     let scope = body
         .get("scope")
@@ -127,7 +133,10 @@ async fn forget(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     if !authorized(&headers, &state) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
     }
     let Some(id) = body.pointer("/selector/id").and_then(Value::as_str) else {
         return (StatusCode::OK, Json(json!({ "removed": 0 })));
@@ -177,7 +186,13 @@ async fn store_then_recall_round_trips() {
     let memory = client(&base_url, ACTOR);
 
     memory
-        .store("company-a", "greeting", "hello there", MemoryCategory::Core, None)
+        .store(
+            "company-a",
+            "greeting",
+            "hello there",
+            MemoryCategory::Core,
+            None,
+        )
         .await
         .expect("store succeeds");
 
@@ -193,7 +208,11 @@ async fn store_then_recall_round_trips() {
         .await
         .expect("recall succeeds");
 
-    assert_eq!(hits.len(), 1, "expected exactly one recalled entry: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one recalled entry: {hits:?}"
+    );
     assert_eq!(hits[0].key, "greeting");
     assert_eq!(hits[0].content, "hello there");
     assert_eq!(hits[0].category, MemoryCategory::Core);
@@ -237,11 +256,23 @@ async fn two_companies_never_share_recall() {
     let memory = client(&base_url, ACTOR);
 
     memory
-        .store("company-a", "secret", "company A's secret", MemoryCategory::Core, None)
+        .store(
+            "company-a",
+            "secret",
+            "company A's secret",
+            MemoryCategory::Core,
+            None,
+        )
         .await
         .expect("store for company-a succeeds");
     memory
-        .store("company-b", "secret", "company B's secret", MemoryCategory::Core, None)
+        .store(
+            "company-b",
+            "secret",
+            "company B's secret",
+            MemoryCategory::Core,
+            None,
+        )
         .await
         .expect("store for company-b succeeds");
 
@@ -305,14 +336,22 @@ async fn forget_removes_the_stored_event() {
     let memory = client(&base_url, ACTOR);
 
     memory
-        .store("company-a", "temp", "throwaway", MemoryCategory::Daily, None)
+        .store(
+            "company-a",
+            "temp",
+            "throwaway",
+            MemoryCategory::Daily,
+            None,
+        )
         .await
         .expect("store succeeds");
-    assert!(memory
-        .get("company-a", "temp")
-        .await
-        .expect("get succeeds")
-        .is_some());
+    assert!(
+        memory
+            .get("company-a", "temp")
+            .await
+            .expect("get succeeds")
+            .is_some()
+    );
 
     let removed = memory
         .forget("company-a", "temp")
@@ -320,11 +359,13 @@ async fn forget_removes_the_stored_event() {
         .expect("forget succeeds");
     assert!(removed, "forget should report the record was removed");
 
-    assert!(memory
-        .get("company-a", "temp")
-        .await
-        .expect("get succeeds")
-        .is_none());
+    assert!(
+        memory
+            .get("company-a", "temp")
+            .await
+            .expect("get succeeds")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -362,7 +403,9 @@ async fn health_probe_reports_down_on_actor_mismatch() {
 /// mandatory `Memory` trait in full, so the two can never disagree.
 #[tokio::test]
 async fn the_bind_time_capability_audit_passes() {
-    use crate::store::memory::driver::{MemoryDriverConfig, MemoryMode, RemoteDeployment, open_driver};
+    use crate::store::memory::driver::{
+        MemoryDriverConfig, MemoryMode, RemoteDeployment, open_driver,
+    };
 
     let (base_url, _state) = spawn_mock("opencompany").await;
     // SAFETY (test-only): OPENCOMPANY_MEMORY_ACTOR is read once inside

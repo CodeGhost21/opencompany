@@ -237,7 +237,9 @@ impl EpisodeOutcome {
                 } else {
                     supporters.join(", ")
                 };
-                format!("The desk settled on #{topic} after {turns} {plural} (backed by {backing}).")
+                format!(
+                    "The desk settled on #{topic} after {turns} {plural} (backed by {backing})."
+                )
             }
             EpisodeEnding::Deadlocked { topics } => format!(
                 "The desk deadlocked after {turns} {plural}: {} carried together and nobody broke the tie.",
@@ -247,9 +249,9 @@ impl EpisodeOutcome {
                     .collect::<Vec<_>>()
                     .join(" and "),
             ),
-            EpisodeEnding::Exhausted => format!(
-                "The desk spent its {turns}-turn budget without reaching a decision.",
-            ),
+            EpisodeEnding::Exhausted => {
+                format!("The desk spent its {turns}-turn budget without reaching a decision.",)
+            }
             EpisodeEnding::Idle => {
                 "Nobody on the desk had anything to add, so the room did not open.".to_owned()
             }

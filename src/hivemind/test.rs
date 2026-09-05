@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
-use tinyhivemind_hive::{
-    SESSION_WINDOW, SessionAuthor, SessionQuery, Sequence, project_session,
-};
+use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::*;
 use crate::Result;
@@ -255,9 +253,12 @@ fn the_manifest_parses_a_hive_block_and_rejects_zero_bounds() {
     assert_eq!(policy.quorum.threshold, 2);
     assert!(!policy.blind_round);
 
-    let problems = record(&format!("{}hive = {{ quorum = 0 }}\n", three_member_manifest()))
-        .manifest
-        .validate();
+    let problems = record(&format!(
+        "{}hive = {{ quorum = 0 }}\n",
+        three_member_manifest()
+    ))
+    .manifest
+    .validate();
     assert!(
         problems.iter().any(|p| p.contains("hive.quorum = 0")),
         "{problems:?}"
@@ -291,7 +292,10 @@ fn the_derived_policy_scales_with_the_room() {
         quorum: Some(99),
         ..HiveConfig::default()
     };
-    assert_eq!(HivePolicy::from_config(&over, 3).episode.quorum.threshold, 3);
+    assert_eq!(
+        HivePolicy::from_config(&over, 3).episode.quorum.threshold,
+        3
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -454,13 +458,19 @@ async fn a_scripted_room_converges_and_journals_the_right_authors() {
     let trigger = seed_desk(&log).await;
     let desk = desk_of(&three_member_manifest(), "eng").expect("a room");
     let runner = ScriptedRunner::new(&[
-        ("planner", "!propose #stage Stage the rollout behind a flag."),
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
         ("scout", "!propose #ship Ship it all at once."),
         (
             "critic",
             "!evidence #stage ^3 The last full rollout took the checkout down.",
         ),
-        ("planner", "!support #stage ^3 Staging bounds the blast radius."),
+        (
+            "planner",
+            "!support #stage ^3 Staging bounds the blast radius.",
+        ),
         ("scout", "!support #stage ^3 Agreed, and it is reversible."),
         ("critic", "!commit #stage ^3 The room settled on staging."),
         ("planner", "!commit #stage ^3 Recorded."),
@@ -537,11 +547,17 @@ async fn the_blind_round_hides_peers_and_the_prompt_says_so() {
         second.contains("You cannot yet see your peers' positions"),
         "{second}"
     );
-    assert!(!second.contains("#stage"), "a peer's position leaked:\n{second}");
+    assert!(
+        !second.contains("#stage"),
+        "a peer's position leaked:\n{second}"
+    );
     assert!(second.contains("Decide the rollout."), "{second}");
     // And every seat is told who else is in the room, and what its own id is.
     let (first_agent, first) = &asked[0];
-    assert!(first.contains(&format!("You are @{first_agent}")), "{first}");
+    assert!(
+        first.contains(&format!("You are @{first_agent}")),
+        "{first}"
+    );
     assert!(first.contains("In the room with you: @"), "{first}");
 }
 

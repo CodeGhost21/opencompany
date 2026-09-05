@@ -28,10 +28,10 @@ use tinyhivemind_hive::{
 use super::log::EventLogSessionLog;
 use super::prompt::{EpisodePrompt, marker_line};
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
+use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
-use crate::Result;
 
 /// Anything that can fill one authorized turn.
 ///
@@ -214,9 +214,8 @@ impl<'a> EpisodeDriver<'a> {
                     self.desk.id, turn.agent_id,
                 ))
             })?;
-            let prompt =
-                EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
-                    .render(&turn, &visible);
+            let prompt = EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
+                .render(&turn, &visible);
 
             let reply = self.runner.speak(&turn.agent_id, &prompt).await?;
             let seq = self
