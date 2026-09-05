@@ -3406,6 +3406,12 @@ impl HarnessBrain {
         }
 
         let mut channel_responses = Vec::new();
+        // Set when a desk answered as a hive room. The episode journals every
+        // turn and its own close directly (`hivemind::EpisodeDriver`), so it
+        // hands nothing back through `channel_responses` — and the
+        // "Acknowledged." fallback below must not then file a second, empty
+        // system row under a conversation that was answered at length.
+        let mut room_answered = false;
         for (index, event) in req.events.iter().enumerate() {
             match event {
                 CompanyEvent::OperatorMessage {
@@ -3538,6 +3544,7 @@ impl HarnessBrain {
                             turns = outcome.turns,
                             "[hive] a desk answered as a room"
                         );
+                        room_answered = true;
                         continue;
                     }
                     // Route to the teammate the message named, else to the
@@ -4229,8 +4236,9 @@ impl HarnessBrain {
             channel_responses.push(system_notice(notice));
         }
 
-        // The runtime requires at least one channel response per cycle.
-        if channel_responses.is_empty() {
+        // A cycle answers with at least one channel response, unless a hive
+        // room already journaled its whole conversation itself.
+        if channel_responses.is_empty() && !room_answered {
             channel_responses.push(system_notice("Acknowledged.".to_string()));
         }
 
