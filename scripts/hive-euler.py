@@ -39,6 +39,14 @@ from pathlib import Path
 SCOPE = "/api/v1/company"
 ADMIN_EMAIL = "harness-e2e@tinyhumans.ai"
 HIVE_REPORT_AUTHOR = "hive-report"
+# Where a checkout of lucky-bai/projecteuler-solutions usually sits; the first
+# that exists is the default for `--answers`, so a grade is available for every
+# problem the fetcher can pull rather than only the hard-coded table.
+DEFAULT_ANSWER_FILES = (
+    "../projecteuler-solutions/Solutions.md",
+    "../../projecteuler-solutions/Solutions.md",
+    __import__("os").path.expanduser("~/work/projecteuler-solutions/Solutions.md"),
+)
 
 # `https://projecteuler.net/minimal=<N>` returns the problem's own HTML
 # fragment with no title, no chrome, and no rate-limit worth working around
@@ -481,7 +489,17 @@ def wait_for_report(
                 seen.add(m["id"])
                 first = m.get("text", "").strip().splitlines()[:1]
                 log(f"    [{m['id']}] {m.get('author')}: {first[0] if first else ''}")
-        report = next((m for m in messages if m.get("author") == HIVE_REPORT_AUTHOR), None)
+        # The close is the last `hive-report` row that is not a failed-turn
+        # notice ("@theorist's turn did not finish: …"); those share the author
+        # because they are host-authored, but the room continues after them.
+        report = next(
+            (
+                m for m in reversed(messages)
+                if m.get("author") == HIVE_REPORT_AUTHOR
+                and not m.get("text", "").lstrip().startswith("@")
+            ),
+            None,
+        )
         if report:
             return report, messages
         time.sleep(5)
@@ -588,7 +606,9 @@ def main() -> int:
     )
     ap.add_argument(
         "--answers",
-        default=None,
+        default=next(
+            (c for c in DEFAULT_ANSWER_FILES if __import__("os").path.exists(c)), None
+        ),
         help="a Solutions.md-shaped file of '<n>. <answer>' lines to grade against",
     )
     ap.add_argument(
@@ -616,7 +636,10 @@ def main() -> int:
         results.append(outcome)
         with open(args.out, "w") as fh:
             json.dump(results, fh, indent=2)
-        if outcome["verdict"] == "correct":
+        # A room that converged on a problem this driver cannot grade is not a
+        # failure of the room; only a wrong, undecided or timed-out episode
+        # counts toward the stop.
+        if outcome["verdict"] in ("correct", "converged (no known answer)"):
             consecutive_failures = 0
         else:
             consecutive_failures += 1
