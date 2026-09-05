@@ -26,9 +26,7 @@ use tinyhivemind_hive::{
 };
 
 use super::log::EventLogSessionLog;
-use super::memory::{
-    HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT,
-};
+use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT};
 use super::moves::{self, MoveViolation};
 use super::prompt::{EpisodePrompt, marker_line};
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
@@ -295,7 +293,10 @@ impl<'a> EpisodeDriver<'a> {
                 .with_unspoken(&unspoken)
                 .render(&turn, &visible);
 
-            let line = match self.line_from(&turn.agent_id, &prompt, &mut violations).await {
+            let line = match self
+                .line_from(&turn.agent_id, &prompt, &mut violations)
+                .await
+            {
                 Ok(line) => {
                     consecutive_failures = 0;
                     line

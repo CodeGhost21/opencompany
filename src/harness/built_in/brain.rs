@@ -202,9 +202,9 @@ use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::blockers::{BlockerPayload, BlockerStep};
 use crate::ports::brain::{Brain, CycleHost};
+use crate::ports::context::ContextStore;
 use crate::ports::runs::{RunOutcome, RunStatus};
 use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
-use crate::ports::context::ContextStore;
 use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk, CycleRequest,
     CycleResult, Effect, EffectGroup, EventSeq, OutboundMessage, TokenUsage, TurnStep,
@@ -4346,7 +4346,11 @@ const HIVE_SEARCH_FANOUT: usize = 8;
 
 #[async_trait]
 impl crate::hivemind::HiveMemory for HiveDeskMemory {
-    async fn recall(&self, query: &str, limit: usize) -> Result<Vec<crate::hivemind::HiveMemoryHit>> {
+    async fn recall(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::hivemind::HiveMemoryHit>> {
         let prefix = crate::hivemind::desk_prefix(&self.desk_id);
         let mine = self.context.list(&self.company, &prefix).await?;
         if mine.is_empty() {
@@ -4355,7 +4359,11 @@ impl crate::hivemind::HiveMemory for HiveDeskMemory {
         // Relevance first: the store's own ranking, narrowed to this desk.
         let hits = self
             .context
-            .search(&self.company, query, limit.saturating_mul(HIVE_SEARCH_FANOUT))
+            .search(
+                &self.company,
+                query,
+                limit.saturating_mul(HIVE_SEARCH_FANOUT),
+            )
             .await?;
         let mut addrs: Vec<crate::ports::types::ChunkAddr> = hits
             .into_iter()

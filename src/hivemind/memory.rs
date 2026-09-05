@@ -87,7 +87,11 @@ pub fn slug(title: &str) -> String {
         }
     }
     let out = out.trim_end_matches('-').to_owned();
-    if out.is_empty() { "note".to_owned() } else { out }
+    if out.is_empty() {
+        "note".to_owned()
+    } else {
+        out
+    }
 }
 
 /// One thing the desk remembers, as it will be rendered into a prompt.

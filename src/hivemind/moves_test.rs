@@ -297,7 +297,10 @@ async fn a_corrected_member_that_complies_is_not_recorded_as_a_violation() {
     let runner = Runner::new(&[
         ("planner", "!propose #stage Stage the rollout."),
         ("scout", "!propose #ship Ship it."),
-        ("scout", "!evidence #stage ^1 The last rollout took checkout down."),
+        (
+            "scout",
+            "!evidence #stage ^1 The last rollout took checkout down.",
+        ),
     ]);
     let outcome = EpisodeDriver::new(
         MemoryLog::company(),
@@ -405,7 +408,10 @@ async fn under_require_evidential_a_proposal_plus_an_evidential_support_carries(
     );
     let desk = desk_of(&manifest, "eng").expect("a room");
     let runner = Runner::new(&[
-        ("planner", "!propose #stage Stage the rollout behind a flag."),
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
         (
             "scout",
             "!evidence #stage ^1 The last full rollout took checkout down for 40 minutes.",
@@ -480,8 +486,11 @@ async fn two_bare_proposals_of_one_topic_do_not_carry_when_only_one_seat_may_pro
 async fn a_recall_block_reaches_every_prompt_of_the_episode() {
     let log = Arc::new(MemoryLog::default());
     let trigger = open(&log).await;
-    let desk = desk_of(&manifest_with("hive = { turn_budget = 2, blind_round = false }"), "eng")
-        .expect("a room");
+    let desk = desk_of(
+        &manifest_with("hive = { turn_budget = 2, blind_round = false }"),
+        "eng",
+    )
+    .expect("a room");
     let memory = Arc::new(ScriptedMemory::with_hits(&[
         "Decide the rollout — #stage\n\nCarried: #stage\nSupporters: planner, scout",
     ]));
@@ -529,12 +538,18 @@ async fn a_converged_episode_writes_exactly_one_note_with_the_topic_and_the_evid
     .expect("a room");
     let memory = Arc::new(ScriptedMemory::default());
     let runner = Runner::new(&[
-        ("planner", "!propose #stage Stage the rollout behind a flag."),
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
         (
             "critic",
             "!evidence #stage ^1 The last full rollout took checkout down.",
         ),
-        ("scout", "!support #stage ^3 Staging bounds the blast radius."),
+        (
+            "scout",
+            "!support #stage ^3 Staging bounds the blast radius.",
+        ),
         ("planner", "!pin ^3 Keep the outage on the board."),
         ("critic", "!commit #stage ^3 The room settled on staging."),
         ("scout", "!commit #stage ^3 Recorded."),
@@ -562,7 +577,8 @@ async fn a_converged_episode_writes_exactly_one_note_with_the_topic_and_the_evid
     assert!(note.body.contains("Carried: #stage"), "{}", note.body);
     assert!(note.body.contains("Supporters:"), "{}", note.body);
     assert!(
-        note.body.contains("!evidence #stage ^1 The last full rollout"),
+        note.body
+            .contains("!evidence #stage ^1 The last full rollout"),
         "the evidence lines are the point of the note:\n{}",
         note.body
     );
@@ -637,7 +653,9 @@ async fn a_broken_memory_never_fails_the_episode() {
     assert!(outcome.turns >= 1, "{outcome:?}");
     let asked = runner.asked();
     assert!(
-        asked.iter().all(|(_, prompt)| !prompt.contains("The desk remembers:")),
+        asked
+            .iter()
+            .all(|(_, prompt)| !prompt.contains("The desk remembers:")),
         "a failed recall renders no block"
     );
 }

@@ -30,15 +30,7 @@ use std::collections::BTreeMap;
 /// member entitled to put something on the board is entitled to take it off
 /// again. Splitting them would be a permission nobody could use correctly.
 pub const MOVE_KINDS: &[&str] = &[
-    "propose",
-    "support",
-    "object",
-    "refute",
-    "evidence",
-    "question",
-    "defer",
-    "commit",
-    "pin",
+    "propose", "support", "object", "refute", "evidence", "question", "defer", "commit", "pin",
 ];
 
 /// The permission kind a marker line asks for, if it asks for one.
