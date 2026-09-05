@@ -1,11 +1,33 @@
 # Hive Math Lab
 
-The [Agentic Math Lab](../agentic_math_lab/README.md) with its three working
-roles — theorist, programmer, verifier — seated on **one desk** instead of
-four, so a stated problem is answered by a tinyhivemind deliberation episode
-rather than by an orchestrator handing work from lead to lead. See
-`docs/spec/runtime/hivemind.md` for the mechanics and
-`scripts/hive-euler.py` for the headless Project Euler driver.
+The [Agentic Math Lab](../agentic_math_lab/README.md), re-seated on **one
+desk** instead of four, so a stated problem is answered by a tinyhivemind
+deliberation episode rather than by an orchestrator handing work from lead to
+lead. The desk keeps the parent lab's three working roles and adds three more
+instruments a hand-off chain had no seat for: a literal reading of the
+statement, a brute force with no clever step to be wrong about, and a memory
+of what this lab already knows. See `docs/spec/runtime/hivemind.md` for the
+mechanics and `scripts/hive-euler.py` for the headless Project Euler driver.
+
+## The solvers desk
+
+Six members, six instruments. Three run on the strongest tier bought
+(`agentic-v1`), reasoning-heavy work runs on `reasoning-v1`, and the three
+that neither derive nor implement run on the cheap `chat-v1` tier — a diverse
+roster, not a uniform one running six copies of the same model.
+
+| Member | Tier → model | May `!propose`? | Job |
+| --- | --- | --- | --- |
+| `theorist` | reasoning → `reasoning-v1` | never | Reduces the problem, costs the naive method, pins the small-case table. |
+| `programmer` | reasoning → `reasoning-v1` | **only member who may** | Writes and runs the program; the number on the floor is what it printed. |
+| `verifier` | agentic → `agentic-v1` | never | An independent implementation written from the statement, not the program. |
+| `skeptic` | none → `chat-v1` | never | Reads the statement literally; hunts inclusive/exclusive, base, and ordering misreadings. |
+| `brute_forcer` | none → `chat-v1` | never | The naive method at a reduced bound, always with its command and output. |
+| `archivist` | none → `chat-v1` | never | The desk's memory: recalls prior problems and methods, records what carried. |
+
+A proposal needs a **quorum of three** grounded, differently-equipped
+supporters to carry — not two identical `!propose`s from members who each
+solved it alone, which is what a live run without this roster showed.
 
 Run it locally against the ladder router and a CortexDB memory instance:
 
