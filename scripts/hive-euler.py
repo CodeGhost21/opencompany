@@ -516,6 +516,7 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
     report, messages = wait_for_report(host, desk, after_id, timeout, log, poster, failure)
     elapsed = round(time.time() - started, 1)
     turns = [m for m in messages if m.get("author") not in (HIVE_REPORT_AUTHOR,) and not m.get("mine")]
+    activity = analyze_transcript(turns, report.get("text") if report else None)
     outcome = {
         "problem": pid,
         "title": problem["title"],
@@ -524,7 +525,9 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
         "turns": len(turns),
         "report": report.get("text") if report else None,
         "messages": messages,
+        **activity,
     }
+    answer = problem["answer"]
     if report is None:
         outcome["verdict"] = "timeout"
     else:
@@ -536,17 +539,20 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
         # The report names the carried topic; a topic is usually the number
         # itself (`#233168`) but a room may name it otherwise, so fall back to
         # the last supporting line's integers.
-        if problem["answer"] not in found:
+        if answer and answer not in found:
             for m in reversed(turns):
-                if problem["answer"] in integers_in(m.get("text", "")):
-                    found.append(problem["answer"])
+                if answer in integers_in(m.get("text", "")):
+                    found.append(answer)
                     break
         outcome["converged"] = converged
-        outcome["verdict"] = (
-            "correct" if converged and problem["answer"] in found else
-            "wrong" if converged else
-            "undecided"
-        )
+        if answer is None:
+            outcome["verdict"] = "converged (no known answer)" if converged else "undecided"
+        else:
+            outcome["verdict"] = (
+                "correct" if converged and answer in found else
+                "wrong" if converged else
+                "undecided"
+            )
     log(f"   -> {outcome['verdict']} after {len(turns)} turns in {elapsed}s")
     return outcome
 
