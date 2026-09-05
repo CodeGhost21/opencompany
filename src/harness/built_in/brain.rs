@@ -4253,6 +4253,41 @@ impl HarnessBrain {
     }
 }
 
+/// A hive episode's turn seam, wired to the harness.
+///
+/// The whole of what an episode needs from this host: an agent id and a prompt
+/// in, one reply out. Everything that makes the answering teammate a teammate —
+/// its tools, its memory retrieve/inject/store loop, its approval gate — comes
+/// from `RunTurn::run` being the ordinary turn path, unchanged. A deliberating
+/// turn differs from a single-responder turn in the prompt it is handed and in
+/// nothing else.
+///
+/// The chat target is the desk the episode is deliberating on, so the live
+/// turn-stream frames carry it and the console routes them to that thread
+/// exactly as it does for a normal desk turn.
+struct HiveDeskRunner {
+    run_turn: Arc<dyn RunTurn>,
+    company: CompanyId,
+    chat_id: Option<String>,
+    thread_root: Option<EventSeq>,
+}
+
+#[async_trait]
+impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
+    async fn speak(&self, agent_id: &str, prompt: &str) -> Result<String> {
+        let outcome = self
+            .run_turn
+            .run(
+                &self.company,
+                agent_id,
+                prompt,
+                ChatTarget::in_thread(self.chat_id.as_deref(), self.thread_root),
+            )
+            .await?;
+        Ok(outcome.reply)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
