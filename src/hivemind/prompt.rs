@@ -129,6 +129,11 @@ pub struct EpisodePrompt<'a> {
     /// The desk's pinboard, folded from the same journal the transcript came
     /// from.
     pins: &'a [Pin],
+    /// What the desk remembers, recalled once at the top of the episode.
+    recall: &'a [HiveMemoryHit],
+    /// Members who have not taken a turn yet in this episode, when the fold has
+    /// just handed the floor back to whoever spoke last.
+    unspoken: &'a [String],
 }
 
 impl<'a> EpisodePrompt<'a> {
@@ -147,7 +152,34 @@ impl<'a> EpisodePrompt<'a> {
             task,
             quorum,
             pins,
+            recall: &[],
+            unspoken: &[],
         }
+    }
+
+    /// Render what the desk remembers from earlier episodes into this prompt.
+    ///
+    /// Recalled once per episode by the driver and handed to every turn, so a
+    /// room does not pay one store round-trip per speaker for an answer that
+    /// cannot change mid-episode.
+    #[must_use]
+    pub fn with_recall(mut self, recall: &'a [HiveMemoryHit]) -> Self {
+        self.recall = recall;
+        self
+    }
+
+    /// Name the members who have not spoken yet in this episode.
+    ///
+    /// Rendered only when the driver has something to say with it — the fold
+    /// gave the floor back to the member who just held it while somebody has
+    /// still not used theirs. It is a *prompt*, never an override: the library
+    /// picked this speaker under invariants this host does not get to break, so
+    /// the repair available is to tell the speaker who is missing and let it
+    /// `!question` or `!defer` to them.
+    #[must_use]
+    pub fn with_unspoken(mut self, unspoken: &'a [String]) -> Self {
+        self.unspoken = unspoken;
+        self
     }
 
     /// Render exactly what this turn is allowed to see.
@@ -157,21 +189,103 @@ impl<'a> EpisodePrompt<'a> {
             Visibility::Blind => "You cannot yet see your peers' positions. Form your own first.",
             Visibility::Full => "You can see the whole room.",
         };
-        let protocol = match turn.phase {
-            Phase::Deliberate => format!("{DELIBERATE_MOVES}\n{DELIBERATE_RULES}"),
-            Phase::Commit => COMMIT_PROTOCOL.to_owned(),
-        };
+        let protocol = self.protocol(turn.phase);
         format!(
-            "You are @{}, the {} on the {} desk. {sight}\n\n{}{}\n\n{protocol}\n\n{}{}\
+            "You are @{}, the {} on the {} desk. {sight}\n\n{}{}{}\n\n{protocol}\n\n{}{}{}\
              Shared attributed transcript:\n{}\n\nYour one line:",
             self.member.id,
             self.member.role,
             self.desk.name,
             self.room(),
+            self.remembered(),
             self.board(),
             self.floor(visible),
+            self.missing(),
             self.last_line(visible),
             render_transcript(visible),
+        )
+    }
+
+    /// The markers this seat may open a line with in `phase`, and the rules.
+    ///
+    /// Phase-gated on top of the per-member grammar, in that order: `!commit`
+    /// is the library's to authorize, and every other marker is the desk's to
+    /// assign. A member allowed `commit` and nothing else therefore sees the
+    /// no-move block while the room is still deliberating, which is correct —
+    /// there is nothing it may legally say yet.
+    fn protocol(&self, phase: Phase) -> String {
+        let allowed = self.desk.config.moves_for(&self.member.id);
+        let assigned = allowed.len() < super::moves::MOVE_KINDS.len();
+        match phase {
+            Phase::Commit => {
+                if allowed.contains(&"commit") {
+                    COMMIT_PROTOCOL.to_owned()
+                } else {
+                    NO_MOVE_AVAILABLE.to_owned()
+                }
+            }
+            Phase::Deliberate => {
+                let lines: Vec<&str> = allowed
+                    .iter()
+                    .filter(|kind| **kind != "commit")
+                    .filter_map(|kind| move_line(kind))
+                    .collect();
+                if lines.is_empty() {
+                    return NO_MOVE_AVAILABLE.to_owned();
+                }
+                let head = "Reply with ONE line only, beginning with exactly one of these \
+                            markers:";
+                let tail = if assigned {
+                    format!("{DELIBERATE_RULES}\n{ASSIGNED_MOVES_RULE}")
+                } else {
+                    DELIBERATE_RULES.to_owned()
+                };
+                format!("{head}\n{}\n{tail}", lines.join("\n"))
+            }
+        }
+    }
+
+    /// What the desk remembers, or nothing when it remembers nothing.
+    ///
+    /// Attributed as memory rather than rendered into the transcript, and
+    /// carrying no sequence, because it is not a message on this desk: a member
+    /// that could cite it with `^N` would be grounding a decision in a number
+    /// nothing in this conversation answers to.
+    fn remembered(&self) -> String {
+        if self.recall.is_empty() {
+            return String::new();
+        }
+        let lines = self
+            .recall
+            .iter()
+            .map(|hit| {
+                let flat = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("- {}", truncate_chars(&flat, MAX_RECALL_CHARS))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\nThe desk remembers:\n(From earlier episodes on this desk. This is memory, not a \
+             line in this conversation — it has no message number and cannot be cited with ^.)\n\
+             {lines}\n",
+        )
+    }
+
+    /// Who has not spoken yet, when the driver asked for it to be said.
+    fn missing(&self) -> String {
+        if self.unspoken.is_empty() {
+            return String::new();
+        }
+        let who = self
+            .unspoken
+            .iter()
+            .map(|id| format!("@{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Members who have not spoken yet: {who}. You have the floor twice in a row. If what \
+             the room is missing is theirs to supply, !question them or !defer #topic to them \
+             rather than restating your own position.\n\n",
         )
     }
 
@@ -365,4 +479,22 @@ fn plain(text: &str) -> String {
         }
     }
     plain
+}
+
+/// Truncate `text` to at most `max` characters, on a char boundary.
+///
+/// The ellipsis is budgeted *inside* `max`, so the cap never quietly exceeds
+/// the bound it advertises — the same accounting
+/// [`memory_loop::truncate_chars`](crate::harness::built_in::memory_loop) does
+/// for injected prior work, duplicated because that module is harness-gated and
+/// this one compiles in every build.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let head: String = text.chars().take(max - 1).collect();
+    format!("{head}\u{2026}")
 }
