@@ -497,7 +497,7 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
         "support only a number you independently checked, and object to anything that did not "
         "come out of a run."
     )
-    log(f"== Problem {pid} ({problem['title']}) — expecting {problem['answer']}")
+    log(f"== Problem {pid} ({problem['title']}) — expecting {problem['answer'] or 'unknown'}")
     started = time.time()
     # The chat POST holds open for the whole episode (the cycle runs it
     # synchronously), and `shell` parks for approval inside it — so the
