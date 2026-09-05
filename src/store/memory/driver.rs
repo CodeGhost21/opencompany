@@ -186,8 +186,13 @@ fn open_failed(error: anyhow::Error) -> OpenCompanyError {
 /// minted for, this decodes that claim (no signature verification — the token
 /// is already trusted, it is this host's own configured credential) rather
 /// than defaulting straight to a generic name that would mismatch the token
-/// and turn every call into a 401. Falls back to `"opencompany"` when neither
-/// source names an actor.
+/// and turn every call into a 401.
+///
+/// Falls back to `"service:opencompany"` when neither source names an actor —
+/// verified against a live CortexDB instance, not guessed: the header is
+/// `type:id` (type one of `user`, `agent`, `service`, `system`), and a bare
+/// name like `"opencompany"` is refused with `invalid X-Cortex-Actor: actor id
+/// missing ':' delimiter`.
 fn cortexdb_actor(key: &str) -> String {
     const ENV: &str = "OPENCOMPANY_MEMORY_ACTOR";
     if let Ok(actor) = std::env::var(ENV) {
@@ -196,7 +201,7 @@ fn cortexdb_actor(key: &str) -> String {
             return actor.to_string();
         }
     }
-    jwt_subject(key).unwrap_or_else(|| "opencompany".to_string())
+    jwt_subject(key).unwrap_or_else(|| "service:opencompany".to_string())
 }
 
 /// Reads the `sub` claim out of a JWT's payload segment, without verifying
