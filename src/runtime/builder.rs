@@ -9718,6 +9718,13 @@ needs_reason = true
             id = "eng"
             name = "Engineering"
             members = ["eng1", "eng2"]
+            # This test is about WHO LEADS a desk, and a two-member desk now
+            # answers as a deliberating room by default (`crate::hivemind`) —
+            # where there is no lead, every member speaks, and the operator's
+            # desk order decides nothing. Opted out here so the fixture keeps
+            # exercising the single-responder ladder it was written for; the
+            # order still governs `delegate_to_desk` and the console's crown.
+            hive = { enabled = false }
             "#,
         );
 
