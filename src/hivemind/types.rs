@@ -1,6 +1,8 @@
 //! The manifest knob, the desk snapshot an episode runs over, and what one
 //! episode ends up having decided.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use tinyhivemind_hive::{EpisodePolicy, QuorumPolicy};
 
@@ -13,7 +15,7 @@ use crate::ports::types::{CompanyRecord, EventSeq};
 /// manifest that says nothing gets a room scaled to its membership rather than
 /// a fixed policy that is too tight for a desk of six and meaningless for a
 /// desk of two.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveConfig {
     /// Whether this desk answers as a room.
     ///
@@ -50,6 +52,59 @@ pub struct HiveConfig {
     /// costing a projection flag rather than any concurrency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blind_round: Option<bool>,
+    /// Per-member move grammar: member id → the trace kinds that member may
+    /// open a line with.
+    ///
+    /// The knob that turns a vote back into a deliberation. A room whose
+    /// members may all `!propose` produces three independent proposals and a
+    /// commit — which is what the live `hive_math_lab` run produced in every
+    /// one of nine episodes — because in `tinyhivemind` a proposal already
+    /// counts as its own author's support, so agreement is reached without
+    /// anybody ever having to engage with anybody else's reasoning.
+    ///
+    /// A member the map does not name may make every move, so an omitted table
+    /// is a no-op for every manifest written before it existed. An entry naming
+    /// no kinds at all is read the same way — an empty list is a table somebody
+    /// started and never filled in far more often than it is a vow of silence.
+    ///
+    /// Valid kinds are [`moves::MOVE_KINDS`](crate::hivemind::moves::MOVE_KINDS);
+    /// an unknown kind and an unknown member id are both refused at validation,
+    /// because a typo here fails **open** — the member keeps every move, and the
+    /// desk quietly goes on voting.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub moves: BTreeMap<String, Vec<String>>,
+    /// Whether support must trace back to a stated fact rather than to another
+    /// opinion.
+    ///
+    /// Off by default, matching `QuorumPolicy::DEFAULT`. On, only support whose
+    /// citation chain reaches an `!evidence` counts, and an objection silences
+    /// nobody unless its author has itself deposited evidence in the window.
+    /// Implies `require_grounded`. It is the second half of the repair `moves`
+    /// begins: assigning somebody the evidence seat is worth little if support
+    /// can still be grounded in a peer's say-so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_evidential: Option<bool>,
+    /// Distinct grounded refuters that cap a topic out of contention, if any.
+    ///
+    /// `None` — the default — still *records* refutations in the standings; it
+    /// declines to let them cap anything. Left off by default deliberately:
+    /// tinyhivemind's own benchmark measured the mechanism costing accuracy,
+    /// because a refutation is global where an objection is local, so one
+    /// member firing it on a noisy read removes an option for the whole room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refutation_cap: Option<u32>,
+    /// Turns one member may take before the attention market damps its bids.
+    ///
+    /// Defaults to `EpisodePolicy::DEFAULT` (50), which is effectively off for
+    /// any budget a desk would actually run. Lower it on a desk where one
+    /// member reliably takes the floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dominance_cap: Option<u32>,
+    /// Distinct supporters after which restating a topic scores nothing.
+    ///
+    /// Defaults to `EpisodePolicy::DEFAULT` (3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repetition_cap: Option<u32>,
 }
 
 impl HiveConfig {
@@ -61,6 +116,20 @@ impl HiveConfig {
     #[must_use]
     pub fn deliberates(&self, members: usize) -> bool {
         members >= 2 && self.enabled != Some(false)
+    }
+
+    /// The moves `member` may open a line with, in [`MOVE_KINDS`] order.
+    ///
+    /// [`MOVE_KINDS`]: crate::hivemind::moves::MOVE_KINDS
+    #[must_use]
+    pub fn moves_for(&self, member: &str) -> Vec<&'static str> {
+        super::moves::allowed_for(&self.moves, member)
+    }
+
+    /// Whether `member` may open a line with `kind`.
+    #[must_use]
+    pub fn may(&self, member: &str, kind: &str) -> bool {
+        self.moves_for(member).contains(&kind)
     }
 }
 
@@ -153,12 +222,32 @@ impl HivePolicy {
             .turn_budget
             .unwrap_or_else(|| count.saturating_mul(3))
             .max(1);
+        // `require_evidential` implies `require_grounded` in the library, but
+        // the flag is set here as well rather than left to be implied: a policy
+        // that says one and not the other reads, in a log or a test, as a
+        // policy that meant it.
+        let require_evidential = config.require_evidential.unwrap_or(false);
         Self {
             episode: EpisodePolicy {
                 turn_budget,
                 blind_round: config.blind_round.unwrap_or(true),
+                // Both caps are the library's own defaults unless the manifest
+                // says otherwise, and a zero is refused at validation rather
+                // than clamped here — a `dominance_cap = 0` would damp every
+                // member's first bid, which is a room that never speaks.
+                dominance_cap: config
+                    .dominance_cap
+                    .unwrap_or(EpisodePolicy::DEFAULT.dominance_cap)
+                    .max(1),
+                repetition_cap: config
+                    .repetition_cap
+                    .unwrap_or(EpisodePolicy::DEFAULT.repetition_cap)
+                    .max(1),
                 quorum: QuorumPolicy {
                     threshold,
+                    require_grounded: require_evidential || QuorumPolicy::DEFAULT.require_grounded,
+                    require_evidential,
+                    refutation_cap: config.refutation_cap,
                     ..QuorumPolicy::DEFAULT
                 },
                 ..EpisodePolicy::DEFAULT
@@ -217,6 +306,14 @@ pub struct EpisodeOutcome {
     /// not fatal — a decision the room actually reached is already durable in
     /// the turns above it.
     pub report_seq: Option<EventSeq>,
+    /// Lines a member deposited that its seat was not entitled to make, after
+    /// the correction and the second attempt both failed.
+    ///
+    /// Reported rather than merely logged: a desk whose move grammar is wrong
+    /// for the work looks, from the transcript alone, exactly like a desk whose
+    /// members are being unhelpful, and the operator is the only one who can
+    /// tell the two apart.
+    pub violations: Vec<super::moves::MoveViolation>,
 }
 
 impl EpisodeOutcome {
@@ -228,6 +325,31 @@ impl EpisodeOutcome {
     /// conversation that already has one.
     #[must_use]
     pub fn summary(&self) -> String {
+        format!("{}{}", self.ending_summary(), self.violation_summary())
+    }
+
+    /// The sentence naming demoted lines, or nothing when there were none.
+    #[must_use]
+    pub fn violation_summary(&self) -> String {
+        if self.violations.is_empty() {
+            return String::new();
+        }
+        let count = self.violations.len();
+        let plural = if count == 1 { "line" } else { "lines" };
+        let named = self
+            .violations
+            .iter()
+            .map(|violation| format!("@{} !{}", violation.agent_id, violation.attempted))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            " {count} {plural} demoted for a move its author may not make on this desk: {named}."
+        )
+    }
+
+    /// How it ended, without the move-grammar postscript.
+    #[must_use]
+    pub fn ending_summary(&self) -> String {
         let turns = self.turns;
         let plural = if turns == 1 { "turn" } else { "turns" };
         match &self.ending {
@@ -293,7 +415,7 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
         .group_chats
         .iter()
         .find(|group| group.id == desk_id);
-    let config = declared.map(|group| group.hive).unwrap_or_default();
+    let config = declared.map(|group| group.hive.clone()).unwrap_or_default();
     let members: Vec<HiveMember> = record
         .effective_desk_members(&desk_id)
         .into_iter()
