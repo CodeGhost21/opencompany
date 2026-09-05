@@ -36,7 +36,8 @@
 
 use tinyhivemind_hive::{
     HiveTurn, Phase, QuorumPolicy, Sequence, SessionAuthor, SessionMessage, Visibility, pins::Pin,
-    quorum::standings, trace::resolve,
+    quorum::{TopicStanding, standings},
+    trace::resolve,
 };
 
 use super::memory::{HiveMemoryHit, MAX_RECALL_CHARS};
@@ -419,9 +420,8 @@ impl<'a> EpisodePrompt<'a> {
     fn floor(&self, standings: &[TopicStanding]) -> String {
         if standings.is_empty() {
             return format!(
-                "No option is on the floor yet. The topic id you coin becomes the room's name \
-                 for that option, so keep it short. An option carries once {} different members \
-                 have backed it with grounds.\n\n",
+                "No option is on the floor yet, so the id above is still free. An option carries \
+                 once {} different members have backed it with grounds.\n\n",
                 self.quorum.threshold,
             );
         }
@@ -468,6 +468,107 @@ impl<'a> EpisodePrompt<'a> {
                 )
             })
     }
+}
+
+/// Words a task's first line uses to frame the question rather than to name it.
+///
+/// Dropped before the id is derived, because they are exactly the tokens two
+/// different tasks share: "Project Euler 12" and "Problem: Euler 145" have
+/// nothing in common that a topic id should record except the part that
+/// differs.
+const FRAMING_WORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "with", "please", "project",
+    "problem", "question", "task", "solve", "compute", "find", "what", "is", "we", "our",
+];
+
+/// How many characters a derived topic id may run to.
+const MAX_TOPIC_CHARS: usize = 32;
+
+/// The id every line about this task's answer should use.
+///
+/// The live failure this exists for: one Project Euler problem produced
+/// `#euler12`, `#euler12-triangle` and `#euler12-triangular` in a single
+/// episode, so support for one number was split three ways and nothing ever
+/// reached a quorum. The room cannot agree on a name it was never given, so the
+/// host derives one and every prompt of the episode repeats it.
+///
+/// An explicit `topic: #foo` line anywhere in the operator's message wins — the
+/// operator naming the id is better than any derivation. Otherwise the id is a
+/// slug of the message's first line: the part before a leading colon when there
+/// is a short one (a title), with framing words dropped and a trailing number
+/// folded onto the word before it, so "Project Euler 12: Highly divisible
+/// triangular number" becomes `euler12`. A line with nothing left to slug falls
+/// back to `answer`.
+#[must_use]
+pub fn canonical_topic(task: &str) -> String {
+    if let Some(declared) = declared_topic(task) {
+        return declared;
+    }
+    let first = task
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    // A short head before a colon is a title, and the rest is the statement:
+    // slugging the whole line would bury the name under its own description.
+    let head = match first.split_once(':') {
+        Some((head, _)) if !head.trim().is_empty() && head.split_whitespace().count() <= 6 => head,
+        _ => first,
+    };
+    let mut words: Vec<String> = Vec::new();
+    for word in head
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+    {
+        let word = word.to_ascii_lowercase();
+        if FRAMING_WORDS.contains(&word.as_str()) {
+            continue;
+        }
+        // A bare number names nothing on its own — it is the index of whatever
+        // came before it — so it joins that word rather than becoming one.
+        match words.last_mut() {
+            Some(last) if word.chars().all(|c| c.is_ascii_digit()) => last.push_str(&word),
+            _ => words.push(word),
+        }
+    }
+    words.truncate(2);
+    let slug = words.join("-");
+    let slug = truncate_chars(&slug, MAX_TOPIC_CHARS)
+        .trim_matches('-')
+        .trim_end_matches('\u{2026}')
+        .to_owned();
+    if slug.is_empty() {
+        "answer".to_owned()
+    } else {
+        slug
+    }
+}
+
+/// The id an operator named outright, if the message names one.
+///
+/// `topic: #foo`, `Topic: foo` — the `#` is optional, because an operator
+/// writing the line at all has already said what they mean and refusing it over
+/// a missing sigil would be a rule nobody can see.
+fn declared_topic(task: &str) -> Option<String> {
+    task.lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let rest = line
+                .strip_prefix("topic:")
+                .or_else(|| line.strip_prefix("Topic:"))
+                .or_else(|| line.strip_prefix("TOPIC:"))?;
+            let word = rest.trim().trim_start_matches('#').split_whitespace().next()?;
+            let slug: String = word
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let slug = truncate_chars(&slug, MAX_TOPIC_CHARS)
+                .trim_end_matches('\u{2026}')
+                .to_owned();
+            (!slug.is_empty()).then_some(slug)
+        })
+        .next()
 }
 
 /// Render an attributed transcript the way every prompt here shows one.
