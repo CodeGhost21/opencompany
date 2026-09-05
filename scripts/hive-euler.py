@@ -191,6 +191,201 @@ PROBLEMS: dict[str, dict[str, str]] = {
 }
 
 
+class _StatementExtractor(HTMLParser):
+    """Strip `minimal=<N>`'s HTML down to text, keeping paragraph breaks.
+
+    `$...$` LaTeX is never touched — it is not a tag, so it simply passes
+    through `handle_data` unchanged, dollar signs and all.
+    """
+
+    BREAK = "\x00"
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if tag in _BLOCK_TAGS:
+            self.parts.append(self.BREAK)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _BLOCK_TAGS:
+            self.parts.append(self.BREAK)
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        self.parts.append(html.unescape(f"&{name};"))
+
+    def handle_charref(self, name: str) -> None:
+        self.parts.append(html.unescape(f"&#{name};"))
+
+
+def clean_statement_html(raw: str) -> str:
+    """Tags out, entities unescaped, `$...$` kept as-is, blank runs collapsed."""
+    extractor = _StatementExtractor()
+    extractor.feed(raw)
+    paragraphs = []
+    for chunk in "".join(extractor.parts).split(_StatementExtractor.BREAK):
+        collapsed = re.sub(r"\s+", " ", chunk).strip()
+        if collapsed:
+            paragraphs.append(collapsed)
+    return "\n\n".join(paragraphs)
+
+
+def fetch_statement(pid: str, cache_dir: Path, do_fetch: bool, log) -> str | None:
+    """The problem statement for `pid`, from the cache or the network.
+
+    A hit under `cache_dir` is trusted forever — a published statement does
+    not change — so a second run of the same ladder makes zero requests.
+    """
+    cache_file = cache_dir / f"{pid}.txt"
+    if cache_file.exists():
+        return cache_file.read_text(encoding="utf-8")
+    if not do_fetch:
+        return None
+    url = FETCH_URL.format(n=pid)
+    req = urllib.request.Request(url, headers={"User-Agent": "hive-euler/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            raw = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, TimeoutError) as err:
+        log(f"!! fetch failed for problem {pid}: {err}")
+        return None
+    text = clean_statement_html(raw)
+    if not text:
+        return None
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(text, encoding="utf-8")
+    return text
+
+
+_ANSWER_LINE = re.compile(r"^\s*(\d+)\.\s+(\S+)\s*$")
+
+
+def load_answers(path: str | None) -> dict[str, str]:
+    """Published answers from a `Solutions.md`-shaped file: `123. 456789` lines."""
+    if not path:
+        return {}
+    answers: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                m = _ANSWER_LINE.match(line)
+                if m:
+                    answers[m.group(1)] = m.group(2)
+    except OSError as err:
+        raise SystemExit(f"--answers {path}: {err}") from None
+    return answers
+
+
+def resolve_problem(
+    pid: str, answers: dict[str, str], cache_dir: Path, do_fetch: bool, log
+) -> dict[str, str] | None:
+    """A problem's title/statement/answer, offline table first, fetch to fill gaps."""
+    known = PROBLEMS.get(pid)
+    statement = (known or {}).get("statement")
+    if do_fetch or statement is None:
+        fetched = fetch_statement(pid, cache_dir, do_fetch, log)
+        if fetched:
+            statement = fetched
+    if statement is None:
+        log(f"!! no statement for problem {pid} (not fetched, not in the offline table)")
+        return None
+    answer = answers.get(pid) or (known or {}).get("answer")
+    if answer is None:
+        log(f"!! no published answer known for problem {pid}; will not be able to grade it")
+    title = (known or {}).get("title", f"Problem {pid}")
+    return {"title": title, "statement": statement, "answer": answer}
+
+
+def parse_problem_spec(spec: str) -> list[str]:
+    """`"200-210,233,301"` -> ordered, de-duplicated problem ids."""
+    seen: set[str] = set()
+    ids: list[str] = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            lo_s, _, hi_s = chunk.partition("-")
+            lo, hi = int(lo_s), int(hi_s)
+            if hi < lo:
+                lo, hi = hi, lo
+            span = (str(n) for n in range(lo, hi + 1))
+        else:
+            span = (chunk,)
+        for pid in span:
+            if pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+    return ids
+
+
+def analyze_transcript(turns: list[dict], report_text: str | None) -> dict:
+    """Count moves, speakers, mentions and citations; check who backed the winner.
+
+    `carried_supporters_other_than_proposer` is the direct check on the
+    failure a live run showed: a room can converge on a proposal with two
+    `!propose`s and nobody's `!support` behind either. `None` when the report
+    named no topic (deadlocked/exhausted/idle) or nobody ever proposed it.
+    """
+    moves = {kind: 0 for kind in MOVE_KINDS}
+    speakers: set[str] = set()
+    mentions = 0
+    citations = 0
+    proposer_of: dict[str, str] = {}
+    supporters_of: dict[str, set[str]] = {}
+
+    for turn in turns:
+        text = (turn.get("text") or "").strip()
+        author = turn.get("author")
+        if author:
+            speakers.add(author)
+        if not text:
+            continue
+        mentions += len(_MENTION_RE.findall(text))
+        citations += len(set(_CITE_RE.findall(text)))
+        first_line = text.splitlines()[0]
+        match = _MARKER_RE.match(first_line)
+        if not match:
+            continue
+        kind = match.group(1)
+        bucket = "pin" if kind == "unpin" else kind
+        if bucket in moves:
+            moves[bucket] += 1
+        topic_match = _TOPIC_RE.search(first_line)
+        topic = topic_match.group(1) if topic_match else None
+        if not (topic and author):
+            continue
+        if kind == "propose":
+            proposer_of.setdefault(topic, author)
+        elif kind in ("support", "commit"):
+            supporters_of.setdefault(topic, set()).add(author)
+
+    carried_topic = None
+    if report_text:
+        m = re.search(r"#(\S+)", report_text)
+        if m:
+            carried_topic = m.group(1).rstrip(".,;:")
+
+    diverse_support = None
+    if carried_topic is not None:
+        proposer = proposer_of.get(carried_topic)
+        backers = supporters_of.get(carried_topic, set())
+        diverse_support = any(a != proposer for a in backers)
+
+    return {
+        "moves": moves,
+        "distinct_speakers": len(speakers),
+        "mentions": mentions,
+        "citations": citations,
+        "carried_topic": carried_topic,
+        "carried_supporters_other_than_proposer": diverse_support,
+    }
+
+
 class Host:
     """A cookie-carrying HTTP client for one OpenCompany host."""
 
