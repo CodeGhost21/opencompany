@@ -292,7 +292,7 @@ async fn a_support_that_reaches_no_evidence_is_re_prompted_once() {
     let log = Arc::new(MemoryLog::default());
     let trigger = open(&log).await;
     let manifest = manifest_with(
-        "hive = { turn_budget = 6, quorum = 2, blind_round = false, require_evidential = true }",
+        "hive = { turn_budget = 9, quorum = 2, blind_round = false, require_evidential = true }",
     );
     let desk = desk_of(&manifest, "eng").expect("a room");
     let runner = Runner::new(&[
@@ -308,6 +308,10 @@ async fn a_support_that_reaches_no_evidence_is_re_prompted_once() {
             "critic",
             "!support #stage ^3 The outage is the reason to stage.",
         ),
+        // Once quorum carries, the room records it.
+        ("planner", "!commit #stage ^3 Recorded."),
+        ("scout", "!commit #stage ^3 Recorded."),
+        ("critic", "!commit #stage ^3 Recorded."),
     ]);
     let outcome = EpisodeDriver::new(
         MemoryLog::company(),
@@ -320,8 +324,6 @@ async fn a_support_that_reaches_no_evidence_is_re_prompted_once() {
     .await
     .expect("the episode runs");
 
-    eprintln!("REPLIES {:#?}", log.replies("eng"));
-    eprintln!("ASKED {:#?}", runner.asked().iter().map(|(a,_)| a.clone()).collect::<Vec<_>>());
     let prompts = runner.prompts_for("critic");
     assert!(prompts.len() >= 2, "critic must be re-prompted: {prompts:?}");
     assert!(
