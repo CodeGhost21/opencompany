@@ -681,10 +681,14 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
                 .unwrap_or_default()
                 .to_owned();
             let me = ask.who().to_owned();
+            if me != THEORIST && whole.contains("!propose #answer42") {
+                eprintln!("[PROPLEAK] opener {i} @{me} blind={} sees the proposal", ask.blind());
+            }
             for peer in [THEORIST, PROGRAMMER, VERIFIER] {
                 if peer != me && whole.contains(&format!("!question {peer}")) {
                     eprintln!("[LEAK] opener {i} @{me} blind={} sees @{peer}", ask.blind());
                 }
+                let _ = peer;
             }
         }
     }
