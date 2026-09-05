@@ -164,6 +164,81 @@ A marker is recognised at the start of a line, outside fenced code blocks.
 The `#` and the `^` are part of the grammar: `!propose canary …` names nothing
 and is discarded, and a support with no citation does not count.
 
+## The per-member move grammar
+
+A room whose members may all make every move is a room that votes. On a live
+run of `companies/hive_math_lab` over Project Euler 1–145, **every** episode was
+three independent `!propose`s of the same number in the blind round followed by
+`!commit` — and quorum carried, because in `tinyhivemind` a proposal already
+counts as its own author's support. No `!support`, `!object`, `!evidence`,
+`!question` or `!pin` was deposited in nine episodes. Three agents agreeing in
+parallel is not deliberation.
+
+`hive.moves` assigns each seat the markers it may **open a line** with:
+
+```toml
+hive = { moves = { solver = ["propose", "support", "commit"],
+                   checker = ["object", "refute", "evidence", "question"],
+                   archivist = ["evidence", "pin", "question"] } }
+```
+
+- A member the table does not name may make **every** move, so an omitted table
+  is a no-op for every manifest written before it existed.
+- A member named with an **empty** list also keeps every move. An empty list is
+  a table somebody started and never filled in far more often than it is a vow
+  of silence, and the other reading hands a seat the floor with nothing legal
+  to say.
+- `pin` covers `!unpin` too: both write the same board.
+- At least one seat must keep `commit`, or the room reaches quorum with nobody
+  able to record it. Refused at validation.
+- An unknown kind and an unknown member id are refused at validation, because
+  both fail **open** at runtime — the member silently keeps every move and the
+  desk goes on voting, which is the exact symptom the table exists to fix.
+
+### What the prompt shows
+
+Only the markers this seat holds, phase-gated on top: `commit` is the library's
+to authorize (it is absent while the room deliberates, present alone in the
+Commit phase), and every other marker is the desk's to assign. A seat that was
+actually narrowed is also told so, once:
+
+```text
+Reply with ONE line only, beginning with exactly one of these markers:
+!object >N ^M  then why, objecting to message N and citing message M
+!evidence #topic ^N  then a fact, adding grounds without taking a side; …
+<the rules those moves are read under>
+These are the ONLY markers this desk gives you. A line opening with any other
+marker is handed back to you once for correction, and on a second attempt it is
+journaled with its marker stripped — it will say what you wrote and count for
+nothing.
+```
+
+### What enforcement does
+
+| Attempt | What happens |
+| --- | --- |
+| A marker the seat holds, or no marker | Journaled unchanged |
+| First barred marker | The **same** prompt plus one line — "You may not \`!propose\`; your moves are !support, !evidence, !question. Reply again with ONE line beginning with one of those markers." — and one more attempt |
+| Second barred marker | Journaled with the leading `!` removed, and counted as a violation |
+
+A demoted line keeps the member's words and loses its trace: `resolve` reads a
+marker at the start of a line and nowhere else, so a demoted line folds to
+nothing and can never be counted as support for anything. That is the property
+the whole mechanism turns on — a barred move that still carried a topic would
+be a rule the fold does not enforce.
+
+One correction, not a loop: a member that has misunderstood the grammar must
+not be able to spend the desk's whole budget being told about it.
+
+The closing `hive-report` row names every demotion, so an operator can tell a
+desk whose grammar is wrong for the work from a desk whose members are being
+unhelpful:
+
+```text
+The desk settled on #stage after 6 turns (backed by planner, critic). 1 line
+demoted for a move its author may not make on this desk: @scout !propose.
+```
+
 ## What lands in the journal
 
 Nothing new. There is no episode record and no second store — the transcript
@@ -210,7 +285,12 @@ journal rows — and a reload reads the same transcript the room folded.
 id = "creative"
 name = "Creative studio"
 members = ["copywriter", "editor", "strategist"]
-hive = { enabled = true, turn_budget = 9, quorum = 2, blind_round = true }
+hive = { enabled = true, turn_budget = 9, quorum = 2, blind_round = true,
+         require_evidential = true, refutation_cap = 2,
+         dominance_cap = 4, repetition_cap = 2,
+         moves = { copywriter = ["propose", "support", "commit"],
+                   editor    = ["object", "refute", "evidence", "question"],
+                   strategist = ["evidence", "pin", "support", "question"] } }
 ```
 
 | Key | Default | Meaning |
@@ -219,12 +299,23 @@ hive = { enabled = true, turn_budget = 9, quorum = 2, blind_round = true }
 | `turn_budget` | `3 × members` | hard cap on turns; the episode reports itself exhausted at it |
 | `quorum` | `(n / 2 + 1).min(n - 1)` | distinct grounded supporters a topic needs. Clamped into `1..=members` on read |
 | `blind_round` | `true` | whether the opening round hides peers' positions |
+| `moves` | every member, every move | member id → the markers that seat may open a line with. See [the per-member move grammar](#the-per-member-move-grammar) |
+| `require_evidential` | `false` | support counts only when its citation chain reaches an `!evidence`, and an objection silences nobody unless its author deposited evidence in the window. Implies `require_grounded` |
+| `refutation_cap` | unset (off) | distinct grounded refuters that cap a topic out of contention. Left off by default because tinyhivemind's own benchmark measured it costing accuracy — a refutation is global where an objection is local |
+| `dominance_cap` | `50` | turns one member may take before the attention market damps its bids |
+| `repetition_cap` | `3` | distinct supporters after which restating a topic scores nothing |
 
-Both zeroes are rejected at validation rather than clamped — `quorum = 0` would
-settle every topic the moment it was proposed, and `turn_budget = 0` opens a
-room that is exhausted before anybody speaks — because an operator who wrote a
-number meant it, and silently substituting a different one is how a desk ends up
-behaving in a way its manifest does not describe.
+Every zero is rejected at validation rather than clamped — `quorum = 0` would
+settle every topic the moment it was proposed, `turn_budget = 0` opens a room
+that is exhausted before anybody speaks, and a cap of zero fires before anybody
+has done anything — because an operator who wrote a number meant it, and
+silently substituting a different one is how a desk ends up behaving in a way
+its manifest does not describe.
+
+`require_evidential` is the second half of the repair `moves` begins: assigning
+somebody the evidence seat is worth little if support can still be grounded in a
+peer's say-so. A support citing another support is a citation of an *opinion*,
+which is the information-cascade condition with a citation on it.
 
 The defaults are functions of the membership because the membership is the only
 thing the runtime reliably knows. A quorum that is a simple majority *and still
