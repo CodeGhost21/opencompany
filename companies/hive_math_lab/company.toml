@@ -1,14 +1,17 @@
 # The Agentic Math Lab, re-seated as one hive-mind desk.
 #
 # `companies/agentic_math_lab` splits the work across four one-member desks and
-# an orchestrator that hands it from one to the next. This bundle keeps the same
-# three working roles — decide the approach, write the program, break the
-# result — but seats them **on one desk**, so an operator's problem is answered
-# by a tinyhivemind deliberation episode rather than by a single lead's turn
+# an orchestrator that hands it from one to the next. This bundle keeps the
+# same working roles — decide the approach, write the program, break the
+# result — and adds three more instruments the hand-off chain had no seat for
+# (a literal reading of the statement, a brute force with no clever step to be
+# wrong about, and a memory of what this lab already knows), then seats all
+# six **on one desk**, so an operator's problem is answered by a tinyhivemind
+# deliberation episode rather than by a single lead's turn
 # (`docs/spec/runtime/hivemind.md`). Nobody dispatches anybody: each member
 # bids on the salience of what has been said, the highest bid takes the floor,
-# and the desk carries an answer only once a quorum of distinct members has
-# grounded support for it.
+# and the desk carries an answer only once a quorum of distinct, differently
+# equipped members has grounded support for it.
 #
 # The acceptance test is the same as the parent lab's: a Project Euler problem
 # stated in the desk, and the integer the room converges on checked against the

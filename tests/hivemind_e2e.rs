@@ -39,6 +39,7 @@
 //! an approval policy that would make it hang.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1150,4 +1151,164 @@ async fn a_desk_reasons_with_what_it_stored_in_an_earlier_episode() {
         "no journaled line cites what the desk remembered: {rows:?}"
     );
     assert!(used[0].1.starts_with("!evidence"), "{used:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 4b: the same claim, with memory held in a remote engine
+// ---------------------------------------------------------------------------
+
+/// What the CortexDB mock was asked to do, so the test can say *when*.
+#[derive(Default)]
+struct CortexMock {
+    writes: AtomicUsize,
+    reads: AtomicUsize,
+    events: Mutex<Vec<Value>>,
+}
+
+/// A CortexDB instance, in process, speaking the wire shapes the driver relies
+/// on — the same shapes `src/store/memory/cortexdb_test.rs` pins.
+async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
+    /// The credential the driver is configured with. Not a JWT, so the actor
+    /// falls back to the driver's documented default.
+    const TOKEN: &str = "cortex-test-token";
+    /// `type:id`, which is the only shape CortexDB accepts.
+    const ACTOR: &str = "service:opencompany";
+
+    let state = Arc::new(CortexMock::default());
+    let authorized = |headers: &axum::http::HeaderMap| {
+        let bearer = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        let actor = headers
+            .get("x-cortex-actor")
+            .and_then(|value| value.to_str().ok());
+        bearer == Some(TOKEN) && actor == Some(ACTOR)
+    };
+
+    let write_state = Arc::clone(&state);
+    let read_state = Arc::clone(&state);
+    let app = axum::Router::new()
+        .route(
+            "/v1/admin/ready",
+            axum::routing::get(move |headers: axum::http::HeaderMap| async move {
+                if authorized(&headers) {
+                    axum::http::StatusCode::OK
+                } else {
+                    axum::http::StatusCode::UNAUTHORIZED
+                }
+            }),
+        )
+        .route(
+            "/v1/experience",
+            post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let state = Arc::clone(&write_state);
+                async move {
+                    assert!(
+                        authorized(&headers),
+                        "the driver must carry both the bearer and the actor"
+                    );
+                    let id = format!("evt_{}", state.writes.fetch_add(1, Ordering::SeqCst) + 1);
+                    let observed_at = body
+                        .pointer("/context/observed_at")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    state.events.lock().unwrap().push(json!({
+                        "id": id,
+                        "scope": body.get("scope").cloned().unwrap_or(Value::Null),
+                        "content": body.get("content").cloned().unwrap_or(Value::Null),
+                        "observed_at": observed_at,
+                    }));
+                    Json(json!({ "event_id": id, "duplicate": false }))
+                }
+            }),
+        )
+        .route(
+            "/v1/recall",
+            post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let state = Arc::clone(&read_state);
+                async move {
+                    assert!(authorized(&headers), "recall must carry the actor too");
+                    state.reads.fetch_add(1, Ordering::SeqCst);
+                    let scope = body.get("scope").and_then(Value::as_str).unwrap_or_default();
+                    // Ranked retrieval is the engine's job; the mock returns
+                    // everything filed under the asked-for scope and lets the
+                    // host's own ranking do the rest.
+                    let items: Vec<Value> = state
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|event| event.get("scope").and_then(Value::as_str) == Some(scope))
+                        .cloned()
+                        .collect();
+                    Json(json!({ "layers": { "events": items } }))
+                }
+            }),
+        )
+        .route(
+            "/v1/forget",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({ "deleted": { "events": 0 }, "matched": 0 }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), state)
+}
+
+/// **The same claim with the memory ports bound to a remote engine.**
+///
+/// The engine is selected exactly as a deployment selects it — through
+/// `StorageSettings`, which is what `OPENCOMPANY_MEMORY*` parses into — so the
+/// binding under test is the real one and no process environment is mutated.
+#[tokio::test]
+async fn a_desk_reasons_with_memory_held_in_a_remote_engine() {
+    use opencompany::store::{MemoryBackend, StorageSettings, open_memory_overlay};
+
+    let home = tempfile::tempdir().unwrap();
+    let (cortex_url, cortex) = spawn_cortexdb().await;
+    let overlay = open_memory_overlay(&StorageSettings {
+        memory_backend: MemoryBackend::Remote,
+        memory_driver: Some("cortexdb".to_owned()),
+        memory_url: Some(cortex_url),
+        memory_api_key: Some("cortex-test-token".to_owned()),
+        ..StorageSettings::default()
+    })
+    .expect("the cortexdb engine binds")
+    .expect("`remote` yields an overlay");
+
+    let (base_url, script) = spawn_script(remembering_script()).await;
+    let (address, runtime) = boot(home.path(), &base_url, SHORT, Some(overlay)).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client.say(DESK, ASK_ONE).await;
+    let wrote = cortex.writes.load(Ordering::SeqCst);
+    assert!(
+        wrote > 0,
+        "episode one stored nothing through /v1/experience, so the engine was not on the path"
+    );
+
+    client.say(DESK, ASK_TWO).await;
+    assert!(
+        cortex.reads.load(Ordering::SeqCst) > 0,
+        "episode two never read /v1/recall"
+    );
+
+    // The engine served the fact, and the room's line was written from it.
+    let recalled = tool_results_for(&script, ASK_TWO);
+    assert!(
+        recalled.iter().any(|result| result.contains(FACT_KEY)),
+        "the remote engine did not serve back what episode one wrote to it: {recalled:?}"
+    );
+    let rows = replies(&runtime, DESK).await;
+    assert!(
+        turns(&rows).iter().any(|(_, text)| text.contains(FACT_KEY)),
+        "no journaled line cites what the remote engine remembered: {rows:?}"
+    );
 }
