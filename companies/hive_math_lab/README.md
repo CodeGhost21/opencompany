@@ -20,7 +20,7 @@ roster, not a uniform one running six copies of the same model.
 | --- | --- | --- | --- |
 | `theorist` | reasoning → `reasoning-v1` | never | Reduces the problem, costs the naive method, pins the small-case table. |
 | `programmer` | reasoning → `reasoning-v1` | **only member who may** | Writes and runs the program; the number on the floor is what it printed. |
-| `verifier` | agentic → `agentic-v1` | never | An independent implementation written from the statement, not the program. |
+| `verifier` | frontend → `agentic-v1` | never | An independent implementation written from the statement, not the program. |
 | `skeptic` | none → `chat-v1` | never | Reads the statement literally; hunts inclusive/exclusive, base, and ordering misreadings. |
 | `brute_forcer` | none → `chat-v1` | never | The naive method at a reduced bound, always with its command and output. |
 | `archivist` | none → `chat-v1` | never | The desk's memory: recalls prior problems and methods, records what carried. |
