@@ -87,9 +87,9 @@ impl Ask {
             .rev()
             .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
             .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .map(hive_core)
             .find(|content| content.contains(TRANSCRIPT_HEADING))
-            .unwrap_or_default()
-            .to_owned();
+            .unwrap_or_default();
         let speaker = prompt
             .split_once("You are @")
             .and_then(|(_, rest)| rest.split_once(','))
@@ -162,6 +162,20 @@ const YOUR_LINE: &str = "\n\nYour one line:";
 /// The block a member's own previous line is rendered under.
 const ALREADY_SAID: &str = "You already said this";
 
+/// The episode prompt inside one user message.
+///
+/// The memory loop prepends a `## Relevant prior work` preamble to every turn's
+/// message, and the outcomes it retrieves are previous turns — whole prompts
+/// included. So the episode prompt is what follows the LAST `## Task` heading;
+/// reading from the front of the message finds a *quoted* prompt belonging to
+/// somebody else's turn, which is a different agent and a staler transcript.
+fn hive_core(content: &str) -> String {
+    content
+        .rsplit_once("\n## Task\n")
+        .map_or(content, |(_, task)| task)
+        .to_owned()
+}
+
 /// `[7] planner: !propose #stage …` → `(7, "planner", "!propose #stage …")`.
 fn parse_transcript_line(line: &str) -> Option<(u64, String, String)> {
     let rest = line.strip_prefix('[')?;
@@ -216,7 +230,9 @@ impl Script {
                             && last
                                 .get("content")
                                 .and_then(Value::as_str)
-                                .is_some_and(|content| content.contains(TRANSCRIPT_HEADING))
+                                .is_some_and(|content| {
+                                    hive_core(content).contains(TRANSCRIPT_HEADING)
+                                })
                     })
             })
             .map(Ask::read)
