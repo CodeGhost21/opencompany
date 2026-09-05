@@ -2,7 +2,6 @@
 //! speaking the wire shapes this driver relies on — no real CortexDB
 //! instance, no network.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
