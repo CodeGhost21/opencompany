@@ -98,9 +98,13 @@ provider = "openhuman"             # delegate to an OpenHuman channel
 [[group_chat]]
 id = "creative"                    # a desk: who the human talks to
 name = "Creative studio"
-members = ["copywriter"]           # ids from the roster
+members = ["copywriter", "editor"] # ids from the roster
 tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
                                    # empty narrows nothing. See runtime/tools.md
+hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true }
+                                   # how this desk answers. Every key optional;
+                                   # omit the table entirely for the defaults.
+                                   # See runtime/hivemind.md
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
