@@ -43,7 +43,10 @@ allow = ["files", "docs", "shell", "code", "workspace", "workspace.*"]
 # `OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY`. The tier map below names the
 # ladder's own model ids (`flash`, `reasoning`, `max-reasoning`); it applies
 # whichever endpoint answers, so a hosted run needs the map removed or
-# re-pointed at real model slugs.
+# re-pointed at real model slugs. Three of the six solvers deliberately name
+# no `tier` at all: the skeptic, the brute forcer and the archivist do work
+# that does not need the strongest model bought, so they fall through to
+# `chat-v1` / `flash` — cheap on purpose, not by oversight.
 [inference]
 models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "max-reasoning", "vision-v1" = "flash" }
 
