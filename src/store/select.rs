@@ -1224,6 +1224,31 @@ mod test {
     }
 
     #[cfg(feature = "tinymemory")]
+    #[test]
+    fn remote_cortexdb_binds_and_reports_its_driver() {
+        // `OPENCOMPANY_MEMORY=remote OPENCOMPANY_MEMORY_DRIVER=cortexdb` with a
+        // URL and a key must open the same way the other three hosted drivers
+        // do: offline (construction validates shape, not reachability) and
+        // reporting the driver id it was asked for.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Remote,
+            memory_driver: Some("cortexdb".into()),
+            memory_url: Some("http://127.0.0.1:3141".into()),
+            memory_api_key: Some("k".into()),
+            ..StorageSettings::default()
+        };
+        let overlay = open_memory_overlay(&settings)
+            .expect("a fully configured cortexdb engine binds")
+            .expect("remote yields an overlay");
+        assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
+        assert_eq!(overlay.descriptor.driver_id, "cortexdb");
+        assert_eq!(
+            overlay.descriptor.healthy, None,
+            "bind must not pre-claim health"
+        );
+    }
+
+    #[cfg(feature = "tinymemory")]
     #[tokio::test]
     async fn refresh_health_records_the_probe_answer() {
         // `null` is the one driver whose health is deterministic offline —
