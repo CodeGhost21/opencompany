@@ -143,7 +143,8 @@ impl Ask {
 
     /// Whether this turn is under the blind projection.
     fn blind(&self) -> bool {
-        self.prompt.contains("You cannot yet see your peers' positions")
+        self.prompt
+            .contains("You cannot yet see your peers' positions")
     }
 
     /// The attributed transcript this turn was handed, as
@@ -289,7 +290,11 @@ async fn spawn_script(responder: Responder) -> (String, Arc<Script>) {
             post(move |Json(body): Json<Value>| {
                 let script = Arc::clone(&chat);
                 async move {
-                    script.seen.lock().expect("script poisoned").push(body.clone());
+                    script
+                        .seen
+                        .lock()
+                        .expect("script poisoned")
+                        .push(body.clone());
                     let ask = Ask::read(&body);
                     let message = match (script.responder)(&ask) {
                         Reply::Say(text) => json!({ "role": "assistant", "content": text }),
@@ -415,7 +420,10 @@ async fn boot(
         .expect("the in-test manifest parses");
     manifest.apply_globals();
     let problems = manifest.validate();
-    assert!(problems.is_empty(), "the in-test manifest is valid: {problems:?}");
+    assert!(
+        problems.is_empty(),
+        "the in-test manifest is valid: {problems:?}"
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -608,7 +616,9 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
     let client = Client::new(address);
     client.sign_in().await;
 
-    client.say(DESK, "Settle the closed form of the recurrence.").await;
+    client
+        .say(DESK, "Settle the closed form of the recurrence.")
+        .await;
 
     let rows = replies(&runtime, DESK).await;
     let turns = turns(&rows);
@@ -652,7 +662,10 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
                 && ["ceo", "greeter"].contains(&author.as_str())
         })
         .collect();
-    assert!(strays.is_empty(), "a second responder answered too: {strays:?}");
+    assert!(
+        strays.is_empty(),
+        "a second responder answered too: {strays:?}"
+    );
 
     // One model call per turn, and the calls are the turns: the speakers the
     // endpoint was asked for are exactly the authors the journal recorded, in
@@ -683,10 +696,15 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
     let client = Client::new(address);
     client.sign_in().await;
 
-    client.say(DESK, "Settle the closed form of the recurrence.").await;
+    client
+        .say(DESK, "Settle the closed form of the recurrence.")
+        .await;
 
     let openers = script.turn_openers();
-    assert!(openers.len() >= 4, "a blind round plus at least one open turn");
+    assert!(
+        openers.len() >= 4,
+        "a blind round plus at least one open turn"
+    );
 
     let blind: Vec<&Ask> = openers.iter().filter(|ask| ask.blind()).collect();
     assert_eq!(
@@ -739,7 +757,10 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
     // Later turns see the room, attributed by id, with the sequence that makes
     // the line citable.
     let seeing: Vec<&Ask> = openers.iter().filter(|ask| !ask.blind()).collect();
-    assert!(!seeing.is_empty(), "the blind round is not the whole episode");
+    assert!(
+        !seeing.is_empty(),
+        "the blind round is not the whole episode"
+    );
     let mut saw_attributed_peer = false;
     let mut saw_own_line = false;
     for ask in &seeing {
@@ -776,14 +797,22 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
         }
         // A member that has spoken is shown its own last line, so it does not
         // restate it.
-        if let Some((_, mine)) = ask.transcript().into_iter().rev().find_map(|(_, a, c)| {
-            (a == me).then_some((a, c))
-        }) {
+        if let Some((_, mine)) = ask
+            .transcript()
+            .into_iter()
+            .rev()
+            .find_map(|(_, a, c)| (a == me).then_some((a, c)))
+        {
             saw_own_line = true;
             let block = ask
                 .prompt
                 .split_once(ALREADY_SAID)
-                .map(|(_, rest)| rest.split(TRANSCRIPT_HEADING).next().unwrap_or(rest).to_owned())
+                .map(|(_, rest)| {
+                    rest.split(TRANSCRIPT_HEADING)
+                        .next()
+                        .unwrap_or(rest)
+                        .to_owned()
+                })
                 .unwrap_or_default();
             assert!(
                 block.contains(&mine),
@@ -885,7 +914,10 @@ async fn an_objection_silences_an_advocate_and_a_second_topic_carries() {
         .find(|(_, text)| text.starts_with("!object"))
         .unwrap_or_else(|| panic!("nobody objected: {rows:?}"));
     assert_eq!(objection.0, VERIFIER);
-    assert!(objection.1.contains(" >"), "an objection names a message: {objection:?}");
+    assert!(
+        objection.1.contains(" >"),
+        "an objection names a message: {objection:?}"
+    );
 
     let reports = reports(&rows);
     assert_eq!(reports.len(), 1, "{rows:?}");
@@ -1015,7 +1047,9 @@ async fn a_single_member_desk_answers_with_one_ordinary_turn() {
     let client = Client::new(address);
     client.sign_in().await;
 
-    client.say(SOLO_DESK, "Anything waiting at the front?").await;
+    client
+        .say(SOLO_DESK, "Anything waiting at the front?")
+        .await;
 
     let rows = replies(&runtime, SOLO_DESK).await;
     let authored: Vec<_> = rows
@@ -1054,10 +1088,7 @@ const ASK_TWO: &str = "What does the small-case table give for n=3?";
 /// the claim does not depend on which member the library hands the floor to.
 fn remembering_script() -> Responder {
     Arc::new(|ask: &Ask| {
-        let grounds = ask
-            .transcript()
-            .first()
-            .map_or(1, |(seq, _, _)| *seq);
+        let grounds = ask.transcript().first().map_or(1, |(seq, _, _)| *seq);
         if ask.task() == ASK_ONE {
             if ask.pending_tool.is_none() {
                 return Reply::Call {
@@ -1228,51 +1259,60 @@ async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
         )
         .route(
             "/v1/experience",
-            post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
-                let state = Arc::clone(&write_state);
-                async move {
-                    assert!(
-                        authorized(&headers),
-                        "the driver must carry both the bearer and the actor"
-                    );
-                    let id = format!("evt_{}", state.writes.fetch_add(1, Ordering::SeqCst) + 1);
-                    let observed_at = body
-                        .pointer("/context/observed_at")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-                    state.events.lock().unwrap().push(json!({
-                        "id": id,
-                        "scope": body.get("scope").cloned().unwrap_or(Value::Null),
-                        "content": body.get("content").cloned().unwrap_or(Value::Null),
-                        "observed_at": observed_at,
-                    }));
-                    Json(json!({ "event_id": id, "duplicate": false }))
-                }
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                    let state = Arc::clone(&write_state);
+                    async move {
+                        assert!(
+                            authorized(&headers),
+                            "the driver must carry both the bearer and the actor"
+                        );
+                        let id = format!("evt_{}", state.writes.fetch_add(1, Ordering::SeqCst) + 1);
+                        let observed_at = body
+                            .pointer("/context/observed_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        state.events.lock().unwrap().push(json!({
+                            "id": id,
+                            "scope": body.get("scope").cloned().unwrap_or(Value::Null),
+                            "content": body.get("content").cloned().unwrap_or(Value::Null),
+                            "observed_at": observed_at,
+                        }));
+                        Json(json!({ "event_id": id, "duplicate": false }))
+                    }
+                },
+            ),
         )
         .route(
             "/v1/recall",
-            post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
-                let state = Arc::clone(&read_state);
-                async move {
-                    assert!(authorized(&headers), "recall must carry the actor too");
-                    state.reads.fetch_add(1, Ordering::SeqCst);
-                    let scope = body.get("scope").and_then(Value::as_str).unwrap_or_default();
-                    // Ranked retrieval is the engine's job; the mock returns
-                    // everything filed under the asked-for scope and lets the
-                    // host's own ranking do the rest.
-                    let items: Vec<Value> = state
-                        .events
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|event| event.get("scope").and_then(Value::as_str) == Some(scope))
-                        .cloned()
-                        .collect();
-                    Json(json!({ "layers": { "events": items } }))
-                }
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                    let state = Arc::clone(&read_state);
+                    async move {
+                        assert!(authorized(&headers), "recall must carry the actor too");
+                        state.reads.fetch_add(1, Ordering::SeqCst);
+                        let scope = body
+                            .get("scope")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        // Ranked retrieval is the engine's job; the mock returns
+                        // everything filed under the asked-for scope and lets the
+                        // host's own ranking do the rest.
+                        let items: Vec<Value> = state
+                            .events
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|event| {
+                                event.get("scope").and_then(Value::as_str) == Some(scope)
+                            })
+                            .cloned()
+                            .collect();
+                        Json(json!({ "layers": { "events": items } }))
+                    }
+                },
+            ),
         )
         .route(
             "/v1/forget",
