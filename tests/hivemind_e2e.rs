@@ -523,6 +523,15 @@ const TOPIC: &str = "answer42";
 /// would pass whatever the prompt said; this cannot.
 fn converging_script() -> Responder {
     Arc::new(|ask: &Ask| {
+        if std::env::var("HIVE_DEBUG").is_ok() {
+            eprintln!(
+                "[ASK] who={} blind={} grounds={:?} transcript={:?}",
+                ask.who(),
+                ask.blind(),
+                ask.seq_of(&format!("!propose #{TOPIC}")),
+                ask.transcript()
+            );
+        }
         let propose = format!("!propose #{TOPIC} The closed form of the recurrence is 42.");
         // A citation is only available once the proposal is visible. In the
         // blind round it is not, which is exactly what the blind round means.
