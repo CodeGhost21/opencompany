@@ -148,9 +148,31 @@ impl HiveTurnRunner for ScriptedRunner {
 }
 
 fn record(manifest: &str) -> CompanyRecord {
-    let manifest = crate::company::CompanyManifest::from_str_for_reload(manifest)
-        .expect("test manifest parses");
-    CompanyRecord::new(MemoryLog::company(), manifest)
+    let manifest: crate::company::CompanyManifest =
+        toml::from_str(manifest).expect("test manifest parses");
+    CompanyRecord {
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
+        id: MemoryLog::company(),
+        manifest,
+        ledger: Vec::new(),
+        lifecycle: "running".to_string(),
+        overlay_agents: Vec::new(),
+        overlay_desk_members: Vec::new(),
+        overlay_desk_order: Vec::new(),
+        overlay_desks: Vec::new(),
+        overlay_workflows: Vec::new(),
+        overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_tool_grants: None,
+        overlay_desk_tools: Default::default(),
+        disabled_workflows: Vec::new(),
+        template_provenance: None,
+        setup: None,
+        name_confirmed: false,
+        activation_completed_at: None,
+        created_at_millis: None,
+    }
 }
 
 /// Three teammates on one desk, all seated.
@@ -233,21 +255,20 @@ fn the_manifest_parses_a_hive_block_and_rejects_zero_bounds() {
     assert_eq!(policy.quorum.threshold, 2);
     assert!(!policy.blind_round);
 
-    let zero_quorum = format!("{}hive = {{ quorum = 0 }}\n", three_member_manifest());
-    let problems = crate::company::CompanyManifest::from_str_for_reload(&zero_quorum)
-        .expect("it parses")
-        .validate()
-        .expect_err("a zero quorum is refused");
+    let problems = record(&format!("{}hive = {{ quorum = 0 }}\n", three_member_manifest()))
+        .manifest
+        .validate();
     assert!(
         problems.iter().any(|p| p.contains("hive.quorum = 0")),
         "{problems:?}"
     );
 
-    let zero_budget = format!("{}hive = {{ turn_budget = 0 }}\n", three_member_manifest());
-    let problems = crate::company::CompanyManifest::from_str_for_reload(&zero_budget)
-        .expect("it parses")
-        .validate()
-        .expect_err("a zero budget is refused");
+    let problems = record(&format!(
+        "{}hive = {{ turn_budget = 0 }}\n",
+        three_member_manifest()
+    ))
+    .manifest
+    .validate();
     assert!(
         problems.iter().any(|p| p.contains("hive.turn_budget = 0")),
         "{problems:?}"
