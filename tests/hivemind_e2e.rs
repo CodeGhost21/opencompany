@@ -679,6 +679,33 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
             peers.is_empty(),
             "a peer's position leaked into a blind turn for @{me}: {peers:?}"
         );
+        // And not through any other door either. The turn's WHOLE request is
+        // checked, not just the episode prompt: the memory loop prepends a
+        // "## Relevant prior work" preamble to every turn's message, and a
+        // stored outcome carries the storing turn's own prompt and reply. A
+        // peer's opening position arriving that way would defeat the blind
+        // round without ever appearing in the transcript block.
+        let whole = ask
+            .messages
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for peer in [THEORIST, PROGRAMMER, VERIFIER] {
+            if peer == me {
+                continue;
+            }
+            assert!(
+                !whole.contains(&format!("!question {peer}")),
+                "@{peer}'s line reached blind turn @{me} outside the transcript"
+            );
+        }
+        if me != THEORIST {
+            assert!(
+                !whole.contains(&format!("!propose #{TOPIC}")),
+                "the theorist's opening position reached blind turn @{me}"
+            );
+        }
     }
 
     // Later turns see the room, attributed by id, with the sequence that makes
