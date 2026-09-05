@@ -209,9 +209,16 @@ impl<'a> EpisodePrompt<'a> {
             Visibility::Blind => "You cannot yet see your peers' positions. Form your own first.",
             Visibility::Full => "You can see the whole room.",
         };
-        let protocol = self.protocol(turn.phase);
+        // Folded once and read twice: the block a member reads its standings
+        // off and the topic the Commit phase names have to be the same fold,
+        // or a seat could be told to record a topic the floor does not show.
+        let standings = self.standings(visible);
+        let protocol = match turn.phase {
+            Phase::Commit => commit_protocol(&self.carried(&standings)),
+            Phase::Deliberate => self.deliberate_protocol(),
+        };
         format!(
-            "You are @{}, the {} on the {} desk. {sight}\n\n{}{}{}\n\n{protocol}\n\n{}{}{}\
+            "You are @{}, the {} on the {} desk. {sight}\n\n{}{}{}\n\n{protocol}\n\n{}{}{}{}\
              Shared attributed transcript:\n{}\n\nYour one line:",
             self.member.id,
             self.member.role,
@@ -219,50 +226,80 @@ impl<'a> EpisodePrompt<'a> {
             self.room(),
             self.remembered(),
             self.board(),
-            self.floor(visible),
+            self.topic_discipline(turn.phase),
+            self.floor(&standings),
             self.missing(),
             self.last_line(visible),
             render_transcript(visible),
         )
     }
 
-    /// The markers this seat may open a line with in `phase`, and the rules.
+    /// The topic id this task's answer is named by, and the rule for coining
+    /// another.
+    ///
+    /// Rendered only while the room is deliberating: the Commit block names the
+    /// carried id outright, so repeating the derivation rule there would be a
+    /// second, weaker instruction about the same string.
+    fn topic_discipline(&self, phase: Phase) -> String {
+        if phase == Phase::Commit {
+            return String::new();
+        }
+        let topic = canonical_topic(self.task);
+        format!(
+            "Topic id for this task's answer: `#{topic}`. Every !propose, !support and !evidence \
+             about the answer uses exactly this id. Only a genuinely different candidate value \
+             gets a different id (`#{topic}-2`). Never invent a synonym for an id already on the \
+             floor.\n\n",
+        )
+    }
+
+    /// The topic the room has carried, for the Commit phase to name.
+    ///
+    /// Falls back to the task's canonical id when the fold shows nothing
+    /// carried — which the Commit phase should make impossible, but a prompt
+    /// naming `#answer` is a better failure than one naming an empty string.
+    fn carried(&self, standings: &[TopicStanding]) -> String {
+        standings
+            .iter()
+            .find(|standing| standing.carried(&self.quorum))
+            .map_or_else(
+                || canonical_topic(self.task),
+                |standing| standing.topic.to_string(),
+            )
+    }
+
+    /// The markers this seat may open a line with while the room deliberates,
+    /// and the rules they are read under.
     ///
     /// Phase-gated on top of the per-member grammar, in that order: `!commit`
-    /// is the library's to authorize, and every other marker is the desk's to
-    /// assign. A member allowed `commit` and nothing else therefore sees the
-    /// no-move block while the room is still deliberating, which is correct —
-    /// there is nothing it may legally say yet.
-    fn protocol(&self, phase: Phase) -> String {
+    /// is the library's to authorize, and the deliberation markers are the
+    /// desk's to assign. `!question` and `!defer` are in every seat's list
+    /// whatever the table says (see
+    /// [`UNGATED_KINDS`](super::moves::UNGATED_KINDS)), so this block always
+    /// offers a member with nothing to add something to say that is not prose.
+    fn deliberate_protocol(&self) -> String {
         let allowed = self.desk.config.moves_for(&self.member.id);
         let assigned = allowed.len() < super::moves::MOVE_KINDS.len();
-        match phase {
-            Phase::Commit => {
-                if allowed.contains(&"commit") {
-                    COMMIT_PROTOCOL.to_owned()
-                } else {
-                    NO_MOVE_AVAILABLE.to_owned()
-                }
-            }
-            Phase::Deliberate => {
-                let lines: Vec<&str> = allowed
-                    .iter()
-                    .filter(|kind| **kind != "commit")
-                    .filter_map(|kind| move_line(kind))
-                    .collect();
-                if lines.is_empty() {
-                    return NO_MOVE_AVAILABLE.to_owned();
-                }
-                let head = "Reply with ONE line only, beginning with exactly one of these \
-                            markers:";
-                let tail = if assigned {
-                    format!("{DELIBERATE_RULES}\n{ASSIGNED_MOVES_RULE}")
-                } else {
-                    DELIBERATE_RULES.to_owned()
-                };
-                format!("{head}\n{}\n{tail}", lines.join("\n"))
-            }
+        let lines: Vec<&str> = allowed
+            .iter()
+            .filter(|kind| **kind != "commit")
+            .filter_map(|kind| move_line(kind))
+            .collect();
+        debug_assert!(
+            !lines.is_empty(),
+            "every seat keeps !question and !defer, so a deliberating member always has a marker",
+        );
+        let head = "Reply with ONE line only, beginning with exactly one of these markers:";
+        let mut tail = DELIBERATE_RULES.to_owned();
+        if self.quorum.require_evidential {
+            tail.push('\n');
+            tail.push_str(EVIDENTIAL_RULE);
         }
+        if assigned {
+            tail.push('\n');
+            tail.push_str(ASSIGNED_MOVES_RULE);
+        }
+        format!("{head}\n{}\n{tail}", lines.join("\n"))
     }
 
     /// What the desk remembers, or nothing when it remembers nothing.
