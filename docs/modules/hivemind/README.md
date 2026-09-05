@@ -13,9 +13,12 @@ the module's own shape and the reasoning behind its boundaries.
 | --- | --- |
 | `types.rs` | `HiveConfig` (the `[[group_chat]].hive` block), `HiveMember` / `HiveDesk` (the snapshot an episode runs over), `HivePolicy` (config + size → `EpisodePolicy`), `EpisodeEnding` / `EpisodeOutcome`, and `desk_episode` — the gate |
 | `log.rs` | `EventLogSessionLog`: the company journal read as a `tinyhivemind::SessionLog`, narrowed to one desk |
+| `moves.rs` | the per-member move grammar: `MOVE_KINDS`, the marker reader, the one-line correction, the demotion, `MoveViolation` |
+| `memory.rs` | `HiveMemory` (recall / remember), `HiveMemoryHit` / `HiveMemoryNote`, `NullHiveMemory`, and the `hive/<desk id>/<slug>` labels |
 | `prompt.rs` | `EpisodePrompt` (what one authorized turn is shown) and `marker_line` (what its answer contributes) |
 | `episode.rs` | `EpisodeDriver` (the host loop) and `HiveTurnRunner` (the one-function turn seam) |
 | `test.rs` | the module's unit tests |
+| `moves_test.rs` | the move grammar, the quorum knobs, desk memory, speaker diversity, and turn failure |
 
 ## Why it is ungated
 
@@ -50,12 +53,34 @@ written by teammates who may since have left it, so an id is its own label
 there. A seated member's display name is applied by the prompt, which does hold
 the roster.
 
+**`HiveMemory` is a trait here and a `ContextStore` in the brain.**
+`src/hivemind/` compiles in every build and holds no ports; starting to hold one
+for desk memory would put a storage dependency in a module whose whole claim is
+that it is a fold over a journal and a turn seam. The trait is two functions
+wide, `NullHiveMemory` satisfies it, and `HiveDeskMemory` (in `brain.rs`) is the
+real one — deliberately beside the memory loop whose `ContextStore` calls it
+reuses, so a desk's notes travel through the same overlay a teammate's do.
+
+**The move grammar is enforced in the driver, not in the prompt.** Rendering
+only the moves a seat holds is necessary and not sufficient: a model will reach
+for a marker it was not shown. The prompt and the enforcement therefore read the
+same table (`config.moves_for`), and a barred line that survives its correction
+is journaled with its `!` removed — which is the only thing that actually stops
+it, since `resolve` reads a marker at the start of a line and nowhere else.
+
 ## Two contracts that are easy to break
 
 **Append before commit.** `step` returns a `next_state` that is only valid once
 the turn it authorized is durably journaled. `EpisodeDriver::run` appends, then
 assigns. Reversing those two lines would let a failed write leave the room
 believing in a turn nothing can read back.
+
+**A member's failed turn is not the room's.** `HiveTurnRunner::speak`
+returning `Err` journals a system row, commits `next_state` and continues; the
+`?` that used to be there threw away three good turns and answered the operator
+with a 500 the first time one member hit the harness's per-turn wall-clock
+ceiling. Only a failed *journal* append, or `members × 2` consecutive failures,
+ends the episode.
 
 **The page contract.** `SessionLog::read_before` must return rows newest-first,
 strictly descending, no larger than asked, with an exclusive cursor no newer
