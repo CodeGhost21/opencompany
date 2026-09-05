@@ -700,6 +700,18 @@ async fn the_opening_round_is_blind_and_every_later_line_is_attributed() {
                 "@{peer}'s line reached blind turn @{me} outside the transcript"
             );
         }
+        if me != THEORIST && whole.contains(&format!("!propose #{TOPIC}")) {
+            for (i, m) in ask.messages.iter().enumerate() {
+                let c = m.get("content").and_then(Value::as_str).unwrap_or("");
+                if c.contains(&format!("!propose #{TOPIC}")) {
+                    eprintln!(
+                        "[WHERE] @{me} msg {i} role={:?} :: {}",
+                        m.get("role"),
+                        c.chars().take(600).collect::<String>()
+                    );
+                }
+            }
+        }
         if me != THEORIST {
             assert!(
                 !whole.contains(&format!("!propose #{TOPIC}")),
