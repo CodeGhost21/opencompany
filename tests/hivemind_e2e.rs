@@ -113,6 +113,19 @@ impl Ask {
         self.speaker.as_deref().unwrap_or("?")
     }
 
+    /// What the operator actually asked, which is what identifies the episode.
+    ///
+    /// Read from the prompt's own `The operator asked the desk:` block rather
+    /// than by searching the whole prompt: the transcript window carries every
+    /// earlier operator message on the desk too, so "contains" matches the
+    /// *previous* episode's question as readily as this one's.
+    fn task(&self) -> String {
+        self.prompt
+            .split_once("The operator asked the desk:\n")
+            .and_then(|(_, rest)| rest.split_once('\n'))
+            .map_or_else(String::new, |(task, _)| task.trim().to_owned())
+    }
+
     /// Whether this turn is under the blind projection.
     fn blind(&self) -> bool {
         self.prompt.contains("You cannot yet see your peers' positions")
@@ -1030,7 +1043,7 @@ fn remembering_script() -> Responder {
             .transcript()
             .first()
             .map_or(1, |(seq, _, _)| *seq);
-        if ask.prompt.contains(ASK_ONE) {
+        if ask.task() == ASK_ONE {
             if ask.tool_outputs.is_empty() {
                 return Reply::Call {
                     tool: "memory_store",
@@ -1041,7 +1054,7 @@ fn remembering_script() -> Responder {
                 "!propose #table ^{grounds} Work the small cases out once and write them down."
             ));
         }
-        if ask.prompt.contains(ASK_TWO) {
+        if ask.task() == ASK_TWO {
             if ask.tool_outputs.is_empty() {
                 return Reply::Call {
                     tool: "memory_recall",
@@ -1074,7 +1087,7 @@ fn tool_results_for(script: &Script, task: &str) -> Vec<String> {
     script
         .hive_asks()
         .into_iter()
-        .filter(|ask| ask.prompt.contains(task))
+        .filter(|ask| ask.task() == task)
         .flat_map(|ask| ask.tool_outputs)
         .collect()
 }
