@@ -2070,6 +2070,11 @@ enum LiveStream<'a> {
         /// the thread is the other half of that scope. Nothing about live
         /// streaming reads it.
         thread_root: Option<EventSeq>,
+        /// Whether this turn is seeded with the desk's recent history
+        /// (issue #1840). False for a hive-mind episode turn, which arrives
+        /// carrying its own attributed, visibility-filtered transcript — see
+        /// [`ChatTarget::history_seed`](crate::runtime::delegation::ChatTarget::history_seed).
+        history_seed: bool,
     },
     /// A workflow agent node (issue #1702): it streams live like `On`, but its
     /// frames route by the workflow run + node rather than a chat thread — the
@@ -3216,6 +3221,7 @@ impl HarnessPool {
             LiveStream::On {
                 chat_id: chat.chat_id,
                 thread_root: chat.thread_root,
+                history_seed: chat.history_seed,
             },
             None,
         )
@@ -3318,6 +3324,7 @@ impl HarnessPool {
             LiveStream::On {
                 chat_id: chat.chat_id,
                 thread_root: chat.thread_root,
+                history_seed: chat.history_seed,
             },
             run_sink,
         )
@@ -3811,7 +3818,11 @@ impl HarnessPool {
         // recent history; a background task or workflow node carries no chat
         // thread to bind history to (issue #1840).
         let seed_chat: Option<Option<&str>> = match &live {
-            LiveStream::On { chat_id, .. } => Some(*chat_id),
+            LiveStream::On {
+                chat_id,
+                history_seed: true,
+                ..
+            } => Some(*chat_id),
             _ => None,
         };
         let stream_ctx = match live {
