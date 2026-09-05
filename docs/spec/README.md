@@ -90,6 +90,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
 | [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
+| [runtime/hivemind.md](runtime/hivemind.md) | Hive-mind desks: when a `[[group_chat]]` answers as a deliberating room rather than through one responder, the episode loop, the trace grammar, and the `hive` manifest keys |
 | [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
 | [runtime/harnesses-acp.md](runtime/harnesses-acp.md) | The ACP transports in detail: `local` vs `runner`, readiness probing, resuming a teammate's session across a restart, and streaming its execution state while the turn runs |
 | [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
