@@ -697,20 +697,16 @@ impl CompanyManifest {
                     }
                 }
             }
-            // Somebody has to be able to record the decision. A desk that bars
-            // every seat from `commit` reaches quorum and then spends the rest
-            // of its budget having every commit line demoted, which reads from
-            // the transcript as a room that could not make up its mind.
-            if !chat.members.is_empty()
-                && chat
-                    .members
-                    .iter()
-                    .all(|member| !chat.hive.may(member, "commit"))
-            {
-                problems.push(format!(
-                    "{label} bars every member from `!commit` in `hive.moves` — the room would                      reach quorum with nobody able to record it; leave `commit` on at least one                      seat."
-                ));
-            }
+            // No rule here about who may `!commit`. `commit` is not a move the
+            // table gates at all (`hivemind::moves::UNGATED_KINDS`): the fold
+            // hands the Commit phase to whoever the attention market picks, so
+            // a desk that could bar a seat from recording a decision would
+            // regularly reach quorum and then hand the floor to somebody with
+            // nothing legal to say — which is exactly what a live six-member
+            // desk did for eight turns before reporting itself exhausted on an
+            // answer it had already carried. A `commit` entry in a member's
+            // list is therefore accepted and ignored rather than refused: it
+            // describes what the seat could already do.
         }
 
         // Delegation allowlists (issue #176): every `delegates_to` entry must
