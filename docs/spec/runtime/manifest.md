@@ -101,10 +101,19 @@ name = "Creative studio"
 members = ["copywriter", "editor"] # ids from the roster
 tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
                                    # empty narrows nothing. See runtime/tools.md
-hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true }
+hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
+         require_evidential = true, refutation_cap = 2,
+         dominance_cap = 4, repetition_cap = 2,
+         moves = { copywriter = ["propose", "support", "commit"],
+                   editor = ["object", "refute", "evidence", "question"] } }
                                    # how this desk answers. Every key optional;
                                    # omit the table entirely for the defaults.
-                                   # See runtime/hivemind.md
+                                   # `moves` assigns each member the markers it
+                                   # may open a line with — a room where
+                                   # everyone may `!propose` votes instead of
+                                   # deliberating. A member the table omits
+                                   # keeps every move; at least one seat must
+                                   # keep `commit`. See runtime/hivemind.md
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
