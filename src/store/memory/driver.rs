@@ -178,5 +178,76 @@ fn open_failed(error: anyhow::Error) -> OpenCompanyError {
         "could not open the configured memory engine: {error}. Check OPENCOMPANY_MEMORY_URL."
     ))
 }
-pub const SUPPORTED_REMOTE_DRIVERS: [&str; 3] =
-    [SUPERMEMORY_DRIVER_ID, MEM0_DRIVER_ID, COGNEE_DRIVER_ID];
+
+/// Resolves the actor CortexDB's `X-Cortex-Actor` header carries.
+///
+/// `OPENCOMPANY_MEMORY_ACTOR` wins when set. Otherwise, since a CortexDB
+/// bearer token is commonly a JWT whose `sub` claim names the actor it was
+/// minted for, this decodes that claim (no signature verification — the token
+/// is already trusted, it is this host's own configured credential) rather
+/// than defaulting straight to a generic name that would mismatch the token
+/// and turn every call into a 401. Falls back to `"opencompany"` when neither
+/// source names an actor.
+fn cortexdb_actor(key: &str) -> String {
+    const ENV: &str = "OPENCOMPANY_MEMORY_ACTOR";
+    if let Ok(actor) = std::env::var(ENV) {
+        let actor = actor.trim();
+        if !actor.is_empty() {
+            return actor.to_string();
+        }
+    }
+    jwt_subject(key).unwrap_or_else(|| "opencompany".to_string())
+}
+
+/// Reads the `sub` claim out of a JWT's payload segment, without verifying
+/// its signature — this token is this host's own configured credential, so
+/// there is nothing to verify against; the decode is purely to read a claim
+/// already trusted the moment it was configured.
+fn jwt_subject(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64url_decode(payload)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("sub")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// A minimal, dependency-free base64url (no padding) decoder — just enough to
+/// read a JWT payload segment without adding a `base64` dependency to a
+/// feature that does not otherwise need one.
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let mut buffer: u32 = 0;
+    let mut bits = 0u32;
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for byte in input.bytes() {
+        if byte == b'=' {
+            continue;
+        }
+        let digit = value(byte)?;
+        buffer = (buffer << 6) | u32::from(digit);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+pub const SUPPORTED_REMOTE_DRIVERS: [&str; 4] = [
+    SUPERMEMORY_DRIVER_ID,
+    MEM0_DRIVER_ID,
+    COGNEE_DRIVER_ID,
+    CORTEXDB_DRIVER_ID,
+];
