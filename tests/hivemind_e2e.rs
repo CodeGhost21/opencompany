@@ -1138,6 +1138,29 @@ async fn a_desk_reasons_with_what_it_stored_in_an_earlier_episode() {
         "memory_recall did not serve the fact episode one stored: {recalled:?}"
     );
 
+    // Belt and braces: the loop also *injects* what memory holds, without the
+    // turn asking. Asserted on the raw request, since the preamble sits above
+    // the episode prompt rather than inside it.
+    let injected = script.bodies().iter().any(|body| {
+        body.get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages.iter().any(|message| {
+                    message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| {
+                            content.contains("## Relevant prior work") && content.contains(FACT_KEY)
+                        })
+                })
+            })
+            .unwrap_or(false)
+    });
+    assert!(
+        injected,
+        "the memory loop never surfaced the stored fact on its own"
+    );
+
     // And the room's own line used it. This is the part a store-level test
     // cannot reach: the fact has to survive the tool, the turn, `marker_line`
     // and the journal to end up here.
