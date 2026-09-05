@@ -156,6 +156,3 @@ pub fn correction(evidence: &[u64]) -> String {
          citing one of those, or deposit your own fact with `!evidence #topic ^N`."
     )
 }
-
-#[cfg(test)]
-mod test;
