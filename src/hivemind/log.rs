@@ -133,22 +133,13 @@ impl EventLogSessionLog {
                 sequence,
                 chat_id: Some(self.desk_id.clone()),
                 parent: parent.map(|seq| Sequence(seq.value())),
-                author: author_of(&agent_id, &self.labels(&agent_id)),
+                author: author_of(&agent_id),
                 content: text,
             }),
             _ => None,
         }
     }
 
-    /// The display label for a reply's author.
-    ///
-    /// The adapter holds no roster, deliberately: it is opened for one desk and
-    /// reads rows written by teammates who may since have left it. The id is
-    /// therefore its own label, and the episode prompt — which does hold the
-    /// roster — is where a seated member's real name is used.
-    fn labels(&self, agent_id: &str) -> String {
-        agent_id.to_owned()
-    }
 }
 
 /// Reserved reply authors this host journals under, which no roster id can
@@ -160,16 +151,21 @@ fn is_system_author(agent_id: &str) -> bool {
 }
 
 /// The session author for a journaled reply.
-fn author_of(agent_id: &str, label: &str) -> SessionAuthor {
+///
+/// The label is the id. The adapter holds no roster, deliberately: it is opened
+/// for one desk and reads rows written by teammates who may since have left it.
+/// A seated member's real name is applied by the episode prompt, which does
+/// hold the roster.
+fn author_of(agent_id: &str) -> SessionAuthor {
     if is_system_author(agent_id) {
         return SessionAuthor::System {
             kind: agent_id.to_owned(),
-            label: label.to_owned(),
+            label: agent_id.to_owned(),
         };
     }
     SessionAuthor::Agent {
         id: agent_id.to_owned(),
-        label: label.to_owned(),
+        label: agent_id.to_owned(),
     }
 }
 
