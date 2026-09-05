@@ -78,19 +78,21 @@ question, and the recommendation follows from them.
    **closed-source**, distributed only as prebuilt artifacts (`cortexdbai/cortexdb-releases`,
    Docker Hub `cortexdb/cortexdb`). Whatever we build treats it as an opaque
    upstream binary we cannot patch.
-2. **The one token minter a self-hosted operator can reach does not confine a
-   token to its scope.** `POST /v1/auth/tokens` answers `NOT_CONFIGURED` by
-   default, but `CORTEX_V1_MINTER_ENABLE=1` turns it on and it mints correctly
-   — `subject`, `scope`, TTL, capability narrowing, and working revocation. The
-   scope does not hold. A token minted *for* scope A, pointed at scope B: `POST
-   /v1/recall` is refused `403 POLICY_DENIED`, but `GET /v1/events?scope=B`
-   returns B's records and `POST /v1/experience` into B is accepted. Reproduced
-   three times, including with narrowed `capabilities`. The vendor documents
-   this minter as dev-only (a minted token reports `tenant: dev`) and says
-   production presets expect an external OIDC provider or the separate
-   `cortex-auth-ref` issuer — which is absent from the v0.9.8 assets, has no
-   public repository, and no published contract. So the reachable minter does
-   not isolate, and the isolating one is not reachable.
+2. **The isolating configuration is not reachable self-hosted — and what we
+   measured is policy, not a broken boundary.** `CORTEX_V1_MINTER_ENABLE=1`
+   turns on `POST /v1/auth/tokens`, which mints correctly. A token minted *for*
+   scope A, pointed at scope B: `/v1/recall` is refused `403 POLICY_DENIED`,
+   but `GET /v1/events?scope=B` returns B's records and `POST /v1/experience`
+   into B is accepted. **That is the deployment tier behaving as configured**:
+   `GET /v1/policy/effective` lists `scope.read.holistic`, `scope.read.descend`
+   and `scope.write.about_other` among the actor's *allowed* capabilities. The
+   documented way to narrow it, `PUT /v1/policy/{tier}`, is experimental and
+   `404`s here, though the read endpoints are present. The minter is itself
+   documented as "a dev convenience, not a production issuer"; production
+   presets expect OIDC or `cortex-auth-ref`, which is in no release asset and no
+   doc page. So we cannot configure the isolation, nor test whether the
+   production path enforces it — weaker than calling it a defect, and the same
+   conclusion: nothing here may rest on Cortex's scopes.
 3. ~~**The derived fact and belief tier does not work.**~~ **Overturned — see
    [Correction](#correction-2026-09-04).** The run below had enrichment off and
    no way to report it; configured, and on a funded provider account, Facts and
