@@ -32,17 +32,37 @@ use tinyhivemind_hive::{
     quorum::standings, trace::resolve,
 };
 
+use super::memory::{HiveMemoryHit, MAX_RECALL_CHARS};
 use super::types::{HiveDesk, HiveMember};
 
-/// The moves available while the room is still deliberating.
-const DELIBERATE_MOVES: &str = "\
-Reply with ONE line only, beginning with exactly one of these markers:
-!propose #topic  then one sentence putting a new option on the floor
-!support #topic ^N  then why, citing message N as grounds
-!object >N ^M  then why, objecting to message N and citing message M
-!evidence #topic ^N  then a fact, adding grounds without taking a side; keep the # when the fact bears on a named option
-!defer #topic  then who should answer instead, when this is not your area
-!question  then what you need that nobody has established";
+/// One line of the move list, per kind.
+///
+/// Rendered per seat rather than as one fixed block: a desk that assigns moves
+/// must not show a member a marker it is about to be corrected for using. The
+/// prompt and the enforcement therefore read the same table, so what a member
+/// is shown is exactly what it is allowed to deposit.
+fn move_line(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "propose" => "!propose #topic  then one sentence putting a new option on the floor",
+        "support" => "!support #topic ^N  then why, citing message N as grounds",
+        "object" => "!object >N ^M  then why, objecting to message N and citing message M",
+        "refute" => {
+            "!refute #topic ^N  then the fact that argues against the option itself, citing \
+             message N"
+        }
+        "evidence" => {
+            "!evidence #topic ^N  then a fact, adding grounds without taking a side; keep the # \
+             when the fact bears on a named option"
+        }
+        "question" => "!question  then what you need that nobody has established",
+        "defer" => "!defer #topic  then who should answer instead, when this is not your area",
+        "pin" => {
+            "!pin ^N  then why message N must stay on the board once the window has scrolled past \
+             it"
+        }
+        _ => return None,
+    })
+}
 
 /// The rules those moves are read under.
 const DELIBERATE_RULES: &str = "\
@@ -60,6 +80,17 @@ hold and somebody here does: a confident guess from outside your area is \
 worse for the room than saying so and standing aside. Write nothing before or \
 after the single marker line.";
 
+/// The extra sentence a seat with an assigned grammar is given.
+///
+/// Only rendered when the desk actually narrowed this member, because a member
+/// that may make every move is not being restricted and telling it so would be
+/// a rule about nothing.
+const ASSIGNED_MOVES_RULE: &str = "\
+These are the ONLY markers this desk gives you. A line opening with any other \
+marker is handed back to you once for correction, and on a second attempt it \
+is journaled with its marker stripped — it will say what you wrote and count \
+for nothing.";
+
 /// The move available once the room has reached quorum.
 const COMMIT_PROTOCOL: &str = "\
 The room has reached quorum. Reply with ONE line only, recording the option \
@@ -69,6 +100,17 @@ Keep the # on the topic and the ^ on the citation; without them the line \
 records nothing. Angle brackets are not part of the line — write the sentence \
 itself. Use the topic the room actually settled on, not the one you would have \
 preferred. Write nothing before or after the single marker line.";
+
+/// What a seat is told when the phase it is in offers it no legal marker.
+///
+/// Reachable only on a desk whose `moves` table barred this member from the one
+/// move the phase authorizes. Rendered rather than left blank so the turn still
+/// has an instruction: an empty protocol block reads as "say anything", which
+/// is the one thing that would then be demoted.
+const NO_MOVE_AVAILABLE: &str = "\
+This desk gives you no marker for this phase. Reply with ONE line of plain \
+prose saying what you would have said; write no marker, since any marker you \
+write will be stripped.";
 
 /// Everything about one seat in a room except how its answer is fetched.
 #[derive(Debug)]
