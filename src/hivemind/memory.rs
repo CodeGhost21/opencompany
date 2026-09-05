@@ -38,7 +38,7 @@ use crate::Result;
 ///
 /// Namespaced by desk exactly as agent memories are namespaced by agent
 /// (`agent-memory/<agent id>/<slug>`, see
-/// [`memory_tools`](crate::harness::built_in::memory_tools)): the full label is
+/// `src/harness/built_in/memory_tools.rs`): the full label is
 /// `hive/<desk id>/<slug>`, so one desk's deliberations are listable on their
 /// own and never collide with another desk's or with a teammate's private
 /// memories.

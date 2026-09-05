@@ -485,7 +485,7 @@ fn plain(text: &str) -> String {
 ///
 /// The ellipsis is budgeted *inside* `max`, so the cap never quietly exceeds
 /// the bound it advertises — the same accounting
-/// [`memory_loop::truncate_chars`](crate::harness::built_in::memory_loop) does
+/// `memory_loop::truncate_chars` does
 /// for injected prior work, duplicated because that module is harness-gated and
 /// this one compiles in every build.
 fn truncate_chars(text: &str, max: usize) -> String {

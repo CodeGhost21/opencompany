@@ -18,7 +18,7 @@
 //! a one-line correction and a second attempt, and a second violation is
 //! journaled with its leading `!` removed. A demoted line still says whatever
 //! the member wanted to say — it simply deposits no trace, because
-//! [`tinyhivemind_hive::trace::resolve`] only reads a marker at the start of a
+//! `tinyhivemind_hive::trace::resolve` only reads a marker at the start of a
 //! line. It can therefore never be folded as support for anything, which is the
 //! one outcome that would let a barred move still carry a topic.
 
@@ -104,11 +104,10 @@ pub fn correction(attempted: &str, allowed: &[&str]) -> String {
 ///
 /// The leading `!` and nothing else: the member's own words are kept verbatim,
 /// so the transcript records what it wanted to say and a reader can see the
-/// attempt. What it loses is the only thing at stake — [`resolve`] reads a
+/// attempt. What it loses is the only thing at stake — `resolve` reads a
 /// marker at the start of a line and nowhere else, so a demoted line folds to
 /// no trace and cannot support, object to, or commit anything.
 ///
-/// [`resolve`]: tinyhivemind_hive::trace::resolve
 #[must_use]
 pub fn demote(line: &str) -> String {
     line.trim_start().strip_prefix('!').map_or_else(
