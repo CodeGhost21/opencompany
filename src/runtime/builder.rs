@@ -5698,6 +5698,7 @@ mod test {
                 description: None,
                 members: Vec::new(),
                 tools: tools.iter().map(|t| t.to_string()).collect(),
+                hive: crate::hivemind::HiveConfig::default(),
             }
         }
 
