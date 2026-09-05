@@ -25,6 +25,7 @@ use tinyhivemind_hive::{
     step,
 };
 
+use super::evidential;
 use super::log::EventLogSessionLog;
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT};
 use super::moves::{self, MoveViolation};
@@ -294,7 +295,7 @@ impl<'a> EpisodeDriver<'a> {
                 .render(&turn, &visible);
 
             let line = match self
-                .line_from(&turn.agent_id, &prompt, &mut violations)
+                .line_from(&turn.agent_id, &prompt, &visible, &mut violations)
                 .await
             {
                 Ok(line) => {
@@ -417,21 +418,31 @@ impl<'a> EpisodeDriver<'a> {
     ///    folded as support for anything. That is the property the whole
     ///    mechanism turns on — a barred move that still counted would be a rule
     ///    the fold does not enforce.
+    ///
+    /// A line that clears the grammar then goes through the same one-retry
+    /// mechanism for citation discipline (see [`evidential`]): under
+    /// `require_evidential` a `!support` whose citations reach no `!evidence`
+    /// counts for nothing at all, so the member is handed one correction naming
+    /// the evidence sequences that would have worked. The second attempt is
+    /// journaled **as-is** — the fold, not this host, decides what a line is
+    /// worth, and a support that still misses is a real position the transcript
+    /// should record.
     async fn line_from(
         &self,
         agent_id: &str,
         prompt: &str,
+        visible: &[&tinyhivemind_hive::SessionMessage],
         violations: &mut Vec<MoveViolation>,
     ) -> Result<String> {
         let allowed = self.desk.config.moves_for(agent_id);
         let line = marker_line(&self.runner.speak(agent_id, prompt).await?);
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
-            return Ok(line);
+            return self.grounded(agent_id, prompt, visible, line).await;
         };
         let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
         let line = marker_line(&self.runner.speak(agent_id, &corrected).await?);
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
-            return Ok(line);
+            return self.grounded(agent_id, prompt, visible, line).await;
         };
         tracing::info!(
             company = %self.company,
@@ -445,6 +456,44 @@ impl<'a> EpisodeDriver<'a> {
             attempted: kind.to_owned(),
         });
         Ok(moves::demote(&line))
+    }
+
+    /// The same line, once its citations have been given one chance to reach a
+    /// fact.
+    ///
+    /// A no-op unless the desk set `require_evidential` and the line is a
+    /// `!support` whose chain lands on no `!evidence` in what this turn could
+    /// see. When it is, the member is asked again with one appended line naming
+    /// the sequences that carry evidence — the same one-retry shape a barred
+    /// move gets, and for the same reason: a member that has misread the rule
+    /// must not be able to spend the desk's whole budget on it.
+    ///
+    /// Whatever comes back is kept. This host does not get a second veto over
+    /// what a member is allowed to think; the correction exists because a
+    /// support that counts for nothing reads, from the transcript, exactly like
+    /// one that counts.
+    async fn grounded(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        visible: &[&tinyhivemind_hive::SessionMessage],
+        line: String,
+    ) -> Result<String> {
+        if self.desk.config.require_evidential != Some(true)
+            || !evidential::support_misses_evidence(&line, agent_id, visible)
+        {
+            return Ok(line);
+        }
+        let available = evidential::evidence_sequences(visible);
+        tracing::info!(
+            company = %self.company,
+            desk = %self.desk.id,
+            agent = %agent_id,
+            evidence = ?available,
+            "[hive] a support reached no evidence; the member was asked once more"
+        );
+        let corrected = format!("{prompt}\n\n{}", evidential::correction(&available));
+        Ok(marker_line(&self.runner.speak(agent_id, &corrected).await?))
     }
 
     /// What the desk remembers about the operator's task, best-effort.
