@@ -24,7 +24,7 @@ use crate::ports::types::{CompanyEvent, EventSeq};
 
 /// A room whose members answer from a per-agent queue, and which may be told to
 /// fail one member's turn a fixed number of times.
-struct Runner {
+pub(super) struct Runner {
     lines: Mutex<Vec<(String, String)>>,
     asked: Mutex<Vec<(String, String)>>,
     /// Agent id → how many of its next turns must fail.
@@ -32,7 +32,7 @@ struct Runner {
 }
 
 impl Runner {
-    fn new(lines: &[(&str, &str)]) -> Self {
+    pub(super) fn new(lines: &[(&str, &str)]) -> Self {
         Self {
             lines: Mutex::new(
                 lines
@@ -45,7 +45,7 @@ impl Runner {
         }
     }
 
-    fn failing(self, agent_id: &str, times: usize) -> Self {
+    pub(super) fn failing(self, agent_id: &str, times: usize) -> Self {
         self.fail
             .lock()
             .expect("poisoned")
@@ -53,12 +53,12 @@ impl Runner {
         self
     }
 
-    fn asked(&self) -> Vec<(String, String)> {
+    pub(super) fn asked(&self) -> Vec<(String, String)> {
         self.asked.lock().expect("poisoned").clone()
     }
 
     /// Every prompt `agent_id` was handed, in order.
-    fn prompts_for(&self, agent_id: &str) -> Vec<String> {
+    pub(super) fn prompts_for(&self, agent_id: &str) -> Vec<String> {
         self.asked()
             .into_iter()
             .filter(|(id, _)| id == agent_id)
@@ -144,7 +144,7 @@ impl HiveMemory for ScriptedMemory {
 }
 
 /// Three teammates, with `moves` assigned per the caller's TOML fragment.
-fn manifest_with(hive: &str) -> String {
+pub(super) fn manifest_with(hive: &str) -> String {
     format!(
         "[company]\nname = \"Acme\"\n\
          [[agent]]\nid = \"planner\"\nrole = \"Planner\"\n\
@@ -158,7 +158,7 @@ fn manifest_with(hive: &str) -> String {
 }
 
 /// The operator's message, and the watermark the episode opens on.
-async fn open(log: &MemoryLog) -> EventSeq {
+pub(super) async fn open(log: &MemoryLog) -> EventSeq {
     log.append(
         &MemoryLog::company(),
         CompanyEvent::OperatorMessage {
@@ -886,7 +886,11 @@ fn validation_rejects_an_unknown_move_kind_and_an_unknown_member() {
 }
 
 #[test]
-fn validation_refuses_a_desk_where_nobody_may_commit() {
+fn a_table_that_names_nobody_for_commit_is_accepted() {
+    // `commit` is not a gated move: the fold hands the Commit phase to whoever
+    // the attention market picks, so a desk that could bar a seat from
+    // recording a decision would reach quorum and then have nothing legal to
+    // say. A table naming no committer is therefore an ordinary table.
     let problems = record(&manifest_with(
         "hive = { moves = { planner = [\"propose\"], scout = [\"support\"], \
          critic = [\"object\"] } }",
@@ -894,10 +898,11 @@ fn validation_refuses_a_desk_where_nobody_may_commit() {
     .manifest
     .validate();
     assert!(
-        problems.iter().any(|problem| problem.contains("!commit")),
+        !problems.iter().any(|problem| problem.contains("!commit")),
         "{problems:?}"
     );
-    // One seat keeping it is enough.
+    // And a table that does name one is accepted too — the entry describes
+    // what the seat could already do, so it is ignored rather than refused.
     let problems = record(&manifest_with(
         "hive = { moves = { planner = [\"propose\", \"commit\"], scout = [\"support\"], \
          critic = [\"object\"] } }",
@@ -939,6 +944,10 @@ fn the_manifest_round_trips_the_new_keys() {
     assert_eq!(desk.config.refutation_cap, Some(2));
     assert_eq!(desk.config.dominance_cap, Some(4));
     assert_eq!(desk.config.repetition_cap, Some(1));
-    assert_eq!(desk.config.moves_for("scout"), vec!["support", "evidence"]);
+    // The declared kinds, plus the three no table can take away.
+    assert_eq!(
+        desk.config.moves_for("scout"),
+        vec!["support", "evidence", "question", "defer", "commit"]
+    );
     assert_eq!(desk.config.moves_for("planner"), MOVE_KINDS.to_vec());
 }
