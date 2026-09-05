@@ -295,6 +295,7 @@ fn split_engine(engine: &str) -> Option<(MemoryBackend, Option<&'static str>)> {
         "supermemory" => Some((MemoryBackend::Remote, Some("supermemory"))),
         "mem0" => Some((MemoryBackend::Remote, Some("mem0"))),
         "cognee" => Some((MemoryBackend::Remote, Some("cognee"))),
+        "cortexdb" => Some((MemoryBackend::Remote, Some("cortexdb"))),
         "null" => Some((MemoryBackend::Null, None)),
         _ => None,
     }
