@@ -765,12 +765,56 @@ impl Memory for CortexdbMemory {
     }
 
     async fn namespace_summaries(&self) -> anyhow::Result<Vec<NamespaceSummary>> {
-        // CortexDB has no "list every scope" endpoint: scopes auto-provision on
-        // first write and nothing enumerates them. A caller that already knows
-        // its namespace gets exact answers from `get`/`list`/`recall`; only the
-        // "list every namespace this backend holds" case — which this host's
-        // own facades never invoke, see `super::mod` — cannot be served.
-        Ok(Vec::new())
+        // `GET /v1/scopes/list` enumerates every scope this deployment holds,
+        // but `scope_for` hashes the namespace one-way to mint a scope
+        // segment, so a scope path can never be reversed back into the
+        // namespace string that produced it. Nothing needs it to be: every
+        // event this driver writes carries the tinymemory namespace in
+        // plaintext inside its own JSON envelope (`envelope.namespace` — see
+        // `store_with_taint`), so decoding the events already filed under one
+        // of our scopes recovers the namespace directly, with no reversal
+        // required. This is what the portability/export path
+        // (`opencompany memory migrate`) relies on to enumerate namespaces
+        // before paging each one with `list`.
+        let prefix = format!("{SCOPE_ROOT}/ns:");
+        let mut out = Vec::new();
+        for scope in self.list_scopes().await? {
+            if !scope.starts_with(&prefix) {
+                // Not a scope this driver wrote — some other product may
+                // share this CortexDB deployment.
+                continue;
+            }
+            let events = self.scope_events(&scope).await?;
+            let mut latest: std::collections::HashMap<String, DecodedRecord> =
+                std::collections::HashMap::new();
+            for record in events {
+                match latest.get(&record.key) {
+                    Some(existing) if existing.observed_at >= record.observed_at => {}
+                    _ => {
+                        latest.insert(record.key.clone(), record);
+                    }
+                }
+            }
+            let Some(namespace) = latest
+                .values()
+                .next()
+                .map(|record| record.namespace.clone())
+            else {
+                // An empty (or fully-forgotten) scope decodes nothing — no
+                // namespace to report.
+                continue;
+            };
+            let last_updated = latest
+                .values()
+                .map(|record| record.observed_at.clone())
+                .max();
+            out.push(NamespaceSummary {
+                namespace,
+                count: latest.len(),
+                last_updated,
+            });
+        }
+        Ok(out)
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
