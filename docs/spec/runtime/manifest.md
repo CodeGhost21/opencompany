@@ -112,8 +112,12 @@ hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
                                    # may open a line with — a room where
                                    # everyone may `!propose` votes instead of
                                    # deliberating. A member the table omits
-                                   # keeps every move; at least one seat must
-                                   # keep `commit`. See runtime/hivemind.md
+                                   # keeps every move. `commit` (with
+                                   # `question`/`defer`) is ungated: every
+                                   # seat keeps it whether or not the table
+                                   # names it, so a `commit` entry here is
+                                   # accepted for documentation only and
+                                   # restricts nothing. See runtime/hivemind.md
 
 [group_chat.hive.referral]         # NEW: may this desk ask ANOTHER desk?
 enabled = true                     # off unless this says so; the whole block
