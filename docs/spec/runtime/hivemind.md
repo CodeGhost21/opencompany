@@ -124,8 +124,13 @@ Pinned on this desk, whatever else has scrolled away:   (when the board holds an
 Members who have not spoken yet: @scout, @critic. …     (see speaker diversity)
 You already said this, so do not repeat it — …          (when it has spoken)
 Shared attributed transcript:
-[7] operator: …
+[7] operator: Decide the rollout.
 [9] planner: !propose #stage …
+--- Above: earlier conversation on this desk, from before this      (only when a
+question was asked. Still readable and citable with ^N — none of     prior episode
+it is on this episode's floor. ---                                   is in the window)
+[15] operator: Decide the next rollout.
+[17] planner: !propose #canary …
 
 Your one line:
 ```
