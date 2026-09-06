@@ -4586,6 +4586,9 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
                 ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root),
             )
             .await?;
+        if let Some(error) = terminal_budget_error(agent_id, &outcome) {
+            return Err(error.into());
+        }
         Ok(outcome.reply)
     }
 }
@@ -4612,6 +4615,9 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner {
                 ChatTarget::deliberating(Some(desk_id), None),
             )
             .await?;
+        if let Some(error) = terminal_budget_error(agent_id, &outcome) {
+            return Err(error.into());
+        }
         Ok(outcome.reply)
     }
 }
