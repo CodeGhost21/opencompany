@@ -4587,7 +4587,7 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
             )
             .await?;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
-            return Err(error.into());
+            return Err(error);
         }
         Ok(outcome.reply)
     }
@@ -4616,7 +4616,7 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner {
             )
             .await?;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
-            return Err(error.into());
+            return Err(error);
         }
         Ok(outcome.reply)
     }
