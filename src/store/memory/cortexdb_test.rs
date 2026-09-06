@@ -540,6 +540,41 @@ async fn namespace_summaries_enumerates_every_namespace_this_driver_wrote() {
     assert_eq!(summaries[1].count, 1);
 }
 
+/// Regression: `count()` used to always return `0`, so every populated
+/// CortexDB instance reported an empty engine to any `Memory` consumer that
+/// checks it. It should report the same per-namespace key counts
+/// `namespace_summaries` does, summed across every namespace this driver has
+/// written to.
+#[tokio::test]
+async fn count_reports_live_keys_across_every_namespace() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    memory
+        .store("company-a", "one", "a1", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+    memory
+        .store("company-a", "two", "a2", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+    memory
+        .store("company-b", "one", "b1", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+    // A second write under the same key is a replay, not a second live key.
+    memory
+        .store("company-a", "one", "a1", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+
+    assert_eq!(
+        memory.count().await.expect("count succeeds"),
+        3,
+        "three live keys across the two namespaces, not the raw event count and not zero"
+    );
+}
+
 /// Regression for the `forget` finding: retracting only the newest event for
 /// a key left an older event behind, and `get` immediately started returning
 /// it again as if `forget` had never run.
