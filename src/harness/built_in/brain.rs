@@ -4536,6 +4536,14 @@ struct HiveDeskRunner {
     company: CompanyId,
     chat_id: Option<String>,
     thread_root: Option<EventSeq>,
+    /// The triggering operator message's own sequence — the same `trigger`
+    /// the episode itself was started with. Carried onto every `ChatTarget`
+    /// this runner builds (`.answering(...)`) so `TurnStreamCtx::message_seq`
+    /// is populated for a hive turn exactly as it is for an ordinary one;
+    /// without it, live tool frames from a desk started inside a thread carry
+    /// no message identity and the frontend files them under the desk-level
+    /// thread instead of the active `desk#root`/message bucket.
+    trigger_seq: Option<EventSeq>,
 }
 
 /// Turns a terminal budget outcome (`outcome.budget_paused` /
