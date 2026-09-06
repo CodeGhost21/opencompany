@@ -257,7 +257,8 @@ fn a_named_reach_is_honoured_in_both_narrower_directions() {
 
 #[tokio::test]
 async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_home() {
-    let far = FarDesk::answering("The replica lag budget is 400ms, measured over the last quarter.");
+    let far =
+        FarDesk::answering("The replica lag budget is 400ms, measured over the last quarter.");
     let (log, outcome) = run(
         REFERRING,
         &[
@@ -265,10 +266,7 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
                 "planner",
                 "!question #lag What is the replica lag budget? @#platform",
             ),
-            (
-                "scout",
-                "!propose #stage Stage the rollout behind a flag.",
-            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
             ("critic", "!support #stage ^1 Staging fits the lag budget."),
             ("planner", "!commit #stage ^3 Recorded."),
         ],
@@ -318,9 +316,15 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
     );
 
     assert_eq!(outcome.referrals.asked.len(), 1);
-    assert!(outcome.referrals.asked[0].returned, "{:?}", outcome.referrals);
     assert!(
-        outcome.summary().contains("asked 1 question of another desk"),
+        outcome.referrals.asked[0].returned,
+        "{:?}",
+        outcome.referrals
+    );
+    assert!(
+        outcome
+            .summary()
+            .contains("asked 1 question of another desk"),
         "the operator is told the room went outside: {}",
         outcome.summary()
     );
@@ -369,7 +373,10 @@ async fn a_line_that_asks_nobody_refers_nothing() {
     let (_, outcome) = run(
         REFERRING,
         &[
-            ("planner", "!propose #stage Stage the rollout behind a flag."),
+            (
+                "planner",
+                "!propose #stage Stage the rollout behind a flag.",
+            ),
             ("scout", "!support #stage ^1 Agreed."),
             ("critic", "!commit #stage ^1 Recorded."),
         ],
@@ -404,7 +411,10 @@ async fn a_desk_that_did_not_opt_in_never_leaves_the_room() {
     .await;
 
     assert!(far.asked().is_empty(), "{:?}", far.asked());
-    assert!(log.replies("platform").is_empty(), "the far desk is untouched");
+    assert!(
+        log.replies("platform").is_empty(),
+        "the far desk is untouched"
+    );
     assert!(outcome.referrals.asked.is_empty());
 }
 
@@ -668,22 +678,13 @@ fn the_manifest_refuses_a_referral_policy_that_could_never_fire() {
     // whose answer is thrown away, which is worse than refusing it.
     let found = problems("hive = { referral = { enabled = true, max_hops = 1 } }");
     assert!(
-        found
-            .iter()
-            .any(|p| p.contains("a round trip is two hops")),
+        found.iter().any(|p| p.contains("a round trip is two hops")),
         "{found:?}"
     );
     // Declared one-way, it is a policy somebody meant.
     let found = problems("hive = { referral = { enabled = true, max_hops = 1, returns = false } }");
-    assert!(
-        !found.iter().any(|p| p.contains("round trip")),
-        "{found:?}"
-    );
+    assert!(!found.iter().any(|p| p.contains("round trip")), "{found:?}");
 
     // And the ordinary opted-in block is accepted.
-    assert!(
-        problems(REFERRING).is_empty(),
-        "{:?}",
-        problems(REFERRING)
-    );
+    assert!(problems(REFERRING).is_empty(), "{:?}", problems(REFERRING));
 }

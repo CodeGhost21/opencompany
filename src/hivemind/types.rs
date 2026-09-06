@@ -112,7 +112,10 @@ pub struct HiveConfig {
     /// struct changes how one room argues with itself; this is the only one
     /// that lets a turn run somewhere else, so it is the only one whose default
     /// is "no" rather than "scaled to the desk".
-    #[serde(default, skip_serializing_if = "super::referral::ReferralConfig::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "super::referral::ReferralConfig::is_default"
+    )]
     pub referral: super::referral::ReferralConfig,
 }
 

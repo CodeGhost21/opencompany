@@ -418,7 +418,10 @@ impl<'a> EpisodeReferrals<'a> {
     }
 
     fn label(&self, id: &str) -> String {
-        self.labels.get(id).cloned().unwrap_or_else(|| id.to_owned())
+        self.labels
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_owned())
     }
 
     fn desk_name(&self, id: &str) -> String {

@@ -3698,8 +3698,7 @@ impl HarnessBrain {
                         // `None` is the default and every desk that never wrote
                         // the block, so the driver below is byte-identical to
                         // the one that ran before referral existed.
-                        let federation =
-                            crate::hivemind::desk_federation(&self.record(), &desk);
+                        let federation = crate::hivemind::desk_federation(&self.record(), &desk);
                         let mut driver = crate::hivemind::EpisodeDriver::new(
                             self.record().id.clone(),
                             desk,
