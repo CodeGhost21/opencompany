@@ -3677,11 +3677,28 @@ impl HarnessBrain {
                         // request built without seqs falls back to the message
                         // itself being the whole of the room's history.
                         let trigger = event_seq.unwrap_or_else(|| EventSeq::new(0));
+                        // The thread this episode's turns and closing report
+                        // are parented to (issue: hive replies were never
+                        // threaded to their trigger). Mirrors
+                        // `server::operator::reply_thread`: already in a
+                        // thread, the episode stays in it; otherwise the
+                        // triggering operator message becomes the thread
+                        // root, exactly as an ordinary single-responder reply
+                        // threads itself. Without this, every hive turn for a
+                        // top-level desk send is journaled with `parent: None`
+                        // — unrelated top-level channel traffic detached from
+                        // the question that asked it, and (worse) sharing the
+                        // desk's channel-level projection with every other
+                        // top-level hive send on the same desk, so a second
+                        // operator message answered in the same cycle can
+                        // fold the first episode's still-fresh turns as its
+                        // own votes.
+                        let thread_root = Some(parent.unwrap_or(trigger));
                         let runner = HiveDeskRunner {
                             run_turn: self.run_turn(),
                             company: self.record().id.clone(),
                             chat_id: chat.clone(),
-                            thread_root: *parent,
+                            thread_root,
                             trigger_seq: Some(trigger),
                         };
                         // The desk's own memory, over the same `ContextStore`
