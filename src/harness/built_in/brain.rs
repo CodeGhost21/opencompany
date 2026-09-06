@@ -11463,7 +11463,10 @@ members = ["engineer", "designer"]
     /// answering — and the episode never counted the turn as failed.
     #[tokio::test]
     async fn hive_speak_turns_a_budget_pause_into_an_error() {
-        let runner = hive_desk_runner(budget_paused_outcome("theorist"));
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(&brain, &host, budget_paused_outcome("theorist"));
         let err = runner
             .speak("theorist", "Settle the derivation.")
             .await
