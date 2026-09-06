@@ -767,6 +767,10 @@ impl Memory for CortexdbMemory {
                     // current value regardless of relevance already has
                     // `get`/`list` for that.
                     if current.content != record.content {
+                        eprintln!(
+                            "DEBUG DROP key={} current={:?} record={:?}",
+                            record.key, current.content, record.content
+                        );
                         return None;
                     }
                     let mut resolved = current.clone();
