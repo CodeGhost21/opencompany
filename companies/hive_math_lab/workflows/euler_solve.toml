@@ -39,8 +39,13 @@ summary = "An operator states a problem with an exact answer in the main line."
 # pass. A guarded cycle needs an explicit bound or the engine rejects it
 # (tinyflows `IllegalCycle`): OpenCompany has no `loop` node kind, so the
 # trigger's `recursion_limit` is the sanctioned way to cap the retry passes.
+# Five passes, not a hundred: `restate`/`approach`/`solve`/`check` per pass is
+# already three agent turns, and a problem still disagreeing after five
+# reduction passes is a misread statement, not a search that needs a hundred
+# more tries — the low bound makes a stuck run fail fast instead of running
+# long and expensive.
 [node.config]
-recursion_limit = 100
+recursion_limit = 5
 
 [[node]]
 id = "restate"
