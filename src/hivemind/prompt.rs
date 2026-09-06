@@ -283,7 +283,7 @@ impl<'a> EpisodePrompt<'a> {
             self.missing(),
             self.peers(),
             self.last_line(visible),
-            render_transcript(visible),
+            render_transcript(visible, self.trigger),
         )
     }
 
