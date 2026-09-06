@@ -1379,3 +1379,142 @@ async fn a_desk_reasons_with_memory_held_in_a_remote_engine() {
         "no journaled line cites what the remote engine remembered: {rows:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9: a desk asks another desk, and only the information crosses
+// ---------------------------------------------------------------------------
+
+/// A desk of three that may put one question to `front`.
+///
+/// `quorum = 2` rather than three: the point of this episode is the crossing,
+/// and a room that needs every seat spends its budget proving the earlier
+/// tests' claim again.
+const REFERRING: &str = "{ enabled = true, turn_budget = 12, quorum = 2, blind_round = false, \
+                         referral = { enabled = true } }";
+
+/// What the far desk says when it is asked.
+const FAR_ANSWER: &str = "The front desk's own log shows the recurrence closing at 42 twice.";
+
+/// The script for the referral episode.
+///
+/// Two shapes of request reach it now, and telling them apart is the whole
+/// fixture: a **hive turn** carries `You are @<id>` and the attributed
+/// transcript, and a **referred turn** carries neither, because the far
+/// teammate is answering a colleague rather than taking a seat in this room.
+fn referring_script() -> Responder {
+    Arc::new(|ask: &Ask| {
+        // The referred turn. Identified by the referral prompt's own opening,
+        // which no episode prompt contains.
+        if ask.speaker.is_none() {
+            let last = ask
+                .messages
+                .last()
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if last.contains("has asked you a question") {
+                return Reply::Say(FAR_ANSWER.to_owned());
+            }
+            return Reply::Say("Acknowledged.".to_owned());
+        }
+        let propose = format!("!propose #{TOPIC} The closed form of the recurrence is 42.");
+        let grounds = ask.seq_of(&format!("!propose #{TOPIC}"));
+        // The theorist opens by asking the other desk — early, before anybody
+        // has backed anything, which is the timing the mechanism turns on.
+        let line = match (ask.who(), grounds) {
+            (THEORIST, None) if !ask.i_said("@#front") => format!(
+                "!question #{TOPIC} Has the front desk seen this recurrence before? @#front"
+            ),
+            (THEORIST, None) => propose,
+            (who, None) => format!("!question {who} is waiting for the opening position."),
+            (who, Some(seq)) if ask.prompt.contains("The room has reached quorum") => {
+                format!("!commit #{TOPIC} ^{seq} {who} records the room's decision.")
+            }
+            (THEORIST, Some(seq)) => format!(
+                "!evidence #{TOPIC} ^{seq} theorist checked base cases 1..5 and each closes at 42."
+            ),
+            (who, Some(seq)) if !ask.i_said("!support") => {
+                format!("!support #{TOPIC} ^{seq} {who} checked the derivation and it holds.")
+            }
+            (who, Some(_)) => format!("!question {who} has nothing further."),
+        };
+        Reply::Say(line)
+    })
+}
+
+/// **A desk asks another desk, and the answer comes home without a vote.**
+///
+/// The claim the unit tests cannot make: the far turn goes through the *real*
+/// harness turn path on the *far desk's* channel, its answer is journaled
+/// there under the teammate that took it, and what returns to the asking desk
+/// is a row the room authored — so a teammate on `front` can inform `lab`
+/// without ever being able to carry a topic on it.
+#[tokio::test]
+async fn a_desk_asks_another_desk_and_only_the_information_crosses() {
+    let home = tempfile::tempdir().unwrap();
+    let (base_url, _script) = spawn_script(referring_script()).await;
+    let (address, runtime) = boot(home.path(), &base_url, REFERRING, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    client
+        .say(DESK, "Settle the closed form of the recurrence.")
+        .await;
+
+    // The far desk ran a real turn, journaled under its own member.
+    let far = replies(&runtime, SOLO_DESK).await;
+    let answered: Vec<_> = far
+        .iter()
+        .filter(|(_, _, text)| text.contains(FAR_ANSWER))
+        .collect();
+    assert_eq!(
+        answered.len(),
+        1,
+        "exactly one turn ran on the far desk — a desk mention is not a fan-out: {far:?}"
+    );
+    assert_eq!(
+        answered[0].1, "greeter",
+        "and it is authored by the teammate that took it, on its own desk: {far:?}"
+    );
+
+    // The answer came home, under the room and not under the answerer. This is
+    // the property the whole design turns on: a row authored by a roster id
+    // folds as a trace and can be counted as a supporter, so an answer that
+    // crossed under `@greeter` would let one supporter count on two desks.
+    let rows = replies(&runtime, DESK).await;
+    let carried: Vec<_> = rows
+        .iter()
+        .filter(|(_, _, text)| text.contains(FAR_ANSWER))
+        .collect();
+    assert_eq!(carried.len(), 1, "the answer came home once: {rows:?}");
+    assert_eq!(
+        carried[0].1, HIVE_REPORT_AUTHOR,
+        "carried by the room, never by the far teammate: {rows:?}"
+    );
+    assert!(
+        carried[0].2.contains("@greeter") && carried[0].2.contains("Front"),
+        "and it says who answered and where: {}",
+        carried[0].2
+    );
+
+    // `greeter` never becomes a member of this desk's fold: every *turn* row
+    // here is one of the three seats.
+    for (_, author, _) in &turns(&rows) {
+        assert!(
+            [THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str()),
+            "a far teammate took a seat in the room: {rows:?}"
+        );
+    }
+
+    // The room still settles, and the closing report tells the operator it
+    // went outside — which is the one thing an operator reading this desk
+    // cannot otherwise see, because the far turn happened somewhere else.
+    let reports = reports(&rows);
+    assert_eq!(reports.len(), 1, "{rows:?}");
+    assert!(
+        reports[0].contains("asked 1 question of another desk"),
+        "{}",
+        reports[0]
+    );
+    assert!(reports[0].contains("@greeter on front"), "{}", reports[0]);
+}
