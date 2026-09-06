@@ -130,6 +130,16 @@ async fn recall(
             Json(json!({"error": "unauthorized"})),
         );
     }
+    {
+        let mut lag = state.recall_lag_calls.lock().unwrap();
+        if *lag > 0 {
+            *lag -= 1;
+            return (
+                StatusCode::OK,
+                Json(json!({ "layers": { "events": [] } })),
+            );
+        }
+    }
     let scope = body
         .get("scope")
         .and_then(Value::as_str)
