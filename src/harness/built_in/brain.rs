@@ -10876,6 +10876,143 @@ members = ["eng1", "eng2"]
         }
     }
 
+    /// A `FixedOutcomeTurn` whose single turn reports a budget pause — the
+    /// account itself is out of inference credits, so `outcome.reply` is
+    /// host-authored pause copy, not an answer.
+    fn budget_paused_outcome(agent: &str) -> crate::harness::built_in::TurnOutcome {
+        crate::harness::built_in::TurnOutcome {
+            reply: BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: agent.to_string(),
+                summary: "add credits and try again".to_string(),
+            }),
+        }
+    }
+
+    /// A `FixedOutcomeTurn` whose single turn halted for spend — the
+    /// teammate's own declared cap was reached mid-turn.
+    fn spend_halted_outcome(agent: &str) -> crate::harness::built_in::TurnOutcome {
+        crate::harness::built_in::TurnOutcome {
+            reply: "partial answer before the brake fired".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: agent.to_string(),
+                spent_usd: 5.5,
+                cap_usd: 5.0,
+            }),
+            budget_paused: None,
+        }
+    }
+
+    fn hive_desk_runner(outcome: crate::harness::built_in::TurnOutcome) -> HiveDeskRunner {
+        HiveDeskRunner {
+            run_turn: Arc::new(FixedOutcomeTurn {
+                outcome,
+                approval_requests: None,
+            }),
+            company: CompanyId::new("acme"),
+            chat_id: Some("lab".to_string()),
+            thread_root: None,
+        }
+    }
+
+    /// **A budget-paused hive turn is a hard error, not a folded reply.**
+    ///
+    /// Before this fix `HiveDeskRunner::speak` returned `Ok(outcome.reply)`
+    /// unconditionally, so `EpisodeDriver` journaled the host's "add credits"
+    /// placeholder as a genuine `AgentReply` under the member's own identity —
+    /// indistinguishable, from the transcript alone, from the member actually
+    /// answering — and the episode never counted the turn as failed.
+    #[tokio::test]
+    async fn hive_speak_turns_a_budget_pause_into_an_error() {
+        let runner = hive_desk_runner(budget_paused_outcome("theorist"));
+        let err = runner
+            .speak("theorist", "Settle the derivation.")
+            .await
+            .expect_err("a budget pause must surface as an error, not Ok(reply)");
+        assert!(
+            err.to_string().contains("theorist"),
+            "the error must name the agent so an operator reading it knows who paused: {err}"
+        );
+    }
+
+    /// The same terminal state, for a spend halt rather than a budget pause.
+    #[tokio::test]
+    async fn hive_speak_turns_a_spend_halt_into_an_error() {
+        let runner = hive_desk_runner(spend_halted_outcome("theorist"));
+        let err = runner
+            .speak("theorist", "Settle the derivation.")
+            .await
+            .expect_err("a spend halt must surface as an error, not Ok(reply)");
+        assert!(
+            err.to_string().contains("theorist"),
+            "the error must name the agent: {err}"
+        );
+    }
+
+    /// **The same bug, on the far-desk referral runner.**
+    ///
+    /// `HiveReferralRunner::refer` shares the exact same shape:
+    /// `EpisodeReferrals` only ever treated an `Err` result as "the far desk
+    /// did not answer", so a budget-paused or spend-halted far turn slipped
+    /// through as though it were a real referral answer and was carried back
+    /// to the asking desk as content.
+    #[tokio::test]
+    async fn hive_refer_turns_a_budget_pause_into_an_error() {
+        let runner = hive_desk_runner(budget_paused_outcome("sre"));
+        let err = runner
+            .refer("platform", "sre", "What is the failover budget?")
+            .await
+            .expect_err("a budget pause on the far desk must surface as an error too");
+        assert!(err.to_string().contains("sre"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hive_refer_turns_a_spend_halt_into_an_error() {
+        let runner = hive_desk_runner(spend_halted_outcome("sre"));
+        let err = runner
+            .refer("platform", "sre", "What is the failover budget?")
+            .await
+            .expect_err("a spend halt on the far desk must surface as an error too");
+        assert!(err.to_string().contains("sre"), "{err}");
+    }
+
+    /// A turn that finishes cleanly is unaffected: `speak`/`refer` still
+    /// return `Ok(reply)` when neither terminal flag is set.
+    #[tokio::test]
+    async fn hive_speak_and_refer_pass_through_an_ordinary_reply() {
+        let ok = |text: &str| crate::harness::built_in::TurnOutcome {
+            reply: text.to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        };
+        let runner = hive_desk_runner(ok("!propose #stage Stage the rollout."));
+        assert_eq!(
+            runner
+                .speak("theorist", "Settle the derivation.")
+                .await
+                .expect("an ordinary reply is not an error"),
+            "!propose #stage Stage the rollout."
+        );
+        let runner = hive_desk_runner(ok("The failover budget is $2,000/month."));
+        assert_eq!(
+            runner
+                .refer("platform", "sre", "What is the failover budget?")
+                .await
+                .expect("an ordinary referral answer is not an error"),
+            "The failover budget is $2,000/month."
+        );
+    }
+
     /// A brain whose provider steers the dispatched card `key` with `actions`
     /// (one per turn). Returns the brain + its task store so a test can seed the
     /// card and read the disposition back.
