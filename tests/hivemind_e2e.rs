@@ -1289,6 +1289,8 @@ async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
 
     let write_state = Arc::clone(&state);
     let read_state = Arc::clone(&state);
+    let events_state = Arc::clone(&state);
+    let scopes_state = Arc::clone(&state);
     let app = axum::Router::new()
         .route(
             "/v1/admin/ready",
