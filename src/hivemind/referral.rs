@@ -543,6 +543,9 @@ impl<'a> EpisodeReferrals<'a> {
             };
         }
         let mut state = self.state.lock().await;
+        // The last question asked is the one this answers. `consider` folds a
+        // forward and then, in the same call, its return — so the two strictly
+        // alternate and there is no interleaving for the index to get wrong.
         if let Some(last) = state.ledger.asked.last_mut() {
             last.returned = true;
         }
