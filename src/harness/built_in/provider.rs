@@ -1871,26 +1871,26 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
 }
 
 #[cfg(test)]
-
-/// The output floor only ever raises the harness's cap (issue: reasoning
-/// models exhaust a 16k `max_tokens` on their hidden stream).
-#[test]
-fn output_cap_floor_raises_but_never_lowers() {
-    let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
-    env.set("OPENCOMPANY_INFERENCE_MAX_TOKENS", "32000");
-    assert_eq!(output_cap(Some(16384)), Some(32000));
-    assert_eq!(output_cap(Some(64000)), Some(64000));
-    assert_eq!(output_cap(None), Some(32000));
-}
-
-#[test]
-fn output_cap_without_the_variable_is_the_harness_cap() {
-    let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
-    env.remove("OPENCOMPANY_INFERENCE_MAX_TOKENS");
-    assert_eq!(output_cap(Some(16384)), Some(16384));
-    assert_eq!(output_cap(None), None);
-}
 mod tests {
+
+    /// The output floor only ever raises the harness's cap (issue: reasoning
+    /// models exhaust a 16k `max_tokens` on their hidden stream).
+    #[test]
+    fn output_cap_floor_raises_but_never_lowers() {
+        let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
+        env.set("OPENCOMPANY_INFERENCE_MAX_TOKENS", "32000");
+        assert_eq!(output_cap(Some(16384)), Some(32000));
+        assert_eq!(output_cap(Some(64000)), Some(64000));
+        assert_eq!(output_cap(None), Some(32000));
+    }
+
+    #[test]
+    fn output_cap_without_the_variable_is_the_harness_cap() {
+        let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
+        env.remove("OPENCOMPANY_INFERENCE_MAX_TOKENS");
+        assert_eq!(output_cap(Some(16384)), Some(16384));
+        assert_eq!(output_cap(None), None);
+    }
     use super::*;
     use crate::app::config::MapEnv;
 
