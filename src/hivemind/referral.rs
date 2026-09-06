@@ -194,7 +194,13 @@ pub struct FederationDesk {
 pub struct HiveFederation {
     /// Every desk in the company, including the one deliberating.
     pub desks: Vec<FederationDesk>,
-    /// Every active roster teammate, as `(id, label)` in roster order.
+    /// Every teammate seated on any of those desks, as `(id, label)`, sorted by
+    /// id.
+    ///
+    /// Order is deliberately not desk order and does not need to be: nothing
+    /// reads a *responder* off this list. The far desk's one answerer is picked
+    /// from that desk's own `members`, which does keep desk order, and this is
+    /// only what `@teammate` resolves against.
     pub agents: Vec<(String, String)>,
 }
 
