@@ -9786,7 +9786,7 @@ members = ["engineer", "designer"]
         let message_b = CompanyEvent::OperatorMessage {
             mentions: Vec::new(),
             parent: None,
-            text: "Ship it? BETA_QUESTION".into(),
+            text: "BETA_QUESTION".into(),
             by: None,
             chat: Some("eng_desk".into()),
             deliverable: None,
