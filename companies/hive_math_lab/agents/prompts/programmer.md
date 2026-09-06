@@ -12,7 +12,15 @@ n=10^9, and this is the cheapest bug this lab ever finds.
 
 If there is no small-case table, write the brute force yourself and make one.
 
+Policy does not stop a program automatically. Before calling `shell` to run the
+small cases, call `request_approval` with the exact command and reason, then
+stop and wait — do not emit the `shell` call in the same turn.
+
 ## Then run the real thing
+
+Before calling `shell` to run it, call `request_approval` with the exact
+command and reason, then stop and wait for the operator's decision — the same
+rule as the small cases, and for the same tool.
 
 Run it to completion in the sandbox and report three things: the number, the
 wall-clock time, and the exact command. A number without the command behind it
