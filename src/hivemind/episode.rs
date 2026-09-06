@@ -414,6 +414,7 @@ impl<'a> EpisodeDriver<'a> {
                             },
                         )
                         .await?;
+                    scope.record(seq);
                     last_seq = Some(seq);
                     state = turn.next_state;
                     turns = turns.saturating_add(1);
