@@ -3711,7 +3711,35 @@ impl HarnessBrain {
                         if let Some(federation) = federation {
                             driver = driver.with_federation(federation, &runner);
                         }
-                        let outcome = driver.run(trigger).await?;
+                        let run_result = driver.run(trigger).await;
+                        // Issue: an MCP tool-call failure inside a hive
+                        // member's turn queues on `self.deps.mcp_failures`
+                        // exactly as one inside an ordinary responder turn
+                        // does, but nothing on this path ever drained it —
+                        // the queue sat until a later, unrelated chat turn
+                        // cleared it silently, and the failing call produced
+                        // neither an error step nor a `McpCallFailed` journal
+                        // row. Drained here, unconditionally, the same way
+                        // the ordinary responder path drains it below: on
+                        // success AND on error, since a failed episode may
+                        // still have queued a real tool failure. The steps
+                        // vec is discarded — a hive episode has no single
+                        // bubble to attach them to, the transcript is already
+                        // the record — but the drain's real effect, the
+                        // journaled `McpCallFailed` row, does not depend on
+                        // it. Best-effort: a failure surfacing its own
+                        // failure must not cost the episode's real outcome.
+                        let mut discarded_steps = Vec::new();
+                        if let Err(err) =
+                            self.surface_mcp_failures(&mut discarded_steps, None).await
+                        {
+                            tracing::warn!(
+                                company = %self.record().id,
+                                error = %err,
+                                "[hive] failed to surface queued MCP failures after an episode"
+                            );
+                        }
+                        let outcome = run_result?;
                         tracing::info!(
                             company = %self.record().id,
                             chat = %chat.as_deref().unwrap_or_default(),
@@ -3722,6 +3750,37 @@ impl HarnessBrain {
                             asked = outcome.referrals.asked.len(),
                             "[hive] a desk answered as a room"
                         );
+                        // Issue: a hive episode journals every turn and its
+                        // own closing report directly (`EpisodeDriver`), so a
+                        // synchronous chat-API caller and `emit_cycle_webhooks`
+                        // — both of which read `CycleReport.responses`
+                        // (`CycleResult.channel_responses` here) rather than
+                        // the journal — saw an empty response collection and
+                        // never fired `work.completed`, even though the desk
+                        // had just answered at length. Pushing the closing
+                        // report's own text back through here is NOT a second
+                        // journal write: `outcome.report_seq` is the sequence
+                        // the episode already journaled it under, so this
+                        // response carries that durable id and
+                        // `journal_chat_replies` — which otherwise journals
+                        // every response it is handed — skips a response that
+                        // already names one. When the report itself failed to
+                        // journal (`report_seq` is `None`, logged where it
+                        // happened), leaving `message_id` unset lets the
+                        // ordinary path journal it now rather than losing it
+                        // twice.
+                        channel_responses.push(OutboundMessage {
+                            message_id: outcome
+                                .report_seq
+                                .map(|seq| seq.value().to_string()),
+                            task_id: None,
+                            channel: "operator".to_string(),
+                            agent: Some(crate::hivemind::HIVE_REPORT_AUTHOR.to_string()),
+                            text: outcome.summary(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
                         room_answered = true;
                         continue;
                     }
