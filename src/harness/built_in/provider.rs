@@ -1125,6 +1125,31 @@ impl MockProvider {
     }
 }
 
+/// The per-request output cap actually sent, given the cap the harness asked
+/// for.
+///
+/// The vendored harness stamps every request with a fixed
+/// `AGENT_TURN_MAX_OUTPUT_TOKENS` (16384) sized for a model whose visible
+/// answer is all it emits. A reasoning model routed through an OpenAI-shaped
+/// endpoint counts its hidden reasoning stream against the same `max_tokens`,
+/// so on a hard problem the model exhausts the cap before writing a single
+/// visible token and the turn fails with `finish_reason: length` and an empty
+/// message. `OPENCOMPANY_INFERENCE_MAX_TOKENS` raises the floor for such a
+/// deployment: the larger of the harness's cap and the variable is sent, so the
+/// variable can never *lower* a cap the harness relied on, and an unset or
+/// unparsable value changes nothing.
+fn output_cap(requested: Option<u32>) -> Option<u32> {
+    let floor = std::env::var("OPENCOMPANY_INFERENCE_MAX_TOKENS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0);
+    match (requested, floor) {
+        (Some(cap), Some(floor)) => Some(cap.max(floor)),
+        (Some(cap), None) => Some(cap),
+        (None, floor) => floor,
+    }
+}
+
 #[async_trait]
 impl ChatModel<()> for MockProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
@@ -1217,31 +1242,6 @@ impl HostedProvider {
 }
 
 #[async_trait]
-
-/// The per-request output cap actually sent, given the cap the harness asked
-/// for.
-///
-/// The vendored harness stamps every request with a fixed
-/// `AGENT_TURN_MAX_OUTPUT_TOKENS` (16384) sized for a model whose visible
-/// answer is all it emits. A reasoning model routed through an OpenAI-shaped
-/// endpoint counts its hidden reasoning stream against the same `max_tokens`,
-/// so on a hard problem the model exhausts the cap before writing a single
-/// visible token and the turn fails with `finish_reason: length` and an empty
-/// message. `OPENCOMPANY_INFERENCE_MAX_TOKENS` raises the floor for such a
-/// deployment: the larger of the harness's cap and the variable is sent, so the
-/// variable can never *lower* a cap the harness relied on, and an unset or
-/// unparsable value changes nothing.
-fn output_cap(requested: Option<u32>) -> Option<u32> {
-    let floor = std::env::var("OPENCOMPANY_INFERENCE_MAX_TOKENS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .filter(|value| *value > 0);
-    match (requested, floor) {
-        (Some(cap), Some(floor)) => Some(cap.max(floor)),
-        (Some(cap), None) => Some(cap),
-        (None, floor) => floor,
-    }
-}
 
 impl ChatModel<()> for HostedProvider {
     /// Advertise native tool calling so openhuman's turn loop drives structured
