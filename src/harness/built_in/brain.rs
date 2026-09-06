@@ -4665,6 +4665,7 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner<'_> {
                     .answering(self.trigger_seq),
             )
             .await?;
+        park_hive_turn_approvals(self.brain, self.host, agent_id).await;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
             return Err(error);
         }
@@ -4673,7 +4674,7 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner<'_> {
 }
 
 #[async_trait]
-impl crate::hivemind::HiveReferralRunner for HiveDeskRunner {
+impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
     async fn refer(&self, desk_id: &str, agent_id: &str, prompt: &str) -> Result<String> {
         let outcome = self
             .run_turn
