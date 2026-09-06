@@ -4638,7 +4638,7 @@ fn terminal_budget_error(
 }
 
 #[async_trait]
-impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
+impl crate::hivemind::HiveTurnRunner for HiveDeskRunner<'_> {
     async fn speak(&self, agent_id: &str, prompt: &str) -> Result<String> {
         let outcome = self
             .run_turn
