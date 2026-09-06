@@ -321,9 +321,18 @@ impl<'a> EpisodeDriver<'a> {
             // Folded fresh each turn from the same journal the transcript came
             // from, so a pin laid down *during* the episode is on the board for
             // the next speaker rather than the next episode.
-            let pins = read_pinboard(&log, &conversation, PIN_LIMIT, None)
-                .await
-                .unwrap_or_default();
+            let pins = match read_pinboard(&log, &conversation, PIN_LIMIT, None).await {
+                Ok(pins) => pins,
+                Err(error) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        desk = %self.desk.id,
+                        error = %error,
+                        "[hive] the pinboard could not be read; this turn sees no pins"
+                    );
+                    Vec::new()
+                }
+            };
             let member = self.desk.member(&turn.agent_id).ok_or_else(|| {
                 OpenCompanyError::Config(format!(
                     "hive episode on desk `{}`: the floor was given to `{}`, who is not seated",
