@@ -714,11 +714,26 @@ impl Memory for CortexdbMemory {
                 .into_iter()
                 .filter_map(|record| {
                     let current = canonical.get(&record.key)?;
+                    // A hit whose content differs from the key's current
+                    // content is superseded: `/v1/recall` matched it against
+                    // `query` before the correction, and there is no way for
+                    // this driver to ask whether the CURRENT content would
+                    // independently match the same query without a second,
+                    // per-key round trip. Swapping in the current content
+                    // under the stale hit's score used to be this fix's
+                    // answer, but that is its own bug: a query for "cat"
+                    // returning "dog" just because "cat" used to be there is
+                    // a bait-and-switch, not a corrected result, and an
+                    // unrelated current value can then displace a genuine
+                    // match once `limit` is applied. Dropping it instead is
+                    // the conservative-correct choice: recall's job is
+                    // trustworthy retrieval, and a caller that wants the
+                    // current value regardless of relevance already has
+                    // `get`/`list` for that.
+                    if current.content != record.content {
+                        return None;
+                    }
                     let mut resolved = current.clone();
-                    // The hit's score is `/v1/recall`'s relevance answer for
-                    // `query`; keep it for ranking even though the content
-                    // underneath may have just been swapped for the current
-                    // version.
                     resolved.score = record.score;
                     Some(resolved)
                 })
