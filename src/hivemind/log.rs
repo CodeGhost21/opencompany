@@ -23,6 +23,7 @@ use tinyhivemind_hive::{
     LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
 };
 
+use super::scope::EpisodeScope;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, StoredEvent};
 
