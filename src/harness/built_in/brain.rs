@@ -9721,11 +9721,21 @@ members = ["engineer", "designer"]
             if !all_text.contains("You are @engineer") && !all_text.contains("You are @designer") {
                 return Ok(ModelResponse::assistant("(not a hive turn)".to_string()));
             }
-            eprintln!("DEBUG PROMPT >>>\n{all_text}\n<<< END PROMPT");
             let line = if let Some(topic) = carried_topic(&all_text) {
                 format!("!commit #{topic} ^1 because the room already carried it.")
             } else {
-                let topic = if all_text.contains("ALPHA_QUESTION") {
+                // The desk's own memory recall can surface a PAST episode's
+                // task and outcome as remembered context (by design — see
+                // `a_desk_reasons_with_what_it_stored_in_an_earlier_episode`),
+                // so the marker is read from the live transcript this turn
+                // was actually handed, not from the whole prompt: the recall
+                // block is prose about a prior episode, not this episode's
+                // own fold.
+                let transcript = all_text
+                    .split("Shared attributed transcript:")
+                    .nth(1)
+                    .unwrap_or(all_text.as_str());
+                let topic = if transcript.contains("ALPHA_QUESTION") {
                     "alpha"
                 } else {
                     "beta"
