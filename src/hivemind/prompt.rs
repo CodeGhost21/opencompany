@@ -238,6 +238,22 @@ impl<'a> EpisodePrompt<'a> {
         self
     }
 
+    /// Name the episode's watermark, so the transcript can show where its own
+    /// floor begins.
+    ///
+    /// The live failure this exists for: a six-seat run's episode for one
+    /// Project Euler problem spent its whole eighteen-turn budget arguing the
+    /// *previous* problem, because the transcript rendered a prior episode's
+    /// live-looking `!propose` and `!support` rows exactly like its own. The
+    /// watermark this host already folds on (`EpisodeDriver::run`'s `trigger`)
+    /// says precisely where the fold stops treating a row as a vote; this
+    /// builder is that same line, drawn where a reader can see it.
+    #[must_use]
+    pub fn with_trigger(mut self, trigger: Sequence) -> Self {
+        self.trigger = Some(trigger);
+        self
+    }
+
     /// Render exactly what this turn is allowed to see.
     #[must_use]
     pub fn render(&self, turn: &HiveTurn, visible: &[&SessionMessage]) -> String {
