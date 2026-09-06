@@ -8,27 +8,22 @@ state.
 
 ## Where things stand
 
-- **Merge of `upstream/main` (69324110b, 764 commits) is in progress and
-  uncommitted** in the worktree `worktrees/hivemind` on the original box.
-  The five source conflicts (`src/harness/built_in/brain.rs`,
-  `src/harness/built_in/mod.rs`, `src/runtime/delegation.rs`,
-  `src/server/ops/memory_engine.rs`, `src/store/memory/driver.rs`) and
-  `Cargo.lock` were resolved by a merge-conflict-resolver agent; the merge
-  commit was not made before the session ran out. The last pushed commit is
-  `b17625a27` (pre-merge). Upstream moved the `vendor/openhuman` gitlink to
-  `b7f4e9490`; `vendor/tinyhivemind` must stay at `e272c84` (tinyhivemind
-  `main`).
-- If you start from a fresh clone: `git fetch upstream && git merge
-  upstream/main` on `hivemind` and redo the five conflicts. What must survive
-  from our side is listed in the PR body under "Summary"; in short: the hive
-  hook and `room_answered` flag in brain.rs, `ChatTarget::deliberating` +
-  `history_seed` in delegation.rs and the `seed_chat` gate in mod.rs, the
-  `cortexdb` arm / `SUPPORTED_REMOTE_DRIVERS` / actor helpers in driver.rs and
-  the CortexDB tile in memory_engine.rs (order must match the driver list),
-  `output_cap` / `OPENCOMPANY_INFERENCE_MAX_TOKENS` in provider.rs.
-- After the merge: run `git submodule update --init --recursive`, then the
-  gates below. An OpenHuman bump is a migration (harness APIs move); fix our
-  side, never `vendor/`.
+- **The merge of `upstream/main` is committed and pushed** (`983d67add`), and
+  every gate below is green on it. `vendor/tinyhivemind` stays at `e272c84`
+  (tinyhivemind `main`).
+- **Cross-desk referral is wired** (`src/hivemind/referral.rs` and
+  `docs/spec/runtime/hivemind-referral.md`). A desk that writes
+  `[group_chat.hive.referral] enabled = true` may put one question to another
+  desk; the far desk answers with a real turn on its own channel and the answer
+  comes home under `hive-referral`, which folds as a system row so it can never
+  be counted as a supporter. Off by default. `MentionTurnQueue` is reached
+  through `reach = "local"` rather than wired separately — the library asserts
+  that decision is identical, and two queues that must agree is worse than one.
+- Desktop CI needed `src-tauri/Cargo.lock` refreshed for the new
+  `tinyhivemind-hive` dependency, and `scripts/__pycache__` was committed by
+  accident; both are fixed, with `__pycache__/` now ignored.
+- An OpenHuman bump is a migration (harness APIs move); fix our side, never
+  `vendor/`.
 
 ## Gates (all green on the pre-merge tree)
 
@@ -67,10 +62,27 @@ OPENCOMPANY_BIND=127.0.0.1:8080 \
 python3 scripts/hive-euler.py --problems 233,249,301,345 --timeout 5400 --out euler.json
 ```
 
-The inference endpoint is the local llm-ladder-router (`ladder` container,
-`~/.config/ladder/config.toml`), which now serves `chat-v1`, `reasoning-v1`,
-`agentic-v1`, `vision-v1` as aliases of `flash` / `reasoning` /
-`max-reasoning`, so per-tier models work without `OPENCOMPANY_INFERENCE_MODEL`.
+The inference endpoint is a local llm-ladder-router. The shared `ladder`
+container on `:6969` serves `flash` / `reasoning` / `max-reasoning` / `scribe`
+and **no** `-v1` aliases, so a hive run against it fails every turn with
+`unknown ladder chat-v1`: `build.rs::model_for_tier` emits the tier names, not
+the ladder names. The router has no `aliases` key — it rejects one at parse
+time — so the alias has to be a duplicated `[[ladders]]` block under the tier
+name. Run a *second* container rather than editing the shared one:
+
+```
+sed 's/0.0.0.0:6969/0.0.0.0:6970/' ~/.config/ladder/config.toml > /tmp/hive-ladder.toml
+# then append copies of the flash / reasoning / max-reasoning blocks renamed
+# chat-v1 / reasoning-v1 / agentic-v1 (and vision-v1), and:
+docker run -d --name ladder-hive -p 127.0.0.1:6970:6970 \
+  -v /tmp/hive-ladder.toml:/etc/ladder/config.toml:ro \
+  -e LADDER_API_KEY -e SURPLUS_API_KEY -e OPENROUTER_API_KEY \
+  ghcr.io/senamakel/llm-ladder-router:latest --config /etc/ladder/config.toml
+```
+
+Point `OPENCOMPANY_INFERENCE_URL` at `:6970`. Grading also needs
+`lucky-bai/projecteuler-solutions` cloned to `~/work/projecteuler-solutions`;
+without it the driver runs the ladder and reports every verdict as ungradeable.
 A BYOK `[inference] provider` in the manifest would need its key in the secret
 store (`inference/key`); the env path is simpler for a lab.
 
@@ -106,12 +118,12 @@ rungs alone; it needs problems where seats disagree.
 
 ## Suggested next steps
 
-1. Commit the merge (or redo it), rebuild, rerun `--problems 233,249,301,345`
-   and paste the rows into the PR body; mark the PR ready.
-2. Wire `MentionTurnQueue` and `ReferralQueue` so `@#records` / `@#desk`
-   leaves the room with one answer carried back (tinyhivemind wiki:
-   Cross-desk-referral, Mentions).
-3. Add a "trap" problem set where a literal misreading gives a different
-   integer, to exercise the skeptic's `!object` path.
-4. Consider `reasoning_effort` on the ladder's `agentic-v1` alias if
+1. Add a "trap" problem set where a literal misreading gives a different
+   integer, to exercise the skeptic's `!object` path. `!object` has still never
+   appeared live, because on every rung so far each seat reached the right
+   number alone.
+2. Consider `reasoning_effort` on the ladder's `agentic-v1` alias if
    `finish_reason: length` recurs even at 65536.
+3. Give `hive_math_lab` a second desk and turn referral on, so the mechanism
+   has a live run behind it as well as a scripted one. It has none yet: every
+   claim in `hivemind-referral.md` is asserted by tests, not measured.
