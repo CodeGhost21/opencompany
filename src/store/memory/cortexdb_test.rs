@@ -764,20 +764,28 @@ async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest(
     );
 }
 
-/// Regression for the `recall` finding, revised: deduplicating only within
-/// one query's own hits does not stop a superseded event from surfacing when
-/// its (now-stale) content still matches the query but the current content
-/// does not. The first fix for this swapped the stale hit's content for the
-/// key's current content — but that is its own bug (a second finding on the
-/// same code): a query for "cat" returning "dog" just because "cat" used to
-/// be there is a bait-and-switch, not a correction, since there is no way to
-/// know the current content ("dog") would independently match "cat" without
-/// a second, per-key round trip this driver does not make. The corrected
-/// behavior is to drop a hit whose content has changed since `/v1/recall`
-/// matched it, rather than resurface it under a value the query never
-/// actually matched.
+/// Regression for the `recall` finding: deduplicating only within one
+/// query's own hits does not stop a superseded event from surfacing when its
+/// (now-stale) content still matches the query but the current content does
+/// not.
+///
+/// A stricter follow-up ("drop the hit instead of swapping in current
+/// content, since a query for 'cat' returning 'dog' is a bait-and-switch")
+/// was tried and reverted: `ProviderContextStore` (`src/store/memory/
+/// facades.rs`) reuses one key — a content-address of a chunk's *body* —
+/// across writes that only add a label to an otherwise-unchanged body, which
+/// is a legitimate, common rewrite, not a superseding one. But the
+/// serialized envelope's `labels` field changing is enough to make the raw
+/// `content` string differ, so "drop on any content difference" also drops
+/// every later-labeled read of an otherwise-unchanged fact — verified via
+/// `tests/hivemind_e2e.rs::a_desk_reasons_with_memory_held_in_a_remote_engine`,
+/// which regressed under the drop behavior: a small-case table stored by one
+/// teammate and re-labeled by two more became unrecallable. Swapping in
+/// current content is the safer failure mode of the two: it can occasionally
+/// surface an unrelated current value for a query that only matched stale
+/// content, but it never makes a real, current fact unrecallable.
 #[tokio::test]
-async fn recall_drops_a_hit_whose_content_is_superseded_rather_than_swapping_it() {
+async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_match() {
     let (base_url, _state) = spawn_mock(ACTOR).await;
     let memory = client(&base_url, ACTOR);
 
@@ -792,8 +800,9 @@ async fn recall_drops_a_hit_whose_content_is_superseded_rather_than_swapping_it(
         .expect("second store succeeds");
 
     // The mock's `/v1/recall` only matches events whose stored content
-    // contains the query text: "cat" only matches the superseded first
-    // event, since the current event's content is "dog".
+    // contains the query text, exactly like the reviewer-described failure
+    // mode: "cat" only matches the superseded first event, since the current
+    // event's content is "dog".
     let hits = memory
         .recall(
             "cat",
@@ -806,26 +815,59 @@ async fn recall_drops_a_hit_whose_content_is_superseded_rather_than_swapping_it(
         .await
         .expect("recall succeeds");
 
-    assert!(
-        hits.is_empty(),
-        "a query that only matched a superseded version must not surface the key's unrelated \
-         current content: {hits:?}"
+    assert_eq!(hits.len(), 1, "expected the key's one current hit: {hits:?}");
+    assert_eq!(
+        hits[0].content, "dog",
+        "recall must resolve a stale hit to the key's current content, not the superseded \
+         version the query happened to match"
     );
 
-    // get() still reports the key's real current content — dropping the
-    // stale recall hit must not touch what `get`/`list` report.
+    // get() must agree with recall(): the key is currently "dog".
     let fetched = memory
         .get("company-a", "pet")
         .await
         .expect("get succeeds")
         .expect("entry exists");
     assert_eq!(fetched.content, "dog");
+}
 
-    // A query that matches the CURRENT content must still recall it — only
-    // superseded hits are dropped, not the key entirely.
+/// Regression for the e2e failure the "drop" behavior above caused: a key
+/// whose stored content only gained a label (the value/body is byte-for-byte
+/// unchanged) must remain recallable by whatever originally matched it.
+/// `ProviderContextStore` produces exactly this shape — the same
+/// content-address key, a grown `labels` array, everything else identical —
+/// whenever a second caller references an existing chunk under a new label.
+#[tokio::test]
+async fn recall_still_finds_a_fact_after_a_label_only_rewrite_under_the_same_key() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    let original =
+        r#"{"v":1,"record":{"label":"agent-memory/theorist/small-case-table","body":"small-case table\n\nThe lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.","stored_at_millis":1,"labels":["agent-memory/theorist/small-case-table"]}}"#;
+    let relabeled =
+        r#"{"v":1,"record":{"label":"agent-memory/theorist/small-case-table","body":"small-case table\n\nThe lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.","stored_at_millis":1,"labels":["agent-memory/theorist/small-case-table","agent-memory/programmer/small-case-table"]}}"#;
+
+    memory
+        .store("company-a", "small-case-table", original, MemoryCategory::Core, None)
+        .await
+        .expect("first store succeeds");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Same key, same underlying body, one more label — exactly the rewrite
+    // `ProviderContextStore::put` performs, not a genuine value change.
+    memory
+        .store(
+            "company-a",
+            "small-case-table",
+            relabeled,
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .expect("second store succeeds");
+
     let hits = memory
         .recall(
-            "dog",
+            "n=3 -> 7",
             10,
             RecallOpts {
                 namespace: Some("company-a"),
@@ -834,8 +876,18 @@ async fn recall_drops_a_hit_whose_content_is_superseded_rather_than_swapping_it(
         )
         .await
         .expect("recall succeeds");
-    assert_eq!(hits.len(), 1, "{hits:?}");
-    assert_eq!(hits[0].content, "dog");
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "a label-only rewrite of an otherwise-unchanged fact must not make it unrecallable: \
+         {hits:?}"
+    );
+    assert!(
+        hits[0].content.contains("n=3 -> 7"),
+        "the fact itself must still be present: {:?}",
+        hits[0].content
+    );
 }
 
 /// Regression for the `list` finding: a single-page `/v1/recall`-backed
