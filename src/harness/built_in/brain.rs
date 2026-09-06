@@ -4728,6 +4728,8 @@ mod tests {
 
     use crate::company::CompanyManifest;
     use crate::harness::provider::{HarnessModel, MockProvider};
+    use crate::hivemind::episode::HiveTurnRunner;
+    use crate::hivemind::referral::HiveReferralRunner;
     use crate::ports::brain::CycleHost;
     // Issue #301: every lifecycle return now lands in To-do (the `backlog` pool
     // is gone), so these assertions read the const rather than a literal.
