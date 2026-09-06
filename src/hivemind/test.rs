@@ -706,7 +706,7 @@ fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
     );
     assert!(prompt.contains("[2] planner"), "{prompt}");
     assert!(
-        !prompt.contains('3'.to_string().as_str()) || !prompt.contains("[3]"),
+        !prompt.contains("[3]"),
         "a peer's live position leaked into a blind turn:\n{prompt}"
     );
     assert!(!prompt.contains("critic"), "{prompt}");
