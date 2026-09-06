@@ -278,15 +278,150 @@ impl CortexdbMemory {
         })
     }
 
+    /// Fetches every event filed under `scope`, following `next_cursor` to
+    /// the end.
+    ///
+    /// `/v1/recall` cannot page a raw listing (see [`EVENTS_LAYER_LIMIT`]),
+    /// so every exhaustive read this driver performs — `get`/`list`'s fold,
+    /// `forget`'s every-version selector, `namespace_summaries`'s scope
+    /// decode, and `recall`'s stale-hit correction — walks `GET /v1/events`
+    /// instead, which does. A page short of `has_more: false` is refused
+    /// rather than treated as the whole scope, because a short read here
+    /// would report a superseded value as current.
+    async fn scope_events(&self, scope: &str) -> anyhow::Result<Vec<DecodedRecord>> {
+        let mut all = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_EVENT_PAGES {
+            let mut query = vec![
+                ("scope".to_string(), scope.to_string()),
+                ("limit".to_string(), EVENTS_PAGE_SIZE.to_string()),
+            ];
+            if let Some(cursor) = &cursor {
+                query.push(("cursor".to_string(), cursor.clone()));
+            }
+            let response = self
+                .request(Method::GET, EVENTS_PATH)
+                .query(&query)
+                .send()
+                .await
+                .map_err(|source| {
+                    anyhow::anyhow!("cortexdb request to {EVENTS_PATH} failed: {source}")
+                })?;
+            let page = Self::check_status(response, EVENTS_PATH).await?;
+            let items = page
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for item in &items {
+                // CortexDB has been observed to emit a record more than once
+                // across pages; the cursor still reaches every record, so
+                // de-duplicating by id here is enough — see the sibling
+                // vendored adapter's `events()` for the same caveat measured
+                // against a live instance.
+                if let Some(id) = item.get("id").and_then(Value::as_str)
+                    && !seen.insert(id.to_string())
+                {
+                    continue;
+                }
+                if let Some(record) = decode_event(item) {
+                    all.push(record);
+                }
+            }
+            let next_cursor = page
+                .get("next_cursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            match (page.get("has_more").and_then(Value::as_bool), next_cursor) {
+                (Some(true), Some(next)) => cursor = Some(next),
+                _ => return Ok(all),
+            }
+        }
+        anyhow::bail!(
+            "listing cortexdb scope `{scope}` exceeded {MAX_EVENT_PAGES} pages of \
+             {EVENTS_PAGE_SIZE}; refusing to answer from a possibly-truncated log"
+        )
+    }
+
+    /// Every scope path `GET /v1/scopes/list` reports, paginated the same way
+    /// as [`Self::scope_events`].
+    async fn list_scopes(&self) -> anyhow::Result<Vec<String>> {
+        let mut all = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_SCOPE_PAGES {
+            let mut query = vec![("limit".to_string(), SCOPES_PAGE_SIZE.to_string())];
+            if let Some(cursor) = &cursor {
+                query.push(("cursor".to_string(), cursor.clone()));
+            }
+            let response = self
+                .request(Method::GET, SCOPES_LIST_PATH)
+                .query(&query)
+                .send()
+                .await
+                .map_err(|source| {
+                    anyhow::anyhow!("cortexdb request to {SCOPES_LIST_PATH} failed: {source}")
+                })?;
+            let page = Self::check_status(response, SCOPES_LIST_PATH).await?;
+            let items = page
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for item in &items {
+                if let Some(path) = item.get("path").and_then(Value::as_str)
+                    && seen.insert(path.to_string())
+                {
+                    all.push(path.to_string());
+                }
+            }
+            let next_cursor = page
+                .get("next_cursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            match (page.get("has_more").and_then(Value::as_bool), next_cursor) {
+                (Some(true), Some(next)) => cursor = Some(next),
+                _ => return Ok(all),
+            }
+        }
+        anyhow::bail!(
+            "listing cortexdb scopes exceeded {MAX_SCOPE_PAGES} pages of {SCOPES_PAGE_SIZE}; \
+             refusing to answer from a possibly-truncated listing"
+        )
+    }
+
+    /// Folds every event filed under `namespace`'s scope down to one
+    /// [`DecodedRecord`] per key — the most recently observed event for a key
+    /// wins. This is the shared "upsert semantics over an event log" read
+    /// this module's docs promise, and it backs `get`, `list`, `forget`, and
+    /// `recall`'s stale-hit correction alike, so all four agree on what
+    /// "current" means for a key.
+    async fn latest_by_key(
+        &self,
+        namespace: &str,
+    ) -> anyhow::Result<std::collections::HashMap<String, DecodedRecord>> {
+        let events = self.scope_events(&Self::scope_for(namespace)).await?;
+        let mut latest: std::collections::HashMap<String, DecodedRecord> =
+            std::collections::HashMap::new();
+        for record in events {
+            if record.namespace != namespace {
+                continue;
+            }
+            match latest.get(&record.key) {
+                Some(existing) if existing.observed_at >= record.observed_at => {}
+                _ => {
+                    latest.insert(record.key.clone(), record);
+                }
+            }
+        }
+        Ok(latest)
+    }
+
     /// The single record most-recently observed for `(namespace, key)`, if
     /// any — CortexDB's answer to "upsert" read through an event log.
     async fn latest(&self, namespace: &str, key: &str) -> anyhow::Result<Option<DecodedRecord>> {
-        Ok(self
-            .recall_raw(namespace, key)
-            .await?
-            .into_iter()
-            .filter(|record| record.namespace == namespace && record.key == key)
-            .max_by(|a, b| a.observed_at.cmp(&b.observed_at)))
+        Ok(self.latest_by_key(namespace).await?.remove(key))
     }
 }
 
