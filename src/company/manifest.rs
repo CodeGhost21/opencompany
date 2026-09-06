@@ -734,20 +734,24 @@ impl CompanyManifest {
             //
             // It is a validation error rather than a runtime symptom for
             // the same reason the move-grammar typo checks above are: the
-            // failure is *silent* — a desk stuck one short of quorum, or one
-            // objection away from being stuck, looks exactly like a desk
-            // whose members never agreed, and the room spends its whole turn
-            // budget finding that out live.
+            // failure is *silent* — a desk stuck one short of quorum looks
+            // exactly like a desk whose members never agreed, and the room
+            // spends its whole turn budget finding that out live.
             //
-            // Live evidence for why the impossible case needs catching at
-            // all: a six-seat `hive_math_lab` run with `quorum = 3`
-            // and only three seats (`theorist`, `programmer`, `verifier`)
-            // holding `support` spent its last six turns with four seats in a
-            // row deferring to the one member who could still legally close
-            // the topic — the desk had already independently verified the
-            // answer four times over and still exhausted its budget, because
-            // those three seats were not slack, they were the *entire* pool
-            // and every one of them had to spend a turn on this exact topic.
+            // How this check was found, stated accurately because the
+            // obvious version of the story is wrong: a six-seat
+            // `hive_math_lab` run spent its last six turns with four seats in
+            // a row deferring to the one member they believed could still
+            // legally close a topic the desk had already verified four times
+            // over, and then exhausted its budget. That desk had three
+            // eligible seats and `quorum = 3` — which this check ACCEPTS —
+            // and its real defect was elsewhere: the proposal and its
+            // supports had been deposited in different episodes, so they
+            // never met inside one fold (see the watermark divider in
+            // `hivemind::prompt`). Reading that transcript is what prompted
+            // asking whether a desk could be built unable to reach its own
+            // quorum at all. It can, and nothing caught it, so this exists —
+            // but the run above is not an instance of it.
             // See `docs/spec/runtime/hivemind-deliberation.md`.
             //
             // `moves_for` (not the raw map) decides eligibility, so a member
