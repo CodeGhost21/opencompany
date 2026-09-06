@@ -297,14 +297,22 @@ fn a_desk_whose_moves_table_permits_support_to_fewer_seats_than_quorum_is_refuse
 }
 
 #[test]
-fn a_desk_at_exactly_quorum_many_eligible_supporters_is_refused() {
-    // Three seats hold `support`, `quorum` asks for exactly three:
-    // mathematically reachable, but only by unanimity among the three —
-    // every one of them has to support every carried topic, and a single
-    // grounded `!object` against any one of them is enough to keep a topic
-    // from ever carrying. `HivePolicy`'s own default threshold refuses this
-    // shape for the whole desk (`.min(count - 1)`); this check refuses it for
-    // the narrower support-eligible pool the same way.
+fn a_desk_at_exactly_quorum_many_eligible_supporters_is_accepted() {
+    // Three seats hold `support` and `quorum` asks for exactly three. That is
+    // fragile — it carries only by unanimity among the three, and one grounded
+    // `!object` silencing any of them leaves nobody to replace what was
+    // silenced — but fragile is not impossible, and it is a shape an operator
+    // is deliberately allowed to ask for: `HivePolicy::from_config` clamps an
+    // explicit `quorum` to `1..=count`, so `quorum = 3` on a desk of three is
+    // honoured as written. The `.min(count - 1)` next to it governs the
+    // *default* threshold only — what a desk that named no number gets — and
+    // is not a ban on unanimity for a desk that named one.
+    //
+    // This test exists as the boundary marker for the check above: an earlier
+    // draft refused this shape and thereby outlawed the desk
+    // `tests/hivemind_e2e.rs` deliberately exercises (`quorum = 3`, three
+    // seats, no `moves` table). Validation enforces the crate's policy; it
+    // does not get to invent a stricter one.
     let manifest = format!(
         "{}[group_chat.hive]\nquorum = 3\n\n[group_chat.hive.moves]\n\
          planner = [\"support\", \"evidence\", \"defer\"]\n\
@@ -314,10 +322,9 @@ fn a_desk_at_exactly_quorum_many_eligible_supporters_is_refused() {
     );
     let problems = record(&manifest).manifest.validate();
     assert!(
-        problems
-            .iter()
-            .any(|p| p.contains("`!support`") && p.contains("quorum")),
-        "{problems:?}"
+        !problems.iter().any(|p| p.contains("can never carry")),
+        "unanimity among the eligible seats is reachable, so it is the \
+         operator's call and not this check's: {problems:?}"
     );
 }
 
