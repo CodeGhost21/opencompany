@@ -55,6 +55,11 @@ pub struct EventLogSessionLog {
     company: CompanyId,
     desk_id: String,
     desk_name: String,
+    /// The running episode's fold boundary, when this log is scoped to one
+    /// (see [`EpisodeScope`]). `None` — the default — admits every row this
+    /// desk's own filter passes, which is every reader this adapter had
+    /// before concurrent episodes needed narrowing at all.
+    scope: Option<Arc<EpisodeScope>>,
 }
 
 impl std::fmt::Debug for EventLogSessionLog {
