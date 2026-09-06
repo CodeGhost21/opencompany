@@ -164,6 +164,19 @@ Your one line:
   between the rows at or below `trigger` and the rows above it, once, only
   when both sides are non-empty, so a live-looking line from before this
   question was asked no longer reads as something on this episode's floor.
+- **The watermark alone cannot bound a *second, concurrent* episode.** It is a
+  lower bound only, and two episodes opened in the same thread — a follow-up
+  accepted before the first one's turns finish — share one `(desk_id,
+  thread_root)`. Without more, episode B's fold would read episode A's turns,
+  appended above B's own trigger, as its own live traces and could converge on
+  A's question instead of its own. `EpisodeScope` (`src/hivemind/scope.rs`) is
+  the upper bound that closes this: it narrows every row `EventLogSessionLog`
+  and `read_pinboard` return to what is at or below this instance's own
+  trigger, or what this instance itself appended above it — a set recorded at
+  the point of every append this driver or a referral it started makes, never
+  re-derived from a second journal read. A concurrent episode's own turns are
+  recorded against its own, separate `EpisodeScope` and so can never appear in
+  this one's set.
 
 ## The grammar
 
