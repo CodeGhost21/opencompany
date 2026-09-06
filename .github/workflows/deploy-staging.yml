@@ -125,9 +125,18 @@ jobs:
       # Recursing from the repo root instead would also drag in openhuman's
       # desktop-only submodules (tauri-cef is a heavy CEF checkout) that no
       # server build compiles.
+      #
+      # `vendor/tinyhivemind` is also required here even though it is a
+      # top-level submodule, not one nested under `vendor/openhuman`:
+      # `tinyhivemind-hive` is an unconditional path dependency in `Cargo.toml`
+      # (`vendor/tinyhivemind/crates/tinyhivemind-hive`), so Cargo must read its
+      # manifest to resolve the dependency graph on every build, feature-gated
+      # or not. `ci.yml`'s jobs get this for free from `submodules: true` on
+      # their checkout; this job uses `submodules: false` and fetches
+      # everything it needs explicitly, so it must fetch this one too.
       - name: Fetch build vendor submodules
         run: |
-          git submodule update --init vendor/openhuman
+          git submodule update --init vendor/openhuman vendor/tinyhivemind
           scripts/ci/init-vendored-submodules.sh
 
       - name: Configure AWS credentials
