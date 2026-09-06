@@ -832,7 +832,16 @@ impl Memory for CortexdbMemory {
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
-        Ok(0)
+        // The same per-namespace `latest_by_key` fold `namespace_summaries`
+        // already does, summed rather than reported per namespace. Counts
+        // live keys (the most recent event per key), not raw events, which
+        // is what every other backend's `count()` reports too.
+        Ok(self
+            .namespace_summaries()
+            .await?
+            .into_iter()
+            .map(|summary| summary.count)
+            .sum())
     }
 
     async fn health_check(&self) -> bool {
