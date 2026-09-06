@@ -277,6 +277,70 @@ fn the_manifest_parses_a_hive_block_and_rejects_zero_bounds() {
 }
 
 #[test]
+fn a_desk_whose_moves_table_permits_support_to_fewer_seats_than_quorum_is_refused() {
+    // Only two of three seats hold `support`; `quorum = 3` needs a third
+    // distinct supporter that no cooperation among these seats can produce.
+    let manifest = format!(
+        "{}[group_chat.hive]\nquorum = 3\n\n[group_chat.hive.moves]\n\
+         planner = [\"support\", \"evidence\", \"defer\"]\n\
+         scout = [\"support\", \"evidence\", \"defer\"]\n\
+         critic = [\"evidence\", \"object\", \"defer\"]\n",
+        three_member_manifest()
+    );
+    let problems = record(&manifest).manifest.validate();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("`!support`") && p.contains("quorum")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_desk_accepted_at_exactly_quorum_many_eligible_supporters() {
+    // Three seats hold `support`, `quorum` asks for exactly three — fragile
+    // (unanimity, zero slack) but not impossible, so this must pass.
+    let manifest = format!(
+        "{}[group_chat.hive]\nquorum = 3\n\n[group_chat.hive.moves]\n\
+         planner = [\"support\", \"evidence\", \"defer\"]\n\
+         scout = [\"support\", \"evidence\", \"defer\"]\n\
+         critic = [\"support\", \"object\", \"evidence\", \"defer\"]\n",
+        three_member_manifest()
+    );
+    let problems = record(&manifest).manifest.validate();
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn an_unnamed_member_counts_as_an_eligible_supporter() {
+    // `critic` is not named in `hive.moves` at all, so it keeps every move,
+    // `support` included, and must count towards quorum.
+    let manifest = format!(
+        "{}[group_chat.hive]\nquorum = 3\n\n[group_chat.hive.moves]\n\
+         planner = [\"support\", \"evidence\", \"defer\"]\n\
+         scout = [\"support\", \"evidence\", \"defer\"]\n",
+        three_member_manifest()
+    );
+    let problems = record(&manifest).manifest.validate();
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn a_member_with_an_empty_moves_list_counts_as_an_eligible_supporter() {
+    // An empty `hive.moves` entry is read as "every move", same as an
+    // unnamed member.
+    let manifest = format!(
+        "{}[group_chat.hive]\nquorum = 3\n\n[group_chat.hive.moves]\n\
+         planner = [\"support\", \"evidence\", \"defer\"]\n\
+         scout = [\"support\", \"evidence\", \"defer\"]\n\
+         critic = []\n",
+        three_member_manifest()
+    );
+    let problems = record(&manifest).manifest.validate();
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
 fn the_derived_policy_scales_with_the_room() {
     let policy = |members: usize| HivePolicy::from_config(&HiveConfig::default(), members).episode;
     // A pair can only ever need one supporter — the other one — so a majority
