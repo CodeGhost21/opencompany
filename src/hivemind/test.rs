@@ -709,7 +709,12 @@ fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
         !prompt.contains("[3]"),
         "a peer's live position leaked into a blind turn:\n{prompt}"
     );
-    assert!(!prompt.contains("critic"), "{prompt}");
+    // The roster always names every teammate ("In the room with you: ..."),
+    // so the leak this guards against is the peer's own *line*, not its id.
+    assert!(
+        !prompt.contains("euler301-alt"),
+        "a peer's live position leaked into a blind turn:\n{prompt}"
+    );
     let prior_end = prompt.find("[1] scout").expect("prior row rendered");
     let divider_at = prompt
         .find("this episode's floor")
