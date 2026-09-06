@@ -3770,9 +3770,7 @@ impl HarnessBrain {
                         // ordinary path journal it now rather than losing it
                         // twice.
                         channel_responses.push(OutboundMessage {
-                            message_id: outcome
-                                .report_seq
-                                .map(|seq| seq.value().to_string()),
+                            message_id: outcome.report_seq.map(|seq| seq.value().to_string()),
                             task_id: None,
                             channel: "operator".to_string(),
                             agent: Some(crate::hivemind::HIVE_REPORT_AUTHOR.to_string()),

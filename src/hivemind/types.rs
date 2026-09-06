@@ -542,10 +542,19 @@ pub fn desk_federation(
         .manifest
         .group_chats
         .iter()
-        .map(|group| (group.id.clone(), group.name.clone(), group.description.clone()))
-        .chain(record.overlay_desks.iter().map(|desk| {
-            (desk.id.clone(), desk.name.clone(), desk.description.clone())
-        }))
+        .map(|group| {
+            (
+                group.id.clone(),
+                group.name.clone(),
+                group.description.clone(),
+            )
+        })
+        .chain(
+            record
+                .overlay_desks
+                .iter()
+                .map(|desk| (desk.id.clone(), desk.name.clone(), desk.description.clone())),
+        )
         .filter(|(id, ..)| seen.insert(id.clone()))
         .map(|(id, name, description)| super::referral::FederationDesk {
             members: record

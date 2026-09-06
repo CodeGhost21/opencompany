@@ -617,7 +617,11 @@ async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_matc
         .await
         .expect("recall succeeds");
 
-    assert_eq!(hits.len(), 1, "expected the key's one current hit: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected the key's one current hit: {hits:?}"
+    );
     assert_eq!(
         hits[0].content, "dog",
         "recall must resolve a stale hit to the key's current content, not the superseded \
