@@ -56,6 +56,22 @@ fi
 if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
     echo "CortexDB container '${CONTAINER_NAME}' is already running." >&2
 elif docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    # A container keeps the environment it was created with; `docker start`
+    # does not re-apply `-e`. If the key in effect now (explicit, or loaded
+    # from $ENV_FILE above) does not match the one baked into the existing
+    # container, starting it leaves CortexDB itself requiring the OLD key
+    # while the readiness probe below authenticates with the NEW one — the
+    # probe fails, the script waits out its timeout, and exits having printed
+    # nothing usable. Fail fast instead, with the exact recovery command.
+    existing_key=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | sed -n 's/^CORTEX_API_KEY=//p')
+    if [ -n "$existing_key" ] && [ "$existing_key" != "$CORTEX_API_KEY" ]; then
+        echo "error: existing CortexDB container '${CONTAINER_NAME}' was created with a \
+different CORTEX_API_KEY than the one now in effect. Docker does not update a \
+running container's environment on 'docker start', so this script cannot make \
+the two agree. Recreate the container with the current key:" >&2
+        echo "  docker rm -f ${CONTAINER_NAME} && $0" >&2
+        exit 1
+    fi
     echo "Starting existing CortexDB container '${CONTAINER_NAME}'." >&2
     docker start "$CONTAINER_NAME" >/dev/null
 else
