@@ -192,12 +192,21 @@ impl<'a> EpisodeDriver<'a> {
             desk_name: self.desk.name.clone(),
             thread_root: self.thread_root.map(|seq| Sequence(seq.value())),
         };
+        // This instance's own fold boundary (issue: two hive episodes in the
+        // same thread could count each other's turns as their own votes). A
+        // thread already has one root regardless of how many episodes open
+        // inside it, so `conversation` alone cannot tell two concurrent
+        // episodes apart — only this scope, narrowed to what THIS `run` call
+        // itself appends above `trigger`, can. See `EpisodeScope`'s module
+        // doc for why the watermark below cannot do this on its own.
+        let scope = Arc::new(EpisodeScope::new(trigger));
         let log = EventLogSessionLog::new(
             Arc::clone(&self.events),
             self.company.clone(),
             self.desk.id.clone(),
             self.desk.name.clone(),
-        );
+        )
+        .with_scope(Arc::clone(&scope));
         let members: Vec<RosterMember> = self
             .desk
             .members
