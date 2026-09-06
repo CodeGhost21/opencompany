@@ -86,7 +86,22 @@ impl EventLogSessionLog {
             company,
             desk_id,
             desk_name,
+            scope: None,
         }
+    }
+
+    /// Narrow every row this log returns to `scope`'s fold boundary: shared
+    /// context at or below its trigger, plus whatever that one episode
+    /// instance has itself appended.
+    ///
+    /// Without this, two episodes deliberating in the same thread read
+    /// identical rows above their respective triggers — including each
+    /// other's turns — because nothing about the desk id or the thread root
+    /// tells them apart. See `EpisodeScope`'s module doc.
+    #[must_use]
+    pub fn with_scope(mut self, scope: Arc<EpisodeScope>) -> Self {
+        self.scope = Some(scope);
+        self
     }
 
     /// Whether a stored chat key addresses this desk.
