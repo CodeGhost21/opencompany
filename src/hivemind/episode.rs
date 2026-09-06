@@ -452,6 +452,7 @@ impl<'a> EpisodeDriver<'a> {
                     },
                 )
                 .await?;
+            scope.record(seq);
             first_seq.get_or_insert(seq);
             last_seq = Some(seq);
             // Considered *after* the line is durable and *before* the next
