@@ -689,7 +689,11 @@ pub async fn consider(
         key: DispatchKey {
             // Distinct from the forward's key so the queue's per-episode
             // idempotency set does not read the return as a duplicate of the
-            // question that caused it.
+            // question that caused it. It cannot collide with a later line's
+            // own forward either: the key is scoped by conversation, this one
+            // is scoped by `forward.to`, and the only path that reaches here
+            // is a forward that *crossed* — so `forward.to` is a desk this
+            // episode never deliberates on.
             trigger_sequence: forward.key.trigger_sequence.saturating_add(1),
         },
         conversation: forward.to.clone(),
