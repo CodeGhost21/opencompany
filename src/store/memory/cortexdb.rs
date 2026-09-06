@@ -115,6 +115,25 @@ const MAX_SCOPE_PAGES: usize = 100;
 /// Largest response body this driver reads before giving up on decoding it.
 const MAX_ERROR_BODY_CHARS: usize = 512;
 
+/// How long [`CortexdbMemory::ingest`] polls `GET /v1/events` for its own
+/// just-written event to become listable, before giving up.
+///
+/// `POST /v1/experience?wait=captured` only acknowledges that CortexDB
+/// durably captured the write — against a live v0.9.8 instance, indexing
+/// (the point at which the event appears in `/v1/events`, and later in
+/// ranked `/v1/recall`) follows 1-4 seconds after that, per
+/// `docs/spec/runtime/memory-engine-cortex-driver.md`'s own measured notes.
+/// Returning from `store`/`store_with_taint` before the write is listable
+/// would let a `get`/`list`/`recall` immediately afterward observe nothing or
+/// a stale prior version — breaking the `Memory` port's read-after-write
+/// contract every other backend (fs/sqlite/mongodb) already honors
+/// synchronously. 6s covers the documented 1-4s window with margin.
+const INGEST_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// How often [`CortexdbMemory::ingest`] re-polls while waiting for
+/// visibility.
+const INGEST_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 /// A CortexDB service (self-hosted or managed) exposed through TinyMemory's
 /// [`Memory`] contract.
 ///
