@@ -115,6 +115,17 @@ hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
                                    # keeps every move; at least one seat must
                                    # keep `commit`. See runtime/hivemind.md
 
+[group_chat.hive.referral]         # NEW: may this desk ask ANOTHER desk?
+enabled = true                     # off unless this says so; the whole block
+                                   # defaults to referring nothing
+max_hops = 2                       # chain depth; 2 is one round trip
+reach = "desks"                    # local | channels | desks — widens strictly
+returns = true                     # carry the answer back to the desk that asked
+peer_cap = 2                       # crossing questions per episode. The library
+                                   # bounds depth; only a host knows what a
+                                   # question costs, so width is ours
+                                   # See runtime/hivemind-referral.md
+
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
 allow = ["web.*", "docs.*", "search"]  # company-wide ceiling. Desks and agents
