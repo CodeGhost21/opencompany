@@ -11204,13 +11204,13 @@ members = ["engineer", "designer"]
             halted_for_spend: None,
             budget_paused: None,
         };
-        let runner = hive_desk_runner(ok("!propose #stage Stage the rollout."));
+        let runner = hive_desk_runner(ok("The rollout is ready to stage."));
         assert_eq!(
             runner
                 .speak("theorist", "Settle the derivation.")
                 .await
                 .expect("an ordinary reply is not an error"),
-            "!propose #stage Stage the rollout."
+            "The rollout is ready to stage."
         );
         let runner = hive_desk_runner(ok("The failover budget is $2,000/month."));
         assert_eq!(
