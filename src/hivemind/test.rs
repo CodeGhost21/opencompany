@@ -630,11 +630,7 @@ fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
     ];
     let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
 
-    let turn = hive_turn(
-        "planner",
-        tinyhivemind_hive::Visibility::Full,
-        Sequence(0),
-    );
+    let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
     let prompt = EpisodePrompt::new(&member, &desk, "Decide the answer.", quorum, &[])
         .with_trigger(Sequence(2))
         .render(&turn, &visible_refs);
@@ -643,7 +639,9 @@ fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
     let divider_at = prompt
         .find("this episode's floor")
         .expect("the divider names its own meaning");
-    let current_start = prompt.find("[3] planner").expect("current row 3 is rendered");
+    let current_start = prompt
+        .find("[3] planner")
+        .expect("current row 3 is rendered");
     assert!(prior_end < divider_at, "{prompt}");
     assert!(divider_at < current_start, "{prompt}");
     // Sequence numbers stay exactly as the projection assigned them, on both
