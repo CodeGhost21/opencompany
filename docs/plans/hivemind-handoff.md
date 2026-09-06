@@ -25,7 +25,7 @@ state.
 - An OpenHuman bump is a migration (harness APIs move); fix our side, never
   `vendor/`.
 
-## Gates (all green on the pre-merge tree)
+## Gates (all green on the merged tree, with referral)
 
 ```
 cargo fmt --all -- --check
@@ -36,8 +36,8 @@ scripts/ci/assert-feature-lanes.sh
 scripts/ci/assert-integration-targets-run.sh openhuman
 ```
 
-Focused targets: `cargo test --features openhuman hivemind` (40),
-`--test hivemind_e2e` (8), `brain::` (208), `store::memory` (cortexdb 10),
+Focused targets: `cargo test --features openhuman hivemind` (57),
+`--test hivemind_e2e` (9), `brain::` (208), `store::memory` (cortexdb 10),
 `memory_engine`, `manifest`, `--lib content_test`.
 
 Long foreground commands get reaped by the harness on that box; detach with
@@ -54,7 +54,7 @@ set -a; . ~/.config/opencompany/cortexdb.env; set +a    # CORTEX_API_KEY
 OPENCOMPANY_MEMORY=remote OPENCOMPANY_MEMORY_DRIVER=cortexdb \
 OPENCOMPANY_MEMORY_URL=http://127.0.0.1:3141 OPENCOMPANY_MEMORY_API_KEY=$CORTEX_API_KEY \
 OPENCOMPANY_MEMORY_ACTOR=service:opencompany \
-OPENCOMPANY_INFERENCE_URL=http://127.0.0.1:6969/v1 OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY \
+OPENCOMPANY_INFERENCE_URL=http://127.0.0.1:6970/v1 OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY \
 OPENCOMPANY_INFERENCE_MAX_TOKENS=65536 OPENHUMAN_AGENT_TURN_TIMEOUT_SECS=1500 \
 OPENCOMPANY_AUTH_MODE=none OPENCOMPANY_DATA_DIR=$HOME/.opencompany/hive-live-2 \
 OPENCOMPANY_BIND=127.0.0.1:8080 \
@@ -111,10 +111,15 @@ evidence/support/object/defer/pin grammar with per-member gating; evidential
 quorum; commit phase open to all; failed turns tolerated; desk memory recalled
 before and written after each episode via CortexDB; per-seat model tiers.
 
-Does not: mention dispatch (`MentionTurnQueue`) or cross-desk referral
-(`ReferralQueue`) — an `@mention` is text the room reads, not a dispatched
-turn. `!object` traffic has not appeared live because every seat solved the
-rungs alone; it needs problems where seats disagree.
+Does, off by default: cross-desk referral — one question per line to another
+desk, answered by one real turn there, with the answer carried home as a system
+row that cannot be counted as support (`hivemind-referral.md`). Mention dispatch
+is the same path at `reach = "local"`.
+
+Does not: chain a referral deeper than one question and one answer — a referred
+turn cannot itself refer. `!object` traffic has not appeared live because every
+seat solved the rungs alone; it needs problems where seats disagree. Referral
+has no live run behind it at all, only tests.
 
 ## Suggested next steps
 
