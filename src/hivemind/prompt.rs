@@ -189,6 +189,7 @@ impl<'a> EpisodePrompt<'a> {
             recall: &[],
             unspoken: &[],
             peers: Vec::new(),
+            trigger: None,
         }
     }
 
