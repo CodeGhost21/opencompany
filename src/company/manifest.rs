@@ -738,20 +738,28 @@ impl CompanyManifest {
             // `moves_for` (not the raw map) decides eligibility, so a member
             // the table omits, or names with an empty list, counts the same as
             // one explicitly given `support` — both already keep every move.
-            let quorum = crate::hivemind::HivePolicy::from_config(&chat.hive, chat.members.len())
-                .episode
-                .quorum
-                .threshold;
-            let eligible = chat
-                .members
-                .iter()
-                .filter(|member| chat.hive.may(member, "support"))
-                .count();
-            if u32::try_from(eligible).is_ok_and(|eligible| eligible < quorum) {
-                problems.push(format!(
-                    "{label} `hive.moves` permits `!support` to only {eligible} of {} seats, but `hive.quorum` needs {quorum} distinct supporters — a topic here can never carry. Widen `hive.moves` so at least {quorum} seats may `!support`, or lower `hive.quorum` to {eligible}.",
-                    chat.members.len()
-                ));
+            //
+            // Gated on `deliberates`: a desk under two members, or opted out
+            // with `enabled = false`, never opens a hive episode at all, so
+            // `hive.quorum` and `hive.moves` on it describe a room that will
+            // never run rather than one that could get stuck.
+            if chat.hive.deliberates(chat.members.len()) {
+                let quorum =
+                    crate::hivemind::HivePolicy::from_config(&chat.hive, chat.members.len())
+                        .episode
+                        .quorum
+                        .threshold;
+                let eligible = chat
+                    .members
+                    .iter()
+                    .filter(|member| chat.hive.may(member, "support"))
+                    .count();
+                if u32::try_from(eligible).is_ok_and(|eligible| eligible < quorum) {
+                    problems.push(format!(
+                        "{label} `hive.moves` permits `!support` to only {eligible} of {} seats, but `hive.quorum` needs {quorum} distinct supporters — a topic here can never carry. Widen `hive.moves` so at least {quorum} seats may `!support`, or lower `hive.quorum` to {eligible}.",
+                        chat.members.len()
+                    ));
+                }
             }
 
             // The referral block. Every check here catches a policy that would
