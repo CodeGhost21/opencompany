@@ -51,14 +51,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinyhivemind_hive::{
+    EnqueueOutcome, EnqueueRefusal,
     desk::{Desk, DeskSet, ResponderMode},
+    dispatch::{DispatchConversation, DispatchKey},
     mention::{Mention, MentionAuthor, resolve as resolve_mentions},
     referral::{
-        NoReferralReason, Referral, ReferralInput, ReferralKind, ReferralOrigin, ReferralPolicy,
-        ReferralQueue, ReferralReach, dispatch_referral,
+        NoReferralReason, Referral, ReferralFuture, ReferralInput, ReferralKind, ReferralOrigin,
+        ReferralOutcome, ReferralPolicy, ReferralQueue, ReferralReach, dispatch_referral,
     },
     roster::{Roster, RosterMember},
-    {DispatchConversation, DispatchKey, EnqueueOutcome, ReferralFuture, ReferralOutcome},
 };
 use tokio::sync::Mutex;
 
@@ -486,7 +487,7 @@ impl<'a> EpisodeReferrals<'a> {
                     )
                     .await;
                 return EnqueueOutcome::Refused {
-                    reason: tinyhivemind_hive::EnqueueRefusal::TargetUnavailable,
+                    reason: EnqueueRefusal::TargetUnavailable,
                 };
             }
         };
@@ -535,7 +536,7 @@ impl<'a> EpisodeReferrals<'a> {
                 "[hive] a referred answer could not be carried back"
             );
             return EnqueueOutcome::Refused {
-                reason: tinyhivemind_hive::EnqueueRefusal::TargetUnavailable,
+                reason: EnqueueRefusal::TargetUnavailable,
             };
         }
         let mut state = self.state.lock().await;
@@ -566,7 +567,7 @@ impl ReferralQueue for EpisodeReferrals<'_> {
                     if state.asked >= self.peer_cap {
                         state.ledger.over_cap = state.ledger.over_cap.saturating_add(1);
                         return Ok(EnqueueOutcome::Refused {
-                            reason: tinyhivemind_hive::EnqueueRefusal::FeatureDisabled,
+                            reason: EnqueueRefusal::FeatureDisabled,
                         });
                     }
                     state.asked = state.asked.saturating_add(1);
