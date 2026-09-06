@@ -3693,7 +3693,7 @@ impl HarnessBrain {
                         // operator message answered in the same cycle can
                         // fold the first episode's still-fresh turns as its
                         // own votes.
-                        let thread_root = Some((*parent).unwrap_or(trigger));
+                        let thread_root = *parent;
                         let runner = HiveDeskRunner {
                             run_turn: self.run_turn(),
                             company: self.record().id.clone(),
