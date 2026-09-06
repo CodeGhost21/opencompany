@@ -133,7 +133,11 @@ impl EventLogSessionLog {
     ///   never be counted as a supporter, and it must stay visible through a
     ///   blind round, both of which follow from the author variant alone.
     fn row(&self, stored: StoredEvent) -> Option<LogMessage> {
-        // TEMP-DISABLED-FOR-RED-VERIFICATION
+        if let Some(scope) = &self.scope
+            && !scope.admits(stored.seq)
+        {
+            return None;
+        }
         let sequence = Sequence(stored.seq.value());
         match stored.event {
             CompanyEvent::OperatorMessage {
