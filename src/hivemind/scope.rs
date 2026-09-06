@@ -80,7 +80,9 @@ impl EpisodeScope {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<EventSeq>> {
-        self.mine.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.mine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

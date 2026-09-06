@@ -73,8 +73,14 @@ impl HiveTurnRunner for YieldFirstTurn<'_> {
 /// is a known-good convergence, not a script this test invented to pass.
 fn converging_script(topic: &'static str, rival: &'static str) -> Runner {
     Runner::new(&[
-        ("planner", leak(format!("!propose #{topic} Stage it behind a flag."))),
-        ("scout", leak(format!("!propose #{rival} Ship it all at once."))),
+        (
+            "planner",
+            leak(format!("!propose #{topic} Stage it behind a flag.")),
+        ),
+        (
+            "scout",
+            leak(format!("!propose #{rival} Ship it all at once.")),
+        ),
         (
             "critic",
             leak(format!(
@@ -83,13 +89,20 @@ fn converging_script(topic: &'static str, rival: &'static str) -> Runner {
         ),
         (
             "planner",
-            leak(format!("!support #{topic} ^3 Staging bounds the blast radius.")),
+            leak(format!(
+                "!support #{topic} ^3 Staging bounds the blast radius."
+            )),
         ),
         (
             "scout",
-            leak(format!("!support #{topic} ^3 Agreed, and it is reversible.")),
+            leak(format!(
+                "!support #{topic} ^3 Agreed, and it is reversible."
+            )),
         ),
-        ("critic", leak(format!("!commit #{topic} ^3 The room settled."))),
+        (
+            "critic",
+            leak(format!("!commit #{topic} ^3 The room settled.")),
+        ),
         ("planner", leak(format!("!commit #{topic} ^3 Recorded."))),
         ("scout", leak(format!("!commit #{topic} ^3 Recorded."))),
     ])
@@ -252,4 +265,3 @@ async fn two_episodes_with_different_thread_roots_do_not_fold_each_others_traces
         "{outcome_b:?}"
     );
 }
-
