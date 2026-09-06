@@ -11127,6 +11127,7 @@ members = ["engineer", "designer"]
             company: CompanyId::new("acme"),
             chat_id: Some("lab".to_string()),
             thread_root: None,
+            trigger_seq: None,
         }
     }
 
