@@ -4481,6 +4481,35 @@ struct HiveDeskRunner {
     thread_root: Option<EventSeq>,
 }
 
+/// Turns a terminal budget outcome (`outcome.budget_paused` /
+/// `outcome.halted_for_spend`) into the hard error a hive turn must surface,
+/// or `None` when the turn actually answered.
+///
+/// Without this, `outcome.reply` on either terminal state is host-authored
+/// pause/halt copy, not the agent's answer — folding it as `Ok(reply)` lets
+/// `EpisodeDriver` journal that copy as a genuine `CompanyEvent::AgentReply`
+/// under the member's own identity, and the episode never counts the turn as
+/// failed (`EpisodeOutcome::failed_turns`), so an operator reading the
+/// transcript cannot tell a real answer from a budget wall the room hit.
+fn terminal_budget_error(
+    agent_id: &str,
+    outcome: &crate::harness::built_in::TurnOutcome,
+) -> Option<OpenCompanyError> {
+    if let Some(pause) = &outcome.budget_paused {
+        return Some(OpenCompanyError::Harness(format!(
+            "{agent_id} paused for lack of inference budget mid-deliberation: {}",
+            pause.summary
+        )));
+    }
+    if let Some(halt) = &outcome.halted_for_spend {
+        return Some(OpenCompanyError::Harness(format!(
+            "{agent_id} halted for spend mid-deliberation: spent ${:.2} against a cap of ${:.2}",
+            halt.spent_usd, halt.cap_usd
+        )));
+    }
+    None
+}
+
 #[async_trait]
 impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
     async fn speak(&self, agent_id: &str, prompt: &str) -> Result<String> {
@@ -4500,6 +4529,9 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
                 ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root),
             )
             .await?;
+        if let Some(error) = terminal_budget_error(agent_id, &outcome) {
+            return Err(error.into());
+        }
         Ok(outcome.reply)
     }
 }
@@ -4526,6 +4558,9 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner {
                 ChatTarget::deliberating(Some(desk_id), None),
             )
             .await?;
+        if let Some(error) = terminal_budget_error(agent_id, &outcome) {
+            return Err(error.into());
+        }
         Ok(outcome.reply)
     }
 }
