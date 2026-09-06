@@ -308,7 +308,7 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
         .find(|(_, text)| text.contains("400ms"))
         .expect("the answer came home");
     assert_eq!(
-        returned.0, HIVE_REPORT_AUTHOR,
+        returned.0, HIVE_REFERRAL_AUTHOR,
         "the row that carries it is the room's, not the far teammate's: {home:?}"
     );
     assert!(
@@ -352,7 +352,7 @@ async fn the_answer_comes_home_under_the_room_so_it_can_never_be_counted_as_supp
         .collect();
     assert_eq!(carried.len(), 1, "{home:?}");
     assert_eq!(
-        carried[0].0, HIVE_REPORT_AUTHOR,
+        carried[0].0, HIVE_REFERRAL_AUTHOR,
         "an answer that crossed is authored by the room, never by the far teammate"
     );
     assert!(
@@ -434,7 +434,7 @@ async fn a_far_turn_that_does_not_finish_leaves_the_room_running() {
     let home = log.replies("eng");
     assert!(
         home.iter()
-            .any(|(author, text)| author == HIVE_REPORT_AUTHOR
+            .any(|(author, text)| author == HIVE_REFERRAL_AUTHOR
                 && text.contains("did not answer the question")),
         "{home:?}"
     );

@@ -49,7 +49,7 @@ use serde_json::{Value, json};
 
 use opencompany::CompanyRuntime;
 use opencompany::company::CompanyManifest;
-use opencompany::hivemind::HIVE_REPORT_AUTHOR;
+use opencompany::hivemind::{HIVE_REFERRAL_AUTHOR, HIVE_REPORT_AUTHOR};
 use opencompany::ports::types::{CompanyEvent, EventSeq};
 use opencompany::runtime::{RuntimeBuilder, company_id_from_name};
 use opencompany::{AppConfig, AppState};
@@ -1488,7 +1488,7 @@ async fn a_desk_asks_another_desk_and_only_the_information_crosses() {
         .collect();
     assert_eq!(carried.len(), 1, "the answer came home once: {rows:?}");
     assert_eq!(
-        carried[0].1, HIVE_REPORT_AUTHOR,
+        carried[0].1, HIVE_REFERRAL_AUTHOR,
         "carried by the room, never by the far teammate: {rows:?}"
     );
     assert!(
