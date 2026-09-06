@@ -369,6 +369,14 @@ pub struct EpisodeReferrals<'a> {
     desk_names: BTreeMap<String, String>,
     peer_cap: u32,
     state: Mutex<ReferralState>,
+    /// The asking episode's own fold boundary.
+    ///
+    /// A row this queue journals onto `home` — a return carried back, or an
+    /// unanswered note — is this episode's own doing exactly as much as a
+    /// turn from its main loop is, so the next speaker must read it. Recorded
+    /// here for the same reason the driver records its own turns: without it,
+    /// the episode that paid for the question could not see its own answer.
+    scope: Arc<EpisodeScope>,
 }
 
 /// The mutable half, behind one lock so the queue is `Sync` without the driver
