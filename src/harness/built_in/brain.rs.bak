@@ -4667,7 +4667,7 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner<'_> {
                     .answering(self.trigger_seq),
             )
             .await?;
-        // TEMP_DISABLED_FOR_RED_CHECK
+        park_hive_turn_approvals(self.brain, self.host, agent_id).await;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
             return Err(error);
         }
@@ -4697,7 +4697,7 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                 ChatTarget::deliberating(Some(desk_id), None),
             )
             .await?;
-        // TEMP_DISABLED_FOR_RED_CHECK
+        park_hive_turn_approvals(self.brain, self.host, agent_id).await;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
             return Err(error);
         }
