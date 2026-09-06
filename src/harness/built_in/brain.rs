@@ -3724,7 +3724,7 @@ impl HarnessBrain {
                             &runner,
                             composed.clone(),
                         )
-                        .in_thread(*parent)
+                        .in_thread(thread_root)
                         .with_memory(memory);
                         if let Some(federation) = federation {
                             driver = driver.with_federation(federation, &runner);
