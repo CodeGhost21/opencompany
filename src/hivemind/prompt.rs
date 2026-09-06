@@ -159,6 +159,15 @@ pub struct EpisodePrompt<'a> {
     /// The other desks this seat may put a question to, when the desk opted in
     /// to referral. Empty otherwise, and the block is then not rendered at all.
     peers: Vec<(String, String, Option<String>)>,
+    /// The episode's watermark — `EpisodeDriver::run`'s `trigger` — or `None`
+    /// for a caller that never set one.
+    ///
+    /// `None` is not "the watermark is sequence zero": it means no divider is
+    /// ever drawn, which is what every caller before this field existed got,
+    /// byte for byte. A caller that does set a trigger and hands a transcript
+    /// wholly above it gets the same output for the same reason — the divider
+    /// is drawn only between two non-empty regions.
+    trigger: Option<Sequence>,
 }
 
 impl<'a> EpisodePrompt<'a> {
@@ -180,6 +189,7 @@ impl<'a> EpisodePrompt<'a> {
             recall: &[],
             unspoken: &[],
             peers: Vec::new(),
+            trigger: None,
         }
     }
 
@@ -228,6 +238,22 @@ impl<'a> EpisodePrompt<'a> {
         self
     }
 
+    /// Name the episode's watermark, so the transcript can show where its own
+    /// floor begins.
+    ///
+    /// The live failure this exists for: a six-seat run's episode for one
+    /// Project Euler problem spent its whole eighteen-turn budget arguing the
+    /// *previous* problem, because the transcript rendered a prior episode's
+    /// live-looking `!propose` and `!support` rows exactly like its own. The
+    /// watermark this host already folds on (`EpisodeDriver::run`'s `trigger`)
+    /// says precisely where the fold stops treating a row as a vote; this
+    /// builder is that same line, drawn where a reader can see it.
+    #[must_use]
+    pub fn with_trigger(mut self, trigger: Sequence) -> Self {
+        self.trigger = Some(trigger);
+        self
+    }
+
     /// Render exactly what this turn is allowed to see.
     #[must_use]
     pub fn render(&self, turn: &HiveTurn, visible: &[&SessionMessage]) -> String {
@@ -257,7 +283,7 @@ impl<'a> EpisodePrompt<'a> {
             self.missing(),
             self.peers(),
             self.last_line(visible),
-            render_transcript(visible),
+            render_transcript(visible, self.trigger),
         )
     }
 
@@ -624,26 +650,59 @@ fn declared_topic(task: &str) -> Option<String> {
         .next()
 }
 
+/// The line marking where a prior episode's context ends and this episode's
+/// own floor begins.
+///
+/// Deliberately not a transcript row: it carries no `[N]` prefix, so nothing
+/// in the grammar reads it as a citable message, and it never collides with a
+/// sequence number a member might cite with `^`. It says three things, because
+/// a member acted on the wrong one of them in the live failure this fix is
+/// for: the rows above are old (so a live-looking `!propose` up there is not
+/// live), they are still legitimate to read and cite (the watermark hides
+/// nothing — `EpisodeDriver::run` promises exactly that), and their topics
+/// carry no standing here (so a `!support` needs a fresh citation on this
+/// side to count for anything).
+const EPISODE_DIVIDER: &str = "--- Above: earlier conversation on this desk, from before this \
+                                question was asked. Still readable and citable with ^N — none of \
+                                it is on this episode's floor. ---";
+
 /// Render an attributed transcript the way every prompt here shows one.
 ///
 /// `[sequence] author: content`, because the sequence IS the citation: a
 /// `!support #topic ^12` names message 12, and a member that cannot see the
 /// numbers cannot ground anything.
+///
+/// `trigger` draws [`EPISODE_DIVIDER`] between the rows at or below it — the
+/// context `EpisodeDriver::run`'s watermark lets the room read but never
+/// folds — and the rows above it, which are this episode's own. The divider
+/// is drawn only when both sides are non-empty: a transcript wholly above the
+/// watermark (the overwhelmingly common case, and every call site before this
+/// parameter existed) renders exactly as it always has, and a caller that
+/// never learned a trigger passes `None` and gets the same guarantee.
 #[must_use]
-pub fn render_transcript(visible: &[&SessionMessage]) -> String {
-    visible
-        .iter()
-        .map(|message| {
-            let author = match &message.author {
-                SessionAuthor::Agent { label, .. }
-                | SessionAuthor::Person { label, .. }
-                | SessionAuthor::System { label, .. } => label.as_str(),
-                SessionAuthor::Operator => "operator",
-            };
-            format!("[{}] {author}: {}", message.sequence, message.content)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+pub fn render_transcript(visible: &[&SessionMessage], trigger: Option<Sequence>) -> String {
+    let split = trigger
+        .map(|trigger| visible.partition_point(|message| message.sequence <= trigger))
+        .filter(|&split| split > 0 && split < visible.len());
+    let mut lines: Vec<String> = Vec::with_capacity(visible.len() + 1);
+    for (index, message) in visible.iter().enumerate() {
+        if split == Some(index) {
+            lines.push(EPISODE_DIVIDER.to_owned());
+        }
+        lines.push(render_transcript_line(message));
+    }
+    lines.join("\n")
+}
+
+/// One transcript row: `[sequence] author: content`.
+fn render_transcript_line(message: &SessionMessage) -> String {
+    let author = match &message.author {
+        SessionAuthor::Agent { label, .. }
+        | SessionAuthor::Person { label, .. }
+        | SessionAuthor::System { label, .. } => label.as_str(),
+        SessionAuthor::Operator => "operator",
+    };
+    format!("[{}] {author}: {}", message.sequence, message.content)
 }
 
 /// The one line a turn's answer contributes to the transcript.

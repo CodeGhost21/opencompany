@@ -124,8 +124,13 @@ Pinned on this desk, whatever else has scrolled away:   (when the board holds an
 Members who have not spoken yet: @scout, @critic. …     (see speaker diversity)
 You already said this, so do not repeat it — …          (when it has spoken)
 Shared attributed transcript:
-[7] operator: …
+[7] operator: Decide the rollout.
 [9] planner: !propose #stage …
+--- Above: earlier conversation on this desk, from before this      (only when a
+question was asked. Still readable and citable with ^N — none of     prior episode
+it is on this episode's floor. ---                                   is in the window)
+[15] operator: Decide the next rollout.
+[17] planner: !propose #canary …
 
 Your one line:
 ```
@@ -151,6 +156,14 @@ Your one line:
 - **Blind turns see less.** Under `Visibility::Blind`, peers' episode messages
   are withheld; the operator's task, system rows, the member's own lines, and
   everything at or below the watermark remain.
+- **The watermark divides the transcript.** A live six-seat run spent an
+  eighteen-turn episode arguing the *previous* Project Euler problem, because
+  the transcript rendered a prior episode's `!propose` and `!support` rows
+  exactly like this episode's own. Rows are never hidden — `EpisodeDriver::run`
+  promises the room may still read and cite them — but a divider is drawn
+  between the rows at or below `trigger` and the rows above it, once, only
+  when both sides are non-empty, so a live-looking line from before this
+  question was asked no longer reads as something on this episode's floor.
 
 ## The grammar
 

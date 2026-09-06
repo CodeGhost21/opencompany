@@ -576,3 +576,148 @@ fn the_marker_line_is_what_the_room_keeps() {
     assert_eq!(marker_line("I am not sure yet."), "I am not sure yet.");
     assert_eq!(marker_line("   \n\n"), "(no answer)");
 }
+
+// ---------------------------------------------------------------------------
+// The episode watermark divider
+// ---------------------------------------------------------------------------
+
+/// One transcript row, as the projection hands it to a prompt.
+fn message(sequence: u64, author: &str, content: &str) -> tinyhivemind_hive::SessionMessage {
+    tinyhivemind_hive::SessionMessage {
+        sequence: Sequence(sequence),
+        author: SessionAuthor::Agent {
+            id: author.to_owned(),
+            label: author.to_owned(),
+        },
+        content: content.to_owned(),
+    }
+}
+
+/// One authorized turn, for rendering a prompt without driving an episode.
+fn hive_turn(
+    agent: &str,
+    visibility: tinyhivemind_hive::Visibility,
+    watermark: Sequence,
+) -> tinyhivemind_hive::HiveTurn {
+    tinyhivemind_hive::HiveTurn {
+        agent_id: agent.to_owned(),
+        phase: tinyhivemind_hive::Phase::Deliberate,
+        visibility,
+        reason: tinyhivemind_hive::BidReason::Salience,
+        next_state: tinyhivemind_hive::EpisodeState::opened(
+            tinyhivemind_hive::Conversation {
+                desk_id: "eng".to_owned(),
+                desk_name: "Engineering".to_owned(),
+                thread_root: None,
+            },
+            watermark,
+        ),
+    }
+}
+
+#[test]
+fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
+    // The live shape: a prior episode's propose/support pair sits below the
+    // trigger, and this episode's own pair sits above it.
+    let desk = desk_of(&three_member_manifest(), "eng").expect("a room");
+    let member = desk.member("planner").expect("planner is seated").clone();
+    let quorum = desk.policy().quorum;
+    let visible = [
+        message(1, "scout", "!propose #euler249 Old guess."),
+        message(2, "scout", "!support #euler249 ^1 Because it is odd."),
+        message(3, "planner", "!propose #euler301 New guess."),
+        message(4, "critic", "!support #euler301 ^3 Because it holds."),
+    ];
+    let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
+
+    let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
+    let prompt = EpisodePrompt::new(&member, &desk, "Decide the answer.", quorum, &[])
+        .with_trigger(Sequence(2))
+        .render(&turn, &visible_refs);
+
+    let prior_end = prompt.find("[2] scout").expect("prior row 2 is rendered");
+    let divider_at = prompt
+        .find("this episode's floor")
+        .expect("the divider names its own meaning");
+    let current_start = prompt
+        .find("[3] planner")
+        .expect("current row 3 is rendered");
+    assert!(prior_end < divider_at, "{prompt}");
+    assert!(divider_at < current_start, "{prompt}");
+    // Sequence numbers stay exactly as the projection assigned them, on both
+    // sides of the divider.
+    for needle in ["[1] scout", "[2] scout", "[3] planner", "[4] critic"] {
+        assert!(prompt.contains(needle), "{needle} missing:\n{prompt}");
+    }
+}
+
+#[test]
+fn a_transcript_entirely_after_the_trigger_renders_with_no_divider() {
+    let desk = desk_of(&three_member_manifest(), "eng").expect("a room");
+    let member = desk.member("planner").expect("planner is seated").clone();
+    let quorum = desk.policy().quorum;
+    let visible = [message(3, "planner", "!propose #stage Stage it.")];
+    let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
+    let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
+
+    let without_trigger = EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
+        .render(&turn, &visible_refs);
+    let with_trigger_below_everything =
+        EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
+            .with_trigger(Sequence(1))
+            .render(&turn, &visible_refs);
+
+    assert_eq!(
+        without_trigger, with_trigger_below_everything,
+        "nothing precedes the watermark, so there is nothing to divide"
+    );
+    assert!(
+        !without_trigger.contains("this episode's floor"),
+        "{without_trigger}"
+    );
+}
+
+#[test]
+fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
+    // [1] predates the trigger and stays visible even blind. [2] is the
+    // turn-holder's own line and stays visible for the same reason a blind
+    // turn always sees its own work. [3] is a peer's line inside this
+    // episode, which a blind opening round must not show.
+    let desk = desk_of(&three_member_manifest(), "eng").expect("a room");
+    let member = desk.member("planner").expect("planner is seated").clone();
+    let quorum = desk.policy().quorum;
+    let full = vec![
+        message(1, "scout", "!propose #euler249 Old guess."),
+        message(2, "planner", "!propose #euler301 My own guess."),
+        message(3, "critic", "!propose #euler301-alt A rushed guess."),
+    ];
+    let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Blind, Sequence(1));
+    let visible = tinyhivemind_hive::project_for(&turn, &full);
+
+    let prompt = EpisodePrompt::new(&member, &desk, "Pick a strategy.", quorum, &[])
+        .with_trigger(Sequence(1))
+        .render(&turn, &visible);
+
+    assert!(
+        prompt.contains("[1] scout"),
+        "prior context stays visible even blind:\n{prompt}"
+    );
+    assert!(prompt.contains("[2] planner"), "{prompt}");
+    assert!(
+        !prompt.contains("[3]"),
+        "a peer's live position leaked into a blind turn:\n{prompt}"
+    );
+    // The roster always names every teammate ("In the room with you: ..."),
+    // so the leak this guards against is the peer's own *line*, not its id.
+    assert!(
+        !prompt.contains("euler301-alt"),
+        "a peer's live position leaked into a blind turn:\n{prompt}"
+    );
+    let prior_end = prompt.find("[1] scout").expect("prior row rendered");
+    let divider_at = prompt
+        .find("this episode's floor")
+        .expect("the divider names its own meaning");
+    let current_start = prompt.find("[2] planner").expect("current row rendered");
+    assert!(prior_end < divider_at, "{prompt}");
+    assert!(divider_at < current_start, "{prompt}");
+}
