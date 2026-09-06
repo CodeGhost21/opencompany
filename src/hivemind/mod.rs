@@ -68,6 +68,8 @@ mod deliberation_test;
 #[cfg(test)]
 mod moves_test;
 #[cfg(test)]
+mod referral_test;
+#[cfg(test)]
 mod test;
 
 pub use episode::{EpisodeDriver, HiveTurnRunner};

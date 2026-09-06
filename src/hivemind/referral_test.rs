@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::moves_test::Runner;
+use super::referral;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
 use crate::Result;

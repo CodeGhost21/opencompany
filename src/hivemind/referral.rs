@@ -705,7 +705,3 @@ pub async fn consider(
     }
     true
 }
-
-#[cfg(test)]
-#[path = "referral_test.rs"]
-mod test;
