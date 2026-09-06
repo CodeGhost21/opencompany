@@ -48,6 +48,8 @@
 //! - [`memory`] — what the desk remembers between episodes, and the seam.
 //! - [`moves`] — the per-member move grammar, and how a barred move is handled.
 //! - [`prompt`] — what one authorized turn is shown, and how its answer is read.
+//! - [`referral`] — the one mechanism here that leaves the room: asking another
+//!   desk a question, and carrying its answer back without carrying its vote.
 //! - [`types`] — the manifest knob, the desk snapshot, and the outcome.
 //!
 //! See `docs/spec/runtime/hivemind.md`.
@@ -58,6 +60,7 @@ pub mod log;
 pub mod memory;
 pub mod moves;
 pub mod prompt;
+pub mod referral;
 pub mod types;
 
 #[cfg(test)]
@@ -75,8 +78,13 @@ pub use memory::{
 };
 pub use moves::{MOVE_KINDS, MoveViolation, UNGATED_KINDS};
 pub use prompt::{EpisodePrompt, canonical_topic, marker_line};
+pub use referral::{
+    AskedQuestion, EpisodeReferrals, FederationDesk, HiveFederation, HiveReferralRunner,
+    REACH_WORDS, ReferralConfig, ReferralLedger,
+};
 pub use types::{
     EpisodeEnding, EpisodeOutcome, HiveConfig, HiveDesk, HiveMember, HivePolicy, desk_episode,
+    desk_federation,
 };
 
 /// The `agent_id` an episode's closing outcome row is journaled under.
