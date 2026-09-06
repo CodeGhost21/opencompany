@@ -815,7 +815,11 @@ async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_matc
         .await
         .expect("recall succeeds");
 
-    assert_eq!(hits.len(), 1, "expected the key's one current hit: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected the key's one current hit: {hits:?}"
+    );
     assert_eq!(
         hits[0].content, "dog",
         "recall must resolve a stale hit to the key's current content, not the superseded \
@@ -842,13 +846,17 @@ async fn recall_still_finds_a_fact_after_a_label_only_rewrite_under_the_same_key
     let (base_url, _state) = spawn_mock(ACTOR).await;
     let memory = client(&base_url, ACTOR);
 
-    let original =
-        r#"{"v":1,"record":{"label":"agent-memory/theorist/small-case-table","body":"small-case table\n\nThe lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.","stored_at_millis":1,"labels":["agent-memory/theorist/small-case-table"]}}"#;
-    let relabeled =
-        r#"{"v":1,"record":{"label":"agent-memory/theorist/small-case-table","body":"small-case table\n\nThe lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.","stored_at_millis":1,"labels":["agent-memory/theorist/small-case-table","agent-memory/programmer/small-case-table"]}}"#;
+    let original = r#"{"v":1,"record":{"label":"agent-memory/theorist/small-case-table","body":"small-case table\n\nThe lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.","stored_at_millis":1,"labels":["agent-memory/theorist/small-case-table"]}}"#;
+    let relabeled = r#"{"v":1,"record":{"label":"agent-memory/theorist/small-case-table","body":"small-case table\n\nThe lab's small-case table for this recurrence is n=1 -> 1, n=2 -> 3, n=3 -> 7.","stored_at_millis":1,"labels":["agent-memory/theorist/small-case-table","agent-memory/programmer/small-case-table"]}}"#;
 
     memory
-        .store("company-a", "small-case-table", original, MemoryCategory::Core, None)
+        .store(
+            "company-a",
+            "small-case-table",
+            original,
+            MemoryCategory::Core,
+            None,
+        )
         .await
         .expect("first store succeeds");
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
