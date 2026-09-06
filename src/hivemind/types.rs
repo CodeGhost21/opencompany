@@ -105,6 +105,15 @@ pub struct HiveConfig {
     /// Defaults to `EpisodePolicy::DEFAULT` (3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repetition_cap: Option<u32>,
+    /// Whether a line on this desk may ask another desk a question, and how
+    /// far that question may travel.
+    ///
+    /// Off unless the block says `enabled = true`. Every other knob on this
+    /// struct changes how one room argues with itself; this is the only one
+    /// that lets a turn run somewhere else, so it is the only one whose default
+    /// is "no" rather than "scaled to the desk".
+    #[serde(default, skip_serializing_if = "super::referral::ReferralConfig::is_default")]
+    pub referral: super::referral::ReferralConfig,
 }
 
 impl HiveConfig {
