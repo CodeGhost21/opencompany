@@ -853,3 +853,56 @@ fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
     assert!(prior_end < divider_at, "{prompt}");
     assert!(divider_at < current_start, "{prompt}");
 }
+
+/// The reviewer's exact scenario (Codex P2 on this PR): a manifest that
+/// validates cleanly becomes an unreachable-quorum desk once a seat is retired
+/// through the Team API.
+///
+/// `manifest.rs` refuses a *declared* desk that cannot reach its quorum, but it
+/// reads `[[group_chat]].members` and runs once at load. The effective roster
+/// moves underneath it, so the same silent failure arrives from a direction a
+/// manifest check cannot see — hence the second gate in `desk_episode`.
+#[test]
+fn a_retirement_that_strands_the_quorum_falls_back_to_one_responder() {
+    // Three seats, quorum 2: `planner` may propose, `scout` may support, and
+    // `critic` may only object. Two seats can put a distinct supporter on a
+    // topic, which clears a quorum of two.
+    let manifest = format!(
+        "{}[group_chat.hive]\nquorum = 2\n\n[group_chat.hive.moves]\n\
+         planner = [\"propose\", \"evidence\", \"defer\"]\n\
+         scout = [\"support\", \"evidence\", \"defer\"]\n\
+         critic = [\"object\", \"evidence\", \"defer\"]\n",
+        three_member_manifest()
+    );
+    assert!(
+        record(&manifest).manifest.validate().is_empty(),
+        "the declared desk is valid, which is the whole point: {:?}",
+        record(&manifest).manifest.validate()
+    );
+    assert!(
+        desk_episode(&record(&manifest), Some("eng")).is_some(),
+        "and it opens a room while everybody is seated"
+    );
+
+    // Retire `scout` — the only seat that may `!support`. What is left is a
+    // two-member deliberating desk whose sole eligible supporter is `planner`,
+    // against a quorum of two: nothing it ever proposes can carry.
+    let mut retired = record(&manifest);
+    retired.overlay_retired_agents = vec!["scout".to_owned()];
+    assert!(
+        desk_episode(&retired, Some("eng")).is_none(),
+        "a desk that can no longer reach its own quorum must keep the \
+         single-responder path rather than open a room that spends its whole \
+         budget failing to carry anything"
+    );
+
+    // Retiring the seat that may only `!object` strands nothing: `planner` and
+    // `scout` still clear the quorum of two, so the room still opens. The gate
+    // has to be about eligibility, not about the desk merely getting smaller.
+    let mut retired = record(&manifest);
+    retired.overlay_retired_agents = vec!["critic".to_owned()];
+    assert!(
+        desk_episode(&retired, Some("eng")).is_some(),
+        "losing an ineligible seat leaves the quorum reachable"
+    );
+}
