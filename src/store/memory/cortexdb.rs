@@ -224,8 +224,9 @@ impl CortexdbMemory {
     }
 
     async fn ingest(&self, namespace: &str, key: &str, envelope: &Value) -> anyhow::Result<()> {
+        let scope = Self::scope_for(namespace);
         let body = json!({
-            "scope": Self::scope_for(namespace),
+            "scope": scope,
             "modality": "tool_result",
             "content": { "kind": "json", "data": envelope },
             "context": { "observed_at": now_rfc3339() },
@@ -244,9 +245,43 @@ impl CortexdbMemory {
             .map_err(|source| {
                 anyhow::anyhow!("cortexdb request to {EXPERIENCE_PATH} failed: {source}")
             })?;
-        Self::check_status(response, EXPERIENCE_PATH)
-            .await
-            .map(|_| ())
+        let accepted = Self::check_status(response, EXPERIENCE_PATH).await?;
+        // `wait=captured` only acknowledges durability, not listability — see
+        // `INGEST_VISIBILITY_TIMEOUT`'s doc comment. Idempotent replays (the
+        // "duplicate": true case) skip the wait: the event this driver would
+        // be waiting to see was already visible from an earlier call, or
+        // CortexDB would not have recognized the idempotency key as a
+        // replay in the first place.
+        let duplicate = accepted
+            .get("duplicate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let Some(event_id) = accepted.get("event_id").and_then(Value::as_str) else {
+            // No id to wait for — nothing this driver can poll against.
+            // Observed on some CortexDB error/edge responses that still
+            // report success; do not fail the store over a missing id.
+            return Ok(());
+        };
+        if duplicate {
+            return Ok(());
+        }
+        let event_id = event_id.to_owned();
+        let deadline = tokio::time::Instant::now() + INGEST_VISIBILITY_TIMEOUT;
+        loop {
+            let events = self.scope_events(&scope).await?;
+            if events.iter().any(|record| record.id == event_id) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "cortexdb accepted event {event_id} for scope {scope} but it was still \
+                     not listable through {EVENTS_PATH} after {}s; the write may not be \
+                     immediately readable",
+                    INGEST_VISIBILITY_TIMEOUT.as_secs()
+                );
+            }
+            tokio::time::sleep(INGEST_VISIBILITY_POLL_INTERVAL).await;
+        }
     }
 
     /// Recalls the raw events filed in `namespace`'s scope.
