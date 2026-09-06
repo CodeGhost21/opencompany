@@ -271,6 +271,7 @@ impl<'a> EpisodeDriver<'a> {
                     },
                     federation,
                     self.desk.config.referral.peer_cap(),
+                    Arc::clone(&scope),
                 ),
                 self.desk.config.referral.policy(),
             )
