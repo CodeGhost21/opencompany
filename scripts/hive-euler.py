@@ -545,7 +545,17 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
 
     poster = threading.Thread(target=state, daemon=True)
     poster.start()
-    report, messages = wait_for_report(host, desk, after_id, timeout, log, poster, failure)
+    report, messages = wait_for_report(host, desk, after_id, timeout, log, failure)
+    # `wait_for_report` can return on its own timeout while the POST above is
+    # still open — `poster` is a daemon thread and is never otherwise joined,
+    # so without this the next problem's POST could start while this one is
+    # still in flight, and both would touch the same desk state concurrently.
+    # Bounded, not indefinite: a `shell` call still parked for approval could
+    # keep the POST open well past our own deadline.
+    poster.join(timeout=60)
+    if poster.is_alive():
+        log("    !! poster thread still running after report/timeout — its POST may still "
+            "be in flight; the next problem may overlap this episode")
     elapsed = round(time.time() - started, 1)
     turns = [m for m in messages if m.get("author") not in (HIVE_REPORT_AUTHOR,) and not m.get("mine")]
     activity = analyze_transcript(turns, report.get("text") if report else None)
