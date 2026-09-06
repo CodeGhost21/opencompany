@@ -3693,7 +3693,14 @@ impl HarnessBrain {
                             company: self.record().id.clone(),
                             desk_id: desk.id.clone(),
                         });
-                        let outcome = crate::hivemind::EpisodeDriver::new(
+                        // The company's other desks, when this one opted in to
+                        // referral and there is a peer with somebody on it.
+                        // `None` is the default and every desk that never wrote
+                        // the block, so the driver below is byte-identical to
+                        // the one that ran before referral existed.
+                        let federation =
+                            crate::hivemind::desk_federation(&self.record(), &desk);
+                        let mut driver = crate::hivemind::EpisodeDriver::new(
                             self.record().id.clone(),
                             desk,
                             events,
@@ -3701,9 +3708,11 @@ impl HarnessBrain {
                             composed.clone(),
                         )
                         .in_thread(*parent)
-                        .with_memory(memory)
-                        .run(trigger)
-                        .await?;
+                        .with_memory(memory);
+                        if let Some(federation) = federation {
+                            driver = driver.with_federation(federation, &runner);
+                        }
+                        let outcome = driver.run(trigger).await?;
                         tracing::info!(
                             company = %self.record().id,
                             chat = %chat.as_deref().unwrap_or_default(),
@@ -3711,6 +3720,7 @@ impl HarnessBrain {
                             turns = outcome.turns,
                             failed_turns = outcome.failed_turns,
                             demoted = outcome.violations.len(),
+                            asked = outcome.referrals.asked.len(),
                             "[hive] a desk answered as a room"
                         );
                         room_answered = true;
@@ -4489,6 +4499,32 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
                 // reaching a *blind* turn, and every peer line reading as
                 // something this member had itself said.
                 ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root),
+            )
+            .await?;
+        Ok(outcome.reply)
+    }
+}
+
+#[async_trait]
+impl crate::hivemind::HiveReferralRunner for HiveDeskRunner {
+    async fn refer(&self, desk_id: &str, agent_id: &str, prompt: &str) -> Result<String> {
+        let outcome = self
+            .run_turn
+            .run(
+                &self.company,
+                agent_id,
+                prompt,
+                // The *far* desk's channel, and never this episode's thread: a
+                // thread root is a sequence in the conversation that owns it, so
+                // carrying the asking desk's root across would parent the answer
+                // to a message that does not exist over there.
+                //
+                // `deliberating` for the same reason the episode's own turns
+                // are, and for one more: the referred teammate is not in this
+                // room, so seeding it with the far desk's recent history would
+                // put lines it has never read into its own assistant role while
+                // it answers a question from somewhere else entirely.
+                ChatTarget::deliberating(Some(desk_id), None),
             )
             .await?;
         Ok(outcome.reply)
