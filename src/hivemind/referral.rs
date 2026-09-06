@@ -63,6 +63,7 @@ use tinyhivemind_hive::{
 };
 use tokio::sync::Mutex;
 
+use super::scope::EpisodeScope;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
@@ -368,6 +369,14 @@ pub struct EpisodeReferrals<'a> {
     desk_names: BTreeMap<String, String>,
     peer_cap: u32,
     state: Mutex<ReferralState>,
+    /// The asking episode's own fold boundary.
+    ///
+    /// A row this queue journals onto `home` — a return carried back, or an
+    /// unanswered note — is this episode's own doing exactly as much as a
+    /// turn from its main loop is, so the next speaker must read it. Recorded
+    /// here for the same reason the driver records its own turns: without it,
+    /// the episode that paid for the question could not see its own answer.
+    scope: Arc<EpisodeScope>,
 }
 
 /// The mutable half, behind one lock so the queue is `Sync` without the driver
@@ -392,6 +401,7 @@ impl<'a> EpisodeReferrals<'a> {
         home: DispatchConversation,
         federation: &HiveFederation,
         peer_cap: u32,
+        scope: Arc<EpisodeScope>,
     ) -> Self {
         Self {
             runner,
@@ -410,6 +420,7 @@ impl<'a> EpisodeReferrals<'a> {
                 .collect(),
             peer_cap,
             state: Mutex::new(ReferralState::default()),
+            scope,
         }
     }
 
@@ -444,7 +455,8 @@ impl<'a> EpisodeReferrals<'a> {
         author: &str,
         text: String,
     ) -> Result<EventSeq> {
-        self.events
+        let seq = self
+            .events
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
@@ -458,7 +470,17 @@ impl<'a> EpisodeReferrals<'a> {
                     mention_depth: 0,
                 },
             )
-            .await
+            .await?;
+        // Only a row landing back on the asking episode's own desk and thread
+        // is this episode's own doing. A crossing forward's answer is
+        // journaled on the far desk's conversation instead (`forward`,
+        // below) — a real turn by a real member of *that* desk, which that
+        // desk's own concurrent episode (if any) must fold on its own terms,
+        // not one this episode's scope should ever admit.
+        if conversation == &self.home {
+            self.scope.record(seq);
+        }
+        Ok(seq)
     }
 
     /// Run one crossing (or local) question and journal its answer where the

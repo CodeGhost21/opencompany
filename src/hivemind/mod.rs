@@ -50,6 +50,8 @@
 //! - [`prompt`] — what one authorized turn is shown, and how its answer is read.
 //! - [`referral`] — the one mechanism here that leaves the room: asking another
 //!   desk a question, and carrying its answer back without carrying its vote.
+//! - [`scope`] — the upper bound a second, concurrent episode in the same
+//!   thread needs and the shared watermark alone does not give it.
 //! - [`types`] — the manifest knob, the desk snapshot, and the outcome.
 //!
 //! See `docs/spec/runtime/hivemind.md`.
@@ -61,8 +63,11 @@ pub mod memory;
 pub mod moves;
 pub mod prompt;
 pub mod referral;
+pub mod scope;
 pub mod types;
 
+#[cfg(test)]
+mod concurrency_test;
 #[cfg(test)]
 mod deliberation_test;
 #[cfg(test)]
@@ -84,6 +89,7 @@ pub use referral::{
     AskedQuestion, EpisodeReferrals, FederationDesk, HiveFederation, HiveReferralRunner,
     REACH_WORDS, ReferralConfig, ReferralLedger,
 };
+pub use scope::EpisodeScope;
 pub use types::{
     EpisodeEnding, EpisodeOutcome, HiveConfig, HiveDesk, HiveMember, HivePolicy, desk_episode,
     desk_federation,

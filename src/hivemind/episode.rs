@@ -31,6 +31,7 @@ use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, R
 use super::moves::{self, MoveViolation};
 use super::prompt::{EpisodePrompt, marker_line};
 use super::referral::{EpisodeReferrals, HiveFederation, HiveReferralRunner, ReferralLedger};
+use super::scope::EpisodeScope;
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -192,12 +193,21 @@ impl<'a> EpisodeDriver<'a> {
             desk_name: self.desk.name.clone(),
             thread_root: self.thread_root.map(|seq| Sequence(seq.value())),
         };
+        // This instance's own fold boundary (issue: two hive episodes in the
+        // same thread could count each other's turns as their own votes). A
+        // thread already has one root regardless of how many episodes open
+        // inside it, so `conversation` alone cannot tell two concurrent
+        // episodes apart — only this scope, narrowed to what THIS `run` call
+        // itself appends above `trigger`, can. See `EpisodeScope`'s module
+        // doc for why the watermark below cannot do this on its own.
+        let scope = Arc::new(EpisodeScope::new(trigger));
         let log = EventLogSessionLog::new(
             Arc::clone(&self.events),
             self.company.clone(),
             self.desk.id.clone(),
             self.desk.name.clone(),
-        );
+        )
+        .with_scope(Arc::clone(&scope));
         let members: Vec<RosterMember> = self
             .desk
             .members
@@ -261,6 +271,7 @@ impl<'a> EpisodeDriver<'a> {
                     },
                     federation,
                     self.desk.config.referral.peer_cap(),
+                    Arc::clone(&scope),
                 ),
                 self.desk.config.referral.policy(),
             )
@@ -403,6 +414,7 @@ impl<'a> EpisodeDriver<'a> {
                             },
                         )
                         .await?;
+                    scope.record(seq);
                     last_seq = Some(seq);
                     state = turn.next_state;
                     turns = turns.saturating_add(1);
@@ -440,6 +452,7 @@ impl<'a> EpisodeDriver<'a> {
                     },
                 )
                 .await?;
+            scope.record(seq);
             first_seq.get_or_insert(seq);
             last_seq = Some(seq);
             // Considered *after* the line is durable and *before* the next
@@ -508,7 +521,7 @@ impl<'a> EpisodeDriver<'a> {
             referrals: referral_ledger,
         };
         self.remember(&outcome, &lines).await;
-        outcome.report_seq = self.report(&outcome).await;
+        outcome.report_seq = self.report(&outcome, &scope).await;
         Ok(outcome)
     }
 
@@ -804,7 +817,7 @@ impl<'a> EpisodeDriver<'a> {
     /// still holds is not worth discarding the episode over.
     ///
     /// [`HIVE_REPORT_AUTHOR`]: super::HIVE_REPORT_AUTHOR
-    async fn report(&self, outcome: &EpisodeOutcome) -> Option<EventSeq> {
+    async fn report(&self, outcome: &EpisodeOutcome, scope: &EpisodeScope) -> Option<EventSeq> {
         match self
             .events
             .append(
@@ -822,7 +835,10 @@ impl<'a> EpisodeDriver<'a> {
             )
             .await
         {
-            Ok(seq) => Some(seq),
+            Ok(seq) => {
+                scope.record(seq);
+                Some(seq)
+            }
             Err(error) => {
                 tracing::warn!(
                     company = %self.company,

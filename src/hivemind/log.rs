@@ -23,6 +23,7 @@ use tinyhivemind_hive::{
     LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
 };
 
+use super::scope::EpisodeScope;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, StoredEvent};
 
@@ -54,6 +55,11 @@ pub struct EventLogSessionLog {
     company: CompanyId,
     desk_id: String,
     desk_name: String,
+    /// The running episode's fold boundary, when this log is scoped to one
+    /// (see [`EpisodeScope`]). `None` — the default — admits every row this
+    /// desk's own filter passes, which is every reader this adapter had
+    /// before concurrent episodes needed narrowing at all.
+    scope: Option<Arc<EpisodeScope>>,
 }
 
 impl std::fmt::Debug for EventLogSessionLog {
@@ -80,7 +86,22 @@ impl EventLogSessionLog {
             company,
             desk_id,
             desk_name,
+            scope: None,
         }
+    }
+
+    /// Narrow every row this log returns to `scope`'s fold boundary: shared
+    /// context at or below its trigger, plus whatever that one episode
+    /// instance has itself appended.
+    ///
+    /// Without this, two episodes deliberating in the same thread read
+    /// identical rows above their respective triggers — including each
+    /// other's turns — because nothing about the desk id or the thread root
+    /// tells them apart. See `EpisodeScope`'s module doc.
+    #[must_use]
+    pub fn with_scope(mut self, scope: Arc<EpisodeScope>) -> Self {
+        self.scope = Some(scope);
+        self
     }
 
     /// Whether a stored chat key addresses this desk.
@@ -112,6 +133,11 @@ impl EventLogSessionLog {
     ///   never be counted as a supporter, and it must stay visible through a
     ///   blind round, both of which follow from the author variant alone.
     fn row(&self, stored: StoredEvent) -> Option<LogMessage> {
+        if let Some(scope) = &self.scope
+            && !scope.admits(stored.seq)
+        {
+            return None;
+        }
         let sequence = Sequence(stored.seq.value());
         match stored.event {
             CompanyEvent::OperatorMessage {
