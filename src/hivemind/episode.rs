@@ -245,6 +245,27 @@ impl<'a> EpisodeDriver<'a> {
         // unreachable is not a reason to refuse the operator's message.
         let recall = self.recall().await;
 
+        // The referral edge, when the desk opted in and the company has a peer
+        // desk to ask. `None` is the overwhelmingly common case and costs the
+        // loop below one `if let` per turn.
+        let referrals = self.federation.as_ref().map(|(federation, runner)| {
+            (
+                federation,
+                EpisodeReferrals::new(
+                    *runner,
+                    Arc::clone(&self.events),
+                    self.company.clone(),
+                    tinyhivemind_hive::dispatch::DispatchConversation {
+                        desk_id: self.desk.id.clone(),
+                        thread_root: self.thread_root.map(EventSeq::value),
+                    },
+                    federation,
+                    self.desk.config.referral.peer_cap(),
+                ),
+                self.desk.config.referral.policy(),
+            )
+        });
+
         let ending = loop {
             let transcript = tinyhivemind_hive::project_session(
                 &log,
@@ -395,6 +416,29 @@ impl<'a> EpisodeDriver<'a> {
                 .await?;
             first_seq.get_or_insert(seq);
             last_seq = Some(seq);
+            // Considered *after* the line is durable and *before* the next
+            // speaker is chosen, which is the whole of the timing. The wiki
+            // measures this as the single largest effect in the mechanism: a
+            // desk that asks a peer and then votes before the answer lands has
+            // voted past the information it paid a turn for, so an answer that
+            // arrives one row late is an answer that arrives never.
+            if let Some((federation, queue, policy)) = referrals.as_ref()
+                && super::referral::consider(
+                    queue,
+                    *policy,
+                    federation,
+                    &tinyhivemind_hive::dispatch::DispatchConversation {
+                        desk_id: self.desk.id.clone(),
+                        thread_root: self.thread_root.map(EventSeq::value),
+                    },
+                    &turn.agent_id,
+                    &line,
+                    seq,
+                )
+                .await
+            {
+                last_seq = self.latest_seq().await.or(last_seq);
+            }
             lines.push((seq, turn.agent_id.clone(), line));
             if !spoken.contains(&turn.agent_id) {
                 spoken.push(turn.agent_id.clone());
@@ -406,6 +450,10 @@ impl<'a> EpisodeDriver<'a> {
             turns = turns.saturating_add(1);
         };
 
+        let referral_ledger = match referrals.as_ref() {
+            Some((_, queue, _)) => queue.ledger().await,
+            None => ReferralLedger::default(),
+        };
         let mut outcome = EpisodeOutcome {
             ending,
             turns,
@@ -414,6 +462,7 @@ impl<'a> EpisodeDriver<'a> {
             report_seq: None,
             violations,
             failed_turns,
+            referrals: referral_ledger,
         };
         self.remember(&outcome, &lines).await;
         outcome.report_seq = self.report(&outcome).await;
