@@ -31,6 +31,7 @@ use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, R
 use super::moves::{self, MoveViolation};
 use super::prompt::{EpisodePrompt, marker_line};
 use super::referral::{EpisodeReferrals, HiveFederation, HiveReferralRunner, ReferralLedger};
+use super::scope::EpisodeScope;
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
 use crate::Result;
 use crate::error::OpenCompanyError;
