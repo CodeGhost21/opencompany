@@ -1364,6 +1364,80 @@ async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
             post(|Json(_body): Json<Value>| async move {
                 Json(json!({ "deleted": { "events": 0 }, "matched": 0 }))
             }),
+        )
+        .route(
+            // The driver's exhaustive reads (`get`/`list`/`namespace_summaries`,
+            // and `recall`'s stale-hit correction) walk this instead of
+            // `/v1/recall`, which cannot page a raw listing — see
+            // `src/store/memory/cortexdb.rs::scope_events`. Without this route
+            // every one of those calls 404s and the driver reports nothing, even
+            // though `/v1/experience` accepted the write.
+            "/v1/events",
+            axum::routing::get(
+                move |headers: axum::http::HeaderMap,
+                      Query(params): Query<std::collections::HashMap<String, String>>| {
+                    let state = Arc::clone(&events_state);
+                    async move {
+                        if !authorized(&headers) {
+                            return (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                Json(json!({ "error": "unauthorized" })),
+                            );
+                        }
+                        let scope = params.get("scope").cloned().unwrap_or_default();
+                        let items: Vec<Value> = state
+                            .events
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|event| {
+                                event.get("scope").and_then(Value::as_str) == Some(scope.as_str())
+                            })
+                            .cloned()
+                            .collect();
+                        // One page always covers this test's event volume, so
+                        // `has_more: false` and no `next_cursor` — the mock does
+                        // not need to exercise the driver's paging loop.
+                        (
+                            axum::http::StatusCode::OK,
+                            Json(json!({ "items": items, "has_more": false })),
+                        )
+                    }
+                },
+            ),
+        )
+        .route(
+            "/v1/scopes/list",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let state = Arc::clone(&scopes_state);
+                async move {
+                    if !authorized(&headers) {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            Json(json!({ "error": "unauthorized" })),
+                        );
+                    }
+                    let mut scopes: Vec<String> = state
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|event| {
+                            event.get("scope").and_then(Value::as_str).map(str::to_owned)
+                        })
+                        .collect();
+                    scopes.sort();
+                    scopes.dedup();
+                    let items: Vec<Value> = scopes
+                        .into_iter()
+                        .map(|scope| json!({ "path": scope }))
+                        .collect();
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({ "items": items, "has_more": false })),
+                    )
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
