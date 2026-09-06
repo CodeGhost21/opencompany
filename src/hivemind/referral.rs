@@ -601,15 +601,12 @@ impl ReferralQueue for EpisodeReferrals<'_> {
 /// own desks), carry the origin back (the second `dispatch_referral` below),
 /// and bound the width ([`ReferralConfig::peer_cap`], enforced in the queue).
 ///
-/// Returns `true` when something was journaled on the asking desk — which the
-/// driver reads as "the next speaker has one more row to fold".
-///
-/// # Errors
-///
-/// Never fails the episode. A malformed snapshot, a refused enqueue and a far
-/// turn that did not finish are all logged and reported as "no referral", for
-/// the same reason a member's own failed turn is: a question that went
-/// unanswered is a worse episode, not a broken one.
+/// Returns nothing, and cannot fail the episode. Whatever this decides lands in
+/// the journal the next speaker folds and in the ledger the closing report
+/// reads, so there is no second answer for a caller to act on. A malformed
+/// snapshot, a refused enqueue and a far turn that did not finish are logged
+/// and dropped, for the same reason a member's own failed turn is: a question
+/// that went unanswered is a worse episode, not a broken one.
 pub async fn consider(
     queue: &EpisodeReferrals<'_>,
     policy: ReferralPolicy,
@@ -618,9 +615,9 @@ pub async fn consider(
     author_id: &str,
     content: &str,
     seq: EventSeq,
-) -> bool {
+) {
     if !policy.enabled {
-        return false;
+        return;
     }
     let members = federation.roster_members();
     let desks = federation.desk_set();
@@ -637,7 +634,7 @@ pub async fn consider(
         &desk_set,
     );
     if mentions.is_empty() {
-        return false;
+        return;
     }
     let input = ReferralInput {
         key: DispatchKey {
@@ -659,15 +656,15 @@ pub async fn consider(
             // (`NoReferralTarget`, `SelfDesk`) are what a normal deliberation
             // line produces every single turn.
             tracing::debug!(reason = ?reason, "[hive] no referral from this line");
-            return false;
+            return;
         }
         Ok(other) => {
             tracing::debug!(outcome = ?other, "[hive] referral not enqueued");
-            return false;
+            return;
         }
         Err(error) => {
             tracing::warn!(error = %error, "[hive] referral fold refused this line");
-            return false;
+            return;
         }
     }
     // The answer comes back. The library holds no state, so the origin it put
@@ -675,15 +672,15 @@ pub async fn consider(
     // that answers it — that is the one thing this host owes it, and skipping
     // it is how an answer ends up with no way home.
     let Some((forward, answer)) = queue.take_answer().await else {
-        return true;
+        return;
     };
     if !policy.returns || !forward.crosses() {
         // A forward that did not cross needs no return: the answer was
         // appended to the very conversation the asker is reading.
-        return true;
+        return;
     }
     let Some(origin) = forward.origin.clone() else {
-        return true;
+        return;
     };
     let reply = ReferralInput {
         key: DispatchKey {
@@ -719,5 +716,4 @@ pub async fn consider(
         Ok(other) => tracing::debug!(outcome = ?other, "[hive] answer not carried back"),
         Err(error) => tracing::warn!(error = %error, "[hive] carrying an answer back failed"),
     }
-    true
 }
