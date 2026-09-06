@@ -9879,6 +9879,12 @@ members = ["engineer", "designer"]
             "each operator message gets its own hive-report response: {:?}",
             result.channel_responses
         );
+        eprintln!("DEBUG channel_responses = {:#?}", result.channel_responses);
+        let debug_log = events
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read log for debug");
+        eprintln!("DEBUG log = {:#?}", debug_log);
         let report_a = &result.channel_responses[0].text;
         let report_b = &result.channel_responses[1].text;
         assert!(
