@@ -705,12 +705,20 @@ async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest(
     );
 }
 
-/// Regression for the `recall` finding: deduplicating only within one
-/// query's own hits does not stop a superseded event from surfacing when its
-/// (now-stale) content still matches the query but the current content does
-/// not.
+/// Regression for the `recall` finding, revised: deduplicating only within
+/// one query's own hits does not stop a superseded event from surfacing when
+/// its (now-stale) content still matches the query but the current content
+/// does not. The first fix for this swapped the stale hit's content for the
+/// key's current content — but that is its own bug (a second finding on the
+/// same code): a query for "cat" returning "dog" just because "cat" used to
+/// be there is a bait-and-switch, not a correction, since there is no way to
+/// know the current content ("dog") would independently match "cat" without
+/// a second, per-key round trip this driver does not make. The corrected
+/// behavior is to drop a hit whose content has changed since `/v1/recall`
+/// matched it, rather than resurface it under a value the query never
+/// actually matched.
 #[tokio::test]
-async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_match() {
+async fn recall_drops_a_hit_whose_content_is_superseded_rather_than_swapping_it() {
     let (base_url, _state) = spawn_mock(ACTOR).await;
     let memory = client(&base_url, ACTOR);
 
@@ -725,9 +733,8 @@ async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_matc
         .expect("second store succeeds");
 
     // The mock's `/v1/recall` only matches events whose stored content
-    // contains the query text, exactly like the reviewer-described failure
-    // mode: "cat" only matches the superseded first event, since the current
-    // event's content is "dog".
+    // contains the query text: "cat" only matches the superseded first
+    // event, since the current event's content is "dog".
     let hits = memory
         .recall(
             "cat",
@@ -740,24 +747,36 @@ async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_matc
         .await
         .expect("recall succeeds");
 
-    assert_eq!(
-        hits.len(),
-        1,
-        "expected the key's one current hit: {hits:?}"
-    );
-    assert_eq!(
-        hits[0].content, "dog",
-        "recall must resolve a stale hit to the key's current content, not the superseded \
-         version the query happened to match"
+    assert!(
+        hits.is_empty(),
+        "a query that only matched a superseded version must not surface the key's unrelated \
+         current content: {hits:?}"
     );
 
-    // get() must agree with recall(): the key is currently "dog".
+    // get() still reports the key's real current content — dropping the
+    // stale recall hit must not touch what `get`/`list` report.
     let fetched = memory
         .get("company-a", "pet")
         .await
         .expect("get succeeds")
         .expect("entry exists");
     assert_eq!(fetched.content, "dog");
+
+    // A query that matches the CURRENT content must still recall it — only
+    // superseded hits are dropped, not the key entirely.
+    let hits = memory
+        .recall(
+            "dog",
+            10,
+            RecallOpts {
+                namespace: Some("company-a"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("recall succeeds");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].content, "dog");
 }
 
 /// Regression for the `list` finding: a single-page `/v1/recall`-backed
