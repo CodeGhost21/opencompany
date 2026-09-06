@@ -67,6 +67,8 @@ pub mod scope;
 pub mod types;
 
 #[cfg(test)]
+mod concurrency_test;
+#[cfg(test)]
 mod deliberation_test;
 #[cfg(test)]
 mod moves_test;
@@ -87,6 +89,7 @@ pub use referral::{
     AskedQuestion, EpisodeReferrals, FederationDesk, HiveFederation, HiveReferralRunner,
     REACH_WORDS, ReferralConfig, ReferralLedger,
 };
+pub use scope::EpisodeScope;
 pub use types::{
     EpisodeEnding, EpisodeOutcome, HiveConfig, HiveDesk, HiveMember, HivePolicy, desk_episode,
     desk_federation,
