@@ -63,7 +63,9 @@ models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "ma
 # three means an answer needs grounded support from three differently
 # equipped members, not just two identical proposals — see
 # `docs/spec/runtime/hivemind.md` for the moves each is restricted to and
-# `agents/prompts/*.md` for why.
+# `agents/prompts/*.md` for why. Four of the six may ever `!support` (below),
+# so a quorum of three has one seat of slack rather than needing every
+# eligible member every time.
 # ---------------------------------------------------------------------------
 
 [[group_chat]]
@@ -118,6 +120,31 @@ repetition_cap = 1
 # proposal only carries once instruments other than the programmer have
 # grounded it.
 #
+# `!support` is held by the four seats that actually compute or check a
+# candidate answer: the theorist (reduces it), the programmer (implements
+# it), the verifier (independently re-implements it) and the brute forcer
+# (independently re-derives it at a reduced bound — the same category of
+# check the verifier's own brief already treats as "no clever step to be
+# wrong about", just run by a dedicated seat). The skeptic and the archivist
+# never hold it: neither checks the *number* — the skeptic checks the
+# question being answered and the archivist only recalls prior work — and a
+# `!support` from either would satisfy `require_evidential`'s citation check
+# without actually grounding the claim it backs, which is the citation-chain
+# loophole `docs/spec/runtime/hivemind-deliberation.md` warns about under a
+# different name.
+#
+# A quorum of three against four eligible seats leaves one seat of slack
+# rather than none: `check` refuses a `hive.moves` table that permits
+# `!support` to fewer distinct seats than `hive.quorum` needs, because that
+# configuration can never carry anything, but three-of-three (this table's
+# previous shape) is the *reachable-yet-fragile* case that check accepts and
+# this comment used to ship unfixed. A live six-seat run hit exactly that:
+# with only the theorist, programmer and verifier able to `!support`, every
+# one of them had to spend a turn on every carried topic, and the desk spent
+# its last six turns with the other three seats deferring to the one member
+# who could still legally close it, on an answer four independent checks had
+# already confirmed. See `docs/spec/runtime/hivemind-deliberation.md`.
+#
 # The table gates the *deliberation* markers only. `commit`, `question` and
 # `defer` belong to every seat whatever a list says, so the `commit` entries
 # below describe nothing and the `defer` entries describe nothing — both are
@@ -133,7 +160,7 @@ theorist = ["support", "object", "evidence", "question", "pin", "defer"]
 programmer = ["propose", "evidence", "support", "commit", "defer"]
 verifier = ["support", "object", "evidence", "commit", "defer"]
 skeptic = ["question", "object", "evidence", "defer"]
-brute_forcer = ["evidence", "object", "defer"]
+brute_forcer = ["support", "evidence", "object", "defer"]
 archivist = ["evidence", "question", "pin", "defer"]
 
 # The records desk is kept so an accepted answer still has somewhere to be

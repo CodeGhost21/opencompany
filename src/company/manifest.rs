@@ -708,6 +708,90 @@ impl CompanyManifest {
             // list is therefore accepted and ignored rather than refused: it
             // describes what the seat could already do.
 
+            // A desk whose `moves` table permits `!support` to no more than
+            // `hive.quorum` distinct seats is refused, not merely a desk that
+            // permits it to fewer. Two different failures share this one
+            // check:
+            //
+            // - Fewer than quorum: `TopicStanding::carried` reads a count of
+            //   distinct supporters, and no amount of cooperation among the
+            //   barred seats can conjure one they are not allowed to deposit.
+            //   A topic here can never carry, full stop.
+            // - Exactly quorum-many: mathematically reachable, but only by
+            //   unanimity among the eligible seats — every one of them has to
+            //   support every carried topic, with nobody free to sit a turn
+            //   out. `HivePolicy::from_config`'s own default threshold,
+            //   `(count / 2 + 1).min(count - 1)`, exists specifically to rule
+            //   this out for the *whole* desk — "a decision never requires
+            //   unanimity" is a stated invariant there, not an accident of the
+            //   arithmetic — and a hand-written `moves` table can reinstate
+            //   the exact thing that clamp forbids, just scoped to the
+            //   support-capable subset instead of the full membership. Zero
+            //   slack also makes the desk's own dissent mechanism lethal: a
+            //   single grounded `!object` against any one of the eligible
+            //   seats' supports is enough to keep that topic from ever
+            //   carrying, because there is no other eligible seat left to
+            //   replace what was silenced.
+            //
+            // Both are a validation error rather than a runtime symptom for
+            // the same reason the move-grammar typo checks above are: the
+            // failure is *silent* — a desk stuck one short of quorum, or one
+            // objection away from being stuck, looks exactly like a desk
+            // whose members never agreed, and the room spends its whole turn
+            // budget finding that out live.
+            //
+            // Live evidence: a six-seat `hive_math_lab` run with `quorum = 3`
+            // and only three seats (`theorist`, `programmer`, `verifier`)
+            // holding `support` spent its last six turns with four seats in a
+            // row deferring to the one member who could still legally close
+            // the topic — the desk had already independently verified the
+            // answer four times over and still exhausted its budget, because
+            // those three seats were not slack, they were the *entire* pool
+            // and every one of them had to spend a turn on this exact topic.
+            // See `docs/spec/runtime/hivemind-deliberation.md`.
+            //
+            // `moves_for` (not the raw map) decides eligibility, so a member
+            // the table omits, or names with an empty list, counts the same as
+            // one explicitly given `support` — both already keep every move.
+            //
+            // Eligibility also includes every seat holding `propose`, not only
+            // `support`: `tinyhivemind_hive::quorum::standings` counts a
+            // `!propose` as its own author's support unconditionally — the
+            // `require_grounded` and `require_evidential` gates in that fold
+            // both match on `TraceKind::Support` only, so neither one ever
+            // touches a `Propose` trace. A member need not have originated a
+            // topic to benefit from this either: nothing stops a second
+            // `propose`-holding seat from re-`!propose`-ing the exact id
+            // already on the floor, which the fold folds in as one more
+            // distinct, ungated supporter of it. Counting `support`-holders
+            // alone would undercount a desk whose extra slack comes from a
+            // second proposer rather than a fourth supporter.
+            //
+            // Gated on `deliberates`: a desk under two members, or opted out
+            // with `enabled = false`, never opens a hive episode at all, so
+            // `hive.quorum` and `hive.moves` on it describe a room that will
+            // never run rather than one that could get stuck.
+            if chat.hive.deliberates(chat.members.len()) {
+                let quorum =
+                    crate::hivemind::HivePolicy::from_config(&chat.hive, chat.members.len())
+                        .episode
+                        .quorum
+                        .threshold;
+                let eligible = chat
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        chat.hive.may(member, "support") || chat.hive.may(member, "propose")
+                    })
+                    .count();
+                if u32::try_from(eligible).is_ok_and(|eligible| eligible <= quorum) {
+                    problems.push(format!(
+                        "{label} `hive.moves` permits `!support` or `!propose` to only {eligible} of {} seats, which is no more than the {quorum} distinct supporters `hive.quorum` needs — every one of those seats would have to back every carried topic, and a single grounded `!object` against any one of them would keep it from ever carrying. Widen `hive.moves` so more than {quorum} seats may `!support` or `!propose`, or lower `hive.quorum` below {eligible}.",
+                        chat.members.len()
+                    ));
+                }
+            }
+
             // The referral block. Every check here catches a policy that would
             // be *silently* inert rather than loudly wrong, which is the
             // failure mode worth a validation error: a desk that asks nothing
