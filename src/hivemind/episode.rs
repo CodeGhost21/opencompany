@@ -817,7 +817,7 @@ impl<'a> EpisodeDriver<'a> {
     /// still holds is not worth discarding the episode over.
     ///
     /// [`HIVE_REPORT_AUTHOR`]: super::HIVE_REPORT_AUTHOR
-    async fn report(&self, outcome: &EpisodeOutcome) -> Option<EventSeq> {
+    async fn report(&self, outcome: &EpisodeOutcome, scope: &EpisodeScope) -> Option<EventSeq> {
         match self
             .events
             .append(
@@ -835,7 +835,10 @@ impl<'a> EpisodeDriver<'a> {
             )
             .await
         {
-            Ok(seq) => Some(seq),
+            Ok(seq) => {
+                scope.record(seq);
+                Some(seq)
+            }
             Err(error) => {
                 tracing::warn!(
                     company = %self.company,
