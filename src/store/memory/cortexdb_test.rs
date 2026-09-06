@@ -109,7 +109,10 @@ async fn recall(
         .get("scope")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let query = body.get("query").and_then(Value::as_str).unwrap_or_default();
+    let query = body
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let events = state.events.lock().unwrap();
     let items: Vec<Value> = events
         .iter()
@@ -126,7 +129,10 @@ async fn recall(
                     .content
                     .pointer("/data/content")
                     .and_then(Value::as_str)
-                    .is_some_and(|text| text.to_ascii_lowercase().contains(&query.to_ascii_lowercase()))
+                    .is_some_and(|text| {
+                        text.to_ascii_lowercase()
+                            .contains(&query.to_ascii_lowercase())
+                    })
         })
         .map(|event| {
             json!({
@@ -210,7 +216,10 @@ async fn scopes_list(
     let mut scopes: Vec<String> = events.iter().map(|event| event.scope.clone()).collect();
     scopes.sort();
     scopes.dedup();
-    let items: Vec<Value> = scopes.into_iter().map(|scope| json!({ "path": scope })).collect();
+    let items: Vec<Value> = scopes
+        .into_iter()
+        .map(|scope| json!({ "path": scope }))
+        .collect();
     (StatusCode::OK, Json(json!({ "items": items })))
 }
 
