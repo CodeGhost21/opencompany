@@ -134,6 +134,18 @@ const INGEST_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(6);
 /// visibility.
 const INGEST_VISIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long [`CortexdbMemory::ingest`] polls `POST /v1/recall` for its own
+/// just-written event to enter *ranked* recall, after it has already
+/// confirmed listing visibility.
+///
+/// Listing visibility (`GET /v1/events`) and ranked-recall visibility
+/// (`POST /v1/recall`) are two separate indexing stages against a live
+/// v0.9.8 instance — "1-4s to the listing, a second more to ranked recall"
+/// per this module's own measured notes. Waiting only for the first stage
+/// would let `store` return before a `recall` immediately afterward can see
+/// its own write. 4s covers the documented "a second more" with margin.
+const INGEST_RECALL_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// A CortexDB service (self-hosted or managed) exposed through TinyMemory's
 /// [`Memory`] contract.
 ///
