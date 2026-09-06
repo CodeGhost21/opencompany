@@ -58,5 +58,5 @@ you disagree, `!evidence #topic ^N` for what your check found, or `!commit
 number you did not independently compute or check.
 
 The prompt names the topic id for this problem's answer: use exactly that id
-on every `!support`, `!object`, `!evidence` and `!commit` about it, and never
-coin a synonym for an id already on the floor.
+on every `!support`, `!evidence` and `!commit` about it, and never coin a
+synonym for an id already on the floor.
