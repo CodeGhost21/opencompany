@@ -651,6 +651,46 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
         );
     }
 
+    // The chat POST's own response — what a synchronous chat-API caller and
+    // `emit_cycle_webhooks` both read — must carry the hive answer too. Before
+    // this, a hive desk journaled everything directly and pushed nothing into
+    // `CycleReport.responses`, so a synchronous caller saw an empty body and
+    // `emit_cycle_webhooks` never fired `work.completed`, even though the desk
+    // had just answered at length.
+    let responses = body["responses"]
+        .as_array()
+        .expect("the chat POST returns a responses array");
+    assert_eq!(
+        responses.len(),
+        1,
+        "the hive answer must reach the response body: {body}"
+    );
+    assert_eq!(
+        responses[0]["text"].as_str(),
+        Some(report.as_str()),
+        "the response carries the same closing report the journal holds: {body}"
+    );
+
+    // And it must not be a SECOND journal write: the response's durable id
+    // has to be the exact sequence the episode's own closing report was
+    // already journaled under, not a fresh one minted by the generic
+    // journal-on-return path every other chat reply goes through.
+    let report_seq = rows
+        .iter()
+        .find(|(_, author, _)| author == HIVE_REPORT_AUTHOR)
+        .map(|(seq, _, _)| *seq)
+        .expect("the episode journals its own closing report");
+    let message_id: u64 = responses[0]["messageId"]
+        .as_str()
+        .expect("the response carries its durable id")
+        .parse()
+        .expect("the durable id is a sequence number");
+    assert_eq!(
+        message_id, report_seq,
+        "the response must carry the report's own sequence, not journal it a second time \
+         under a different one: {body}"
+    );
+
     // No single-responder bubble: the desk's only authored rows are the
     // episode's own turns and its report. In particular the orchestrator never
     // answered on top of the room. Any author that is neither the report nor
