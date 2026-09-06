@@ -63,6 +63,7 @@ use tinyhivemind_hive::{
 };
 use tokio::sync::Mutex;
 
+use super::scope::EpisodeScope;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
