@@ -736,6 +736,14 @@ impl Memory for CortexdbMemory {
         if let Some(min_score) = opts.min_score {
             records.retain(|record| record.score.is_none_or(|score| score >= min_score));
         }
+        // The dedup pass above sorted by `observed_at` to pick which
+        // duplicate of a key to keep, not to answer the query — `/v1/recall`
+        // ranked these by relevance, and that ranking is what `limit` is
+        // supposed to keep the top of. Without re-sorting here, truncating by
+        // timestamp order can drop an older, more relevant hit in favor of a
+        // newer, weaker one. A record with no score (canonicalized from a
+        // scope walk rather than a ranked hit) sorts after every scored one.
+        records.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         records.truncate(limit);
         Ok(records.into_iter().map(DecodedRecord::into_entry).collect())
     }
