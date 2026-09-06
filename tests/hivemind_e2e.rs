@@ -1499,7 +1499,7 @@ async fn a_desk_asks_another_desk_and_only_the_information_crosses() {
 
     // `greeter` never becomes a member of this desk's fold: every *turn* row
     // here is one of the three seats.
-    for (_, author, _) in &turns(&rows) {
+    for (author, _) in &turns(&rows) {
         assert!(
             [THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str()),
             "a far teammate took a seat in the room: {rows:?}"
