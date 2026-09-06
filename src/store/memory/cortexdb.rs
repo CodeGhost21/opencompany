@@ -714,21 +714,35 @@ impl Memory for CortexdbMemory {
     }
 
     async fn forget(&self, namespace: &str, key: &str) -> anyhow::Result<bool> {
-        let Some(record) = self.latest(namespace, key).await? else {
+        let scope = Self::scope_for(namespace);
+        // Every event ever filed for this key, not only the newest: a key
+        // stored more than once (e.g. a caller that rewrites its envelope to
+        // add metadata without changing the logical key) leaves each write
+        // as its own event in the log, and retracting only the latest would
+        // leave the older ones behind for `get`/`list`/`recall` to fold back
+        // in as if `forget` never ran.
+        let ids: Vec<String> = self
+            .scope_events(&scope)
+            .await?
+            .into_iter()
+            .filter(|record| record.namespace == namespace && record.key == key)
+            .map(|record| record.id)
+            .collect();
+        if ids.is_empty() {
             return Ok(false);
-        };
-        // `selector.memory_ids` plus `cascade: "redact_events"` names exactly
-        // one record and asks for the raw event itself, not only its derived
-        // layers — verified against a live CortexDB instance, which otherwise
-        // refuses `{"by": "id", ...}` (not this server's `ForgetSelector`
-        // shape at all: `about_subject` / `about_entity` / `predicate` /
-        // `memory_ids`) and refuses an *empty* selector without
+        }
+        // `selector.memory_ids` plus `cascade: "redact_events"` names the
+        // records and asks for the raw events themselves, not only their
+        // derived layers — verified against a live CortexDB instance, which
+        // otherwise refuses `{"by": "id", ...}` (not this server's
+        // `ForgetSelector` shape at all: `about_subject` / `about_entity` /
+        // `predicate` / `memory_ids`) and refuses an *empty* selector without
         // `confirm_all: true`. Every named layer travels too, since a generic
         // driver cannot know which of them this envelope reached.
         let body = json!({
-            "scope": Self::scope_for(namespace),
+            "scope": scope,
             "layers": ["events", "episodes", "facts", "beliefs", "understanding"],
-            "selector": { "memory_ids": [record.id] },
+            "selector": { "memory_ids": ids },
             "cascade": "redact_events",
         });
         let response = self
