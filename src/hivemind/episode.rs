@@ -455,7 +455,9 @@ impl<'a> EpisodeDriver<'a> {
             // demoted line (no leading marker left to recognize), so this is
             // the same "committed and legitimate" test the fold already
             // applies before counting a line as anything.
-            if let Some((federation, queue, policy)) = referrals.as_ref() {
+            if moves::line_kind(&line).is_some()
+                && let Some((federation, queue, policy)) = referrals.as_ref()
+            {
                 super::referral::consider(
                     queue,
                     *policy,
