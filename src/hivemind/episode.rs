@@ -442,7 +442,22 @@ impl<'a> EpisodeDriver<'a> {
             // `last_seq` is deliberately not advanced by what a referral
             // journals: it names the episode's last *turn*, and a question's
             // answer is a row the room reads, not a turn the room took.
-            if let Some((federation, queue, policy)) = referrals.as_ref() {
+            //
+            // Gated on the line still carrying an allowed marker:
+            // `moves::demote` (in `line_from`) strips only the leading `!` off
+            // a barred move, and leaves the rest of the text — including any
+            // `@#desk` mention it contains — intact. `consider` resolves
+            // mentions from raw content with no grammar check of its own, so
+            // without this a barred move that happened to mention a desk
+            // could still spend a peer-desk turn and return an answer under
+            // `HIVE_REFERRAL_AUTHOR`, even though the line itself was refused
+            // as an illegitimate move. `line_kind` returns `None` for a
+            // demoted line (no leading marker left to recognize), so this is
+            // the same "committed and legitimate" test the fold already
+            // applies before counting a line as anything.
+            if moves::line_kind(&line).is_some()
+                && let Some((federation, queue, policy)) = referrals.as_ref()
+            {
                 super::referral::consider(
                     queue,
                     *policy,
