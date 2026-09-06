@@ -521,7 +521,7 @@ impl<'a> EpisodeDriver<'a> {
             referrals: referral_ledger,
         };
         self.remember(&outcome, &lines).await;
-        outcome.report_seq = self.report(&outcome).await;
+        outcome.report_seq = self.report(&outcome, &scope).await;
         Ok(outcome)
     }
 
