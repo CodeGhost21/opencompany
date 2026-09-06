@@ -580,10 +580,22 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
         found = integers_in(rtext)
         # The report names the carried topic; a topic is usually the number
         # itself (`#233168`) but a room may name it otherwise, so fall back to
-        # the last supporting line's integers.
-        if answer and answer not in found:
+        # the last supporting line's integers. Restricted to turns whose own
+        # marker line names the *carried* topic: without that, a room that
+        # churned onto a different `#topic` partway through can be graded
+        # "correct" because some unrelated turn happens to mention the right
+        # integer for a different reason entirely.
+        carried_topic = activity.get("carried_topic")
+        if answer and answer not in found and carried_topic is not None:
             for m in reversed(turns):
-                if answer in integers_in(m.get("text", "")):
+                text = (m.get("text") or "").strip()
+                if not text:
+                    continue
+                topic_match = _TOPIC_RE.search(text.splitlines()[0])
+                topic = topic_match.group(1).rstrip(".,;:") if topic_match else None
+                if topic != carried_topic:
+                    continue
+                if answer in integers_in(text):
                     found.append(answer)
                     break
         outcome["converged"] = converged
