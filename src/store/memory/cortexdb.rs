@@ -696,10 +696,12 @@ impl Memory for CortexdbMemory {
         };
         let mut out = Vec::new();
         for namespace in namespaces {
-            let mut records = self.recall_raw(&namespace, "").await?;
+            let mut records: Vec<DecodedRecord> = self
+                .latest_by_key(&namespace)
+                .await?
+                .into_values()
+                .collect();
             records.sort_by(|a, b| b.observed_at.cmp(&a.observed_at));
-            let mut seen = std::collections::HashSet::new();
-            records.retain(|record| seen.insert(record.key.clone()));
             if let Some(category) = category {
                 records.retain(|record| &record.category == category);
             }
