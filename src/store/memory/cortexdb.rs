@@ -296,28 +296,7 @@ impl CortexdbMemory {
             }
             tokio::time::sleep(INGEST_VISIBILITY_POLL_INTERVAL).await;
         }
-        // Stage two: listing visibility is not ranked-recall visibility —
-        // "1-4s to the listing, a second more to ranked recall" per this
-        // module's own measured notes. `store`/`store_with_taint` promise a
-        // record any of `get`/`list`/`recall` can read back immediately
-        // after returning, so both stages must clear before this call
-        // returns, not only the first.
-        let deadline = tokio::time::Instant::now() + INGEST_RECALL_VISIBILITY_TIMEOUT;
-        loop {
-            let hits = self.recall_raw(namespace, "").await?;
-            if hits.iter().any(|record| record.id == event_id) {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!(
-                    "cortexdb accepted event {event_id} for scope {scope} and it is listable \
-                     through {EVENTS_PATH}, but it was still not visible through \
-                     {RECALL_PATH} after {}s; the write may not be immediately recallable",
-                    INGEST_RECALL_VISIBILITY_TIMEOUT.as_secs()
-                );
-            }
-            tokio::time::sleep(INGEST_VISIBILITY_POLL_INTERVAL).await;
-        }
+        Ok(())
     }
 
     /// Recalls the raw events filed in `namespace`'s scope.
