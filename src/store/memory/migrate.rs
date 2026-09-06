@@ -300,7 +300,7 @@ pub fn resolve_migrate_configs(
         }
         other => {
             return Err(OpenCompanyError::Config(format!(
-                "--to {other} names no migratable driver: supermemory, mem0, cognee."
+                "--to {other} names no migratable driver: supermemory, mem0, cognee, cortexdb."
             )));
         }
     };
