@@ -707,6 +707,41 @@ impl CompanyManifest {
             // answer it had already carried. A `commit` entry in a member's
             // list is therefore accepted and ignored rather than refused: it
             // describes what the seat could already do.
+
+            // The referral block. Every check here catches a policy that would
+            // be *silently* inert rather than loudly wrong, which is the
+            // failure mode worth a validation error: a desk that asks nothing
+            // looks exactly like a desk whose members had nothing to ask.
+            let referral = &chat.hive.referral;
+            if let Some(reach) = referral.reach.as_deref()
+                && !crate::hivemind::REACH_WORDS.contains(&reach)
+            {
+                problems.push(one_of(
+                    &format!("{label} `hive.referral.reach`"),
+                    crate::hivemind::REACH_WORDS,
+                    reach,
+                ));
+            }
+            for (key, value) in [
+                ("max_hops", referral.max_hops),
+                ("peer_cap", referral.peer_cap),
+            ] {
+                if value == Some(0) {
+                    problems.push(format!(
+                        "{label} sets `hive.referral.{key} = 0` — a referral budget of nothing never asks anybody anything; omit `hive.referral` entirely to keep the desk inside its own room."
+                    ));
+                }
+            }
+            // A round trip is two hops: one out, one home. Refused rather than
+            // clamped, because an operator who wrote `max_hops = 1` alongside
+            // `returns = true` has described a question whose answer is thrown
+            // away, and spending the far desk's turn anyway is worse than
+            // saying so.
+            if referral.max_hops == Some(1) && referral.returns != Some(false) {
+                problems.push(format!(
+                    "{label} sets `hive.referral.max_hops = 1` while answers still come back — a round trip is two hops, so every answer would be stranded on the desk that gave it. Use `max_hops = 2`, or set `returns = false` if the question is meant to be one-way."
+                ));
+            }
         }
 
         // Delegation allowlists (issue #176): every `delegates_to` entry must
