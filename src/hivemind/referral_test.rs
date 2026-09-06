@@ -201,6 +201,80 @@ fn the_federation_carries_every_desk_and_names_the_peers() {
     );
 }
 
+/// **A desk created at runtime through the console is a referral peer too.**
+///
+/// `desk_federation` used to build its desk list from `record.manifest
+/// .group_chats` alone, so an `overlay_desks` desk — the console's "create a
+/// desk" action — could never be named by `@#id` from another desk, even
+/// though [`CompanyRecord::effective_desk_members`] (the single source of
+/// truth the REST desk list and the harness both read) already treats
+/// manifest and overlay desks as one set.
+#[test]
+fn the_federation_includes_a_console_created_desk() {
+    let manifest = two_desks(REFERRING);
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let mut record = record(&manifest);
+    record.overlay_desks.push(crate::ports::types::OverlayDesk {
+        id: "growth".to_owned(),
+        name: "Growth".to_owned(),
+        description: Some("Runs experiments".to_owned()),
+        members: vec!["planner".to_owned()],
+        responder: crate::ports::types::ResponderMode::default(),
+    });
+
+    let federation = desk_federation(&record, &desk).expect("a federation");
+    assert_eq!(
+        federation.desks.len(),
+        3,
+        "the manifest's two desks plus the console-created one: {federation:?}"
+    );
+    let peers = federation.peers_of("eng");
+    assert!(
+        peers.iter().any(|peer| peer.id == "growth"),
+        "a console-created desk must be a reachable referral peer: {peers:?}"
+    );
+}
+
+/// **A teammate's overlay-edited label reaches the federation, not the
+/// manifest's stale one.**
+///
+/// `member_of` used to read `record.manifest.agents` directly to build the
+/// `(id, label)` pairs in `HiveFederation.agents`, bypassing
+/// `CompanyRecord::effective_agent` — the function that already applies a
+/// console edit on top of the manifest row everywhere else the roster is
+/// read. A teammate renamed after the manifest was authored was therefore
+/// served under its stale manifest label to a peer desk asking for it.
+#[test]
+fn the_federation_serves_an_overlay_edited_label_not_the_stale_manifest_one() {
+    let manifest = two_desks(REFERRING);
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let mut record = record(&manifest);
+    record
+        .overlay_agent_edits
+        .push(crate::ports::types::AgentOverride {
+            agent_id: "sre".to_owned(),
+            name: Some("Senior SRE".to_owned()),
+            role: None,
+            description: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
+
+    let federation = desk_federation(&record, &desk).expect("a federation");
+    let label = federation
+        .agents
+        .iter()
+        .find(|(id, _)| id == "sre")
+        .map(|(_, label)| label.clone())
+        .expect("sre is seated on the peer desk");
+    assert_eq!(
+        label, "Senior SRE",
+        "the overlay-edited label must reach the federation, not the manifest's own: \
+         {federation:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The policy
 // ---------------------------------------------------------------------------
