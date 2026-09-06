@@ -134,10 +134,7 @@ async fn recall(
         let mut lag = state.recall_lag_calls.lock().unwrap();
         if *lag > 0 {
             *lag -= 1;
-            return (
-                StatusCode::OK,
-                Json(json!({ "layers": { "events": [] } })),
-            );
+            return (StatusCode::OK, Json(json!({ "layers": { "events": [] } })));
         }
     }
     let scope = body
