@@ -708,39 +708,39 @@ impl CompanyManifest {
             // list is therefore accepted and ignored rather than refused: it
             // describes what the seat could already do.
 
-            // A desk whose `moves` table permits `!support` to no more than
-            // `hive.quorum` distinct seats is refused, not merely a desk that
-            // permits it to fewer. Two different failures share this one
-            // check:
+            // A desk whose `moves` table permits a distinct supporter to
+            // FEWER seats than `hive.quorum` needs is refused:
+            // `TopicStanding::carried` reads a count of distinct supporters,
+            // and no amount of cooperation among the barred seats can conjure
+            // one they are not allowed to deposit. A topic there can never
+            // carry, full stop.
             //
-            // - Fewer than quorum: `TopicStanding::carried` reads a count of
-            //   distinct supporters, and no amount of cooperation among the
-            //   barred seats can conjure one they are not allowed to deposit.
-            //   A topic here can never carry, full stop.
-            // - Exactly quorum-many: mathematically reachable, but only by
-            //   unanimity among the eligible seats — every one of them has to
-            //   support every carried topic, with nobody free to sit a turn
-            //   out. `HivePolicy::from_config`'s own default threshold,
-            //   `(count / 2 + 1).min(count - 1)`, exists specifically to rule
-            //   this out for the *whole* desk — "a decision never requires
-            //   unanimity" is a stated invariant there, not an accident of the
-            //   arithmetic — and a hand-written `moves` table can reinstate
-            //   the exact thing that clamp forbids, just scoped to the
-            //   support-capable subset instead of the full membership. Zero
-            //   slack also makes the desk's own dissent mechanism lethal: a
-            //   single grounded `!object` against any one of the eligible
-            //   seats' supports is enough to keep that topic from ever
-            //   carrying, because there is no other eligible seat left to
-            //   replace what was silenced.
+            // Exactly quorum-many eligible seats is ACCEPTED, and the
+            // temptation to refuse it is worth writing down because it was
+            // tried and was wrong. Such a desk carries a topic only by
+            // unanimity among its eligible seats, which is fragile — one
+            // grounded `!object` silencing any of them leaves nobody to
+            // replace what was silenced. But fragile is not impossible, and
+            // more to the point it is a configuration this crate deliberately
+            // lets an operator ask for: `HivePolicy::from_config` clamps an
+            // explicit `quorum` to `1..=count`, so `quorum = 3` on a desk of
+            // three is honoured as written. The neighbouring
+            // `(count / 2 + 1).min(count - 1)` governs only the *default*
+            // threshold — it says what a desk that named no number should
+            // get, not that unanimity is forbidden to one that did. Refusing
+            // it here would have outlawed a desk the e2e suite deliberately
+            // exercises, and would have been this check inventing a policy
+            // rather than enforcing one.
             //
-            // Both are a validation error rather than a runtime symptom for
+            // It is a validation error rather than a runtime symptom for
             // the same reason the move-grammar typo checks above are: the
             // failure is *silent* — a desk stuck one short of quorum, or one
             // objection away from being stuck, looks exactly like a desk
             // whose members never agreed, and the room spends its whole turn
             // budget finding that out live.
             //
-            // Live evidence: a six-seat `hive_math_lab` run with `quorum = 3`
+            // Live evidence for why the impossible case needs catching at
+            // all: a six-seat `hive_math_lab` run with `quorum = 3`
             // and only three seats (`theorist`, `programmer`, `verifier`)
             // holding `support` spent its last six turns with four seats in a
             // row deferring to the one member who could still legally close
@@ -784,9 +784,9 @@ impl CompanyManifest {
                         chat.hive.may(member, "support") || chat.hive.may(member, "propose")
                     })
                     .count();
-                if u32::try_from(eligible).is_ok_and(|eligible| eligible <= quorum) {
+                if u32::try_from(eligible).is_ok_and(|eligible| eligible < quorum) {
                     problems.push(format!(
-                        "{label} `hive.moves` permits `!support` or `!propose` to only {eligible} of {} seats, which is no more than the {quorum} distinct supporters `hive.quorum` needs — every one of those seats would have to back every carried topic, and a single grounded `!object` against any one of them would keep it from ever carrying. Widen `hive.moves` so more than {quorum} seats may `!support` or `!propose`, or lower `hive.quorum` below {eligible}.",
+                        "{label} `hive.moves` permits `!support` or `!propose` to only {eligible} of {} seats, but `hive.quorum` needs {quorum} distinct supporters — a topic here can never carry, because the barred seats cannot deposit a supporter however much they agree. Widen `hive.moves` so at least {quorum} seats may `!support` or `!propose`, or lower `hive.quorum` to {eligible}.",
                         chat.members.len()
                     ));
                 }
