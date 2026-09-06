@@ -283,8 +283,9 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
     assert_eq!(asked[0].0, "platform", "the turn ran on the far desk");
     assert_eq!(asked[0].1, "sre", "the far desk's first eligible member");
     assert!(
-        asked[0].2.contains("Decide the rollout.") == false,
-        "the far teammate is asked a colleague's question, not handed this room's task"
+        !asked[0].2.contains("Decide the rollout."),
+        "the far teammate is asked a colleague's question, not handed this room's task:\n{}",
+        asked[0].2
     );
     assert!(
         asked[0].2.contains("What is the replica lag budget?"),
@@ -303,17 +304,16 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
     let home = log.replies("eng");
     let returned = home
         .iter()
-        .find(|(author, _)| author == HIVE_REPORT_AUTHOR && _1_is_the_answer(&home, &far_rows))
-        .map(|(_, text)| text.clone())
-        .or_else(|| {
-            home.iter()
-                .find(|(_, text)| text.contains("400ms"))
-                .map(|(_, text)| text.clone())
-        })
+        .find(|(_, text)| text.contains("400ms"))
         .expect("the answer came home");
+    assert_eq!(
+        returned.0, HIVE_REPORT_AUTHOR,
+        "the row that carries it is the room's, not the far teammate's: {home:?}"
+    );
     assert!(
-        returned.contains("@sre") && returned.contains("Platform"),
-        "the answer names who said it and where: {returned}"
+        returned.1.contains("@sre") && returned.1.contains("Platform"),
+        "and it names who said it and where: {}",
+        returned.1
     );
 
     assert_eq!(outcome.referrals.asked.len(), 1);
@@ -323,12 +323,6 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
         "the operator is told the room went outside: {}",
         outcome.summary()
     );
-}
-
-/// A tiny predicate kept honest by name rather than by cleverness: the
-/// returning row is the one authored by the room, not by the far teammate.
-fn _1_is_the_answer(_home: &[(String, String)], _far: &[(String, String)]) -> bool {
-    true
 }
 
 #[tokio::test]
