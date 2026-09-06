@@ -524,16 +524,12 @@ impl<'a> EpisodeDriver<'a> {
         let allowed = self.desk.config.moves_for(agent_id);
         let line = marker_line(&self.runner.speak(agent_id, prompt).await?);
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
-            return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
-                .await;
+            return self.grounded(agent_id, prompt, visible, line).await;
         };
         let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
         let line = marker_line(&self.runner.speak(agent_id, &corrected).await?);
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
-            return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
-                .await;
+            return self.grounded(agent_id, prompt, visible, line).await;
         };
         tracing::info!(
             company = %self.company,
@@ -541,50 +537,6 @@ impl<'a> EpisodeDriver<'a> {
             agent = %agent_id,
             attempted = %kind,
             "[hive] a member used a move its seat does not have, twice; the line was demoted"
-        );
-        violations.push(MoveViolation {
-            agent_id: agent_id.to_owned(),
-            attempted: kind.to_owned(),
-        });
-        Ok(moves::demote(&line))
-    }
-
-    /// [`grounded`](Self::grounded), with the seat's move grammar re-enforced
-    /// on whatever it hands back.
-    ///
-    /// `grounded` may send the member back for one more turn (the evidential
-    /// retry, when a `!support` reaches no evidence) and keeps whatever comes
-    /// of that unconditionally — its own doc says so, and that is right for
-    /// citation discipline: a support that still misses evidence is a real
-    /// position. But "keep it unconditionally" also meant the retried line
-    /// never had its move *kind* re-checked, so a member answering the
-    /// citation-correction prompt could switch to a marker kind its seat is
-    /// not entitled to make at all, and it would fold into the transcript as
-    /// a legitimate move — exactly the class of bug `moves_for` seat
-    /// restriction exists to prevent everywhere else `line_from` returns a
-    /// line. Re-deriving `line_kind` and demoting on the same terms as the
-    /// first-reply path closes that gap without touching the evidential
-    /// retry's own, separate, contract.
-    async fn grounded_and_regraded(
-        &self,
-        agent_id: &str,
-        prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
-        line: String,
-        allowed: &[&'static str],
-        violations: &mut Vec<MoveViolation>,
-    ) -> Result<String> {
-        let line = self.grounded(agent_id, prompt, visible, line).await?;
-        let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
-            return Ok(line);
-        };
-        tracing::info!(
-            company = %self.company,
-            desk = %self.desk.id,
-            agent = %agent_id,
-            attempted = %kind,
-            "[hive] a member's evidential retry used a move its seat does not have; \
-             the line was demoted"
         );
         violations.push(MoveViolation {
             agent_id: agent_id.to_owned(),
