@@ -1217,6 +1217,32 @@ impl HostedProvider {
 }
 
 #[async_trait]
+
+/// The per-request output cap actually sent, given the cap the harness asked
+/// for.
+///
+/// The vendored harness stamps every request with a fixed
+/// `AGENT_TURN_MAX_OUTPUT_TOKENS` (16384) sized for a model whose visible
+/// answer is all it emits. A reasoning model routed through an OpenAI-shaped
+/// endpoint counts its hidden reasoning stream against the same `max_tokens`,
+/// so on a hard problem the model exhausts the cap before writing a single
+/// visible token and the turn fails with `finish_reason: length` and an empty
+/// message. `OPENCOMPANY_INFERENCE_MAX_TOKENS` raises the floor for such a
+/// deployment: the larger of the harness's cap and the variable is sent, so the
+/// variable can never *lower* a cap the harness relied on, and an unset or
+/// unparsable value changes nothing.
+fn output_cap(requested: Option<u32>) -> Option<u32> {
+    let floor = std::env::var("OPENCOMPANY_INFERENCE_MAX_TOKENS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0);
+    match (requested, floor) {
+        (Some(cap), Some(floor)) => Some(cap.max(floor)),
+        (Some(cap), None) => Some(cap),
+        (None, floor) => floor,
+    }
+}
+
 impl ChatModel<()> for HostedProvider {
     /// Advertise native tool calling so openhuman's turn loop drives structured
     /// `tools`/`tool_calls` instead of prompt-guided XML. See [`MANAGED_PROFILE`].
@@ -1240,7 +1266,7 @@ impl ChatModel<()> for HostedProvider {
             "temperature": temperature,
             "messages": messages,
         });
-        if let Some(cap) = request.max_tokens {
+        if let Some(cap) = output_cap(request.max_tokens) {
             body["max_tokens"] = serde_json::json!(cap);
         }
         // Native tool calling: expose the turn's tools so the model emits
@@ -1413,7 +1439,7 @@ pub async fn request_plan(
         "temperature": temperature,
         "messages": messages,
     });
-    if let Some(cap) = max_tokens {
+    if let Some(cap) = output_cap(max_tokens) {
         body["max_tokens"] = serde_json::json!(cap);
     }
     let supports_parallel_control =
@@ -1845,6 +1871,26 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
 }
 
 #[cfg(test)]
+
+    /// The output floor only ever raises the harness's cap (issue: reasoning
+    /// models exhaust a 16k `max_tokens` on their hidden stream).
+    #[test]
+    fn output_cap_floor_raises_but_never_lowers() {
+        let _guard = crate::test_support::EnvVarGuard::set(
+            "OPENCOMPANY_INFERENCE_MAX_TOKENS",
+            "32000",
+        );
+        assert_eq!(output_cap(Some(16384)), Some(32000));
+        assert_eq!(output_cap(Some(64000)), Some(64000));
+        assert_eq!(output_cap(None), Some(32000));
+    }
+
+    #[test]
+    fn output_cap_without_the_variable_is_the_harness_cap() {
+        let _guard = crate::test_support::EnvVarGuard::unset("OPENCOMPANY_INFERENCE_MAX_TOKENS");
+        assert_eq!(output_cap(Some(16384)), Some(16384));
+        assert_eq!(output_cap(None), None);
+    }
 mod tests {
     use super::*;
     use crate::app::config::MapEnv;
