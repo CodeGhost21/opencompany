@@ -9685,6 +9685,239 @@ members = ["engineer", "designer"]
         );
     }
 
+    /// Content-aware scripted model for
+    /// `two_hive_desk_episodes_in_one_cycle_do_not_fold_into_each_other`.
+    ///
+    /// Reads the rendered episode prompt exactly as the operator's model
+    /// would: which seat is being asked (`You are @<id>`), whether the room
+    /// is still deliberating or has already been told a topic carried
+    /// (`commit_protocol`'s `carried \`#<topic>\`` line), and which of the
+    /// two questions this desk was actually asked (`ALPHA_QUESTION` /
+    /// `BETA_QUESTION`, planted in each operator message's own text so a
+    /// prompt scan can tell episode A's transcript from episode B's without
+    /// touching the journal directly).
+    struct HiveTopicProvider;
+
+    /// The topic a `commit_protocol` block is telling this seat to record, if
+    /// the prompt carries one — i.e. the room already reached quorum.
+    fn carried_topic(prompt: &str) -> Option<String> {
+        let marker = "carried `#";
+        let start = prompt.find(marker)? + marker.len();
+        let rest = &prompt[start..];
+        let end = rest.find('`')?;
+        Some(rest[..end].to_string())
+    }
+
+    #[async_trait]
+    impl ChatModel<()> for HiveTopicProvider {
+        async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
+            let all_text: String = request
+                .messages
+                .iter()
+                .map(Message::text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !all_text.contains("You are @engineer") && !all_text.contains("You are @designer") {
+                return Ok(ModelResponse::assistant("(not a hive turn)".to_string()));
+            }
+            let line = if let Some(topic) = carried_topic(&all_text) {
+                format!("!commit #{topic} ^1 because the room already carried it.")
+            } else {
+                let topic = if all_text.contains("ALPHA_QUESTION") {
+                    "alpha"
+                } else {
+                    "beta"
+                };
+                format!("!propose #{topic} Because the marker says so.")
+            };
+            Ok(ModelResponse::assistant(line))
+        }
+    }
+
+    impl HarnessModel for HiveTopicProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "hive-topic-mock".to_string()
+        }
+    }
+
+    /// **Two operator messages to the same hive desk in one cycle must not
+    /// fold into each other.**
+    ///
+    /// Both `OperatorMessage` events are journaled up front (mirroring
+    /// `CycleRequest::event_seqs`, which names a sequence every caller
+    /// already durable-wrote before the brain ever sees the event) and
+    /// `run_cycle_scoped` then answers each in turn on the *same* desk. The
+    /// first episode (`ALPHA_QUESTION`) runs to completion before the second
+    /// (`BETA_QUESTION`) ever opens, so by the time episode B's very first
+    /// `EpisodeDriver::run` iteration reads the desk's transcript, episode
+    /// A's turns already sit in the journal at sequences *above* B's own
+    /// trigger.
+    ///
+    /// Before the fix, a top-level hive send never threaded its turns to the
+    /// triggering operator message (`in_thread(*parent)` with `parent: None`),
+    /// so both episodes shared the same desk-channel conversation. Episode
+    /// B's fold has only a lower watermark and no upper bound, so it read
+    /// episode A's already-carried `#alpha` votes as its own live traces and
+    /// converged on `#alpha` immediately — zero turns of its own, and on the
+    /// wrong question entirely.
+    ///
+    /// After the fix, each episode's turns are parented to its own triggering
+    /// message, so episode B's conversation is a distinct thread and cannot
+    /// see episode A's turns at all: it deliberates on its own and converges
+    /// on `#beta`.
+    #[tokio::test]
+    async fn two_hive_desk_episodes_in_one_cycle_do_not_fold_into_each_other() {
+        use crate::store::FsEventLog;
+
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<dyn crate::ports::EventLog> = Arc::new(FsEventLog::new(dir.path()));
+        let company = CompanyId::new("acme");
+
+        let message_a = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "Ship it? ALPHA_QUESTION".into(),
+            by: None,
+            chat: Some("eng_desk".into()),
+            deliverable: None,
+            attachments: Vec::new(),
+        };
+        let message_b = CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "Ship it? BETA_QUESTION".into(),
+            by: None,
+            chat: Some("eng_desk".into()),
+            deliverable: None,
+            attachments: Vec::new(),
+        };
+        // Both journaled before the brain ever runs a cycle over them —
+        // exactly the ordering `CycleRequest::event_seqs`'s doc names as the
+        // caller's contract, and the ordering the finding depends on: episode
+        // A's turns (journaled below) land at sequences above `seq_b`.
+        let seq_a = events
+            .append(&company, message_a.clone())
+            .await
+            .expect("journal message A");
+        let seq_b = events
+            .append(&company, message_b.clone())
+            .await
+            .expect("journal message B");
+
+        let deps = HarnessDeps {
+            notifications: None,
+            ledgers: None,
+            ledger_registry: Default::default(),
+            provider: Arc::new(HiveTopicProvider),
+            provider_slug: "mock".to_string(),
+            serves: None,
+            context: Arc::new(FsContextStore::new(dir.path())),
+            store: Arc::new(FsCompanyStore::new(dir.path())),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            mcp_home: None,
+            workspace_git_enabled: false,
+            audit_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: Some(events.clone()),
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            tenant_search: None,
+            workspace: None,
+            workflow_runs: None,
+            deep_trace: None,
+        };
+        let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_hive_desk());
+
+        let req = CycleRequest {
+            cycle_id: "cycle-hive-isolation".to_string(),
+            company_id: company.clone(),
+            events: vec![message_a, message_b],
+            event_seqs: vec![seq_a, seq_b],
+            policy: None,
+        };
+        let result = brain
+            .run_cycle(req, &NoopHost)
+            .await
+            .expect("both hive episodes in the cycle answer");
+
+        assert_eq!(
+            result.channel_responses.len(),
+            2,
+            "each operator message gets its own hive-report response: {:?}",
+            result.channel_responses
+        );
+        let report_a = &result.channel_responses[0].text;
+        let report_b = &result.channel_responses[1].text;
+        assert!(
+            report_a.contains("#alpha"),
+            "episode A must settle on its own question: {report_a}"
+        );
+        assert!(
+            report_b.contains("#beta") && !report_b.contains("#alpha"),
+            "episode B must settle on its OWN question rather than inheriting \
+             episode A's already-carried #alpha vote: {report_b}"
+        );
+
+        // The journal itself must show the two episodes parented to their own
+        // triggering message, not sharing one unparented desk-channel thread.
+        let logged = events
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .expect("read the journal back");
+        let turns_under = |root: EventSeq| {
+            logged
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        CompanyEvent::AgentReply { parent, .. } if *parent == Some(root)
+                    )
+                })
+                .count()
+        };
+        assert!(
+            turns_under(seq_a) > 0,
+            "episode A's turns must be parented to message A: {logged:?}"
+        );
+        assert!(
+            turns_under(seq_b) > 0,
+            "episode B's turns must be parented to message B rather than left \
+             unparented on the shared desk channel: {logged:?}"
+        );
+    }
+
     // --- Approval parking (issue #172) --------------------------------------
 
     /// A brain over `dir` whose deps carry `requests` as the shared
