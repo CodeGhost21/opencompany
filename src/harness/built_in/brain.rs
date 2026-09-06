@@ -11539,7 +11539,10 @@ members = ["engineer", "designer"]
             halted_for_spend: None,
             budget_paused: None,
         };
-        let runner = hive_desk_runner(ok("The rollout is ready to stage."));
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(&brain, &host, ok("The rollout is ready to stage."));
         assert_eq!(
             runner
                 .speak("theorist", "Settle the derivation.")
@@ -11547,7 +11550,7 @@ members = ["engineer", "designer"]
                 .expect("an ordinary reply is not an error"),
             "The rollout is ready to stage."
         );
-        let runner = hive_desk_runner(ok("The failover budget is $2,000/month."));
+        let runner = hive_desk_runner(&brain, &host, ok("The failover budget is $2,000/month."));
         assert_eq!(
             runner
                 .refer("platform", "sre", "What is the failover budget?")
