@@ -754,6 +754,19 @@ impl CompanyManifest {
             // the table omits, or names with an empty list, counts the same as
             // one explicitly given `support` — both already keep every move.
             //
+            // Eligibility also includes every seat holding `propose`, not only
+            // `support`: `tinyhivemind_hive::quorum::standings` counts a
+            // `!propose` as its own author's support unconditionally — the
+            // `require_grounded` and `require_evidential` gates in that fold
+            // both match on `TraceKind::Support` only, so neither one ever
+            // touches a `Propose` trace. A member need not have originated a
+            // topic to benefit from this either: nothing stops a second
+            // `propose`-holding seat from re-`!propose`-ing the exact id
+            // already on the floor, which the fold folds in as one more
+            // distinct, ungated supporter of it. Counting `support`-holders
+            // alone would undercount a desk whose extra slack comes from a
+            // second proposer rather than a fourth supporter.
+            //
             // Gated on `deliberates`: a desk under two members, or opted out
             // with `enabled = false`, never opens a hive episode at all, so
             // `hive.quorum` and `hive.moves` on it describe a room that will
@@ -767,11 +780,13 @@ impl CompanyManifest {
                 let eligible = chat
                     .members
                     .iter()
-                    .filter(|member| chat.hive.may(member, "support"))
+                    .filter(|member| {
+                        chat.hive.may(member, "support") || chat.hive.may(member, "propose")
+                    })
                     .count();
                 if u32::try_from(eligible).is_ok_and(|eligible| eligible <= quorum) {
                     problems.push(format!(
-                        "{label} `hive.moves` permits `!support` to only {eligible} of {} seats, which is no more than the {quorum} distinct supporters `hive.quorum` needs — every one of those seats would have to support every carried topic, and a single grounded `!object` against any one of them would keep it from ever carrying. Widen `hive.moves` so more than {quorum} seats may `!support`, or lower `hive.quorum` below {eligible}.",
+                        "{label} `hive.moves` permits `!support` or `!propose` to only {eligible} of {} seats, which is no more than the {quorum} distinct supporters `hive.quorum` needs — every one of those seats would have to back every carried topic, and a single grounded `!object` against any one of them would keep it from ever carrying. Widen `hive.moves` so more than {quorum} seats may `!support` or `!propose`, or lower `hive.quorum` below {eligible}.",
                         chat.members.len()
                     ));
                 }
