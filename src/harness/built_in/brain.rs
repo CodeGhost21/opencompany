@@ -11428,7 +11428,18 @@ members = ["engineer", "designer"]
         }
     }
 
-    fn hive_desk_runner(outcome: crate::harness::built_in::TurnOutcome) -> HiveDeskRunner {
+    /// A bare brain over a fresh temp-dir store, for tests that only need
+    /// `HiveDeskRunner`'s `brain`/`host` fields satisfied and are not
+    /// exercising the approval-parking path itself.
+    fn hive_test_brain(dir: &std::path::Path) -> HarnessBrain {
+        brain_with_approval_queue(dir, crate::harness::policy::ApprovalRequestQueue::default())
+    }
+
+    fn hive_desk_runner<'a>(
+        brain: &'a HarnessBrain,
+        host: &'a dyn CycleHost,
+        outcome: crate::harness::built_in::TurnOutcome,
+    ) -> HiveDeskRunner<'a> {
         HiveDeskRunner {
             run_turn: Arc::new(FixedOutcomeTurn {
                 outcome,
@@ -11438,6 +11449,8 @@ members = ["engineer", "designer"]
             chat_id: Some("lab".to_string()),
             thread_root: None,
             trigger_seq: None,
+            brain,
+            host,
         }
     }
 
