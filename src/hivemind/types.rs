@@ -504,6 +504,41 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
     if !config.deliberates(members.len()) {
         return None;
     }
+    // The desk must still be able to reach its own quorum *now*.
+    //
+    // `manifest.rs` refuses a declared desk whose `moves` table lets fewer
+    // seats put a distinct supporter on a topic than `hive.quorum` needs, but
+    // that check reads the manifest's own `[[group_chat]].members` and runs
+    // once, at load. Membership here is the **effective** roster — overlay
+    // edits and Team-API retirements applied — and it moves underneath a
+    // manifest that stays valid. A three-seat desk with `quorum = 2`, one seat
+    // holding `propose`, one holding `support` and one holding only `object`
+    // passes validation; retire the `support` seat and what is left is a
+    // deliberating desk with one eligible supporter and a quorum of two, which
+    // can never carry anything. Nothing would refuse it, and every episode
+    // would spend its whole budget discovering that live — the same silent
+    // failure the manifest check exists to prevent, arrived at from a
+    // direction a manifest check cannot see.
+    //
+    // Declining here rather than erroring is deliberate and is what the rest
+    // of this function already does: every rung above is a reason to keep the
+    // single-responder path, and a desk that cannot deliberate answers exactly
+    // as it did before hive desks existed. An operator who retires somebody
+    // mid-flight gets a working room with one responder, not a 500.
+    let policy = HivePolicy::from_config(&config, members.len()).episode;
+    let eligible = members
+        .iter()
+        .filter(|member| config.may(&member.id, "support") || config.may(&member.id, "propose"))
+        .count();
+    if u32::try_from(eligible).is_ok_and(|eligible| eligible < policy.quorum.threshold) {
+        tracing::info!(
+            desk = %desk_id,
+            eligible,
+            quorum = policy.quorum.threshold,
+            "[hive] the effective roster cannot reach this desk's quorum; answering with one responder"
+        );
+        return None;
+    }
     Some(HiveDesk {
         name: declared.map_or_else(|| desk_id.clone(), |group| group.name.clone()),
         description: declared.and_then(|group| group.description.clone()),
