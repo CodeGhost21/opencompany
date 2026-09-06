@@ -22,6 +22,12 @@ struct StoredEvent {
     id: String,
     content: Value,
     observed_at: String,
+    /// A relevance stand-in `recall` reports as `confidence`, distinct from
+    /// insertion recency: earlier-stored events score higher by default, so
+    /// a test can construct a case where the highest-scored hit is *not* the
+    /// most recent one, and assert `recall` keeps it under a tight `limit`
+    /// rather than the timestamp-freshest hit.
+    score: f64,
 }
 
 /// State shared by the mock's handlers.
