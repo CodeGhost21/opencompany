@@ -469,6 +469,57 @@ async fn a_line_that_asks_nobody_refers_nothing() {
     );
 }
 
+/// **A barred move demoted for its grammar violation must not still trigger a
+/// referral.**
+///
+/// `moves::demote` (called from `line_from` after a second grammar violation)
+/// strips only the leading `!` off a barred move and leaves the rest of the
+/// text — including any `@#desk` mention it names — intact. Before this fix,
+/// `consider` resolved mentions from that raw, demoted content with no check
+/// that the line still carried an allowed marker, so a member using a move
+/// its seat does not have could still spend a far desk's turn and bring an
+/// answer home, even though the line itself was refused as illegitimate.
+#[tokio::test]
+async fn a_demoted_barred_move_never_reaches_the_far_desk() {
+    let far = FarDesk::answering("unused");
+    // `planner`'s seat may only `!propose`; `!object` is barred for it. Two
+    // consecutive barred attempts (the seat is asked once, corrected once,
+    // and demoted on the second miss) both name `@#platform` in the body, the
+    // same shape a legitimate referral-worthy line would use.
+    let hive = "hive = { turn_budget = 6, quorum = 2, blind_round = false, \
+                referral = { enabled = true }, moves = { planner = [\"propose\"] } }";
+    let (_, outcome) = run(
+        hive,
+        &[
+            (
+                "planner",
+                "!object >1 ^1 @#platform can you check the migration plan?",
+            ),
+            (
+                "planner",
+                "!object >1 ^1 @#platform can you check the migration plan?",
+            ),
+            ("scout", "!support #stage ^1 Agreed."),
+            ("critic", "!commit #stage ^1 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    assert!(
+        far.asked().is_empty(),
+        "a demoted, illegitimate move must never spend a far desk's turn: {:?}",
+        far.asked()
+    );
+    assert!(outcome.referrals.asked.is_empty());
+    assert_eq!(
+        outcome.violations.len(),
+        1,
+        "the barred move is still recorded as a violation: {:?}",
+        outcome.violations
+    );
+}
+
 #[tokio::test]
 async fn a_desk_that_did_not_opt_in_never_leaves_the_room() {
     let far = FarDesk::answering("unused");
