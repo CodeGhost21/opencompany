@@ -480,7 +480,7 @@ def integers_in(text: str) -> list[str]:
 
 
 def wait_for_report(
-    host: Host, desk: str, after_id: int, timeout: float, log, poster=None, failure=None
+    host: Host, desk: str, after_id: int, timeout: float, log, failure=None
 ) -> tuple[dict | None, list[dict]]:
     """Poll the desk until a hive-report bubble newer than `after_id` lands."""
     deadline = time.time() + timeout
