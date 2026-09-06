@@ -4549,7 +4549,7 @@ impl HarnessBrain {
 /// The chat target is the desk the episode is deliberating on, so the live
 /// turn-stream frames carry it and the console routes them to that thread
 /// exactly as it does for a normal desk turn.
-struct HiveDeskRunner {
+struct HiveDeskRunner<'a> {
     run_turn: Arc<dyn RunTurn>,
     company: CompanyId,
     chat_id: Option<String>,
@@ -4562,6 +4562,50 @@ struct HiveDeskRunner {
     /// no message identity and the frontend files them under the desk-level
     /// thread instead of the active `desk#root`/message bucket.
     trigger_seq: Option<EventSeq>,
+    /// The brain and host this runner's episode is running under, so a
+    /// gated tool call a member's turn hits can be parked for the operator
+    /// **between turns**, not only once the whole episode has finished.
+    ///
+    /// Without this, `request_approval` — the tool `speak`/`refer` reach
+    /// through `self.run_turn.run(...)` — enqueues onto
+    /// `self.deps.approval_requests` and the turn completes normally with a
+    /// "blocked, requires approval" refusal folded into the reply text
+    /// (openhuman resolves `RequireApproval` inline; nothing downstream
+    /// blocks on it). The episode loop therefore keeps running further
+    /// turns without ever surfacing the pending request, and the *cycle's*
+    /// `park_approval_requests` call only runs once
+    /// [`driver.run(trigger)`](crate::hivemind::EpisodeDriver::run) has
+    /// already returned — by then the room may have converged, deadlocked
+    /// or exhausted its budget without the approval it was waiting on ever
+    /// reaching `scripts/hive-euler.py`'s concurrent approval pump.
+    ///
+    /// Draining after every turn this runner completes closes that gap; the
+    /// cycle-level call after `driver.run` stays in place as a safety net
+    /// for anything queued by non-hive-turn work in the same cycle.
+    brain: &'a HarnessBrain,
+    host: &'a dyn CycleHost,
+}
+
+/// Drains and parks whatever a single hive turn just queued onto
+/// `self.deps.approval_requests`, logging rather than propagating a failure:
+/// there is no single "reply" a hive turn returns an operator-visible notice
+/// on the way [`HarnessBrain::park_approval_requests`] does for an ordinary
+/// cycle, and a parking failure must not fail the turn that already computed
+/// a real answer.
+async fn park_hive_turn_approvals(brain: &HarnessBrain, host: &dyn CycleHost, agent_id: &str) {
+    match brain.park_approval_requests(host).await {
+        Ok(None) => {}
+        Ok(Some(notice)) => tracing::warn!(
+            agent = %agent_id,
+            %notice,
+            "[hive] not every approval request from this turn could be parked for the operator"
+        ),
+        Err(err) => tracing::warn!(
+            agent = %agent_id,
+            error = %err,
+            "[hive] failed to park approval requests queued during a member's turn"
+        ),
+    }
 }
 
 /// Turns a terminal budget outcome (`outcome.budget_paused` /
