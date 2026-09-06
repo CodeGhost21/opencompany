@@ -440,6 +440,77 @@ async fn under_require_evidential_a_proposal_plus_an_evidential_support_carries(
     );
 }
 
+/// **The evidential retry is graded against the seat's moves too.**
+///
+/// `line_from` enforces `moves_for` on a member's first reply and on the
+/// move-correction retry, then hands whatever clears that off to `grounded`,
+/// which may send the member back once more for citation discipline. Before
+/// this test's fix, whatever `grounded`'s retry answered was journaled
+/// as-is with no re-check at all — a member could answer the
+/// citation-correction prompt with a marker kind its seat is not entitled to
+/// make, and it folded into the transcript as a legitimate move. Here critic
+/// may not `!propose`; its first `!support` cites the proposal rather than the
+/// evidence line (missing evidence, so `grounded` retries it), and the retry
+/// answer switches straight to `!propose`.
+#[tokio::test]
+async fn an_evidential_retry_is_still_graded_against_the_seats_moves() {
+    let log = Arc::new(MemoryLog::default());
+    let trigger = open(&log).await;
+    let manifest = manifest_with(
+        "hive = { turn_budget = 9, quorum = 2, blind_round = false, require_evidential = true, \
+         moves = { scout = [\"evidence\", \"support\", \"commit\", \"question\"], \
+         critic = [\"evidence\", \"support\", \"object\", \"commit\", \"question\"] } }",
+    );
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let runner = Runner::new(&[
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
+        (
+            "scout",
+            "!evidence #stage ^1 The last full rollout took checkout down for 40 minutes.",
+        ),
+        (
+            "critic",
+            // Cites the proposal (^1), not the evidence (^2) — misses evidence,
+            // which sends critic back for the evidential retry.
+            "!support #stage ^1 The proposal alone is reason enough.",
+        ),
+        (
+            "critic",
+            // The evidential retry's answer: a move barred for this seat.
+            "!propose #rush Ship immediately without staging.",
+        ),
+    ]);
+    let outcome = EpisodeDriver::new(
+        MemoryLog::company(),
+        desk,
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        &runner,
+        "Decide the rollout.",
+    )
+    .run(trigger)
+    .await
+    .expect("the episode runs");
+    let replies = log.replies("eng");
+    let critic_retry = replies
+        .iter()
+        .find(|(author, text)| author == "critic" && text.contains("Ship immediately"))
+        .map(|(_, text)| text.clone())
+        .expect("critic's evidential retry answer is journaled somewhere");
+    assert!(
+        !critic_retry.starts_with('!'),
+        "a barred move on the evidential retry must be demoted, not journaled as a legitimate \
+         move: {critic_retry:?} (outcome: {outcome:?})"
+    );
+    assert_eq!(
+        outcome.violations.len(),
+        1,
+        "the evidential retry's barred move must be reported as a seat violation too: {outcome:?}"
+    );
+}
+
 #[tokio::test]
 async fn two_bare_proposals_of_one_topic_do_not_carry_when_only_one_seat_may_propose() {
     let log = Arc::new(MemoryLog::default());
