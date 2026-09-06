@@ -161,6 +161,7 @@ A marker is recognised at the start of a line, outside fenced code blocks.
 | `!propose #topic …` | puts a new option on the floor |
 | `!support #topic ^N …` | backs an option, citing message N as grounds |
 | `!object >N ^M …` | objects to message N, citing message M |
+| `!refute #topic ^N …` | caps an option out of contention, naming the topic and citing the fact that refutes it |
 | `!evidence #topic ^N …` | adds grounds without taking a side |
 | `!question …` | asks for what nobody has established |
 | `!defer #topic …` | stands aside; costs the turn, adds no support |
