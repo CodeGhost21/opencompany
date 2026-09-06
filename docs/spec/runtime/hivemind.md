@@ -55,6 +55,7 @@ raising it should be a decision rather than a default.
 | A workflow copilot thread | Single, **confined** turn — it returns before this gate |
 | A desk with fewer than two effective roster members | Single turn |
 | `hive = { enabled = false }` on the desk | Single turn |
+| The effective roster can no longer reach the desk's `quorum` | Single turn |
 | Anything else | **Episode** |
 
 Membership is read through `CompanyRecord::effective_desk_members` — the same
@@ -63,6 +64,19 @@ so who is in the room and who the console says is in it cannot drift. Overlay
 (operator-created) desks are included, and take the default config.
 
 A one-teammate-per-desk company therefore behaves byte-for-byte as it did.
+
+The quorum rung is the runtime half of a check the manifest also makes.
+`manifest.rs` refuses a **declared** desk whose `moves` table lets fewer seats
+put a distinct supporter on a topic than `hive.quorum` needs, but it reads
+`[[group_chat]].members` and runs once, at load. The effective roster moves
+underneath it: retire the only seat holding `support` through the Team API and
+a manifest that is still valid now describes a room that can never carry
+anything. So `desk_episode` re-checks eligibility against the roster it is
+actually about to seat, and declines rather than erroring — an operator who
+retires somebody mid-flight gets a working desk with one responder, not a
+failed message. Eligibility counts seats holding `propose` as well as
+`support`, because `tinyhivemind_hive::quorum::standings` gates on
+`TraceKind::Support` only and a `!propose` is therefore an ungated supporter.
 
 ## The loop
 
