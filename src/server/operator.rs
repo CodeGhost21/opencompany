@@ -3499,6 +3499,19 @@ pub(crate) async fn journal_chat_replies(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // A response that already carries a durable id was journaled by its
+        // producer, not by this loop — a hive desk episode journals its own
+        // turns and closing report directly (`EpisodeDriver::report`) and
+        // hands the report's own sequence back on the bubble precisely so
+        // this generic journal-on-return path does not write it a second
+        // time under a different sequence. `OutboundMessage::message_id` is
+        // documented as "stamped by the chat route after journaling, not
+        // produced by a brain" for every other producer, which is exactly
+        // what makes its presence here a reliable "already durable" signal
+        // rather than something a brain sets for itself.
+        if response.message_id.is_some() {
+            continue;
+        }
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
