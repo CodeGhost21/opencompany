@@ -502,6 +502,173 @@ async fn health_probe_reports_down_on_actor_mismatch() {
     }
 }
 
+/// Regression for the `namespace_summaries` finding: it used to always
+/// return an empty set, which made the portability/export path (`opencompany
+/// memory migrate`) believe a populated CortexDB store held nothing.
+#[tokio::test]
+async fn namespace_summaries_enumerates_every_namespace_this_driver_wrote() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    memory
+        .store("company-a", "one", "a1", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+    memory
+        .store("company-a", "two", "a2", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+    memory
+        .store("company-b", "one", "b1", MemoryCategory::Core, None)
+        .await
+        .expect("store succeeds");
+
+    let mut summaries = memory
+        .namespace_summaries()
+        .await
+        .expect("namespace_summaries succeeds");
+    summaries.sort_by(|a, b| a.namespace.cmp(&b.namespace));
+
+    assert_eq!(
+        summaries.len(),
+        2,
+        "expected exactly the two populated namespaces: {summaries:?}"
+    );
+    assert_eq!(summaries[0].namespace, "company-a");
+    assert_eq!(summaries[0].count, 2);
+    assert_eq!(summaries[1].namespace, "company-b");
+    assert_eq!(summaries[1].count, 1);
+}
+
+/// Regression for the `forget` finding: retracting only the newest event for
+/// a key left an older event behind, and `get` immediately started returning
+/// it again as if `forget` had never run.
+#[tokio::test]
+async fn forget_removes_every_version_of_a_key_not_only_the_latest() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    memory
+        .store("company-a", "note", "first", MemoryCategory::Core, None)
+        .await
+        .expect("first store succeeds");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    memory
+        .store("company-a", "note", "second", MemoryCategory::Core, None)
+        .await
+        .expect("second store succeeds");
+
+    let removed = memory
+        .forget("company-a", "note")
+        .await
+        .expect("forget succeeds");
+    assert!(removed, "forget should report the key was removed");
+
+    assert!(
+        memory
+            .get("company-a", "note")
+            .await
+            .expect("get succeeds")
+            .is_none(),
+        "an older version of the key must not resurface after forget"
+    );
+    assert!(
+        memory
+            .list(Some("company-a"), None, None)
+            .await
+            .expect("list succeeds")
+            .is_empty(),
+        "list must not resurrect an older version of the forgotten key either"
+    );
+}
+
+/// Regression for the `recall` finding: deduplicating only within one
+/// query's own hits does not stop a superseded event from surfacing when its
+/// (now-stale) content still matches the query but the current content does
+/// not.
+#[tokio::test]
+async fn recall_resolves_hits_to_the_key_s_current_content_not_a_superseded_match() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    memory
+        .store("company-a", "pet", "cat", MemoryCategory::Core, None)
+        .await
+        .expect("first store succeeds");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    memory
+        .store("company-a", "pet", "dog", MemoryCategory::Core, None)
+        .await
+        .expect("second store succeeds");
+
+    // The mock's `/v1/recall` only matches events whose stored content
+    // contains the query text, exactly like the reviewer-described failure
+    // mode: "cat" only matches the superseded first event, since the current
+    // event's content is "dog".
+    let hits = memory
+        .recall(
+            "cat",
+            10,
+            RecallOpts {
+                namespace: Some("company-a"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("recall succeeds");
+
+    assert_eq!(hits.len(), 1, "expected the key's one current hit: {hits:?}");
+    assert_eq!(
+        hits[0].content, "dog",
+        "recall must resolve a stale hit to the key's current content, not the superseded \
+         version the query happened to match"
+    );
+
+    // get() must agree with recall(): the key is currently "dog".
+    let fetched = memory
+        .get("company-a", "pet")
+        .await
+        .expect("get succeeds")
+        .expect("entry exists");
+    assert_eq!(fetched.content, "dog");
+}
+
+/// Regression for the `list` finding: a single-page `/v1/recall`-backed
+/// listing silently truncated at [`super::EVENTS_LAYER_LIMIT`] (500) and
+/// reported that page as the whole namespace. `list` now walks the paginated
+/// `GET /v1/events` instead, which must not lose anything past one page.
+#[tokio::test]
+async fn list_does_not_truncate_a_namespace_larger_than_one_recall_page() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    // Comfortably past both the old 500-event `/v1/recall` cap and the
+    // 200-event `/v1/events` page size this driver now pages through.
+    const KEY_COUNT: usize = 520;
+    for i in 0..KEY_COUNT {
+        memory
+            .store(
+                "company-a",
+                &format!("key-{i}"),
+                "v",
+                MemoryCategory::Core,
+                None,
+            )
+            .await
+            .expect("store succeeds");
+    }
+
+    let entries = memory
+        .list(Some("company-a"), None, None)
+        .await
+        .expect("list succeeds");
+    assert_eq!(
+        entries.len(),
+        KEY_COUNT,
+        "list must report every key in a namespace larger than one page"
+    );
+}
+
 /// The bind-time capability audit — the same one `open_driver` runs in
 /// production — passes for this driver: `MemoryTraitProvider` derives its
 /// advertised capabilities from its accessors, and this driver implements the
