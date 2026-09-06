@@ -434,8 +434,19 @@ class Host:
 
     # -- the operator's two jobs: stating the problem and answering approvals --
 
-    def say(self, desk: str, text: str) -> None:
-        status, body = self.call("POST", f"{SCOPE}/chat", {"text": text, "chat": desk}, timeout=3600)
+    def say(self, desk: str, text: str, timeout: float = 3600) -> None:
+        """State one problem in `desk`, holding the POST open for the episode.
+
+        `timeout` has to be the caller's own per-problem budget rather than a
+        constant. The cycle runs the whole episode synchronously inside this
+        one request, so a socket timeout below the budget kills the room's
+        turns mid-flight and the run reports `timeout` for an episode whose
+        own budget was never spent — which is exactly what a `--timeout 5400`
+        run did against the hard-coded 3600 that used to be here.
+        """
+        status, body = self.call(
+            "POST", f"{SCOPE}/chat", {"text": text, "chat": desk}, timeout=timeout
+        )
         if status >= 300:
             raise RuntimeError(f"chat POST failed ({status}): {body}")
 
@@ -525,7 +536,10 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
 
     def state() -> None:
         try:
-            host.say(desk, text)
+            # A little past the reader's own deadline, so the POST outlives the
+            # wait rather than racing it: whichever fires first should be the
+            # deadline that was asked for, and that is `wait_for_report`'s.
+            host.say(desk, text, timeout=timeout + 60)
         except BaseException as err:  # noqa: BLE001 — surfaced below
             failure.append(err)
 
