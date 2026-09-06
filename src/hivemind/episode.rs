@@ -265,6 +265,21 @@ impl<'a> EpisodeDriver<'a> {
                 self.desk.config.referral.policy(),
             )
         });
+        // The peer list every prompt of this episode renders. Built once for
+        // the same reason the recall is: it cannot change mid-episode, and a
+        // seat that saw a different set of desks from the seat before it would
+        // be reading a different company.
+        let peers: Vec<(String, String, Option<String>)> = referrals
+            .as_ref()
+            .filter(|(_, _, policy)| policy.enabled && policy.reach.addresses_desks())
+            .map(|(federation, _, _)| {
+                federation
+                    .peers_of(&self.desk.id)
+                    .into_iter()
+                    .map(|desk| (desk.id.clone(), desk.name.clone(), desk.description.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let ending = loop {
             let transcript = tinyhivemind_hive::project_session(
@@ -333,6 +348,7 @@ impl<'a> EpisodeDriver<'a> {
             let prompt = EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
                 .with_recall(&recall)
                 .with_unspoken(&unspoken)
+                .with_peers(peers.clone())
                 .render(&turn, &visible);
 
             let line = match self
