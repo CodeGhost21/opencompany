@@ -409,7 +409,7 @@ impl CortexdbMemory {
                 continue;
             }
             match latest.get(&record.key) {
-                Some(existing) if existing.observed_at >= record.observed_at => {}
+                Some(existing) if existing.observed_at > record.observed_at => {}
                 _ => {
                     latest.insert(record.key.clone(), record);
                 }
@@ -789,7 +789,7 @@ impl Memory for CortexdbMemory {
                 std::collections::HashMap::new();
             for record in events {
                 match latest.get(&record.key) {
-                    Some(existing) if existing.observed_at >= record.observed_at => {}
+                    Some(existing) if existing.observed_at > record.observed_at => {}
                     _ => {
                         latest.insert(record.key.clone(), record);
                     }
