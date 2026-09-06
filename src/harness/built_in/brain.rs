@@ -4695,6 +4695,7 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                 ChatTarget::deliberating(Some(desk_id), None),
             )
             .await?;
+        park_hive_turn_approvals(self.brain, self.host, agent_id).await;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
             return Err(error);
         }
