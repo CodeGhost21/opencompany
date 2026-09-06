@@ -4,7 +4,11 @@ description = "Read the statement literally and hunt the misreading everybody el
 # need the strongest model bought to notice "below" is not "up to".
 context = ["GOAL.md", "brief.md"]
 
-tools = ["files", "shell", "workspace.read"]
+# No `shell`/`code`: this seat reads the statement literally and works one
+# small case by hand (see prompts/skeptic.md, "Work one small case by hand")
+# — it never runs a program, unlike brute_forcer/programmer/theorist, so it
+# does not need execution access.
+tools = ["files", "workspace.read"]
 
 ledgers = [
     { name = "tasks", access = "record" },
