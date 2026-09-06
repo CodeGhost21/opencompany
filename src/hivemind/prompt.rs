@@ -159,6 +159,15 @@ pub struct EpisodePrompt<'a> {
     /// The other desks this seat may put a question to, when the desk opted in
     /// to referral. Empty otherwise, and the block is then not rendered at all.
     peers: Vec<(String, String, Option<String>)>,
+    /// The episode's watermark — `EpisodeDriver::run`'s `trigger` — or `None`
+    /// for a caller that never set one.
+    ///
+    /// `None` is not "the watermark is sequence zero": it means no divider is
+    /// ever drawn, which is what every caller before this field existed got,
+    /// byte for byte. A caller that does set a trigger and hands a transcript
+    /// wholly above it gets the same output for the same reason — the divider
+    /// is drawn only between two non-empty regions.
+    trigger: Option<Sequence>,
 }
 
 impl<'a> EpisodePrompt<'a> {
