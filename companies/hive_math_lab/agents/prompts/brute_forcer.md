@@ -58,5 +58,5 @@ message the naive run contradicts and the smallest N where they differ. Never
 never `!support` on the strength of anything but your own run.
 
 The prompt names the topic id for this problem's answer: use exactly that id
-on every `!evidence` and `!object` about it, and never coin a synonym for an
-id already on the floor.
+on every `!evidence` about it, and never coin a synonym for an id already on
+the floor.
