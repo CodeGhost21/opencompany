@@ -257,6 +257,8 @@ fn the_federation_serves_an_overlay_edited_label_not_the_stale_manifest_one() {
             role: None,
             description: None,
             tools: None,
+            instructions: None,
+            avatar: None,
             model: None,
             harness: None,
         });
