@@ -44,7 +44,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Json;
-use axum::routing::post;
+use axum::extract::Query;
+use axum::routing::{get, post};
 use serde_json::{Value, json};
 
 use opencompany::CompanyRuntime;
