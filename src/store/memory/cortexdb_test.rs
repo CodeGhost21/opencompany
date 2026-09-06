@@ -147,6 +147,7 @@ async fn recall(
                 "id": event.id,
                 "content": event.content,
                 "observed_at": event.observed_at,
+                "confidence": event.score,
             })
         })
         .collect();
