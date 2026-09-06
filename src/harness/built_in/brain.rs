@@ -4758,6 +4758,7 @@ mod tests {
     use super::*;
     use crate::ports::tasks::TaskTitle;
 
+    use tinyinference::Result as TaResult;
     use tinyinference::message::Message;
     use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
