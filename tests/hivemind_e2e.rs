@@ -1294,7 +1294,7 @@ async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
     let app = axum::Router::new()
         .route(
             "/v1/admin/ready",
-            axum::routing::get(move |headers: axum::http::HeaderMap| async move {
+            get(move |headers: axum::http::HeaderMap| async move {
                 if authorized(&headers) {
                     axum::http::StatusCode::OK
                 } else {
@@ -1373,7 +1373,7 @@ async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
             // every one of those calls 404s and the driver reports nothing, even
             // though `/v1/experience` accepted the write.
             "/v1/events",
-            axum::routing::get(
+            get(
                 move |headers: axum::http::HeaderMap,
                       Query(params): Query<std::collections::HashMap<String, String>>| {
                     let state = Arc::clone(&events_state);
@@ -1408,7 +1408,7 @@ async fn spawn_cortexdb() -> (String, Arc<CortexMock>) {
         )
         .route(
             "/v1/scopes/list",
-            axum::routing::get(move |headers: axum::http::HeaderMap| {
+            get(move |headers: axum::http::HeaderMap| {
                 let state = Arc::clone(&scopes_state);
                 async move {
                     if !authorized(&headers) {
