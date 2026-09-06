@@ -650,20 +650,26 @@ async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest(
     let (base_url, _state) = spawn_mock(ACTOR).await;
     let memory = client(&base_url, ACTOR);
 
-    // Stored first, so the mock's insertion-order-derived score ranks it
-    // highest — but it is also the *older* write.
+    // Stored first (older `observed_at`), and marked so the mock scores it
+    // as the most relevant hit.
     memory
         .store(
             "company-a",
             "high-relevance",
-            "widget alpha",
+            "widget alpha HIGH_RELEVANCE_MARKER",
             MemoryCategory::Core,
             None,
         )
         .await
         .expect("store succeeds");
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    // Stored second: newer `observed_at`, but a lower mock score.
+    // `now_rfc3339` (src/server/graphql/mod.rs::iso8601) has one-second
+    // resolution, so the two writes need to straddle a real second boundary
+    // for their `observed_at` to differ — otherwise the initial recency sort
+    // is a no-op tie and this test would pass on insertion order alone,
+    // proving nothing about the score-sort fix.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // Stored second (newer `observed_at`), with no marker — the mock scores
+    // it lower, but a recency-only sort would rank it first.
     memory
         .store(
             "company-a",
@@ -687,7 +693,6 @@ async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest(
         .await
         .expect("recall succeeds");
 
-    eprintln!("DEBUG HITS: {hits:?}");
     assert_eq!(
         hits.len(),
         1,
