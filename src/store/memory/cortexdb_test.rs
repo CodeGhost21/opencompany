@@ -675,6 +675,7 @@ async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest(
         .await
         .expect("recall succeeds");
 
+    eprintln!("DEBUG HITS: {hits:?}");
     assert_eq!(
         hits.len(),
         1,
