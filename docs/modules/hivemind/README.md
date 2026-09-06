@@ -17,8 +17,10 @@ the module's own shape and the reasoning behind its boundaries.
 | `memory.rs` | `HiveMemory` (recall / remember), `HiveMemoryHit` / `HiveMemoryNote`, `NullHiveMemory`, and the `hive/<desk id>/<slug>` labels |
 | `prompt.rs` | `EpisodePrompt` (what one authorized turn is shown) and `marker_line` (what its answer contributes) |
 | `episode.rs` | `EpisodeDriver` (the host loop) and `HiveTurnRunner` (the one-function turn seam) |
+| `referral.rs` | cross-desk referral: `ReferralConfig`, `HiveFederation` (the peer snapshot), `HiveReferralRunner` (the far-turn seam), `EpisodeReferrals` (the `ReferralQueue` impl) and `consider` |
 | `test.rs` | the module's unit tests |
 | `moves_test.rs` | the move grammar, the quorum knobs, desk memory, speaker diversity, and turn failure |
+| `referral_test.rs` | what crosses, what does not, and what validation refuses |
 
 ## Why it is ungated
 
@@ -52,6 +54,21 @@ validated against would stop matching the desk it was validated for.
 written by teammates who may since have left it, so an id is its own label
 there. A seated member's display name is applied by the prompt, which does hold
 the roster.
+
+**`HiveReferralRunner` is a second trait rather than a method on
+`HiveTurnRunner`.** A referred turn runs on a *different* desk from the
+episode's, so it needs the desk id. Folding that into the episode seam would
+have made every existing implementation carry a parameter it must ignore, and
+would have quietly invited an implementation that ignores it — which is a far
+desk's answer journaled in the asking room under the far teammate's name, the
+one thing the whole design exists to prevent.
+
+**The federation is opt-in at the driver, not read off the record.**
+`EpisodeDriver::with_federation` is absent by default, so a driver built without
+it never considers a line for referral and is byte-identical to the one that
+ran before referral existed. `desk_federation` returns `None` for a desk that
+did not opt in and for a company with no peer desk, so the common case costs the
+loop one `if let` per turn and nothing else.
 
 **`HiveMemory` is a trait here and a `ContextStore` in the brain.**
 `src/hivemind/` compiles in every build and holds no ports; starting to hold one
