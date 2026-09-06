@@ -50,9 +50,29 @@ interface Props {
 }
 
 /** The probe line under the picker. */
-function healthLabel(healthy: boolean | undefined): string {
-  if (healthy === true) return "answering";
+/// The standing status line beside the engine name.
+///
+/// `healthy` alone is not the whole verdict, and refused families **do** reach
+/// here. Apply rejects them, but *boot* binds-and-warns by design — a transient
+/// vendor outage must not crash-loop a tenant — so `healthy: true` alongside
+/// `unreachable: ["core"]` is the ordinary boot outcome for an engine that
+/// answers `/health` and refuses the reads the knowledge ports need. Reading
+/// the boolean alone put a green dot and "answering" on exactly that engine.
+///
+/// Refused outranks slow: one is the engine saying no, the other is it being
+/// busy.
+function healthLabel(
+  healthy: boolean | undefined,
+  slow?: string[],
+  unreachable?: string[],
+): string {
   if (healthy === false) return "not answering — check the endpoint and key";
+  if (unreachable?.length) {
+    return `answering, but refusing ${unreachable.join(", ")} — reads against those will fail`;
+  }
+  if (healthy === true) {
+    return slow?.length ? `answering, but ${slow.join(", ")} timed out at the last probe` : "answering";
+  }
   return "no probe — this engine has no health check to ask";
 }
 
@@ -119,11 +139,18 @@ export function EngineSection({ client, company, onApplied }: Props) {
     try {
       const probe = await testMemoryEngine(client, company, choice());
       if (probe.healthy) {
-        toast.success(
-          probe.capabilities.length
-            ? `${option?.label ?? chosen} answered · ${probe.capabilities.join(", ")}`
-            : `${option?.label ?? chosen} answered`,
-        );
+        // A healthy candidate can still carry a caveat — a family that was slow
+        // rather than refused. `healthy` already means "apply will accept
+        // this", so the caveat is a warning, not a failure.
+        if (probe.detail) {
+          toast.warning(`${option?.label ?? chosen}: ${probe.detail}`);
+        } else {
+          toast.success(
+            probe.capabilities.length
+              ? `${option?.label ?? chosen} answered · ${probe.capabilities.join(", ")}`
+              : `${option?.label ?? chosen} answered`,
+          );
+        }
       } else {
         toast.error(probe.detail ?? "the engine did not answer");
       }
@@ -142,6 +169,14 @@ export function EngineSection({ client, company, onApplied }: Props) {
       setDraft(null);
       setApiKey("");
       setUrl(applied.engineState.url ?? "");
+      // Independent facts, so independent toasts. These were an `if/else if`,
+      // which meant an apply that both needed a restart and had a family time
+      // out reported only the restart.
+      if (applied.engineState.slowFamilies?.length) {
+        toast.warning(
+          `${applied.engineState.slowFamilies.join(", ")} did not answer inside the probe budget — the engine may simply be loaded.`,
+        );
+      }
       if (applied.restartRequiredFor.length > 0) {
         // Named, never assumed: these companies are still running on the
         // previous engine, and saying "restart required" without saying which
@@ -198,15 +233,20 @@ export function EngineSection({ client, company, onApplied }: Props) {
                 // say the opposite of what is true.
                 state.active === "null"
                   ? "bg-status-blocked"
-                  : state.healthy === true
-                    ? "bg-status-done"
-                    : state.healthy === false
-                      ? "bg-status-failed"
-                      : "bg-muted-foreground/40",
+                  : // A refused family is a failure even when `/health` answers:
+                    // boot binds-and-warns, so this engine is live and cannot
+                    // serve the ports. Green here said the opposite.
+                    state.unreachableFamilies?.length
+                    ? "bg-status-failed"
+                    : state.healthy === true
+                      ? "bg-status-done"
+                      : state.healthy === false
+                        ? "bg-status-failed"
+                        : "bg-muted-foreground/40",
               )}
             />
             <span className="font-medium">{state.active}</span>
-            <span className="text-muted-foreground">· {healthLabel(state.healthy)}</span>
+            <span className="text-muted-foreground">· {healthLabel(state.healthy, state.slowFamilies, state.unreachableFamilies)}</span>
           </span>
           {state.capabilities.length > 0 && (
             <span className="flex flex-wrap items-center gap-1.5">

@@ -122,7 +122,35 @@ const TIER_TEXT: &[TierDto] = &[
     TierDto {
         value: "readonly",
         label: "Read-only",
-        description: "The agents can look at things but change nothing and spend nothing.",
+        // **B-023.** "spend nothing" was read as a spend control, and it is not
+        // one. What `readonly` gates is `Reach` (`policy::consequence`): it
+        // denies everything that is not `Reach::Nothing`
+        // (`denied_under_readonly`), which is three distinct things and the
+        // sentence has to carry all three: `Consequence` (state changes, a
+        // counterparty reached, arbitrary code or address), `Money` (a billed
+        // tool call) and `ExternalRead` (a third party's own data read with the
+        // company's connected credential — no change, no bill, and still
+        // denied). So billed *tool calls* really are denied — but inference is
+        // not a tool call and reaches neither gate, so the agents still think
+        // and the company is still billed for it.
+        //
+        // The old sentence therefore promised a bill of zero and delivered one,
+        // and said nothing about `ExternalRead` — which is precisely what an
+        // operator choosing this tier wants to know is blocked. Both halves are
+        // named here rather than in the console, for the reason this table
+        // exists: the prose lives beside the gate it describes so it cannot
+        // drift from it.
+        //
+        // **The first sentence has to stand alone.** The pill renders
+        // `leadSentence(description)` and nothing else (`autonomy-pill.tsx`),
+        // on the argument that half a claim about what the agents may do is
+        // worse than none. So the lead states only the authority — which is
+        // wholly true — and makes no claim about spending at all, where the old
+        // copy made a false one. The billing caveat lands in the second
+        // sentence, which the menu and the settings page both render in full.
+        description: "The agents can look at things but change nothing, contact nobody, and use \
+                      no connected account. Billed tool calls are refused too — but the agents \
+                      still think, and the company is billed for that.",
     },
     TierDto {
         value: "supervised",

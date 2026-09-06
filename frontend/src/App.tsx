@@ -23,6 +23,7 @@ import {
   type LocalInstance,
 } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
+import { AppUpdatePrompt } from "@/components/app-update-prompt";
 import { ConsoleChrome } from "@/components/host-switcher";
 import { ManageHostsPage } from "@/components/manage-hosts";
 import { RouteLoading } from "@/components/route-loading";
@@ -294,6 +295,7 @@ function Console() {
     // A browser has nothing to ask, so it is resolved before it starts.
     resolved: !isDesktopRuntime(),
     id: null,
+    roster: false,
     instances: [],
   }));
 
@@ -315,7 +317,7 @@ function Console() {
       // Adopted once. A second call would re-run the prune against a set it has
       // already reconciled, for a value this one already has.
       const id = host ? adoptLocalHosts([host])[0] : null;
-      setEmbedded({ resolved: true, id, instances: [] });
+      setEmbedded({ resolved: true, id, roster: false, instances: [] });
       return;
     }
 
@@ -346,9 +348,34 @@ function Console() {
       // every machine that has not deliberately stopped it. What the desktop
       // opens on when nothing else is selected.
       id: ids[0] ?? null,
+      roster: true,
       instances,
     });
   }, []);
+
+  /**
+   * Start the host on this computer, for an operator who has none.
+   *
+   * The desktop's recovery is an action rather than a choice: there is exactly
+   * one meaningful answer to "where should this run" on a machine that runs its
+   * own host, and the usual reason there is nothing to show — another copy
+   * holding the data root — is fixed by quitting that copy and trying again, not
+   * by picking a different kind of host.
+   */
+  const runHere = useCallback(async (): Promise<void> => {
+    const instances = await localInstances();
+    if (instances === null) {
+      // A shell predating the roster answers no instances to start, so there is
+      // nothing this can do. It is not offered there — see `canStartHere` — and
+      // saying so is better than a press that silently changes nothing.
+      throw new Error(
+        "This version of the application cannot start a host for you. Quit any other copy that is holding its data, then reopen this one.",
+      );
+    }
+    const target = instances.find((instance) => !instance.running) ?? instances[0];
+    if (target) await startLocalInstance(target.id);
+    await refreshLocal();
+  }, [refreshLocal]);
 
   useEffect(() => {
     let cancelled = false;
@@ -684,11 +711,13 @@ function Console() {
             isBootstrap={active.id === bootstrapId}
           />
         ) : (
-          // The switcher rides along, because an operator whose local host is
-          // gone still has somewhere else to connect to — and "Add a host" is
-          // the only way out of a desktop that holds none.
           <ConsoleChrome>
-            <NoConnection starting={!embedded.resolved} desktop={isDesktopRuntime()} />
+            <NoConnection
+              starting={!embedded.resolved}
+              desktop={isDesktopRuntime()}
+              onRunHere={runHere}
+              canStartHere={embedded.roster}
+            />
           </ConsoleChrome>
         )}
       </ConsoleOrAddHost>
@@ -696,6 +725,14 @@ function Console() {
           host on screen selects another one, which remounts the console. A page
           mounted within would unmount itself mid-edit. */}
       <ManageHostsPage />
+
+      {/* Mounted for the whole session rather than inside the console: the
+          desktop shell is one application however many hosts it is holding,
+          and an operator who has not picked one yet — or whose only local host
+          will not start — is exactly the person a fixed build should be able to
+          reach. Renders nothing in a browser, and nothing on the desktop until
+          an update has been downloaded and is waiting on a restart. */}
+      <AppUpdatePrompt />
     </HostsProvider>
   );
 }
@@ -736,6 +773,15 @@ interface EmbeddedState {
    * none is running. What the desktop opens on.
    */
   id: ConnectionId | null;
+  /**
+   * Whether this shell answers the instance roster at all.
+   *
+   * `false` on a shell predating it, which is a supported degrade — and not the
+   * same fact as a roster that came back empty. Only the roster can start an
+   * instance, so this is what separates "nothing is running, and this app can
+   * start it" from "nothing is running, and it cannot".
+   */
+  roster: boolean;
   /**
    * Every local instance the core knows about, running or not.
    *
@@ -781,9 +827,44 @@ function Waiting({ children }: { children: React.ReactNode }) {
  * telling somebody with nothing on screen to go and find a control is not an
  * answer, it is a description of one.
  */
-function NoConnection({ starting, desktop }: { starting: boolean; desktop: boolean }) {
+function NoConnection({
+  starting,
+  desktop,
+  onRunHere,
+  canStartHere,
+}: {
+  starting: boolean;
+  desktop: boolean;
+  onRunHere: () => Promise<void>;
+  /**
+   * Whether this shell can start a host at all.
+   *
+   * False on one predating the instance roster: it answers no list, so there is
+   * nothing to start and a button would be a control whose only outcome is
+   * nothing happening. The remedy there is the operator's, so the screen says
+   * what it is instead of offering to do it.
+   */
+  canStartHere: boolean;
+}) {
   const { setAddingHost } = useHosts();
   const copy = firstHostCopy(desktop);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  async function runHere() {
+    setBusy(true);
+    setFailed(null);
+    try {
+      await onRunHere();
+    } catch (error) {
+      setFailed(
+        error instanceof Error ? error.message : "The host on this computer would not start.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <FullScreen>
       {starting ? (
@@ -794,9 +875,29 @@ function NoConnection({ starting, desktop }: { starting: boolean; desktop: boole
         <div className="max-w-sm space-y-3" data-testid="no-connection">
           <p className="text-sm font-medium">{copy.title}</p>
           <p className="text-sm text-muted-foreground">{copy.body}</p>
-          <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
-            {copy.action}
-          </Button>
+          {desktop && !canStartHere ? (
+            <p className="text-sm text-muted-foreground" data-testid="no-connection-cannot-start">
+              This version of the application cannot start it for you. Quit the other copy, then
+              reopen this one.
+            </p>
+          ) : desktop ? (
+            <Button
+              data-testid="no-connection-run-here"
+              disabled={busy}
+              onClick={() => void runHere()}
+            >
+              {busy ? "Starting…" : copy.action}
+            </Button>
+          ) : (
+            <Button data-testid="no-connection-add" onClick={() => setAddingHost(true)}>
+              {copy.action}
+            </Button>
+          )}
+          {failed && (
+            <p className="text-sm text-destructive" data-testid="no-connection-failed">
+              {failed}
+            </p>
+          )}
         </div>
       )}
     </FullScreen>

@@ -169,6 +169,26 @@ export function NodeDetailPanel({
           </DetailField>
         )}
 
+        {/* Issue #1866, found in the #1937 boundary sweep: a run-safety gate
+            an operator declared must be visible here, the same way onError/
+            retry above are — otherwise the panel silently claims a node has
+            "no extra details" while the runtime still enforces a gate on it. */}
+        {node.postcondition && (
+          <DetailField label="Postcondition">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
+              {JSON.stringify(node.postcondition, null, 2)}
+            </pre>
+          </DetailField>
+        )}
+
+        {node.verify && (
+          <DetailField label="Semantic verification">
+            <p className="text-sm leading-snug">
+              {node.verify.criteria ?? "Checks whether this step is sufficient to continue."}
+            </p>
+          </DetailField>
+        )}
+
         {/* Issue #596: what this node actually produced on the run being
             inspected — the make.com per-node output view. Only rendered when a
             run is being inspected (a live run's clicked node, or a past run
@@ -184,6 +204,8 @@ export function NodeDetailPanel({
           !node.schedule &&
           !node.destination &&
           !node.requiresApproval &&
+          !node.postcondition &&
+          !node.verify &&
           // Issue #850: `repeatable === false` renders the "not repeated on
           // approval" badge above, so a node whose only detail is that
           // declaration must not also claim it has no extra details.

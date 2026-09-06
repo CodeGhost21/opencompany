@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
-import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { ApprovalSummary, CognitionState, DecideApproval, TurnStep, Verdict } from "@/api/types";
 import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -50,6 +50,16 @@ interface Props {
    */
   liveSteps?: TurnStep[];
   /**
+   * Live rows per **query**, keyed by the asking message's console id — the
+   * per-turn half of `liveSteps` above, which is the per-thread strip.
+   *
+   * Both exist because a frame only knows which query it belongs to when the
+   * host stamps `messageSeq` on it. One that does renders under its own
+   * message; one that does not (a relay, a dispatched card, an older host)
+   * falls back to the strip.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
+  /**
    * The live receipt for a synchronous chat turn this console just sent (issue
    * #1934). When present it supersedes {@link TypingRow} — it says "Sent →
    * Picked up → on step" with a ticking clock instead of bare typing dots — and
@@ -66,6 +76,13 @@ interface Props {
   onDismissCard: (taskId: string) => void;
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
+  /**
+   * Settles the in-review card a finished card's settle pill links to — the
+   * Approve control on that pill. Absent where review is not wired.
+   */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Every card whose review verdict is in flight, if any. */
+  reviewingCardIds?: ReadonlySet<string>;
   /**
    * Resolves a stored attachment's bytes to an object URL for the transcript
    * (issue #1682). Threaded from the shell, which holds the authenticated
@@ -94,7 +111,7 @@ interface Props {
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
   failedApprovals?: Record<string, string>;
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecideApproval?: DecideApproval;
   /**
    * Whether this company's teammates can think (issue #1735). On either echo
    * state every company-side row below is a canned line rather than a
@@ -160,12 +177,15 @@ export function MessageTimeline({
   typing,
   queued,
   liveSteps,
+  liveStepsByMessage,
   receipt,
   agentNames,
   onOpenThread,
   onReact,
   onDismissCard,
   dismissingCardId,
+  onReviewCard,
+  reviewingCardIds,
   resolveAttachmentUrl,
   taskStatusByTaskId,
   onStartBrief,
@@ -375,11 +395,18 @@ export function MessageTimeline({
               {item.entry.dayLabel && <DayDivider label={item.entry.dayLabel} />}
               <MessageRow
                 entry={item.entry}
+                // The turn this message asked for, while it runs. Keyed by the
+                // message's own id, so two questions in one channel each get
+                // their own timeline instead of sharing the foot-of-channel
+                // strip (and clearing each other's rows).
+                liveSteps={liveStepsByMessage?.[item.entry.message.id]}
                 threadOpen={item.entry.message.id === openThreadId}
                 onOpenThread={onOpenThread}
                 onReact={onReact}
                 onDismissCard={onDismissCard}
                 dismissingCardId={dismissingCardId}
+                onReviewCard={onReviewCard}
+                reviewingCardIds={reviewingCardIds}
                 resolveAttachmentUrl={resolveAttachmentUrl}
                 taskStatusByTaskId={taskStatusByTaskId}
                 now={now ?? Date.now()}
@@ -387,6 +414,15 @@ export function MessageTimeline({
                 onRedeemBudgetPause={onRedeemBudgetPause}
                 redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
                 latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
+                // Issue #1986: read off `channel.system` here rather than
+                // threaded down from `ChatView`, because this component already
+                // holds the channel and that flag *is* the predicate `ChatView`
+                // derives its own `readOnly` from — a second prop carrying the
+                // same fact through the same tree is one more thing that can
+                // disagree with it. See `MessageRow`'s `readOnly` doc for what
+                // it takes away (adding a reaction) and what it deliberately
+                // leaves (reactions already there, and the way into a thread).
+                readOnly={Boolean(channel.system)}
               />
             </div>
           ) : (
@@ -414,15 +450,18 @@ export function MessageTimeline({
             />
           ),
         )}
-        {receipt && !queued ? (
+        {receipt ? (
           // The receipt for our own in-flight send (issue #1934) supersedes the
-          // typing dots and carries the live steps itself. A queued turn keeps
-          // its honest "Queued…" row instead — the receipt is a `!queued` state.
+          // typing dots and carries the live steps itself. It now rides a
+          // detached turn past its 202 into the queued/working window too (issue
+          // #2021), so `queued` words its base line and stills its pulse rather
+          // than dropping it back to the bare "Queued…"/step row.
           <ChatLiveReceipt
             channel={channel}
             receipt={receipt}
             agentNames={agentNames}
             steps={liveSteps ?? []}
+            queued={queued}
           />
         ) : liveStepCount > 0 && !queued ? (
           <LiveTurnRow channel={channel} steps={liveSteps ?? []} />
@@ -513,8 +552,16 @@ function ChannelIntro({
       {/* The two openings a new channel actually has. Held back until the
           history has answered, for the same reason the sentence above is:
           offering "add a teammate here" over a channel that turns out to be full
-          of conversation reads as data loss. */}
-      {empty && !loading && channel.kind === "channel" && (
+          of conversation reads as data loss.
+
+          Not on the read-only Operator feed (`channel.system`, the same
+          predicate `ChatView` derives `readOnly` from). Neither opening exists
+          there: "Give the team a brief" prefills a composer that channel does
+          not render, and "Add people" opens a members pane `ChatView` gates
+          off on the same flag — so both were controls offering an action that
+          could not happen, under a notice saying there is nothing to reply to
+          here. */}
+      {empty && !loading && channel.kind === "channel" && !channel.system && (
         <ActionCards onStartBrief={onStartBrief} onAddPeople={onAddPeople} />
       )}
     </div>

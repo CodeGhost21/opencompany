@@ -150,7 +150,9 @@ async function leaveForModelSettings() {
     await new Promise((r) => setTimeout(r, 0));
   });
   // jsdom does not follow the anchor's href, so drive the navigation it implies.
-  await goTo("#/settings/connections");
+  // `#/settings/inference` since the model links were corrected off the dead
+  // `#/settings/connections`, which named no settings page at all.
+  await goTo("#/settings/inference");
 }
 
 describe("leaving to wire a model", () => {
@@ -179,7 +181,7 @@ describe("leaving to wire a model", () => {
     await mount(clientWith(BASELINE));
     await leaveForModelSettings();
     // A sub-page of the same settings area is not "coming back".
-    await goTo("#/settings/connections?provider=openrouter");
+    await goTo("#/settings/inference?provider=openrouter");
     expect(dialog()).toBeNull();
   });
 
@@ -192,7 +194,7 @@ describe("leaving to wire a model", () => {
 
     root = createRoot(container);
     // `deepLinked` as `AppShell` computes it for this address: a reload on
-    // `#/settings/connections` is a named view, so nothing opens unprompted and
+    // `#/settings/inference` is a named view, so nothing opens unprompted and
     // the resume is the only thing that could.
     await mount(clientWith(BASELINE), true);
     expect(dialog(), "reloaded on the settings page — they have not returned yet").toBeNull();
@@ -263,7 +265,7 @@ describe("leaving to wire a model", () => {
 
     // The next return reads successfully: the debt pays out and setup reopens.
     failing = false;
-    await goTo("#/settings/connections");
+    await goTo("#/settings/inference");
     await goTo("#/overview");
     expect(dialog(), "the retried return should resume setup").toBeTruthy();
   });
@@ -336,7 +338,7 @@ describe("leaving to wire a model", () => {
     expect(setupResuming(SCOPE)).toBe(false);
 
     // And it stays shut across a return trip: "later" means later.
-    await goTo("#/settings/connections");
+    await goTo("#/settings/inference");
     await goTo("#/overview");
     expect(dialog()).toBeNull();
   });

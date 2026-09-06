@@ -457,3 +457,55 @@ describe("the chat cognition banner", () => {
     expect(banner()).toBeNull();
   });
 });
+
+/**
+ * The banner moved from above the transcript to directly above the composer,
+ * and that made one word in it false.
+ *
+ * All four states said "the replies **below** come from the offline echo
+ * brain". That was true while the strip sat above the transcript. Below the
+ * transcript, "below" points at the composer and the "Enter to send" hint —
+ * at no reply at all — so the sentence asserted a position rather than a
+ * fact, and our own change is what falsified it.
+ *
+ * The fix is direction-free rather than "above", so the sentence survives this
+ * strip being moved again. Only the directional word changed; each state still
+ * says its three load-bearing things — these are not the teammate they appear
+ * under, they come from the offline echo brain, and the remedy (or the absence
+ * of one) is whatever that state's own copy already said.
+ *
+ * All four are covered here rather than only the two a local host can be put
+ * into, because the word was identical in all four and would be identically
+ * wrong in each.
+ */
+describe("the cognition banner's copy claims no direction", () => {
+  const ECHOING: CognitionState[] = [
+    "unconfigured",
+    "restart-required",
+    "unavailable",
+    "undetermined",
+  ];
+
+  for (const state of ECHOING) {
+    it(`says "in this conversation", not a direction, for ${state}`, async () => {
+      await render(state);
+
+      const text = banner()!.textContent!;
+      // No leading article: `unavailable` opens its own sentence with it, so
+      // the word is capitalised there and lower-case in the other three.
+      expect(text).toContain("replies in this conversation");
+      // The word that moving the strip falsified, and the mirror-image fix
+      // that would be just as fragile the next time it moves.
+      expect(text).not.toContain("replies below");
+      expect(text).not.toContain("replies above");
+    });
+
+    it(`still names the echo brain and the false attribution for ${state}`, async () => {
+      await render(state);
+
+      const text = banner()!.textContent!;
+      expect(text).toContain("offline echo brain");
+      expect(text).toContain("rather than the teammate they appear under");
+    });
+  }
+});

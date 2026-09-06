@@ -68,6 +68,11 @@ pub mod spend;
 /// its step cap. Test-only.
 #[cfg(test)]
 mod spend_halt_turn_test;
+/// Issue #1890 F: `read_thread`, which follows a reference the operator makes
+/// to another conversation in the channel a turn is answering in. Scoped
+/// through the same `owns` predicate the chat seed uses, so it cannot reach a
+/// thread the isolation was built to keep out. See [`thread_tools`].
+pub mod thread_tools;
 
 /// The ACP `RunTurn`, under the path it had before the split.
 ///

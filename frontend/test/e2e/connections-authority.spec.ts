@@ -4,8 +4,9 @@ import { expect, test } from "@playwright/test";
  * Issue #403 — the connection pages must not offer a member controls the host
  * refuses.
  *
- * Since the Connections split there are three of them: OAuth (`#/settings/oauth`),
- * MCP (`#/settings/mcp`) and Inference (`#/settings/inference`). Each carries
+ * Since the Connections split there are three of them, now across two sections:
+ * Apps (`#/connections/apps`), MCP (`#/connections/mcp`) and Inference
+ * (`#/settings/inference`). Each carries
  * its own read-only banner and its own credential fields, so each is driven
  * here — a split that left one page still inviting a member to paste a token
  * would be exactly the regression this spec is about.
@@ -95,7 +96,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
     await signInAsMember(page.request, memberContext.request);
     const memberPage = await memberContext.newPage();
 
-    // ---- OAuth: the third-party accounts the company acts through ----------
+    // ---- Apps: the third-party accounts the company acts through -----------
     await openSettingsPage(memberPage, "oauth");
 
     // The page says why, in the operator's language.
@@ -117,7 +118,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
 
     // But the read is intact — a member can still see what the company is
     // wired to, which is what explains why an agent can reach a provider.
-    await expect(memberPage.getByRole("heading", { name: "OAuth" })).toBeVisible();
+    await expect(memberPage.getByRole("heading", { name: "Apps" })).toBeVisible();
     const status = await memberPage.request.get("/api/v1/company/composio");
     expect(status.ok()).toBeTruthy();
     expect(await status.text()).not.toContain("token");
@@ -144,7 +145,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
 test("an admin is still offered every control across the three pages", async ({ page }) => {
   await openSettingsPage(page, "oauth");
   // The member's banner is absent, and the credential surface is present.
-  // The company-credential key is the OAuth page's write surface on every
+  // The company-credential key is the Apps page's write surface on every
   // build: the Composio token card only renders when the host reports a
   // composio credential the admin may override (default-feature hosts never
   // do), so it is not the invariant to assert here.

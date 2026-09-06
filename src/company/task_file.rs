@@ -89,7 +89,7 @@ impl TaskSeed {
     pub fn to_record(&self, at_millis: u64) -> TaskRecord {
         TaskRecord {
             id: self.id.clone(),
-            title: self.title.clone(),
+            title: crate::ports::tasks::TaskTitle::authored(&self.title),
             note: self.note.clone(),
             column: COLUMN_TODO.to_string(),
             priority: self
@@ -98,7 +98,7 @@ impl TaskSeed {
                 .unwrap_or_else(|| "medium".to_string()),
             assignee: self.assignee.clone().unwrap_or_default(),
             updated_at_millis: at_millis,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -107,6 +107,7 @@ impl TaskSeed {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -291,7 +292,7 @@ mod test {
         // The whole safety property: nothing seeded can enter the dispatching
         // or the billing column.
         assert_eq!(card.column, COLUMN_TODO);
-        assert!(card.origin_chat_id.is_none());
+        assert!(card.origin_chat_id().is_none());
         assert!(card.parent_task_id.is_none());
         assert!(card.origin_run_id.is_none());
         assert!(card.origin_workflow_id.is_none());

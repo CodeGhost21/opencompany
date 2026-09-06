@@ -132,6 +132,19 @@ describe("foldLiveRun reports running from node-started frames", () => {
     expect(live?.states.ceo).toBe("ok");
   });
 
+  it("a declined (benign-halt) node cannot be downgraded by a stray later start", () => {
+    // Coderabbit review on #1990: `declined` (a node the sufficiency judge
+    // halted benignly) was missing from the same out-of-order guard `ok` /
+    // `error` / `blocked` already had, so a late-arriving started frame could
+    // flip a settled benign-stop back to "running".
+    const live = foldLiveRun(
+      [start("r1"), nodeFinished("r1", "ceo", "declined"), nodeStarted("r1", "ceo")],
+      "greet",
+      GRAPH,
+    );
+    expect(live?.states.ceo).toBe("declined");
+  });
+
   it("clears an orphaned running mark once the run settles (cancel/crash)", () => {
     // ceo started but never finished — the run ended on it. The settled sweep
     // drops the orphan so the canvas does not pulse "running" forever.

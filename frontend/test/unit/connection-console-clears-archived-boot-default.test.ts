@@ -90,6 +90,7 @@ function stubClient(acme: CompanyStatus) {
   const listCompanies = vi.fn(() => Promise.resolve([] as CompanyStatus[]));
   const client = {
     carriesPlatformBearer: true,
+    provisioningInfo: vi.fn(() => Promise.resolve({ auth_mode: "email", wallets_required: false })),
     spec: async () => spec(),
     listCompanies,
     status: vi.fn((id: string | null) =>

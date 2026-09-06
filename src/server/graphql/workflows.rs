@@ -14,7 +14,10 @@ use std::sync::Arc;
 use async_graphql::{Context, ID, SimpleObject};
 
 use crate::company::runtime::CompanyRuntime;
-use crate::company::{WorkflowFile, list_workflows_with_globals, load_workflow_with_globals};
+use crate::company::{
+    WorkflowFile, WorkflowJudgeDef, WorkflowPostconditionDef, list_workflows_with_globals,
+    load_workflow_with_globals,
+};
 use crate::ports::types::OverlayWorkflow;
 
 /// A one-line workflow summary for the workflows list.
@@ -79,6 +82,12 @@ pub struct WorkflowNodeGql {
     /// `Company.workflow(id)` does not drop model data. Both keys are single
     /// words, so the model shape needs no camelCase mirror the way `retry` does.
     pub destination: Option<async_graphql::Json<crate::company::WorkflowDestinationDef>>,
+    /// A node's declared deterministic postcondition (issue #1866), as a JSON
+    /// scalar for the same reason `destination` is — `require`/`field` are
+    /// single words, so no camelCase mirror is needed.
+    pub postcondition: Option<async_graphql::Json<WorkflowPostconditionDef>>,
+    /// Optional semantic sufficiency policy, exposed as JSON like postcondition.
+    pub verify: Option<async_graphql::Json<WorkflowJudgeDef>>,
 }
 
 /// The camelCase retry shape the console reads back over GraphQL, mirroring the
@@ -136,6 +145,8 @@ impl From<WorkflowFile> for WorkflowGql {
                     retry: node.retry.map(|r| async_graphql::Json(RetryGql::from(r))),
                     requires_approval: node.requires_approval,
                     destination: node.destination.map(async_graphql::Json),
+                    postcondition: node.postcondition.map(async_graphql::Json),
+                    verify: node.verify.map(async_graphql::Json),
                 })
                 .collect(),
             edges: file
@@ -357,6 +368,56 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&done.destination.as_ref().unwrap().0).unwrap(),
             json!({ "kind": "owner" })
+        );
+    }
+
+    /// Bonus finding from the #1937 boundary sweep (issue #1866): a node's
+    /// declared `postcondition` was never exposed over GraphQL at all — every
+    /// sibling policy field (`config`/`on_error`/`retry`/`requires_approval`/
+    /// `destination`) had a field on `WorkflowNodeGql` and this didn't, so
+    /// `Company.workflow(id)` silently dropped a run-safety gate for any
+    /// console surface reading over GraphQL instead of REST. Same shape as
+    /// `node_conversion_preserves_the_output_destination` above.
+    #[test]
+    fn node_conversion_preserves_the_postcondition() {
+        let file = parse_workflow(
+            r#"
+            id = "wf3"
+            name = "Workflow 3"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.postcondition]
+            require = "field_present"
+            field = "json.items"
+            [node.verify]
+            criteria = "Name the evidence."
+            [[edge]]
+            from = "start"
+            to = "worker"
+            "#,
+        )
+        .expect("workflow parses");
+
+        let gql = WorkflowGql::from(file);
+        let worker = gql
+            .nodes
+            .iter()
+            .find(|n| n.id.as_str() == "worker")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&worker.postcondition.as_ref().unwrap().0).unwrap(),
+            json!({ "require": "field_present", "field": "json.items" })
+        );
+        assert_eq!(
+            serde_json::to_value(&worker.verify.as_ref().unwrap().0).unwrap(),
+            json!({ "criteria": "Name the evidence." })
         );
     }
 }

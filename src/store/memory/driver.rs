@@ -160,9 +160,19 @@ fn remote_provider(
             }
             .map_err(open_failed)?,
         )),
+        // Two adapters reach the same CortexDB service. `cortexdb` is this
+        // repo's own (`store::memory::cortexdb`) and sends `X-Cortex-Actor`;
+        // `cortex` is the dialect `tinymemory-remote` ships. Both stay
+        // selectable — they differ in what they send, not in what they talk to.
         CORTEXDB_DRIVER_ID => Arc::new(tinymemory::mandatory::MemoryTraitProvider::new(
             Arc::new(CortexdbMemory::api(url, key, cortexdb_actor(key)).map_err(open_failed)?),
             CORTEXDB_DRIVER_ID,
+        )),
+        // CortexDB takes the same credential either way — `self_hosted` is an
+        // alias for `api` upstream — so `managed` only picks the endpoint, and
+        // `url` already carries it. One arm covers both deployments.
+        tinymemory_remote::CORTEX_DRIVER_ID => Arc::new(tinymemory_remote::cortex_provider(
+            tinymemory_remote::CortexMemory::api(url, key).map_err(open_failed)?,
         )),
         other => {
             return Err(MemoryDriverError(format!(
@@ -250,9 +260,16 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-pub const SUPPORTED_REMOTE_DRIVERS: [&str; 4] = [
+pub const SUPPORTED_REMOTE_DRIVERS: [&str; 5] = [
     SUPERMEMORY_DRIVER_ID,
     MEM0_DRIVER_ID,
     COGNEE_DRIVER_ID,
     CORTEXDB_DRIVER_ID,
+    // Neither `cortexdb` nor `cortex` is in `DriverRegistry::builtin()`'s
+    // reserved table, which is fine: `admit` takes an unreserved id when the
+    // host declares the class, and this host declares every remote driver
+    // `External` with `TRUSTED`. The class stays host-decided rather than
+    // self-reported, which is the property the reserved table exists to
+    // protect.
+    tinymemory_remote::CORTEX_DRIVER_ID,
 ];

@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { VIEWS as ROUTED_VIEWS, type View } from "@/lib/console-routes";
-import { FINANCE_NAMED_BY, NAMED_BY, SETTINGS_NAMED_BY, type Leaf } from "./support/routed-views";
+import {
+  CONNECTIONS_NAMED_BY,
+  FINANCE_NAMED_BY,
+  NAMED_BY,
+  SETTINGS_NAMED_BY,
+  type Leaf,
+} from "./support/routed-views";
 
 /**
  * Every page's title comes from `PageHeader`. A view that hand-rolls an `<h1>`
@@ -233,12 +239,14 @@ describe("every routed view is named by something (#1763)", () => {
   });
 
   it("has every section page rendering a PageHeader too", () => {
-    // Settings and Finance are one routed view each over ten and three
-    // bookmarkable addresses. A `Record` keyed on their own tables means a new
-    // page with no row is a compile error; this is the runtime half.
+    // Settings, Finance and Connections are one routed view each over seven,
+    // three and two bookmarkable addresses. A `Record` keyed on their own
+    // tables means a new page with no row is a compile error; this is the
+    // runtime half.
     const offenders = [
       ...Object.entries(SETTINGS_NAMED_BY).map(([id, f]) => [`settings/${id}`, f] as const),
       ...Object.entries(FINANCE_NAMED_BY).map(([id, f]) => [`finances/${id}`, f] as const),
+      ...Object.entries(CONNECTIONS_NAMED_BY).map(([id, f]) => [`connections/${id}`, f] as const),
     ]
       .filter(([, file]) => !(SOURCES.get(file) ?? "").includes("<PageHeader"))
       .map(([page, file]) => `${page} is named by ${file}, which renders no <PageHeader>`);

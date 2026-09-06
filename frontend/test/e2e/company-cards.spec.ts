@@ -163,7 +163,7 @@ test("#1141 the Company nav lands on the teammates, not on the desks", async ({ 
 
   // Start elsewhere, so arriving is a real navigation rather than the page the
   // document happened to load on.
-  await page.goto("/#/overview");
+  await page.goto("/#/chat");
   const nav = page
     .getByRole("link", { name: "Company", exact: true })
     .or(page.getByRole("button", { name: "Company", exact: true }))
@@ -340,8 +340,10 @@ test("#1193 the Company nav row means the roster, even after visiting Desks", as
   // surfaces rather than two places inside one. Remembering it would open the
   // org chart for an operator who clicked "Company" wanting their team: the
   // remembered-mode failure #1193 removed, wearing a different mechanism.
-  await page.getByRole("link", { name: "Overview", exact: true })
-    .or(page.getByRole("button", { name: "Overview", exact: true }))
+  // Somewhere outside the Company section, so coming back is a real
+  // navigation. Room, because Overview is not a sidebar row any more.
+  await page.getByRole("link", { name: "Room", exact: true })
+    .or(page.getByRole("button", { name: "Room", exact: true }))
     .first()
     .click();
   await page.getByRole("link", { name: "Company", exact: true })

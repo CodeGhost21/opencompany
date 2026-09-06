@@ -34,6 +34,7 @@ import {
   fieldsFor,
   getSetup,
   INFERENCE_PROVIDERS,
+  SETUP_INFERENCE_OPTIONS,
   proposeSetupRoster,
   testInference,
   submitSetup,
@@ -62,6 +63,7 @@ import {
 } from "@/lib/company-setup";
 import { isDesktopRuntime } from "@/api/transport";
 import { cn } from "@/lib/utils";
+import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
 
 /**
  * The flow, in order. `fields` names the config keys each step owns.
@@ -118,7 +120,7 @@ const STEPS: readonly (Step & { fields: readonly string[] })[] = [
  * works, which is what earns something a place behind "press on if none of it
  * matters to you".
  */
-const ADVANCED_GROUPS: readonly {
+const ALL_ADVANCED_GROUPS: readonly {
   id: string;
   label: string;
   title: string;
@@ -133,6 +135,11 @@ const ADVANCED_GROUPS: readonly {
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
   },
 ];
+
+/** Advanced groups on offer — the Host group is hidden while hosts are. */
+const ADVANCED_GROUPS = ALL_ADVANCED_GROUPS.filter(
+  (group) => group.id !== "host" || !HOST_SETTINGS_HIDDEN,
+);
 
 /** How each sign-in mode is described, in consequences rather than mode names. */
 const AUTH_MODE_COPY: Record<string, { label: string; hint: string }> = {
@@ -193,25 +200,44 @@ interface Props {
  *   provider onto the manifest and stores the key against the company; a
  *   template seed has nowhere to put either, and silently dropping a key the
  *   operator just watched pass is the worse trade.
- * - **Except `managed`, which carries nothing.** The designed submit omits
- *   inference entirely for that provider, because the host already reaches it.
- *   Taking the designed path there trades the template away for a credential
- *   that was never going to be written — a pure loss, and an invisible one,
- *   since the review screen shows the template's roster either way.
+ * - **Except when nothing will be carried.** Where the submit omits inference
+ *   anyway — the host already reaches it, or the credential that passed was the
+ *   house's rather than this operator's — the designed path trades the template
+ *   away for a credential that was never going to be written: a pure loss, and
+ *   an invisible one, since the review screen shows the template's roster either
+ *   way.
+ *
+ *   Asked as `writesInference` rather than `provider === "managed"`. That
+ *   literal was the same assumption spelled as a string, and it silently stopped
+ *   firing the moment the model step stopped adopting a provider it does not
+ *   offer — the caller passes the very condition its submit uses, so the two
+ *   cannot answer differently.
  */
+/**
+ * The provider the house's credential can ride.
+ *
+ * Mirrors `resolve_endpoint` (`src/company/inference.rs`): the injected
+ * credential is inherited for the managed choice, and for this provider only
+ * while no base URL overrides the endpoint. Everything else is sent without it,
+ * so a step that hides the key field for one of those promises a credential the
+ * host will not forward.
+ */
+const HOUSE_CREDENTIAL_PROVIDER = "openrouter";
+
 export function shouldSeedTemplate(input: {
   hasCompany: boolean;
   source: "model" | "fallback" | "preset" | null;
   rosterEdited: boolean;
   template: string;
   credentialTested: boolean;
-  provider: string;
+  /** Whether the submit will actually write inference for this company. */
+  writesInference: boolean;
 }): boolean {
   if (input.hasCompany) return false;
   if (input.source !== "preset") return false;
   if (input.rosterEdited) return false;
   if (!input.template.trim()) return false;
-  return !input.credentialTested || input.provider === "managed";
+  return !input.credentialTested || !input.writesInference;
 }
 
 /**
@@ -310,7 +336,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    */
   // Seeded from the host once its status arrives — see the fetch effect. Not an
   // initialiser, because `status` is null until then.
-  const [provider, setProvider] = useState<string>("managed");
+  const [provider, setProvider] = useState<string>(SETUP_INFERENCE_OPTIONS[0].id);
   const [baseUrl, setBaseUrl] = useState<string>("");
   /**
    * The verdict on the credential, and the reason the step can gate on it.
@@ -402,8 +428,28 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
         // their own, and no way to get one — the step should arrive answered.
-        if (s.inference.provider) setProvider(s.inference.provider);
-        if (s.inference.base_url) setBaseUrl(s.inference.base_url);
+        // Only adopt a provider the step actually offers. The host reports the
+        // nothing-configured case as `managed`, which is not a tile here any
+        // more — adopting it would select nothing and leave the step looking
+        // answered when it is not.
+        if (
+          s.inference.provider &&
+          SETUP_INFERENCE_OPTIONS.some((option) => option.id === s.inference.provider)
+        ) {
+          setProvider(s.inference.provider);
+        }
+        // Only for a provider that actually takes one. The host reports its own
+        // endpoint whatever the route, and dropping that into the form for a
+        // provider with no URL field left an invisible value that later read as
+        // a tenant override — which is precisely what withholds the injected
+        // credential (`resolve_endpoint`). Same rule the Inference card uses.
+        const seededProvider =
+          s.inference.provider &&
+          SETUP_INFERENCE_OPTIONS.some((option) => option.id === s.inference.provider)
+            ? s.inference.provider
+            : SETUP_INFERENCE_OPTIONS[0].id;
+        const seededSpec = INFERENCE_PROVIDERS.find((p) => p.id === seededProvider);
+        if (s.inference.base_url && seededSpec?.needsUrl) setBaseUrl(s.inference.base_url);
       })
       .catch((err: unknown) => {
         if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
@@ -511,7 +557,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * starts at its longest.
    */
   const visibleSteps = useMemo(
-    () => STEPS.filter((s) => s.id !== "account" || !status || requiresSignIn(status, values)),
+    () =>
+      STEPS.filter(
+        (s) =>
+          (s.id !== "account" || !status || requiresSignIn(status, values)) &&
+          (s.id !== "advanced" || ADVANCED_GROUPS.length > 0),
+      ),
     [status, values],
   );
 
@@ -526,6 +577,39 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       (k) => status.fields.find((f) => f.key === k)?.requires_restart,
     );
   }, [status, changed]);
+
+  /**
+   * Whether the house is supplying inference rather than this operator.
+   *
+   * The credential the model step tests is the HOST's whenever the operator
+   * leaves the key box empty, so a pass there says the house works — not that
+   * the provider selected beside it does.
+   *
+   * This used to be spelled `provider !== "managed"` at the two call sites
+   * below, and it held only because the step adopted the host's provider
+   * verbatim: a hosted tenant selected `managed`, that check withheld the
+   * config, and the platform default went on applying. The step no longer
+   * adopts a route it does not offer, so `provider` is now a real one and the
+   * literal check stopped firing — testing the house credential with a blank
+   * key would write `openrouter` at the managed endpoint with no key over a
+   * configuration that was working.
+   *
+   * A key the operator actually typed is theirs, so it stays configuration.
+   */
+  const houseSuppliesInference =
+    !!status?.inference.ready &&
+    !SETUP_INFERENCE_OPTIONS.some((option) => option.id === status.inference.provider);
+  const operatorConfiguredInference =
+    !houseSuppliesInference || !!values.tinyhumans_api_key?.trim();
+  /**
+   * Whether finishing will write inference onto this company.
+   *
+   * Read by both the submit payload and {@link shouldSeedTemplate}: the seed
+   * decision exists to avoid trading a template away for a credential that is
+   * never written, so it has to be asking the same question the payload answers.
+   */
+  const writesInference =
+    tested.kind === "ok" && provider !== "managed" && operatorConfiguredInference;
 
   /**
    * Ask the host to design a team, on the way into Review.
@@ -546,8 +630,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         automate: draft.automate,
         template: template || null,
         inferenceKey: values.tinyhumans_api_key || null,
-        inferenceProvider: tested.kind === "ok" ? provider : null,
-        inferenceBaseUrl: tested.kind === "ok" ? tested.baseUrl : null,
+        inferenceProvider:
+          tested.kind === "ok" && operatorConfiguredInference ? provider : null,
+        inferenceBaseUrl:
+          tested.kind === "ok" && operatorConfiguredInference ? tested.baseUrl : null,
         inferenceModel: tested.kind === "ok" ? tested.model : null,
       });
       // The host is contracted never to answer with an empty roster, so a
@@ -596,7 +682,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         rosterEdited,
         template,
         credentialTested: tested.kind === "ok",
-        provider,
+        writesInference,
       });
 
       const result = await submitSetup(client, {
@@ -618,15 +704,14 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                 // As reviewed, not as proposed.
                 agents: roster.agents,
                 adminEmail: email.trim() || null,
-                inference:
-                  tested.kind === "ok" && provider !== "managed"
-                    ? {
-                        provider,
-                        baseUrl: tested.baseUrl,
-                        model: tested.model ?? null,
-                        key: values.tinyhumans_api_key?.trim() || null,
-                      }
-                    : null,
+                inference: writesInference
+                  ? {
+                      provider,
+                      baseUrl: tested.baseUrl,
+                      model: tested.model ?? null,
+                      key: values.tinyhumans_api_key?.trim() || null,
+                    }
+                  : null,
               }
             : null,
       });
@@ -1369,7 +1454,32 @@ function PowerStep({
   const [override, setOverride] = useState(false);
   // The house already holds one, and this operator may have no way to get their
   // own. The key box is then optional rather than the point of the screen.
-  const onTheHouse = status.inference.ready && provider === status.inference.provider;
+  // The house already holds one, and this operator may have no way to get their
+  // own — so the key box is optional rather than the point of the screen.
+  //
+  // The second arm is what keeps that true for a hosted tenant once a route
+  // stops being offered here. Its control plane injects the credential and the
+  // host reports itself ready on a provider this step has no tile for; matching
+  // on the tile alone then went false, and first-run setup started demanding a
+  // key from the one operator who cannot obtain one. Readiness is the host's
+  // fact, not a property of which tile happens to be selected.
+  //
+  // Scoped to a selection the credential actually serves. `resolve_endpoint`
+  // inherits the injected credential for the managed choice, and for
+  // `openrouter` only while nothing overrides the endpoint — "the platform
+  // credential rides only the platform's own endpoint", since pairing it with
+  // an arbitrary one would leak it there. Ollama and a custom endpoint get no
+  // inheritance at all. Claiming it for those hid the key field, enabled Test
+  // with nothing in it, and sent an unauthenticated probe that could only fail.
+  const houseProviderHidden = !SETUP_INFERENCE_OPTIONS.some(
+    (option) => option.id === status.inference.provider,
+  );
+  const houseCredentialServes =
+    provider === HOUSE_CREDENTIAL_PROVIDER && !baseUrl.trim();
+  const onTheHouse =
+    status.inference.ready &&
+    (provider === status.inference.provider ||
+      (houseProviderHidden && houseCredentialServes));
   // "Use my own" flips the gate: the host credential is only testable while
   // that is the operator's actual choice. Once they opt to supply their own
   // key, an empty box must not test anything — a test with no key probes the
@@ -1420,7 +1530,7 @@ function PowerStep({
             someone can make without knowing the vocabulary first — a dropdown
             of slugs assumes they already do. */}
         <div className="mt-3 grid gap-2" role="radiogroup" aria-label="Model provider">
-          {INFERENCE_PROVIDERS.map((option) => (
+          {SETUP_INFERENCE_OPTIONS.map((option) => (
             <button
               key={option.id}
               type="button"

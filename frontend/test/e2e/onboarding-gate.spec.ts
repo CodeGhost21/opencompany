@@ -64,7 +64,7 @@ async function mockActivation(page: Page, body: () => unknown) {
 
 /** The shell's own nav — present only once `AppShell` renders past the gate. */
 function shellNav(page: Page) {
-  return page.locator('[data-tour="nav-overview"]');
+  return page.locator('[data-tour="nav-chat"]');
 }
 
 function gateStep(page: Page, id: "name" | "integration" | "workflow") {

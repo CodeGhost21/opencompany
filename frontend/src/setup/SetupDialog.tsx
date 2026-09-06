@@ -30,6 +30,7 @@ import {
 import { cn } from "@/lib/utils";
 import { initials, toneFor } from "@/lib/team";
 import { TEAM_TONES } from "@/lib/team";
+import { settingsHref } from "@/views/settings-pages";
 
 /**
  * How long each created agent stays on screen before the next write starts.
@@ -191,7 +192,7 @@ export function SetupDialog({
    * Whether the operator may change where the company's model calls go.
    *
    * The actions the notice offers — wiring a model, restarting to pick one up —
-   * are an admin's (the Connections form and its restart control render only
+   * are an admin's (the Inference form and its restart control render only
    * under management authority and the host refuses the writes for a member),
    * so a member is told to ask an admin rather than handed a dead-end link.
    * `null` while the role read is outstanding: the admin actions are withheld
@@ -831,8 +832,16 @@ function InferenceNotice({
           "Carry on with the standard team."
         ) : offered && canManage ? (
           <>
+            {/* Both arms land on Inference. "Set up a model" obviously does;
+                so does "Restart the company", because the restart this notice
+                means is the one `restartRequired` names — a company whose
+                stored model postdates its running brain — and the control that
+                performs it renders on the Inference card
+                (`views/connections/InferenceSection.tsx`), not on General.
+                This said `#/settings/connections`, which named no settings
+                page and was repaired onto General, where neither action is. */}
             <a
-              href="#/settings/connections"
+              href={settingsHref("inference")}
               onClick={onLeave}
               className="font-medium underline underline-offset-4"
             >
@@ -988,7 +997,7 @@ function BuildOut({
           */}
           {fallback === "no_model" && harnessReachable && canManage === true && (
             <a
-              href="#/settings/connections"
+              href={settingsHref("inference")}
               onClick={onRedesign}
               data-testid="setup-add-model"
               className={buttonVariants({ variant: "outline" })}
@@ -1026,7 +1035,7 @@ function BuildOut({
               </Button>
               {canManage === true && (
                 <a
-                  href="#/settings/connections"
+                  href={settingsHref("inference")}
                   onClick={onRedesign}
                   data-testid="setup-check-connection"
                   className={buttonVariants({ variant: "outline" })}

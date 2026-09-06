@@ -47,9 +47,11 @@
 //! ambiguous.
 //!
 //! [`detect_task_intent`] remains as the thin `Track`-only wrapper the card
-//! paths call, so the issue-#463 title contract with
-//! `DelegationRunner::chat_handler_card` — which has to derive byte-for-byte
-//! the same title the handler wrote — is untouched.
+//! paths call to decide **whether** a message is work. What the card is then
+//! *named* is no longer its business: a title is minted through
+//! [`mint_task_title`](crate::ports::tasks::mint_task_title), and the card the
+//! handler wrote is found again by the message's own sequence position rather
+//! than by re-deriving its headline.
 //!
 //! # What this deliberately is not
 //!
@@ -190,6 +192,8 @@ const ACTION_VERBS: &[&str] = &[
     "cancel",
     "start",
     "stop",
+    "move",
+    "close",
     "implement",
     "deploy",
     "configure",
@@ -330,6 +334,42 @@ const READ_VERBS: &[&str] = &[
 /// read that lands there costs the operator nothing, whereas the gated request
 /// cost them the work.
 const READ_PHRASES: &[&str] = &["walk me through", "let me know", "remind me"];
+
+/// Phrases that point at the board or a card already on it, rather than at a new
+/// deliverable. Word-boundary-checked so "the card" does not fire inside "the
+/// cardstock", and object-position-checked ([`board_deixis_is_object`]) so it
+/// only fires when the phrase is the request's actual object — not the head of
+/// a longer noun ("the board **presentation**") and not the topic of a
+/// different object ("a report **about** the board").
+const BOARD_DEIXIS: &[&str] = &[
+    "the task card",
+    "this card",
+    "that card",
+    "the card",
+    "this task",
+    "that task",
+    "the ticket",
+    "the board",
+    "the column",
+    "the backlog",
+    "the kanban",
+];
+
+/// Mutable fields of a card. Ambiguous alone ("update the status page" is real
+/// work), so they demote only in board context — see
+/// [`field_noun_in_board_context`].
+const BOARD_FIELD_NOUNS: &[&str] = &["the status", "the priority", "the assignee"];
+
+/// Words that, immediately after a [`BOARD_FIELD_NOUNS`] phrase, mark it as the
+/// object of a board operation rather than the head of a longer noun.
+///
+/// Deliberately excludes `of`: "the status **of** the landing page" makes the
+/// landing page the head of the noun phrase — the field belongs to it, so the
+/// object of the request is the page, not the card's status field on the
+/// board (PR #1949 review, CodeRabbit thread 3895107555). `on`/`to`/`for`/`and`
+/// instead introduce a board operation's target value ("change the assignee
+/// **to** nova"), which is why they stay.
+const BOARD_CONNECTIVES: &[&str] = &["on", "for", "to", "and"];
 
 /// Max length of a generated task title.
 const TITLE_MAX: usize = 80;
@@ -478,12 +518,18 @@ pub fn triage_message_detailed(text: &str) -> TriageOutcome {
 
     // Frame beats interrogative: a polite instruction stays work.
     if REQUEST_FRAMES.iter().any(|f| core.starts_with(f)) && contains_action(core) {
+        if refers_to_board_entity(core) {
+            return matched(MessageTriage::Chatter);
+        }
         return matched(MessageTriage::Track(to_title(trimmed)));
     }
     if is_question(core) {
         return matched(MessageTriage::Answer);
     }
     if starts_with_action(core) {
+        if refers_to_board_entity(core) {
+            return matched(MessageTriage::Chatter);
+        }
         return matched(MessageTriage::Track(to_title(trimmed)));
     }
     // The residue. Every rule above declined, so this says only "no rule
@@ -561,10 +607,12 @@ pub fn small_talk(text: &str) -> Option<SmallTalk> {
 /// Returns a cleaned task title when `text` is an actionable request, else
 /// `None` — the [`MessageTriage::Track`]-only view of [`triage_message`].
 ///
-/// Kept as its own function because two card paths depend on it agreeing with
-/// itself byte-for-byte: the REST chat handler writes the title, and
-/// `DelegationRunner::chat_handler_card` re-derives it moments later to find
-/// the card that handler wrote (issue #463).
+/// The title it returns is a *fallback* name, used when no titling pass is
+/// wired or the model could not answer. Nothing re-derives it to find a card
+/// again — adoption is keyed on
+/// [`TaskRecord::origin_message_seq`](crate::ports::tasks::TaskRecord::origin_message_seq) —
+/// so this no longer has to agree with itself byte-for-byte across two call
+/// sites.
 pub fn detect_task_intent(text: &str) -> Option<String> {
     match triage_message(text) {
         MessageTriage::Track(title) => Some(title),
@@ -683,6 +731,97 @@ fn starts_with_action(lower: &str) -> bool {
     ACTION_VERBS.contains(&first)
 }
 
+/// Whether the object of the request is the board itself or a card on it — a
+/// message *about* the kanban rather than a new deliverable.
+fn refers_to_board_entity(lower: &str) -> bool {
+    if BOARD_DEIXIS
+        .iter()
+        .any(|p| board_deixis_is_object(lower, p))
+    {
+        return true;
+    }
+    field_noun_in_board_context(lower)
+}
+
+/// True when `phrase` occurs in `lower`, word-bounded, in the request's actual
+/// object position: not the head of a longer noun ("the board
+/// **presentation**" — see [`followed_by_board_context`]) and not the topic of
+/// a different object ("a report **about** the board" — see
+/// [`preceded_by_topic_marker`]).
+fn board_deixis_is_object(lower: &str, phrase: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(phrase) {
+        let start = from + rel;
+        let end = start + phrase.len();
+        from = start + 1;
+        let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after = end == lower.len() || !bytes[end].is_ascii_alphanumeric();
+        if before
+            && after
+            && followed_by_board_context(&lower[end..])
+            && !preceded_by_topic_marker(&lower[..start])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a topic-introducing word immediately precedes a deixis phrase,
+/// making the phrase the topic of a different, earlier object ("a memo
+/// **about** the board") rather than the object of the request itself. The
+/// verb's own complement prepositions ("look **at** the board", "move it
+/// **to** the board") are not topic markers and are left alone.
+fn preceded_by_topic_marker(lead: &str) -> bool {
+    const TOPIC_MARKERS: &[&str] = &["about", "regarding", "concerning"];
+    let last_word = lead
+        .trim_end()
+        .rsplit(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or("");
+    TOPIC_MARKERS.contains(&last_word)
+}
+
+/// A [`BOARD_FIELD_NOUNS`] phrase used as a board operation's object: clause-final,
+/// or immediately followed by a connective/preposition/punctuation rather than a
+/// continuing noun.
+fn field_noun_in_board_context(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    for phrase in BOARD_FIELD_NOUNS {
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(phrase) {
+            let start = from + rel;
+            let end = start + phrase.len();
+            from = start + 1;
+            let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let after = end == lower.len() || !bytes[end].is_ascii_alphanumeric();
+            if before && after && followed_by_board_context(&lower[end..]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether what trails a field noun marks it as a board operation's object: the
+/// clause ends, or the next token is punctuation or a [`BOARD_CONNECTIVES`] word
+/// — but not a continuing noun ("the status **page**").
+fn followed_by_board_context(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    match rest.chars().next() {
+        None => true,
+        Some(c) if !c.is_alphanumeric() => true,
+        Some(_) => {
+            let next_word = rest
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or("");
+            BOARD_CONNECTIVES.contains(&next_word)
+        }
+    }
+}
+
 /// An action verb/phrase appears anywhere (used behind a request frame).
 fn contains_action(lower: &str) -> bool {
     if ACTION_PHRASES.iter().any(|p| lower.contains(p)) {
@@ -750,6 +889,185 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
     out
+}
+
+/// What an operator's reply to a parked blocker asks the company to do (issue
+/// #1862).
+///
+/// The four verdicts lower onto the existing [`Approve`/`Deny`] resolve surface
+/// — no new gate arm — so answering a blocker is the same durable decision as
+/// answering any approval. [`Unrelated`](Self::Unrelated) is the escape: a
+/// greeting or a question back is not a verdict, and the reply runs as an
+/// ordinary chat turn instead of settling anything.
+///
+/// Deliberately says nothing about resumption. Resolving a blocker is inert
+/// until #1863; this only records which verdict the operator gave.
+///
+/// [`Approve`/`Deny`]: crate::ports::types::Verdict
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockerReplyIntent {
+    /// Run the stopped step again as it was.
+    Retry,
+    /// Answer or correct it — the reply text carries what changed.
+    Amend,
+    /// Drop this blocker and let the work go on without it.
+    Skip,
+    /// Abandon the stopped work.
+    Cancel,
+    /// Not a verdict — ordinary conversation that must run as a normal turn.
+    Unrelated,
+}
+
+/// Words that plainly abandon the work — checked first, because "stop" and
+/// "drop" outrank every other reading.
+const CANCEL_WORDS: &[&str] = &[
+    "cancel", "abort", "abandon", "drop", "forget", "scrap", "kill", "discard",
+];
+
+/// Words that waive the blocker but keep the work going.
+const SKIP_WORDS: &[&str] = &["skip", "waive", "ignore", "bypass", "omit"];
+
+/// Words that ask for the same step again, unchanged. Strong signals only — a
+/// bare "yes"/"ok" is a [`GREETINGS`] entry and stays [`Unrelated`], so a
+/// passing affirmation in an ordinary sentence never reads as a verdict.
+///
+/// [`Unrelated`]: BlockerReplyIntent::Unrelated
+const RETRY_WORDS: &[&str] = &[
+    "retry", "again", "proceed", "continue", "approve", "approved", "rerun", "redo",
+];
+
+/// Classifies an operator's reply to a parked blocker (issue #1862),
+/// lexical-first and conservative.
+///
+/// The order is the priority: an abandon word wins over a waive word wins over
+/// a retry word, because "cancel it, but retry the other one" must read as a
+/// cancel of the thing in hand. A reply that is empty, a greeting, or a
+/// question back is [`Unrelated`](BlockerReplyIntent::Unrelated) — the operator
+/// is talking, not deciding. Everything else is
+/// [`Amend`](BlockerReplyIntent::Amend): a substantive line in a blocked
+/// teammate's DM is taken as answering the question, and the text becomes the
+/// correction.
+///
+/// Model-assisted disambiguation is #678; this is the lexical tier that abstains
+/// to [`Unrelated`] rather than guessing.
+pub fn classify_blocker_reply(text: &str) -> BlockerReplyIntent {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return BlockerReplyIntent::Unrelated;
+    }
+    let lower = trimmed.to_lowercase();
+    let bare = bare_message(&lower);
+    if GREETINGS.contains(&bare) {
+        return BlockerReplyIntent::Unrelated;
+    }
+    let core = strip_lead_ins(&lower);
+    // A question back is the operator asking, not answering — it must run as a
+    // normal turn so the teammate can respond, not settle the blocker.
+    if is_question(core) {
+        return BlockerReplyIntent::Unrelated;
+    }
+    if mentions_any(&lower, CANCEL_WORDS) {
+        return BlockerReplyIntent::Cancel;
+    }
+    if mentions_any(&lower, SKIP_WORDS) {
+        return BlockerReplyIntent::Skip;
+    }
+    if mentions_any(&lower, RETRY_WORDS) || lower.contains("go ahead") {
+        return BlockerReplyIntent::Retry;
+    }
+    // A purely social line — "hello there", "thanks so much" — carries no
+    // answer, so it runs as a normal turn rather than being taken as a
+    // correction. A single non-social word tips it to a substantive answer.
+    if is_pure_social(&lower) {
+        return BlockerReplyIntent::Unrelated;
+    }
+    BlockerReplyIntent::Amend
+}
+
+/// Whether any whole word of `lower` is in `words` and is not negated by a
+/// preceding "not"/"don't"/… within two tokens — so `okay` matches `ok`-the-word
+/// but `okra` never matches `ok`, and `don't retry` no longer reads as a retry.
+fn mentions_any(lower: &str, words: &[&str]) -> bool {
+    let flattened = lower.replace(['\'', '\u{2019}'], "");
+    let tokens: Vec<&str> = flattened
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    tokens
+        .iter()
+        .enumerate()
+        .any(|(i, word)| words.contains(word) && !negated_before(&tokens, i))
+}
+
+/// Negations that flip a following verdict word to a non-verdict, apostrophes
+/// already stripped so `don't` reads as `dont`.
+const NEGATIONS: &[&str] = &[
+    "not", "no", "never", "cannot", "dont", "doesnt", "wont", "cant", "isnt", "arent",
+];
+
+/// Whether a negation sits within the two tokens before `i`.
+fn negated_before(tokens: &[&str], i: usize) -> bool {
+    tokens[i.saturating_sub(2)..i]
+        .iter()
+        .any(|token| NEGATIONS.contains(token))
+}
+
+/// Words that carry no instruction — greetings, thanks, fillers. A message made
+/// only of these is social, not an answer.
+const SOCIAL_WORDS: &[&str] = &[
+    "hi",
+    "hii",
+    "hiya",
+    "hey",
+    "hello",
+    "howdy",
+    "yo",
+    "sup",
+    "gm",
+    "good",
+    "morning",
+    "evening",
+    "afternoon",
+    "there",
+    "thanks",
+    "thank",
+    "you",
+    "ty",
+    "thx",
+    "cheers",
+    "so",
+    "much",
+    "ok",
+    "okay",
+    "k",
+    "kk",
+    "cool",
+    "nice",
+    "great",
+    "awesome",
+    "perfect",
+    "sure",
+    "np",
+    "sg",
+    "lol",
+    "haha",
+    "please",
+];
+
+/// Whether every word of `lower` is a [`SOCIAL_WORDS`] filler — a non-empty
+/// message with nothing to act on.
+fn is_pure_social(lower: &str) -> bool {
+    let mut seen = false;
+    for word in lower.split(|c: char| !c.is_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        seen = true;
+        if !SOCIAL_WORDS.contains(&word) {
+            return false;
+        }
+    }
+    seen
 }
 
 #[cfg(test)]
@@ -950,6 +1268,128 @@ mod tests {
         assert_eq!(
             triage_message("could you please fix the checkout bug?"),
             MessageTriage::Track("Fix the checkout bug".to_string())
+        );
+    }
+
+    /// The predicate the board guard turns on: deixis fires only when it is
+    /// the object of the request (see
+    /// [`board_deixis_must_be_the_objects_head_not_a_modifier_or_topic`] for
+    /// the cases that must NOT fire), field nouns demote only in board
+    /// context, and everything else is real work.
+    #[test]
+    fn board_entity_predicate_reads_the_object_of_the_request() {
+        // Tier 1 — deixis, matched wherever it is the object of the request.
+        for msg in [
+            "update the status on the task card",
+            "move this card to done",
+            "close the ticket",
+            "reprioritise the backlog",
+            "look at the board",
+        ] {
+            assert!(refers_to_board_entity(msg), "should be board: {msg}");
+        }
+        // Tier 2 — a field noun that is the object of a board operation.
+        assert!(refers_to_board_entity("update the status on the board"));
+        assert!(refers_to_board_entity("bump the priority")); // clause-final
+        assert!(refers_to_board_entity("change the assignee to nova")); // connective
+        // Tier 2 — a field noun that heads a longer noun is real work.
+        assert!(!refers_to_board_entity("update the status page"));
+        assert!(!refers_to_board_entity("draft the priority list"));
+        // No board vocabulary at all.
+        for msg in [
+            "update the landing page",
+            "move the deploy to staging",
+            "create a task tracker",
+        ] {
+            assert!(!refers_to_board_entity(msg), "should not be board: {msg}");
+        }
+        // A boundary check: deixis must not fire inside a larger word.
+        assert!(!refers_to_board_entity("restock the cardstock"));
+    }
+
+    /// PR #1949 review (Codex thread 3895066476, CodeRabbit thread
+    /// 3895107555): `BOARD_DEIXIS` used to match anywhere in the message, so
+    /// a deliverable whose title merely *contains* board vocabulary — as a
+    /// compound noun, or as the topic of a different object — got misread as
+    /// the object of a board operation and demoted to `Chatter`, opening no
+    /// card. The predicate must require the deixis phrase to actually be the
+    /// object of the request, the same way [`field_noun_in_board_context`]
+    /// already requires for field nouns.
+    #[test]
+    fn board_deixis_must_be_the_objects_head_not_a_modifier_or_topic() {
+        // "the board"/"the ticket" heads a longer noun ("board presentation",
+        // "ticket booking flow") — real work, not a board operation.
+        assert!(!refers_to_board_entity("build the board presentation"));
+        assert!(!refers_to_board_entity("update the ticket booking flow"));
+        // "about"/"regarding" make the deixis phrase the *topic* of a
+        // different object ("a report"), not the object itself.
+        assert!(!refers_to_board_entity("create a report about the board"));
+        assert!(!refers_to_board_entity("write a memo regarding the board"));
+        // Genuine deixis-as-object still fires — the verb's own complement
+        // preposition ("at", "to") is not a topic marker.
+        assert!(refers_to_board_entity("look at the board"));
+        assert!(refers_to_board_entity("move this card to done"));
+    }
+
+    /// PR #1949 review (CodeRabbit thread 3895107555): `field_noun_in_board_
+    /// context` treated a trailing `of` exactly like `on`/`to`/`for`/`and`,
+    /// but `of` introduces the noun a field *belongs to* ("the status **of**
+    /// the landing page" = the landing page's status), not a board
+    /// operation's target value the way "change the assignee **to** nova"
+    /// does. Demoting real deliverable work phrased with `of` closed no card.
+    #[test]
+    fn field_noun_followed_by_of_is_not_board_context() {
+        assert!(!refers_to_board_entity(
+            "update the status of the landing page"
+        ));
+        // The other connectives are unaffected.
+        assert!(refers_to_board_entity("update the status on the board"));
+        assert!(refers_to_board_entity("change the assignee to nova"));
+    }
+
+    /// A board operation phrased as an instruction is a *decision* to touch the
+    /// existing card, not a new deliverable — so it is `Chatter` (Matched), not
+    /// a second `Track` card. The incident that opened the issue leads the list.
+    #[test]
+    fn a_board_operation_does_not_mint_a_second_card() {
+        for msg in [
+            "can you also update the status on the task card?",
+            "update the status on the task card",
+            "please move the card to done",
+            "can you update the priority on this task?",
+            "close the ticket",
+            "update the status on the board",
+        ] {
+            let out = triage_message_detailed(msg);
+            assert_eq!(out.triage, MessageTriage::Chatter, "should not card: {msg}");
+            assert_eq!(
+                out.confidence,
+                TriageConfidence::Matched,
+                "a board op is a decision, not an abstention: {msg}"
+            );
+            assert!(detect_task_intent(msg).is_none(), "no card for: {msg}");
+        }
+    }
+
+    /// The other side of the trade: real work that merely mentions a board word
+    /// (or a field noun heading a longer noun) still cards.
+    #[test]
+    fn real_work_that_mentions_a_field_still_cards() {
+        for (msg, title) in [
+            ("update the landing page", "Update the landing page"),
+            ("move the deploy to staging", "Move the deploy to staging"),
+            ("update the status page", "Update the status page"),
+            ("create a task tracker", "Create a task tracker"),
+        ] {
+            assert_eq!(
+                triage_message(msg),
+                MessageTriage::Track(title.to_string()),
+                "should stay work: {msg}"
+            );
+        }
+        assert_eq!(
+            triage_message("can you review the design"),
+            MessageTriage::Track("Review the design".to_string())
         );
     }
 
@@ -1216,5 +1656,133 @@ mod tests {
             assert!(!reply.trim().is_empty());
             assert!(reply.chars().count() <= 80, "{reply:?} is too long");
         }
+    }
+}
+
+#[cfg(test)]
+mod blocker_reply_tests {
+    use super::*;
+
+    #[test]
+    fn a_retry_word_asks_for_the_same_step_again() {
+        for reply in [
+            "retry",
+            "try it again",
+            "go ahead",
+            "yes, proceed",
+            "approved",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Retry,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_skip_word_waives_the_blocker() {
+        for reply in [
+            "skip it",
+            "waive this",
+            "just ignore it",
+            "bypass the check",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Skip,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancel_word_abandons_the_work() {
+        for reply in [
+            "cancel",
+            "abort this",
+            "drop it",
+            "forget about it",
+            "scrap the task",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Cancel,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// Abandon outranks retry: "cancel this and retry the other" is a cancel of
+    /// the thing in hand.
+    #[test]
+    fn abandon_outranks_retry_when_both_appear() {
+        assert_eq!(
+            classify_blocker_reply("cancel this one, retry the other"),
+            BlockerReplyIntent::Cancel
+        );
+    }
+
+    #[test]
+    fn a_substantive_answer_is_an_amendment() {
+        for reply in [
+            "use gpt-4o-mini instead",
+            "deploy to staging, not prod",
+            "the brief in the January doc is the current one",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Amend,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_greeting_or_a_question_back_is_unrelated() {
+        for reply in [
+            "hey",
+            "hello there",
+            "what do you mean?",
+            "which one is blocked?",
+            "   ",
+        ] {
+            assert_eq!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Unrelated,
+                "reply: {reply}"
+            );
+        }
+    }
+
+    /// The word match is on whole words: `okra` is not `ok`.
+    #[test]
+    fn a_verdict_word_matches_only_as_a_whole_word() {
+        assert_eq!(
+            classify_blocker_reply("order some okra for the office"),
+            BlockerReplyIntent::Amend,
+            "a substring of a verdict word is not that verdict"
+        );
+    }
+
+    #[test]
+    fn a_negated_verdict_word_is_not_that_verdict() {
+        for reply in [
+            "don't retry this",
+            "do not retry",
+            "not approved",
+            "no, cancel",
+        ] {
+            assert_ne!(
+                classify_blocker_reply(reply),
+                BlockerReplyIntent::Retry,
+                "a negated verdict word must not read as the positive verdict: {reply:?}"
+            );
+        }
+        assert_ne!(
+            classify_blocker_reply("no, cancel"),
+            BlockerReplyIntent::Cancel,
+            "a negated cancel is not a cancel"
+        );
     }
 }

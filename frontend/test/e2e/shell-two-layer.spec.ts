@@ -15,9 +15,11 @@ import { openFirstWorkflow } from "./workflows";
  * The first attempt at this issue (PR #1188) inset the frame on three sides
  * over a flat tint and shipped a hairline sliver: structurally a two-layer
  * shell, visually nothing. Every geometric assertion below therefore names a
- * quantity rather than a class — a margin of at least 8px on *all four* sides,
- * a real corner radius, a card fill measurably different from the chrome —
- * because "the class is present" is exactly what that change would have passed.
+ * quantity rather than a class — a margin of at least 8px on the three sides
+ * that face the window, a thinner but non-zero one under the title row that now
+ * stands above the card, a real corner radius, a card fill measurably different
+ * from the chrome — because "the class is present" is exactly what that change
+ * would have passed.
  *
  * # The single-scrim property
  *
@@ -107,6 +109,19 @@ async function shell(page: Page) {
       unframed: card?.getAttribute("data-unframed") ?? null,
       insetBox: box(inset),
       cardBox: box(card),
+      // The window's title row and the lowest edge anything actually *stands*
+      // on in it. The row is 52px of chrome whose controls are centred in it,
+      // so its own bottom edge is not what the eye measures the card's top gap
+      // from — the bottom of the controls is. Both named rather than derived
+      // from the row's children, because the row's elastic middle is a
+      // full-height drag spacer and would report the row's own edge.
+      titleBarBox: box(q('[data-testid="window-title-bar"]')),
+      titleRowContentBottom: (() => {
+        const bottoms = ['[data-testid="host-switcher"]', '[data-testid="autonomy-pill"]']
+          .map((selector) => box(q(selector))?.bottom)
+          .filter((bottom): bottom is number => bottom !== undefined);
+        return bottoms.length > 0 ? Math.max(...bottoms) : null;
+      })(),
     };
   });
 }
@@ -133,7 +148,7 @@ for (const theme of ["light", "dark"] as const) {
     expect(s.sidebarBorderRight).toBe(0);
   });
 
-  test(`the content card is inset on all four sides and rounded (${theme})`, async ({ page }) => {
+  test(`the content card is framed on three sides, clear of the title row on the fourth (${theme})`, async ({ page }) => {
     await open(page, theme, "/#/settings");
     const s = await shell(page);
 
@@ -142,14 +157,13 @@ for (const theme of ["light", "dark"] as const) {
     expect(frame).not.toBeNull();
     expect(card).not.toBeNull();
 
-    // A frame, not a sliver, and an EVEN one: the four sides come from a single
-    // `--frame-inset`, so they are equal by construction rather than by four
-    // numbers that happen to agree. The closed first attempt at this issue
-    // inset three sides and left the fourth flush, which is what produced a
-    // sliver instead of a frame.
+    // A frame, not a sliver, and an EVEN one on the three sides that face the
+    // window: they come from a single `--frame-inset`, so they are equal by
+    // construction rather than by three numbers that happen to agree. The
+    // closed first attempt at this issue inset three sides and left the fourth
+    // flush, which is what produced a sliver instead of a frame.
     const insets = {
       left: card!.left - frame!.left,
-      top: card!.top - frame!.top,
       right: frame!.right - card!.right,
       bottom: frame!.bottom - card!.bottom,
     };
@@ -157,6 +171,38 @@ for (const theme of ["light", "dark"] as const) {
       expect(gap, `${side} inset`).toBeGreaterThanOrEqual(8);
       expect(gap, `${side} inset matches the left`).toBeCloseTo(insets.left, 0);
     }
+
+    // The top is the one side that does NOT face the window, and it is held to
+    // a different rule on purpose. A full `--frame-inset` there stacks on top of
+    // the space the title row's own controls are already centred in, and the
+    // sum reads as a gap half again as large as the other three edges. So the
+    // card takes a thin margin (`mt-0.5`) and the row above supplies the rest.
+    //
+    // Two quantities are still pinned, and between them they fence both ways it
+    // can go wrong. `mt-0` — the card welded to the underside of the row — is
+    // caught by the first. A restored even frame, which is what someone reading
+    // only the three assertions above would "fix" this to, is caught by the
+    // second.
+    const top = card!.top - frame!.top;
+    expect(top, "the card is not flush with the row above it").toBeGreaterThan(0);
+    expect(
+      top,
+      "…and does not repeat the whole frame under a row that already spaces it",
+    ).toBeLessThan(insets.left);
+
+    // And the row is chrome standing clear above the card, never over it: it is
+    // outside the scrolling card by construction, and nothing it carries may
+    // overlap the sheet below.
+    expect(s.titleBarBox, "the window title row should be on screen").not.toBeNull();
+    expect(s.titleRowContentBottom, "the title row should have controls standing in it").not.toBeNull();
+    expect(
+      s.titleBarBox!.bottom,
+      "the title row ends above the card rather than over it",
+    ).toBeLessThanOrEqual(card!.top);
+    expect(
+      card!.top - s.titleRowContentBottom!,
+      "the controls in the row clear the card's top edge",
+    ).toBeGreaterThan(0);
 
     expect(s.cardRadius).toBeGreaterThanOrEqual(8);
     expect(s.cardBorderWidth).toBeGreaterThan(0);

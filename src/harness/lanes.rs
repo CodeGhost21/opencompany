@@ -88,6 +88,7 @@ fn resolve_acp_engine(
     acp_agents: Option<AcpFactory<'_>>,
     workspace_root: &std::path::Path,
     agent_models: &std::collections::HashMap<String, String>,
+    desks: Vec<(String, String)>,
 ) -> std::result::Result<Arc<dyn RunTurn>, String> {
     // Validation guarantees `acp` is `Some` and `transport` is one of
     // `ACP_TRANSPORTS` on every harness that reaches here — this crate's own
@@ -112,7 +113,8 @@ fn resolve_acp_engine(
     factory
         .build(agent_id, acp.model.as_deref(), agent_models, workspace_root)
         .map(|agent| {
-            Arc::new(crate::harness::acp::run_turn::AcpRunTurn::new(agent)) as Arc<dyn RunTurn>
+            Arc::new(crate::harness::acp::run_turn::AcpRunTurn::new(agent).with_desks(desks))
+                as Arc<dyn RunTurn>
         })
         .map_err(|error| format!("`{agent_id}` could not be started: {error}"))
 }
@@ -126,8 +128,32 @@ fn resolve_acp_engine(
     _acp_agents: Option<AcpFactory<'_>>,
     _workspace_root: &std::path::Path,
     _agent_models: &std::collections::HashMap<String, String>,
+    _desks: Vec<(String, String)>,
 ) -> std::result::Result<Arc<dyn RunTurn>, String> {
     Err(unavailable_reason("acp"))
+}
+
+/// This company's `(desk id, desk name)` pairs, for an engine that has to
+/// canonicalise a chat selector without a store — see
+/// [`AcpRunTurn::session_key`](crate::harness::acp::run_turn).
+fn declared_desks(record: &CompanyRecord) -> Vec<(String, String)> {
+    // Manifest desks **and overlay desks**: a desk created from the console
+    // lives only in `overlay_desks`, and `resolve_desk_id` / `GET .../desks`
+    // both treat it as a routable desk, so leaving it out would mint two ACP
+    // sessions for it under its two spellings — the exact split this snapshot
+    // exists to prevent (codex + coderabbit on #1972).
+    record
+        .manifest
+        .group_chats
+        .iter()
+        .map(|chat| (chat.id.clone(), chat.name.clone()))
+        .chain(
+            record
+                .overlay_desks
+                .iter()
+                .map(|overlay| (overlay.id.clone(), overlay.name.clone())),
+        )
+        .collect()
 }
 
 /// The engines a company's declared harnesses resolve to on this host.
@@ -295,6 +321,7 @@ pub fn build(
             acp_agents,
             &base.workspace_root,
             &agent_models_on(record, &default_harness_id, &default_harness_id),
+            declared_desks(record),
         ) {
             Ok(engine) => Some(engine),
             Err(reason) => {
@@ -326,6 +353,7 @@ pub fn build(
                 acp_agents,
                 &base.workspace_root,
                 &agent_models_on(record, &harness.id, &default_harness_id),
+                declared_desks(record),
             ) {
                 Ok(engine) => lanes.push((harness.id.clone(), engine)),
                 Err(reason) => unavailable.push((harness.id.clone(), reason)),
@@ -348,6 +376,7 @@ pub fn build(
             acp_agents,
             &base.workspace_root,
             &agent_models_on(record, &id, &default_harness_id),
+            declared_desks(record),
         ) {
             Ok(engine) => lanes.push((id, engine)),
             Err(reason) => unavailable.push((id, reason)),
@@ -421,6 +450,39 @@ pub fn company_of(record: &CompanyRecord) -> &CompanyId {
 mod tests {
     use super::*;
     use crate::ports::types::OverlayAgent;
+
+    /// The ACP session-key snapshot carries **every** routable desk.
+    ///
+    /// A desk created from the console lives only in `overlay_desks`, so a
+    /// manifest-only snapshot left it out — and the ACP key then split its two
+    /// spellings into two durable sessions in the external agent, which is the
+    /// context loss the canonicalisation exists to prevent (coderabbit + codex
+    /// on #1972).
+    #[test]
+    fn the_desk_snapshot_includes_console_created_desks() {
+        let mut record = record();
+        record
+            .manifest
+            .group_chats
+            .push(toml::from_str("id = \"growth_desk\"\nname = \"Growth\"").expect("a desk"));
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops_desk".to_string(),
+            name: "Operations".to_string(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+
+        let desks = declared_desks(&record);
+        assert!(
+            desks.contains(&("growth_desk".to_string(), "Growth".to_string())),
+            "the manifest desk: {desks:?}"
+        );
+        assert!(
+            desks.contains(&("ops_desk".to_string(), "Operations".to_string())),
+            "and the console-created one: {desks:?}"
+        );
+    }
 
     /// A two-harness company with a console-created overlay teammate.
     fn record() -> CompanyRecord {

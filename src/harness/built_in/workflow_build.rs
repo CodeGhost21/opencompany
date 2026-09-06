@@ -60,8 +60,8 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde::Deserialize;
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::company::{

@@ -33,13 +33,14 @@ use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::workflow_refs::WorkflowRefQueue;
 use crate::ports::tasks::{
-    COLUMN_PLANNING, COLUMN_TODO, TaskOutput, TaskOutputAction, TaskOutputSource,
-    TaskOutputWorkflow,
+    COLUMN_TODO, TaskOutput, TaskOutputAction, TaskOutputSource, TaskOutputWorkflow,
 };
 use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
-use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
+use crate::ports::{TaskOrigin, TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
-use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, assignment_matches};
+use crate::runtime::cycle::{
+    BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION, SETTLED_WORK_ANNOTATION, THREAD_INDEX_ANNOTATION,
+};
 
 /// One agent turn, abstracted so delegation orchestration never touches the
 /// harness-specific [`HarnessDeps`](crate::harness::HarnessDeps).
@@ -85,16 +86,32 @@ pub struct ChatTarget<'a> {
     /// attribution — the thing `^N` citations are read against — is undercut by
     /// a history that names nobody.
     pub history_seed: bool,
+    /// The journal sequence of the operator message this turn is answering,
+    /// when the turn is answering one at all.
+    ///
+    /// The identity of the turn's own line in the log, which lets a projection
+    /// over that log tell this turn's message apart from every other by
+    /// `stored.seq` rather than by comparing text. Two different messages can
+    /// legitimately share a prefix, so text can only ever be a guess; a seq
+    /// cannot be two events.
+    ///
+    /// `None` on every turn that is not answering a journaled operator message
+    /// — a relay, a delegate's instruction, a dispatched card, a workflow node
+    /// — because those run on prose the model wrote, which no log line
+    /// corresponds to. A consumer falls back to whatever it did before this
+    /// field existed.
+    pub message_seq: Option<EventSeq>,
 }
 
 impl Default for ChatTarget<'_> {
-    /// An unaddressed, unthreaded, **seeded** turn — what every caller had
-    /// before the seed was a knob.
+    /// An unaddressed, unthreaded, **seeded** turn answering no journaled
+    /// message — what every caller had before the seed was a knob.
     fn default() -> Self {
         Self {
             chat_id: None,
             thread_root: None,
             history_seed: true,
+            message_seq: None,
         }
     }
 }
@@ -127,7 +144,18 @@ impl<'a> ChatTarget<'a> {
             chat_id,
             thread_root,
             history_seed: false,
+            ..Self::default()
         }
+    }
+
+    /// Binds this target to the journaled operator message the turn answers.
+    ///
+    /// Separate from the constructors because it is true of exactly one turn
+    /// in a delegation drain — the responder's own — while the conversation
+    /// the target names is shared by every turn in it.
+    pub fn answering(mut self, message_seq: Option<EventSeq>) -> Self {
+        self.message_seq = message_seq;
+        self
     }
 }
 
@@ -166,12 +194,19 @@ pub trait RunTurn: Send + Sync {
     /// [`run_steered`](Self::run_steered). It is *this* method the dispatched
     /// card's own turns pass a sink to, which is what makes the card's trace
     /// durable while the turn runs even though nothing is streamed.
+    ///
+    /// `chat` is the conversation the turn belongs to, which is **not** implied
+    /// by the absence of a stream (issue #1890 I). A dispatched card passes
+    /// [`ChatTarget::default`] and binds to nothing; an approval's re-issued
+    /// call passes the conversation the approval was raised in, so it runs
+    /// against that thread's history rather than whatever was loaded last.
     async fn run_steered_background(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
         control: &SteerControl,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome>;
 
@@ -461,6 +496,7 @@ impl RunTurn for NoTurn {
         _agent_id: &str,
         _message: &str,
         _control: &SteerControl,
+        _chat: ChatTarget<'_>,
         _run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         Err(no_turn_error())
@@ -774,6 +810,14 @@ pub(crate) struct DelegationRunner<'a> {
     /// The channel stays an argument, because every caller has one and it
     /// selects *who answers*. The thread only narrows *what they remember*.
     thread_root: Option<EventSeq>,
+    /// The journal sequence of the operator message this drain is answering.
+    ///
+    /// Reaches only the responder's own turn (see
+    /// [`answering_target`](Self::answering_target)), never the relay or a
+    /// delegate's, because only that one turn is running the very text this seq
+    /// names. `None` on every non-operator path, and on any caller that has not
+    /// been taught to carry it.
+    message_seq: Option<EventSeq>,
     /// The cycle's approval queue, read (never written) to tell whether a turn
     /// this runner drove parked an approval (issue #465).
     ///
@@ -796,6 +840,10 @@ pub(crate) struct DelegationRunner<'a> {
     /// build wires no evaluator — keeps the deterministic answer, which is the
     /// behaviour this had before.
     triage: Option<&'a dyn crate::harness::triage::TriageEscalation>,
+    /// Names the work a card is opened for. `None` — every pre-existing
+    /// constructor, and any company whose build wires no titler — falls back to
+    /// shortening the request, which is what every card was named before.
+    titler: Option<&'a dyn crate::ports::tasks::TitleSummariser>,
     /// Workflows the turn authored in-flight with the inline `create_workflow`
     /// tool (issues #112, #339), read so an operator turn can settle the card it
     /// adopted instead of leaving it in To-do (issue #678).
@@ -833,10 +881,12 @@ impl<'a> DelegationRunner<'a> {
             also_mentioned: Vec::new(),
             reissue_message: None,
             thread_root: None,
+            message_seq: None,
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
             triage: None,
+            titler: None,
         }
     }
 
@@ -885,10 +935,12 @@ impl<'a> DelegationRunner<'a> {
             also_mentioned: Vec::new(),
             reissue_message: None,
             thread_root: None,
+            message_seq: None,
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
             triage: None,
+            titler: None,
         }
     }
 
@@ -930,6 +982,18 @@ impl<'a> DelegationRunner<'a> {
         triage: &'a dyn crate::harness::triage::TriageEscalation,
     ) -> Self {
         self.triage = Some(triage);
+        self
+    }
+
+    /// Wires the pass that names the work a card is opened for.
+    ///
+    /// Without it a card is named by shortening the request, which is what
+    /// every card was named before.
+    pub(crate) fn with_titler(
+        mut self,
+        titler: &'a dyn crate::ports::tasks::TitleSummariser,
+    ) -> Self {
+        self.titler = Some(titler);
         self
     }
 
@@ -1107,11 +1171,33 @@ impl<'a> DelegationRunner<'a> {
         ChatTarget::in_thread(chat_id, self.thread_root)
     }
 
+    /// [`target`](Self::target), plus the identity of the journaled message the
+    /// turn is answering.
+    ///
+    /// Only the responder's own turn gets this. The relay turn runs a prompt
+    /// the orchestrator composed and a delegate runs an instruction the model
+    /// wrote — neither is the operator's line, so claiming that seq for them
+    /// would name someone else's message as their own.
+    fn answering_target(&self, chat_id: Option<&'a str>) -> ChatTarget<'a> {
+        self.target(chat_id).answering(self.message_seq)
+    }
+
     /// Binds this turn to the thread rooted at `root` (#1890) — `None` is the
     /// channel-level conversation, which is what every non-threaded path wants
     /// and therefore never has to say.
     pub(crate) fn in_thread(mut self, root: Option<EventSeq>) -> Self {
         self.thread_root = root;
+        self
+    }
+
+    /// Carries the journal sequence of the operator message this drain answers.
+    ///
+    /// A builder for the same reason [`in_thread`](Self::in_thread) is: optional
+    /// context about the turn, absent on every path that is not a journaled
+    /// operator message, and threading it as an argument would make every
+    /// existing call site restate `None` to say nothing.
+    pub(crate) fn answering(mut self, message_seq: Option<EventSeq>) -> Self {
+        self.message_seq = message_seq;
         self
     }
 
@@ -1217,11 +1303,10 @@ impl<'a> DelegationRunner<'a> {
         // does not make.
         //
         // An escalation can only ever *narrow* the claim, never widen what the
-        // turn may do, and it never mints a card: the title a card opens under
-        // is pinned byte-for-byte between the REST handler and
-        // `chat_handler_card` (issue #463), so a model-authored one would
-        // orphan it. `Work` and `Chatter` therefore both leave the gate where
-        // the abstention left it, and only `Answer` moves it.
+        // turn may do, and it never mints a card: a missed card costs one
+        // follow-up message, a spurious card pollutes the board permanently.
+        // `Work` and `Chatter` therefore both leave the gate where the
+        // abstention left it, and only `Answer` moves it.
         let mut answering = triage.is_answer();
         // Issue #984: the same escalation, read for BOTH of its useful answers.
         //
@@ -1373,7 +1458,7 @@ impl<'a> DelegationRunner<'a> {
         // authored. Run records stay reserved for actual work attempts (#183
         // §4), so this turn mints none — see `TaskOutputSource`.
         let handler_card = match carded_by_handler {
-            true => self.chat_handler_card(message, chat_id).await?,
+            true => self.chat_handler_card().await?,
             false => None,
         };
         // Issue #442, path one: a desk lead or teammate asked DIRECTLY carries
@@ -1481,8 +1566,12 @@ impl<'a> DelegationRunner<'a> {
                 || (chatter && is_pure_small_talk(operator_words(message))));
         let outcome = with_chat_only_hint(
             chat_only,
-            self.run_turn
-                .run(self.company, responder, message, self.target(chat_id)),
+            self.run_turn.run(
+                self.company,
+                responder,
+                message,
+                self.answering_target(chat_id),
+            ),
         )
         .await?;
         let parked = self.approvals_queued().saturating_sub(approvals_before);
@@ -2631,7 +2720,7 @@ impl<'a> DelegationRunner<'a> {
         }
         let card = TaskRecord {
             id: generate_id(),
-            title: card_title(request),
+            title: crate::ports::tasks::mint_task_title(request, None, self.titler).await,
             note: Some(append_note(None, "operator", request)),
             // The agent runs it in this turn, so the board shows it in progress
             // while that happens — the same window `hand_card_over` opens for a
@@ -2640,7 +2729,13 @@ impl<'a> DelegationRunner<'a> {
             priority: "medium".to_string(),
             assignee: assignee.to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: chat_id.map(str::to_string),
+            // Issue #1890 B: the conversation this card was raised in — the
+            // desk, and *which thread* inside it. The runner was bound to the
+            // raising turn's root by `in_thread`, so this is the same
+            // conversation the turn itself answers in, not a second reading of
+            // it. `None` for the thread is the channel-level conversation,
+            // which is what an unthreaded hand-off has always been.
+            origin: TaskOrigin::new(chat_id.map(str::to_string), self.thread_root),
             parent_task_id: None,
             output: None,
             plan: None,
@@ -2649,6 +2744,7 @@ impl<'a> DelegationRunner<'a> {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         tasks.upsert(self.company, &card).await?;
@@ -2774,94 +2870,59 @@ impl<'a> DelegationRunner<'a> {
         self.open_work_card(responder, message, chat_id, ctx).await
     }
 
-    /// Whether a card assigned to `assignee` is assigned to whoever `chat_id`
-    /// addresses (issue #982).
-    ///
-    /// The comparison itself is [`assignment_matches`] — the one comparator on
-    /// this seam — asked twice: once for the key as the console sent it, and
-    /// once for the `dm:<teammate-id>` form with its prefix stripped, which the
-    /// chat route resolves the same way and in the same order.
-    fn addressed_to(&self, chat_id: Option<&str>, assignee: &str) -> bool {
-        let Some(chat) = chat_id else {
-            return false;
-        };
-        assignment_matches(self.record, chat, assignee)
-            || assignee::dm_key(chat)
-                .is_some_and(|key| assignment_matches(self.record, key, assignee))
-    }
-
     /// The card the REST chat handler opened for this message, when it opened
     /// one and it is still on the board (issue #463).
     ///
-    /// Only ever called once [`detect_task_intent`] has already fired, so the
-    /// title it derives is byte-for-byte the one the handler wrote — the handler
-    /// runs the same detector over the same words moments earlier. The match is
-    /// deliberately narrow, and every clause is a property of a card **that
-    /// handler** writes: its landing column, an assignee it is entitled to have,
-    /// and an origin thread that is this one. `list` is newest-first, so the
-    /// first match is the one just written rather than a months-old card that
-    /// happens to share a title.
+    /// Found by the **sequence position of the message itself**
+    /// ([`TaskRecord::origin_message_seq`]), which the handler stamps as it
+    /// writes. One message has one journal position and one card, so this is an
+    /// identity lookup rather than a search.
     ///
-    /// # The assignee clause is no longer "blank" (issue #982)
+    /// # It used to match on the title, and that is why boards read as chat logs
     ///
-    /// It was, and it had to stop being, in the same change that made the
-    /// handler assign the card to the thread it was addressed to. A blank-only
-    /// clause and an assigning handler do not fail loudly together: they stop
-    /// matching, `spawned_task` falls back, the "Card opened" chip silently
-    /// disappears from every carded chat message, and
-    /// `settle_authored_workflow_card` stops running so a workflow the turn
-    /// authored strands its card in To-do. Nothing errors, and the
-    /// duplicate-card guard is keyed on the detector rather than on adoption, so
-    /// there is not even a second card to notice.
+    /// This re-ran the same lexical detector over the same words and compared
+    /// the two titles for byte equality, narrowed by the card's column, its
+    /// assignee and its origin thread. It worked, and it made the headline an
+    /// identity key: any better name for a card broke adoption, so a
+    /// model-authored title was refused outright rather than risk it. That is
+    /// the constraint that kept every card named after the message that opened
+    /// it.
     ///
-    /// What replaces it is the same question one narrower: blank, **or** an
-    /// assignee that is who this message was addressed to, compared with
-    /// [`assignment_matches`] — the comparator the direct-card path already uses
-    /// (issue #176) rather than a second one that could drift. A card assigned to
-    /// somebody *else* is still refused, which is what the clause was protecting.
+    /// The failure mode is also why the coupling had to go rather than be worked
+    /// around. Nothing errors when adoption stops matching — `spawned_task`
+    /// falls back, the "Card opened" chip silently disappears from every carded
+    /// chat message, and `settle_authored_workflow_card` stops running so a
+    /// workflow the turn authored strands its card in To-do. Issues #982 and
+    /// #576 are both that same silence, found twice, after the handler changed
+    /// an assignee and then a column out from under clauses that were reading
+    /// them.
     ///
-    /// The origin clause moved for the same reason and reads the same way: the
-    /// handler now stamps the thread it opened the card from, so `None` (an
-    /// unaddressed message) **or** this very thread is the handler's write, and
-    /// a card carrying somebody else's thread is still not ours to adopt.
+    /// A sequence position has none of that surface: it is stamped by the write
+    /// this looks for, it does not move when the handler changes what column or
+    /// assignee it opens a card under, and it cannot be re-derived wrongly
+    /// because it is not derived at all. It also settles a case title equality
+    /// got wrong on its own terms — two alike-reading messages in one thread are
+    /// two cards, and a newest-first scan adopted whichever came back first.
     ///
-    /// **Two landing columns, not one** (issue #576). The handler opens a
-    /// person's card directly in Planning and a machine's in To-do, so pinning
-    /// this clause to To-do stopped recognising the commonest card of the two —
-    /// and the cost is invisible from here: `spawned_task` falls back, the
-    /// operator bubble reports no card, and the chip tying the reply to the
-    /// board silently disappears while the card itself is created correctly.
-    /// Both columns are named explicitly rather than dropping the clause,
-    /// because the clause is what keeps this from adopting a card the operator
-    /// dragged somewhere; a card resting anywhere else was moved by somebody.
-    ///
-    /// `None` when no store is wired, or when nothing matches — which is the
-    /// honest answer for a handler write that failed (it is best-effort there)
-    /// and for every non-REST caller of this seam, none of which have a chat
-    /// handler in front of them. Callers must not read `None` as "the handler
-    /// did not fire": the stand-down is keyed on the detector, not on this.
-    async fn chat_handler_card(
-        &self,
-        message: &str,
-        chat_id: Option<&str>,
-    ) -> Result<Option<String>> {
+    /// `None` when no store is wired, when the turn is not answering a journaled
+    /// message, or when nothing matches — the honest answer for a handler write
+    /// that failed (it is best-effort there), for a card written before this
+    /// field existed, and for every non-REST caller of this seam, none of which
+    /// have a chat handler in front of them. Callers must not read `None` as
+    /// "the handler did not fire": the stand-down is keyed on the detector, not
+    /// on this.
+    async fn chat_handler_card(&self) -> Result<Option<String>> {
         let Some(tasks) = self.tasks else {
             return Ok(None);
         };
-        let Some(title) = crate::company::task_intent::detect_task_intent(operator_words(message))
-        else {
+        let Some(seq) = self.message_seq else {
             return Ok(None);
         };
         Ok(tasks
             .list(self.company)
             .await?
             .into_iter()
-            .find(|card| {
-                card.title == title
-                    && (card.column == COLUMN_TODO || card.column == COLUMN_PLANNING)
-                    && (card.assignee.is_empty() || self.addressed_to(chat_id, &card.assignee))
-                    && (card.origin_chat_id.is_none() || card.origin_chat_id.as_deref() == chat_id)
-            })
+            .find(|card| card.origin_message_seq == Some(seq))
             .map(|card| card.id))
     }
 
@@ -2996,8 +3057,9 @@ impl<'a> DelegationRunner<'a> {
                 };
                 let card = TaskRecord {
                     id: generate_id(),
-                    title,
+                    title: crate::ports::tasks::TaskTitle::system(&title),
                     note,
+                    origin_message_seq: None,
                     column: COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
                     assignee: assignee.unwrap_or_default(),
@@ -3012,7 +3074,13 @@ impl<'a> DelegationRunner<'a> {
                     // *scheduled* the workflow hours earlier would make the card
                     // answer into a conversation the operator has left. The run
                     // reference below is the provenance instead.
-                    origin_chat_id: chat_id.map(str::to_string),
+                    // Issue #1890 B: which thread inside it, too — the root the
+                    // runner was bound to by `in_thread`, so a card a threaded
+                    // turn spawns settles back into that thread rather than flat
+                    // in the channel. On the workflow path the whole origin is
+                    // `None` for the reason above: no conversation is behind a
+                    // run, so there is no thread inside one either.
+                    origin: TaskOrigin::new(chat_id.map(str::to_string), self.thread_root),
                     // Lineage (#185): the dispatched card whose turn queued this
                     // one, when the drain is running inside a task
                     // (`for_task`) — since #204 a dispatched turn drains the
@@ -3418,7 +3486,7 @@ card is still with {delegator}."
 /// Appends a responder-attributed result block to a card's note, preserving any
 /// prior note above it (issue #186). Mirrors `harness::brain::append_result`,
 /// kept local to the seam so the lifecycle arms never reach back into the brain.
-fn append_note(prev: Option<&str>, responder: &str, body: &str) -> String {
+pub(crate) fn append_note(prev: Option<&str>, responder: &str, body: &str) -> String {
     let block = format!("[{responder}] {body}");
     match prev.filter(|p| !p.is_empty()) {
         Some(p) => format!("{p}\n\n{block}"),
@@ -3596,6 +3664,13 @@ fn work_words(text: &str) -> Vec<String> {
 /// work verbs, so every `workflow` message would read as substantial no matter
 /// what the operator actually typed.
 ///
+/// Issue #1890 C added a fourth: [`SETTLED_WORK_ANNOTATION`], briefing the turn
+/// on work raised in this conversation that has since finished. Missing it would
+/// be the "thanks!" bug a third time, and with a nastier loop than #176's: the
+/// settled briefing grows as cards *finish*, so every completed card would make
+/// the next message likelier to open one, which would in time finish and
+/// lengthen the briefing again.
+///
 /// Issue #1682 added a third: the attachment markers
 /// [`with_attachment_refs`](crate::brain::medulla::effects::with_attachment_refs)
 /// appends when a message carries files. The harness brain feeds the agent
@@ -3606,6 +3681,8 @@ pub(crate) fn operator_words(message: &str) -> &str {
     let cut = [
         message.find(OPEN_WORK_ANNOTATION),
         message.find(BUILDER_ANNOTATION),
+        message.find(SETTLED_WORK_ANNOTATION),
+        message.find(THREAD_INDEX_ANNOTATION),
         message.find(crate::brain::medulla::effects::ATTACHMENT_MARKER_PREFIX),
     ]
     .into_iter()
@@ -3707,6 +3784,37 @@ tokio::task_local! {
     pub(crate) static CHAT_ONLY_TURN: bool;
 }
 
+tokio::task_local! {
+    /// The conversation the current turn is answering in (issue #1890 F).
+    ///
+    /// A task-local for the reason [`CHAT_ONLY_TURN`] is one: a tool's belt is
+    /// built once per agent and a turn's conversation changes every message, so
+    /// the tool cannot be handed it at construction. This is the ambient fact a
+    /// tool reads at call time.
+    ///
+    /// It carries the **channel**, which is what scopes `read_thread`: a tool
+    /// able to read any thread in any channel would reintroduce through the
+    /// back door the leak #1890 A closed at the seed.
+    static TURN_CONVERSATION: Option<String>;
+}
+
+/// Run `fut` with the current turn's channel set (issue #1890 F).
+pub(crate) async fn with_turn_conversation<F: std::future::Future>(
+    chat_id: Option<String>,
+    fut: F,
+) -> F::Output {
+    TURN_CONVERSATION.scope(chat_id, fut).await
+}
+
+/// The channel the current turn is answering in, or `None` outside one — a
+/// dispatched card, a workflow node, or any path that never set it.
+///
+/// `None` is a refusal for `read_thread` rather than a wildcard: a turn with no
+/// conversation has no threads it is entitled to read.
+pub(crate) fn turn_conversation() -> Option<String> {
+    TURN_CONVERSATION.try_with(Clone::clone).ok().flatten()
+}
+
 /// Run `fut` with the [`CHAT_ONLY_TURN`] hint set to `chat_only`.
 pub(crate) async fn with_chat_only_hint<F: std::future::Future>(
     chat_only: bool,
@@ -3722,39 +3830,18 @@ pub(crate) fn is_chat_only_turn() -> bool {
     CHAT_ONLY_TURN.try_with(|v| *v).unwrap_or(false)
 }
 
-/// How many characters of a request survive into the card's title.
-const TITLE_CHARS: usize = 80;
-
-/// A one-line card title from the request that opened it.
-///
-/// Collapses whitespace, then truncates on a **character** boundary — never a
-/// byte one — and prefers the last whole word so a title never breaks mid-word.
-/// The ellipsis is budgeted inside [`TITLE_CHARS`], so the result is never
-/// longer than the cap it advertises.
-fn card_title(text: &str) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= TITLE_CHARS {
-        return one_line;
-    }
-    let head: String = one_line.chars().take(TITLE_CHARS - 1).collect();
-    let head = match head.rsplit_once(' ') {
-        Some((whole, _)) if !whole.is_empty() => whole,
-        _ => head.as_str(),
-    };
-    format!("{head}…")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
 
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
     use crate::ports::TaskStore;
     use crate::ports::tasks::{
-        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO,
-        TaskOutputSource,
+        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
+        COLUMN_TODO, TaskOutputSource,
     };
     use crate::ports::types::LedgerEntry;
     use crate::store::FsOps;
@@ -4056,6 +4143,84 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         assert_eq!(operator_words(&reversed), "ship the audit");
     }
 
+    /// Issue #1890 C: nor is the settled-work briefing.
+    ///
+    /// The same trap a third time, with the nastiest loop of the three. #176's
+    /// briefing grew as cards were *opened*; this one grows as cards **finish**,
+    /// so an unstripped message would open a card on every "thanks!" in a
+    /// productive channel, and each of those cards would in time finish and
+    /// lengthen the briefing again. Built from the shared constant, so rewording
+    /// the briefing fails this test rather than silently restoring the bug.
+    #[test]
+    fn the_cycles_settled_work_briefing_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{SETTLED_WORK_ANNOTATION} has finished — this is where each card stands \
+now, which may differ from the marker in the transcript):\n- Read the pricing repository and \
+write a summary of its module layout — finished → In review\n- Draft the investor update for \
+the quarter — finished → To-do (the dispatch failed: provider timeout)\n]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped briefing really does read as work — which is why the \
+             strip has to happen, not merely why it is tidy"
+        );
+    }
+
+    /// All three briefings can land on one message — a desk-addressed
+    /// `workflow` request in a conversation that has raised work before gets
+    /// every one of them. The cut is a `min` over all four markers, so whichever
+    /// lands first ends the operator's words.
+    #[test]
+    fn operator_words_cuts_at_the_first_of_every_briefing() {
+        let all = format!(
+            "ship the audit{OPEN_WORK_ANNOTATION} …]{BUILDER_ANNOTATION} …]\
+{SETTLED_WORK_ANNOTATION} …]{THREAD_INDEX_ANNOTATION} …]"
+        );
+        assert_eq!(operator_words(&all), "ship the audit");
+        // …and in every other order, since nothing pins which is appended
+        // first and the cut is a `min` rather than a chain.
+        for reordered in [
+            format!("ship the audit{SETTLED_WORK_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]"),
+            format!("ship the audit{THREAD_INDEX_ANNOTATION} …]{BUILDER_ANNOTATION} …]"),
+            format!("ship the audit{BUILDER_ANNOTATION} …]{THREAD_INDEX_ANNOTATION} …]"),
+        ] {
+            assert_eq!(operator_words(&reordered), "ship the audit");
+        }
+    }
+
+    /// Issue #1890 E: nor is the thread index.
+    ///
+    /// The fourth appended block, and the trap a fourth time. This one is a
+    /// list of other people's questions — the most work-shaped prose any of
+    /// the four carries, since every line is literally something an operator
+    /// asked for. Unstripped, a channel with a few live threads would open a
+    /// card on every "thanks!", and each card would settle and add a
+    /// `finished → …` line to the index that opened the next one.
+    #[test]
+    fn the_cycles_thread_index_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{THREAD_INDEX_ANNOTATION}, for reference only — do NOT read or answer from \
+them unless this message explicitly refers to one, and if a reference could mean more than one, \
+ask which):\n- \"draft the launch email\" — 4 replies\n- \"build the migration plan\" — \
+finished → In review\n]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped index really does read as work — it is a list of \
+             requests — which is why the strip has to happen"
+        );
+    }
+
     /// An attachment marker rides the same composed text the agent sees, and
     /// the triage must not score it: the marker's extracted text is a long
     /// block of file-derived prose, so "thanks" beside a file would otherwise
@@ -4076,10 +4241,16 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
     #[test]
     fn a_card_title_is_bounded_and_utf8_safe() {
         let long = "рынок ".repeat(60);
-        let title = card_title(&long);
-        assert!(title.chars().count() <= TITLE_CHARS, "{title}");
+        let title = crate::ports::tasks::TaskTitle::truncated(&long);
+        assert!(
+            title.chars().count() <= crate::ports::tasks::TASK_TITLE_MAX_CHARS,
+            "{title}"
+        );
         assert!(title.ends_with('…'), "{title}");
-        assert_eq!(card_title("  keep   it   short  "), "keep it short");
+        assert_eq!(
+            crate::ports::tasks::TaskTitle::truncated("  keep   it   short  "),
+            "keep it short"
+        );
     }
 
     // ── harness ─────────────────────────────────────────────────────────────
@@ -4464,6 +4635,7 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             agent_id: &str,
             message: &str,
             control: &SteerControl,
+            _chat: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             Ok(self.next(agent_id, message, Some(control)).await)
@@ -4783,13 +4955,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::new();
         let card = TaskRecord {
             id: "card-1".to_string(),
-            title: "Draft the launch plan".to_string(),
+            title: TaskTitle::authored("Draft the launch plan"),
             note: Some("[engineer] drafted".to_string()),
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
             assignee: "engineer".to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -4798,6 +4970,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         fx.tasks
@@ -4894,7 +5067,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the card belongs to the delegate"
         );
         assert_eq!(card.column, COLUMN_IN_REVIEW, "it settles for a person");
-        assert_eq!(card.origin_chat_id.as_deref(), Some("general"));
+        assert_eq!(card.origin_chat_id(), Some("general"));
         assert!(
             card.note
                 .as_deref()
@@ -5039,8 +5212,77 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(cards[0].assignee, "engineer");
         assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
-        assert_eq!(cards[0].origin_chat_id.as_deref(), Some("eng_desk"));
+        assert_eq!(cards[0].origin_chat_id(), Some("eng_desk"));
+        assert_eq!(
+            cards[0].origin_parent(),
+            None,
+            "an unthreaded turn raises a card on the channel-level conversation",
+        );
         assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// Issue #1890 B — the card records **which thread** asked, not only which
+    /// channel.
+    ///
+    /// Without this the settle marker lands flat in the channel, so an operator
+    /// who asked inside a thread watches their own thread never report the work
+    /// finishing. The runner is already bound to the raising turn's root (A's
+    /// `in_thread` builder); this is that root reaching the board.
+    #[tokio::test]
+    async fn a_card_raised_inside_a_thread_records_its_root() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
+        fx.runner(&turns)
+            .in_thread(Some(EventSeq::new(41)))
+            .handle_operator_message(
+                "engineer",
+                "read the pricing repo and write modules.md",
+                Some("eng_desk"),
+            )
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(
+            cards[0].origin_chat_id(),
+            Some("eng_desk"),
+            "the channel half is unchanged",
+        );
+        assert_eq!(
+            cards[0].origin_parent(),
+            Some(EventSeq::new(41)),
+            "and the thread half is the root the turn was bound to",
+        );
+    }
+
+    /// The same, for the card a `spawn_task` queues rather than the one a
+    /// hand-off opens. Two card-raising sites, one rule — and they are far
+    /// enough apart in this file that only a test keeps them agreeing.
+    #[tokio::test]
+    async fn a_spawned_card_records_the_thread_that_queued_it() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "opening a card",
+                vec![Delegation::SpawnTask {
+                    title: "write the migration plan".to_string(),
+                    note: None,
+                    assignee: Some("engineer".to_string()),
+                }],
+            )],
+        );
+        fx.runner(&turns)
+            .in_thread(Some(EventSeq::new(41)))
+            .handle_operator_message("chief", "open a card for the migration", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].origin_chat_id(), Some("general"));
+        assert_eq!(cards[0].origin_parent(), Some(EventSeq::new(41)));
     }
 
     /// **Issue #984, the reported probe.** The message that opened a card on
@@ -5638,16 +5880,27 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// A card standing in for the one the REST chat handler opened (#463), in
     /// the column it landed in — To-do for a machine's card, Planning for a
     /// person's (issue #576).
+    /// The journal position of the operator message a seeded handler card was
+    /// opened for.
+    ///
+    /// Adoption keys on this alone, so a fixture that seeds a card without it is
+    /// a card no turn can claim — which is the point: the runner must be told
+    /// which message it is answering (`.answering(Some(HANDLER_SEQ))`) exactly
+    /// as the chat drain tells it in production.
+    fn handler_seq() -> EventSeq {
+        EventSeq::new(41)
+    }
+
     fn handler_card_in(title: String, column: &str) -> TaskRecord {
         TaskRecord {
             id: "t-handler".to_string(),
-            title,
+            title: TaskTitle::authored(&title),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -5656,8 +5909,190 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: Some(handler_seq()),
             bounced: None,
         }
+    }
+
+    /// A titling pass that answers with one canned name, and records what it
+    /// was asked to name.
+    struct ScriptedTitler {
+        title: &'static str,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedTitler {
+        fn new(title: &'static str) -> Self {
+            Self {
+                title,
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().expect("asked").clone()
+        }
+    }
+
+    #[async_trait]
+    impl crate::ports::tasks::TitleSummariser for ScriptedTitler {
+        async fn title(&self, request: &str) -> Option<TaskTitle> {
+            self.asked.lock().expect("asked").push(request.to_string());
+            TaskTitle::summarised(self.title)
+        }
+    }
+
+    /// The defect, at the seam that produced it: a card opened for a rambling
+    /// ask is named after the **work**, not after the message.
+    ///
+    /// The assertion that matters is the negative one. A card titled
+    /// `hey can you take a look at the pricing page, I think the tiers are…` is
+    /// a prefix of the request wearing an ellipsis, and that is what a board of
+    /// them read as — a chat log. Asserting only the expected string would still
+    /// pass if the title were an excerpt that happened to match.
+    #[tokio::test]
+    async fn a_card_is_named_after_the_work_not_the_message_that_asked_for_it() {
+        let rambling = "hey can you take a look at the pricing page, I think the tiers are \
+                        confusing and we should probably reword the middle one";
+        let fx = Fixture::new();
+        let titler = ScriptedTitler::new("Reword the middle pricing tier");
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .with_titler(&titler)
+            .handle_operator_message("engineer", rambling, Some("engineer"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+        assert_eq!(cards[0].title, "Reword the middle pricing tier");
+        assert!(
+            !rambling.starts_with(cards[0].title.trim_end_matches('…')),
+            "the headline is still an excerpt of the request: {}",
+            cards[0].title
+        );
+        // The full ask is not lost — it moved to where the detail belongs.
+        assert!(
+            cards[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("the tiers are confusing")),
+            "the operator's words must survive on the card: {:?}",
+            cards[0].note
+        );
+        // The pass saw the operator's words, not the open-work briefing the
+        // cycle appends to a desk-addressed message.
+        assert_eq!(titler.asked(), vec![rambling.to_string()]);
+    }
+
+    /// No titler wired — an offline company, a default build — still opens the
+    /// card, named the way every card was named before.
+    #[tokio::test]
+    async fn without_a_titler_a_card_is_still_opened_and_still_named() {
+        // The same message the test above names semantically — one the lexical
+        // layer does not recognise, so the direct-card path is the one that
+        // opens it rather than standing down for the chat handler.
+        let request = "hey can you take a look at the pricing page, I think the tiers are \
+                       confusing and we should probably reword the middle one";
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+        fx.runner(&turns)
+            .handle_operator_message("engineer", request, Some("engineer"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+        assert_eq!(
+            cards[0].title,
+            crate::ports::tasks::TaskTitle::truncated(request)
+        );
+        assert!(!cards[0].title.is_empty());
+    }
+
+    /// The coupling this change exists to break: the handler's card is adopted
+    /// even when its headline bears **no relation** to the message.
+    ///
+    /// Adoption used to re-derive the title lexically and match it byte-for-byte,
+    /// so this card — named the way a titling pass names one — was invisible to
+    /// it. That is the whole reason a model-authored title could not ship: the
+    /// failure is silent, and it costs the "Card opened" chip and the workflow
+    /// settle rather than an error.
+    #[tokio::test]
+    async fn a_handler_card_is_adopted_by_its_message_not_by_its_title() {
+        let imperative = "draft the launch plan for next quarter";
+        let fx = Fixture::new();
+        let mut handler =
+            handler_card_in("Reword the middle pricing tier".to_string(), COLUMN_TODO);
+        handler.id = "handler-card".to_string();
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .answering(Some(handler_seq()))
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+        assert_eq!(
+            turn.spawned_task.as_deref(),
+            Some("handler-card"),
+            "a card whose title is a NAME is still this message's card"
+        );
+    }
+
+    /// Two alike-reading messages in one thread are two cards, and a turn
+    /// adopts its **own** — even when that is not the newest one on the board.
+    ///
+    /// Title equality could not tell them apart: both cards carry the headline
+    /// the old key derived from the message, so the matcher had two equally good
+    /// candidates and took the first the store returned. `list` is newest-first,
+    /// so it took the *later* card — and a person who asks twice in one thread
+    /// then watches their first ask settle the second ask's card.
+    ///
+    /// The fixture puts the right answer in the older card deliberately. With
+    /// both cards equally titled and the newer one wrong, only an identity that
+    /// names the message can pick correctly.
+    #[tokio::test]
+    async fn a_turn_adopts_its_own_card_not_the_newest_alike_one() {
+        let imperative = "draft the launch plan for next quarter";
+        let derived = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        // The card this turn's message opened — and the OLDER of the two.
+        for (id, seq, updated) in [
+            ("card-mine", 41u64, 1_000u64),
+            ("card-later", 77u64, 2_000u64),
+        ] {
+            let mut card = handler_card_in(derived.clone(), COLUMN_TODO);
+            card.id = id.to_string();
+            card.origin_message_seq = Some(EventSeq::new(seq));
+            card.updated_at_millis = updated;
+            TaskStore::upsert(&*fx.tasks, &fx.record.id, &card)
+                .await
+                .expect("seed a handler card");
+        }
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .answering(Some(EventSeq::new(41)))
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turn.spawned_task.as_deref(),
+            Some("card-mine"),
+            "the turn must adopt the card opened for ITS message, not the newest alike one"
+        );
     }
 
     fn authored(workflow_id: &str) -> TaskOutputWorkflow {
@@ -5691,6 +6126,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
@@ -5739,6 +6175,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
@@ -5795,6 +6232,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
@@ -5857,6 +6295,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             )],
         );
         fx.runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("chief", imperative, Some("general"))
             .await
             .expect("operator message handled");
@@ -5990,13 +6429,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "handler-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6005,6 +6444,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: Some(handler_seq()),
                     bounced: None,
                 },
             )
@@ -6021,6 +6461,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
         let turn = fx
             .runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
@@ -6056,13 +6497,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "handler-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_PLANNING.to_string(),
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6071,6 +6512,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: Some(handler_seq()),
                     bounced: None,
                 },
             )
@@ -6080,6 +6522,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("chief", imperative, None)
             .await
             .expect("operator message handled");
@@ -6113,13 +6556,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "handler-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_PLANNING.to_string(),
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6128,6 +6571,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: Some(handler_seq()),
                     bounced: None,
                 },
             )
@@ -6137,6 +6581,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("engineer", imperative, Some("engineer"))
             .await
             .expect("operator message handled");
@@ -6163,13 +6608,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "handler-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_PLANNING.to_string(),
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6178,6 +6623,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: Some(handler_seq()),
                     bounced: None,
                 },
             )
@@ -6187,6 +6633,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("engineer", imperative, Some("dm:engineer"))
             .await
             .expect("operator message handled");
@@ -6209,13 +6656,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "handler-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_PLANNING.to_string(),
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: Some("dm:engineer".to_string()),
+                    origin: TaskOrigin::new(Some("dm:engineer".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6224,6 +6671,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: Some(handler_seq()),
                     bounced: None,
                 },
             )
@@ -6233,11 +6681,72 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
         let turn = fx
             .runner(&turns)
+            .answering(Some(handler_seq()))
             .handle_operator_message("engineer", imperative, Some("dm:engineer"))
             .await
             .expect("operator message handled");
 
         assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
+    }
+
+    /// …nor is one from a different **thread of the same desk**, which the
+    /// desk-only clause did not hold.
+    ///
+    /// The desk matched, so a same-titled card raised in another thread was
+    /// adopted and settled by this turn: one thread received an answer it never
+    /// asked for while the other's card moved under it. That is #1890 B's split
+    /// reached from the other side — the conversation a card belongs to read as
+    /// a desk when it is a desk *and a thread* (coderabbit on #1982).
+    #[tokio::test]
+    async fn a_handler_card_from_another_thread_of_the_same_desk_is_not_adopted() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "another-threads-card".to_string(),
+                    title: TaskTitle::authored(&title),
+                    note: None,
+                    column: COLUMN_PLANNING.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: now_millis(),
+                    // The same desk this message is addressed to — and a thread
+                    // inside it that this message is not in.
+                    origin: TaskOrigin::new(
+                        Some("dm:engineer".to_string()),
+                        Some(crate::ports::types::EventSeq::new(41)),
+                    ),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .expect("seed the card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", imperative, Some("dm:engineer"))
+            .await
+            .expect("operator message handled");
+
+        assert_ne!(
+            turn.spawned_task.as_deref(),
+            Some("another-threads-card"),
+            "a card from another thread of this desk is not this message's card",
+        );
     }
 
     /// …and a card opened from a *different* conversation is still not ours,
@@ -6253,13 +6762,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "another-threads-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_PLANNING.to_string(),
                     priority: "medium".to_string(),
                     assignee: "".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: Some("eng_desk".to_string()),
+                    origin: TaskOrigin::new(Some("eng_desk".to_string()), None),
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6268,6 +6777,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -6301,13 +6811,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "someone-elses-card".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_PLANNING.to_string(),
                     priority: "medium".to_string(),
                     assignee: "engineer".to_string(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6316,6 +6826,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -6349,13 +6860,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 &fx.record.id,
                 &TaskRecord {
                     id: "moved-on".to_string(),
-                    title,
+                    title: TaskTitle::authored(&title),
                     note: None,
                     column: COLUMN_IN_PROGRESS.to_string(),
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: now_millis(),
-                    origin_chat_id: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -6364,6 +6875,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -8401,7 +8913,12 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "the member's own turn gets the full per-turn cap, and no more"
         );
         // Three follow-up cards from the member, plus the hand-off's own card.
-        let mut titles: Vec<String> = fx.cards().await.into_iter().map(|c| c.title).collect();
+        let mut titles: Vec<String> = fx
+            .cards()
+            .await
+            .into_iter()
+            .map(|c| c.title.to_string())
+            .collect();
         titles.sort();
         assert_eq!(titles.len(), 4, "{titles:?}");
         assert!(
@@ -8505,13 +9022,13 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let fx = Fixture::nested();
         let mut card = TaskRecord {
             id: "card-1".to_string(),
-            title: "Ship the API".to_string(),
+            title: TaskTitle::authored("Ship the API"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: "chief".to_string(),
             updated_at_millis: now_millis(),
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -8520,6 +9037,7 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
         fx.tasks.upsert(&fx.record.id, &card).await.expect("seed");

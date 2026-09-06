@@ -123,6 +123,21 @@ pub trait Brain: Send + Sync {
     fn cognition(&self) -> Cognition {
         Cognition::default()
     }
+
+    /// The pass that names the work a card is opened for, when this brain has a
+    /// model to name it with.
+    ///
+    /// On the [`Brain`] seam rather than reached for directly because three of
+    /// the four card-opening paths compile without the harness. They still need
+    /// a title, and this is the only handle they all hold.
+    ///
+    /// The default is `None`, which is every brain that is not the harness: an
+    /// echo brain has no model, and
+    /// [`mint_task_title`](crate::ports::tasks::mint_task_title) falls back to
+    /// shortening the request — exactly what the default build has always done.
+    fn titler(&self) -> Option<&dyn crate::ports::tasks::TitleSummariser> {
+        None
+    }
 }
 
 /// Callbacks the brain makes into the host mid-cycle.

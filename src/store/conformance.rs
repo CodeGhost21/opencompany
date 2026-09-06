@@ -40,7 +40,7 @@ use crate::ports::run_output::{
 use crate::ports::sessions::{SessionKind, SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
-use crate::ports::tasks::{TaskRecord, TaskStore};
+use crate::ports::tasks::{TaskOrigin, TaskRecord, TaskStore, TaskTitle};
 use crate::ports::types::{
     Attachment, ChunkAddr, ChunkMeta, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace,
     ContextChunk, EventSeq, LedgerEntry, SecretValue, TemplateProvenance,
@@ -930,6 +930,31 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
         events.read_before(&id, None, 0).await.unwrap().is_empty(),
         "a zero limit never reads a page"
     );
+
+    // Issue #1890 G. `usize::MAX` is the port's "no limit" sentinel, and the
+    // one input a backend is most likely to get wrong while looking correct:
+    // an implementation that reserves against the limit allocates 2^64 slots,
+    // and one that reads from the end must not treat it as a stopping count.
+    // Every caller of the unbounded form is a full-history reader, so a page
+    // silently short here is a reader silently missing history.
+    let all = events.read_before(&id, None, usize::MAX).await.unwrap();
+    assert_eq!(
+        all.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[3], seqs[2], seqs[1], seqs[0]],
+        "an unlimited page is the whole log, newest-first"
+    );
+    let unbounded_before = events
+        .read_before(&id, Some(seqs[2]), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        unbounded_before
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![seqs[1], seqs[0]],
+        "…and still stops at the cursor"
+    );
 }
 
 /// Asserts the [`EventLog`] retention contract (issue #275): the default
@@ -953,6 +978,7 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
         run_id: format!("run-{n}"),
         scheduled: false,
         started_by: None,
+        resume_semantic: None,
     };
     let audit = |n: u64| CompanyEvent::LifecycleChanged {
         from: "running".to_string(),
@@ -1551,13 +1577,13 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     let beta = CompanyId::new("beta");
     let task = |id: &str, col: &str, at: u64| TaskRecord {
         id: id.to_string(),
-        title: format!("title {id}"),
+        title: TaskTitle::authored(&format!("title {id}")),
         note: Some(format!("note {id}")),
         column: col.to_string(),
         priority: "medium".to_string(),
         assignee: "Strategy desk".to_string(),
         updated_at_millis: at,
-        origin_chat_id: None,
+        origin: None,
         parent_task_id: None,
         output: None,
         plan: None,
@@ -1566,6 +1592,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     };
 
@@ -1602,7 +1629,10 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     // bounced marker, output lineage, or workflow proposal without failing.
     let populated = TaskRecord {
         note: Some("retry after the transport failed".to_string()),
-        origin_chat_id: Some("chat-1".to_string()),
+        origin: TaskOrigin::new(
+            Some("chat-1".to_string()),
+            Some(crate::ports::EventSeq::new(41)),
+        ),
         parent_task_id: Some("parent-1".to_string()),
         output: Some(crate::ports::tasks::TaskOutput {
             source: crate::ports::tasks::TaskOutputSource::Run {

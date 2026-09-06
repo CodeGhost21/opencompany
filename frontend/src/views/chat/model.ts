@@ -17,6 +17,7 @@ import {
   type Desk,
 } from "@/lib/desks";
 import { initials as nameInitials, type TeamMember } from "@/lib/team";
+import type { TaskStatus } from "@/api/tasks";
 
 /**
  * A host desk (`GET .../desks`), shaped into the console's `Desk`. The host
@@ -30,6 +31,176 @@ import { initials as nameInitials, type TeamMember } from "@/lib/team";
  * company declared. Dropping them here is what made every channel show the
  * whole company (issue #369).
  */
+/**
+ * The id of the most recent system settle pill carrying each `taskId`, last
+ * occurrence wins.
+ *
+ * Shared by {@link buildTimeline} (which stamps `isLatestSettlePill` on every
+ * row) and {@link reviewCardIdForThread} (which must apply the identical
+ * latest-pill gate to a reply anchor, not just to the row's Approve button) —
+ * one definition of "latest" for both surfaces.
+ */
+function latestSettlePillIdByTaskId(messages: readonly ChatMessage[]): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const m of messages) {
+    if (m.from === "system" && m.taskId !== undefined) latest.set(m.taskId, m.id);
+  }
+  return latest;
+}
+
+/**
+ * The in-review dispatch card a chat thread is reviewing, or `undefined` when
+ * `parent` is not a review surface.
+ *
+ * A parent is a review surface when it is the card's settle pill — a system
+ * marker carrying its `taskId` — or the relay bubble that followed it: the
+ * pill's *first* company line with no `taskId`, mirroring the backend's
+ * `is_relay_bubble_for`. A later, ordinary company reply is not a review
+ * surface even though it has the same shape. Either way the card must still
+ * be in `in_review`; one already approved or re-running is no longer open
+ * for review.
+ *
+ * A card that finished, was revised, and is `in_review` again mints a NEW
+ * settle pill while the old one stays in history under the same `taskId`.
+ * Only the newest pill (or its relay) is a live review surface — the same
+ * {@link latestSettlePillIdByTaskId} gate {@link buildTimeline} uses for the
+ * Approve control — so opening an old pill's thread and replying there does
+ * not silently apply feedback to, and re-dispatch, the latest attempt.
+ */
+export function reviewCardIdForThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): string | undefined {
+  const inReview = (taskId: string | undefined): taskId is string =>
+    taskId !== undefined && statusByTaskId[taskId]?.column === "in_review";
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
+  const isLatestPill = (pill: ChatMessage): boolean =>
+    pill.taskId !== undefined && latestPillIdByTaskId.get(pill.taskId) === pill.id;
+  if (parent.from === "system") {
+    return inReview(parent.taskId) && isLatestPill(parent) ? parent.taskId : undefined;
+  }
+  if (parent.from !== "company" || parent.taskId) return undefined;
+  const index = messages.findIndex((m) => m.id === parent.id);
+  if (index < 0) return undefined;
+  for (let i = index - 1; i >= 0; i--) {
+    const prior = messages[i];
+    if (prior.from === "company" && !prior.taskId) return undefined;
+    if (prior.from !== "system" || !prior.taskId) continue;
+    return inReview(prior.taskId) && isLatestPill(prior) ? prior.taskId : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Every distinct in-review card a thread anchors to, as `{taskId, anchorId}`
+ * pairs — one entry per card, newest-checked-first: `parent` itself, then
+ * `replies` from most to least recent.
+ *
+ * A thread usually anchors at most one card, but a second can be dispatched
+ * from inside it before the first is settled (Codex #3906594069), leaving
+ * both live in the same thread at once. Each stays its own entry here —
+ * {@link reviewCardIdForThread}'s stale-pill gate already keeps a superseded
+ * pass of the SAME card out of this list, so only genuinely distinct cards
+ * collect, never two anchors for one taskId.
+ */
+export function reviewAnchorsForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string }[] {
+  const seen = new Set<string>();
+  const anchors: { taskId: string; anchorId: string }[] = [];
+  const candidates: readonly ChatMessage[] = [parent, ...[...replies].reverse()];
+  for (const candidate of candidates) {
+    const taskId = reviewCardIdForThread(candidate, messages, statusByTaskId);
+    if (taskId === undefined || seen.has(taskId)) continue;
+    seen.add(taskId);
+    anchors.push({ taskId, anchorId: candidate.id });
+  }
+  return anchors;
+}
+
+/**
+ * Where a thread's review feedback should be anchored, or `undefined` when
+ * the thread is not reviewing anything.
+ *
+ * The newest of {@link reviewAnchorsForThread}'s cards — the thread's one
+ * composer can only ever target a single card with a typed reply, so when
+ * more than one is live this is the one it targets. `parent` itself is the
+ * review surface for a thread opened directly on a settle pill or its relay.
+ * But when the card that produced the pill was itself sent inside an
+ * existing thread, the pill and its relay land as replies under that
+ * thread's own root — `parent` is neither of them, so
+ * {@link reviewCardIdForThread} on `parent` alone finds nothing. Falls back
+ * to scanning `replies` (newest first) for the review surface among them,
+ * and anchors there instead.
+ */
+export function reviewAnchorForThread(
+  parent: ChatMessage,
+  replies: readonly ChatMessage[],
+  messages: readonly ChatMessage[],
+  statusByTaskId: Readonly<Record<string, TaskStatus>>,
+): { taskId: string; anchorId: string } | undefined {
+  return reviewAnchorsForThread(parent, replies, messages, statusByTaskId)[0];
+}
+
+/**
+ * Whether `taskId`'s Approve/Revise click should go out right now.
+ *
+ * `reviewingCardIds` is keyed per card, not a single global slot — since
+ * {@link reviewAnchorsForThread} (`a99b39e87`) made every distinct in-review
+ * card in a thread independently actionable, a click on one card's control
+ * must not be silently dropped just because a DIFFERENT card's verdict is
+ * still in flight (Codex #3906779123). Only a click repeated on the SAME
+ * card while its own verdict is outstanding is refused. The host is safe to
+ * take both at once: `runtime.task_writes` (`3ab934918`) serializes review
+ * verdicts per company, so a second card's write simply queues behind the
+ * first instead of racing it.
+ */
+export function canSubmitReview(
+  reviewingCardIds: ReadonlySet<string>,
+  activeThreadId: string | undefined,
+  taskId: string,
+): boolean {
+  return activeThreadId !== undefined && !reviewingCardIds.has(taskId);
+}
+
+/**
+ * Every message the open thread panel should show under `parent` — not just
+ * its direct children.
+ *
+ * Review feedback sent from inside a thread is anchored on whichever reply
+ * {@link reviewAnchorForThread} found (the card's settle pill or relay, when
+ * that card was dispatched from inside this very thread) rather than on
+ * `parent` itself, because that is what the backend needs to find the card
+ * (`review_anchor_card` on the host walks a message's *direct* parent, not
+ * its thread). That reply becomes the operator's own message's parent, so a
+ * same-level filter (`m.parentId === parent.id`) never finds it — the
+ * message the operator just typed disappears from the panel the moment it
+ * sends, in both the optimistic bubble and the persisted echo. Walk each
+ * message's parent chain back to `parent` instead, so a reply-to-a-reply
+ * still renders.
+ */
+export function repliesInThread(
+  parent: ChatMessage,
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  const descendsFromParent = (message: ChatMessage): boolean => {
+    const seen = new Set<string>();
+    let ancestorId = message.parentId;
+    while (ancestorId !== undefined && !seen.has(ancestorId)) {
+      if (ancestorId === parent.id) return true;
+      seen.add(ancestorId);
+      ancestorId = byId.get(ancestorId)?.parentId;
+    }
+    return false;
+  };
+  return messages.filter(descendsFromParent);
+}
+
 export function deskFromDto(d: DeskDto): Desk {
   const slug = d.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return {
@@ -622,8 +793,15 @@ export function channelIdForThread(
  *
  * One place, because two answers to "where does the main line render" is
  * precisely how a message ends up somewhere nothing is listening.
+ *
+ * Exported because `ChatView` folds a General *address* onto it too: the host
+ * accepts four spellings for this one conversation (`isGeneralChannel`), and
+ * every other consumer of that fold — `generalAwareChannel`, `channelForThread`,
+ * `mention-badge` — already applies it. Routing was the one place that did not,
+ * so `#/chat/main` raised "isn't a channel here" in exactly the grandfathered
+ * company where the built-in channel had stepped aside for a desk.
  */
-function generalChannelId(desks: Desk[]): string {
+export function generalChannelId(desks: Desk[]): string {
   return desks.find(deskClaimsGeneralChannel)?.id ?? MAIN_THREAD_ID;
 }
 
@@ -952,6 +1130,13 @@ export interface TimelineEntry {
    * replied four times is still one face.
    */
   replySenders: Sender[];
+  /**
+   * For a system settle pill, whether it is the most recent one carrying its
+   * `taskId`. A card that has re-run since parks an older pill in history
+   * with the same id; only the latest should offer Approve. Meaningless (and
+   * left `undefined`) for any other row.
+   */
+  isLatestSettlePill?: boolean;
 }
 
 /**
@@ -978,11 +1163,189 @@ function distinctSenders(
 }
 
 /**
+ * Which first replies render **inline** in the channel rather than folding into
+ * their parent's summary row (issue #1890 D, part 2).
+ *
+ * # Why this exists at all
+ *
+ * Part 1 of #1890 D threads every answer under the message that opened it, so
+ * that `parent` is uniform and a thread means a *topic*. Fold every parented
+ * line, as this module did before, and the channel becomes a column of your own
+ * questions each wearing a "1 reply" chip — every answer deleted from the view.
+ *
+ * # Flat when nothing overlaps, threaded when it does
+ *
+ * A question answered with nothing in between is not a thread anyone opened; it
+ * is a normal exchange, and it reads as one. So its first reply is laid out
+ * inline, in its own chronological place. Only when something *else* arrived
+ * between the question and its answer does the pair collapse to the summary
+ * row — which is the case the fold was always for: two conversations racing in
+ * one channel, where inline rendering would interleave them into nonsense.
+ *
+ * # Decided here, never in the journal
+ *
+ * The tempting version stamps this at write time — "thread it only if another
+ * question arrived while I was working". That makes `parent` a function of race
+ * timing, and `parent` is permanent: two operators doing the identical thing
+ * would get permanently different transcripts on microseconds, and the console
+ * renders a reply as it streams, before the backend could know, so a bubble
+ * would render inline and jump into a thread on reload. Re-deciding
+ * presentation on every render costs nothing and writes nothing racy down.
+ *
+ * # What counts as "in between"
+ *
+ * Any message that is neither the root nor one of the root's own replies. That
+ * is deliberately wider than "another root": a sibling thread's reply landing
+ * between question and answer interleaves the two conversations on screen just
+ * as visibly as a new question does, and the rule is about what a reader sees.
+ *
+ * Returns the reply ids to render inline, so the caller can lay each out in its
+ * own place and leave the remainder on the parent's chip.
+ */
+function inlineFirstReplies(
+  messages: ChatMessage[],
+  replies: Map<string, ChatMessage[]>,
+): Set<string> {
+  const position = new Map<string, number>();
+  const roots = new Set<string>();
+  messages.forEach((m, i) => {
+    position.set(m.id, i);
+    if (!m.parentId) roots.add(m.id);
+  });
+
+  const inline = new Set<string>();
+  for (const [rootId, bucket] of replies) {
+    // **An orphan renders flat rather than not at all** (issue #1890 D).
+    //
+    // A reply whose parent is absent from this transcript used to be dropped,
+    // which was safe while only hand-opened threads carried a `parentId`. Part
+    // 1 gives *every* answer one, so the same rule silently deletes answers —
+    // and two of them are ordinary: a reply to a message another client sent
+    // (this console deliberately does not draw an operator line it did not
+    // send), and a reply that arrives before `reconcileIds` has swapped a
+    // locally-sent message's id for the host's, which a killed POST leaves
+    // pending for good.
+    //
+    // There is no summary row to fold into, so the whole bucket renders. The
+    // cost is a reply whose root fell outside the history window reading
+    // without its question; the alternative is an answer that is simply gone,
+    // and a lost answer is the failure this whole sub-issue exists to prevent.
+    if (!position.has(rootId)) {
+      for (const orphan of bucket) inline.add(orphan.id);
+      continue;
+    }
+    // **Only a root's reply is ever promoted.** A reply-to-a-reply must render
+    // nowhere, and promoting one would give the console a second fold level —
+    // which is not a cosmetic difference: `cycle_conversation`
+    // (`src/runtime/cycle.rs`) parents an approval continuation to the thread
+    // *root* rather than to the message that raised it precisely because a
+    // grandchild is unrenderable, and #435's routing choice would quietly stop
+    // being necessary. Pinned by the one-level-deep test.
+    //
+    // A grandchild whose own parent IS present is therefore still dropped —
+    // the orphan arm above is about a root this transcript never held, not
+    // about relaxing the depth rule.
+    if (!roots.has(rootId)) continue;
+    // **One turn's output is not promoted apart.**
+    //
+    // Promotion is safe because it *empties* the chip — `own` below drops what
+    // was promoted, so a lone answer renders inline, no chip appears, and the
+    // thread is never opened. The message lives on exactly one surface. That is
+    // the case #1890 D / #1972 / #2001 built this for, and it still holds when
+    // the rest of the bucket is the operator writing again: their follow-up is
+    // a separate act, and the answer they were waiting for belongs in the
+    // channel.
+    //
+    // A capped turn is not that. It emits the agent's partial write-up and then
+    // the host's `iteration_cap_pause_notice`, both parented to the same
+    // operator message, and promoting only the first splits one turn's output
+    // across two surfaces: the write-up renders inline *and* in the panel,
+    // because `repliesInThread` walks the parent chain and knows nothing of
+    // what was promoted. Dropping it from the panel instead is not open to us —
+    // the notice under it opens "The reply above is a pause", and there has to
+    // be a reply above.
+    //
+    // So promotion stops at the boundary it was always about: a lone answer.
+    // When the runtime spoke more than once, the whole turn stays folded and
+    // the chip says so.
+    const runtimeReplies = bucket.filter(
+      (r) => (r.from === "company" && !r.byPerson) || r.from === "system",
+    );
+    if (runtimeReplies.length > 1) continue;
+    const root = position.get(rootId);
+    const first = bucket[0];
+    // **Only the runtime's own answer is ever promoted** (codex on #1972).
+    //
+    // `bucket[0]` is merely the earliest reply, and that is the *operator's*
+    // own follow-up whenever they wrote again before the agent answered — a
+    // thread they deliberately opened, flattened back into the channel, with
+    // the answer they were waiting for still folded behind the root's chip. The
+    // reader sees their own words twice and the reply not at all, which is the
+    // failure this promotion exists to prevent, in the one case where a person
+    // was demonstrably treating the exchange as a thread.
+    //
+    // A `system` line is excluded on the same terms: a settle marker is
+    // runtime-generated but it is not an answer, and #1890 B put markers in the
+    // thread that raised the card on purpose. Promoting one back into the
+    // channel would undo that from the render side.
+    //
+    // **`from` alone does not say "the runtime wrote this".** `fromHistory`
+    // projects `from` off `mine`, so *another signed-in person's* reply arrives
+    // as `company` too, carrying `byPerson` to tell them apart — and without
+    // that term a colleague answering first was promoted exactly as the
+    // operator's own follow-up had been, reproducing this defect for everyone
+    // except the viewer (codex + coderabbit on #2001).
+    //
+    // Only an explicit `true` blocks it. `undefined` means the host did not
+    // say, and it is what *every* locally built company line carries — this
+    // console's own POST, an `AgentReplyEvent` — so reading it as "might be a
+    // person" would fold the live answer this promotion exists for.
+    if (first === undefined || first.from !== "company" || first.byPerson) continue;
+    const answer = position.get(first.id);
+    if (root === undefined || answer === undefined) continue;
+    const own = new Set(bucket.map((r) => r.id));
+    let interleaved = false;
+    for (let i = root + 1; i < answer; i += 1) {
+      if (!own.has(messages[i].id)) {
+        interleaved = true;
+        break;
+      }
+    }
+    if (!interleaved) inline.add(first.id);
+  }
+  return inline;
+}
+
+/**
+ * Which of `messages` render **inline** in the channel rather than folding into
+ * a parent's summary row (issue #1890 D).
+ *
+ * The public form of {@link inlineFirstReplies}, for the surfaces that must
+ * agree with the timeline about what is on screen. Today that is the mention
+ * badge: a summons inside a *folded* reply must stay unread until its thread is
+ * opened, and one inside an *inline* reply is visible the moment the channel
+ * is, so deferring it would leave a badge nobody can clear.
+ *
+ * Two surfaces, one definition — the discipline `owns` enforces on the host
+ * side, and the reason this is exported rather than reimplemented.
+ */
+export function inlineReplyIds(messages: ChatMessage[]): ReadonlySet<string> {
+  const replies = new Map<string, ChatMessage[]>();
+  for (const m of messages) {
+    if (!m.parentId) continue;
+    const bucket = replies.get(m.parentId);
+    if (bucket) bucket.push(m);
+    else replies.set(m.parentId, [m]);
+  }
+  return inlineFirstReplies(messages, replies);
+}
+
+/**
  * Flatten a channel's messages into rows the timeline can render directly.
  *
- * Replies are folded into their parent rather than laid out inline: a parent
- * carries its own replies and renders a summary row, matching how a threaded
- * chat keeps the main channel readable.
+ * A thread's **first reply renders inline** when nothing interleaved between
+ * the question and it; everything else folds into the parent's summary row. See
+ * {@link inlineFirstReplies} for the rule and why it is the renderer's to make.
  */
 export function buildTimeline(
   messages: ChatMessage[],
@@ -998,12 +1361,15 @@ export function buildTimeline(
     if (bucket) bucket.push(m);
     else replies.set(m.parentId, [m]);
   }
+  const inline = inlineFirstReplies(messages, replies);
+
+  const latestPillIdByTaskId = latestSettlePillIdByTaskId(messages);
 
   const entries: TimelineEntry[] = [];
   let prev: TimelineEntry | undefined;
 
   for (const m of messages) {
-    if (m.parentId) continue;
+    if (m.parentId && !inline.has(m.id)) continue;
     const sender = senderOf(m, channel, members, youAvatar);
     const newDay = !prev || !sameDay(prev.message.at, m.at);
     const continuation =
@@ -1032,7 +1398,18 @@ export function buildTimeline(
       // a run is a claim that they are.
       !!prev.message.byPerson === !!m.byPerson;
 
-    const own = replies.get(m.id) ?? [];
+    // **Only a root carries a chip.** An inline reply is a rendered row, so
+    // hanging its own bucket off it would put the second fold level back on
+    // screen through the summary instead of through a row — the same
+    // one-level-deep invariant `inlineFirstReplies` guards, and just as
+    // invisible when it breaks.
+    //
+    // And the inline first reply is a row of its own, so it must not also count
+    // on its parent's chip: a reader would see the answer and be told there is
+    // one more thing to open, which there is not.
+    const own = m.parentId
+      ? []
+      : (replies.get(m.id) ?? []).filter((r) => !inline.has(r.id));
     const entry: TimelineEntry = {
       message: m,
       sender,
@@ -1040,6 +1417,10 @@ export function buildTimeline(
       dayLabel: newDay ? formatDay(m.at) : undefined,
       replies: own,
       replySenders: distinctSenders(own, channel, members, youAvatar),
+      isLatestSettlePill:
+        m.from === "system" && m.taskId !== undefined
+          ? latestPillIdByTaskId.get(m.taskId) === m.id
+          : undefined,
     };
     entries.push(entry);
     prev = entry;
@@ -1156,6 +1537,11 @@ export type TimelineItem =
  * the second surface just wasn't reading it.
  */
 export function approvalBatchKey(approval: ApprovalSummary): string {
+  // A blocker folds by its root cause (#1862): every card stalled on one
+  // broken integration is one question, even across turns a batch would keep
+  // apart. Falls back to the turn batch, then to the id — so an ordinary
+  // approval groups exactly as before.
+  if (approval.group_key) return `group:${approval.group_key}`;
   return approval.batch ?? `solo:${approval.id}`;
 }
 

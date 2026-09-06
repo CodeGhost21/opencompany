@@ -216,6 +216,20 @@ export interface MemoryEngineState {
   active: string;
   capabilities: string[];
   healthy?: boolean;
+  /**
+   * Mandatory families the engine advertised but did not answer at boot.
+   * Empty is healthy; absent means it was never probed.
+   *
+   * `capabilities` is what the driver claims. This is what the engine
+   * answered — the two can disagree, and the bind-time audit cannot catch it
+   * for the mandatory families.
+   */
+  unreachableFamilies?: string[];
+  /**
+   * Families that did not answer inside the probe budget. Not the same verdict
+   * as refused — the engine may simply be loaded.
+   */
+  slowFamilies?: string[];
   /** The engine the saved selection names. */
   selected: string;
   url?: string;
@@ -241,8 +255,17 @@ export interface EngineApplied {
 
 /** A probe of a candidate engine, saving nothing. */
 export interface EngineProbe {
+  /**
+   * Whether the candidate can actually be bound. False when it did not answer
+   * a health check *or* refused a mandatory family — apply rejects both, so
+   * this has to agree with apply rather than only reporting reachability.
+   */
   healthy: boolean;
   capabilities: string[];
+  /** Mandatory families the candidate refused. Apply will reject these. */
+  unreachableFamilies?: string[];
+  /** Families that were merely slow. Reported, but does not block a bind. */
+  slowFamilies?: string[];
   detail?: string;
 }
 

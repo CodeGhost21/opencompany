@@ -7,6 +7,7 @@
 // stays a rendering concern.
 
 import { ApiError } from "@/api/types";
+import { base58ToBytes } from "@/lib/wallet";
 
 /** What the New-company form collects. */
 export interface ManifestInput {
@@ -18,6 +19,14 @@ export interface ManifestInput {
    * standing admin, so a company provisioned with none is not a dead end.
    */
   adminEmail?: string;
+  /**
+   * Wallet sign-in addresses, on a host whose auth mode is `wallet`. When
+   * non-empty the manifest is emitted in `wallet` mode (`[users].mode =
+   * "wallet"` plus `[users].wallets`) — the host's manifest validator only
+   * reads the wallet list when the manifest itself declares that mode, and
+   * `wallet` mode never reads `[users].admins`, so the two lists do not mix.
+   */
+  wallets?: string[];
   /**
    * The approval tier, when the operator overrode it. Omitted for the default:
    * the host records `[policy].mode = "auto"` for a manifest that names none,
@@ -90,7 +99,16 @@ export function buildManifestToml(input: ManifestInput): string {
   const lines: string[] = ["[company]", `name = ${tomlString(input.name)}`];
 
   const email = input.adminEmail?.trim();
-  if (email) {
+  const wallets = (input.wallets ?? []).map((w) => w.trim()).filter((w) => w.length > 0);
+
+  // `wallet` mode is emitted with its own `mode` declaration: the host's
+  // manifest validator reads `[users].wallets` only when the manifest itself
+  // says `mode = "wallet"`, and refuses `email`-mode text that carries a wallet
+  // list. `wallet` mode never reads `admins`, so the two never share a block.
+  if (wallets.length > 0) {
+    const rendered = wallets.map((w) => tomlString(w)).join(", ");
+    lines.push("", "[users]", 'mode = "wallet"', `wallets = [${rendered}]`);
+  } else if (email) {
     lines.push("", "[users]", `admins = [${tomlString(email)}]`);
   }
 
@@ -100,6 +118,37 @@ export function buildManifestToml(input: ManifestInput): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * A conservative sanity check on one wallet address, returning a problem string
+ * or `null`. The host's `manifest_wallets` decoder stays authoritative — this
+ * decodes the same way `decode_wallet_address` (`src/ports/users.rs`) does and
+ * requires the same exact 32-byte result, so this catches a typo (blank,
+ * non-base58 characters, a wrong-length key) before the destructive archive
+ * leg on a reset, the same way `adminEmailProblem` does for an email admin.
+ *
+ * A character-count range is not a substitute for decoding: base58 is not
+ * fixed-width per character (each digit carries log2(58) ≈ 5.858 bits, not a
+ * whole byte), so two strings of the same length can decode to different byte
+ * counts — 32 `z` characters decode to 24 bytes, not 32. A length-only check
+ * let a reset validate a key the host's `decode_wallet_address` goes on to
+ * refuse, archiving the old company before provisioning the replacement was
+ * ever going to succeed (codex review on #1943, PR comment 3894416376).
+ */
+export function walletAddressProblem(address: string): string | null {
+  const trimmed = address.trim();
+  if (!trimmed) {
+    return "Enter a wallet address, or nobody will be able to sign in to this company.";
+  }
+  const bytes = base58ToBytes(trimmed);
+  if (!bytes) {
+    return "That doesn't look like a wallet address — it should be base58 (no 0, O, I, or l).";
+  }
+  if (bytes.length !== 32) {
+    return "That doesn't look like a wallet address — it should be a 32-byte base58 public key.";
+  }
+  return null;
 }
 
 /**

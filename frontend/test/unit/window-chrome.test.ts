@@ -92,16 +92,20 @@ describe("the traffic-light inset", () => {
     expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
   });
 
-  it("reserves a draggable strip at the top of the sidebar on macOS", () => {
+  it("reserves a draggable strip at the left of the title row on macOS", () => {
     asDesktop("MacIntel");
     render(createElement(WindowControlsInset));
 
     const inset = host.querySelector("[data-tauri-drag-region]") as HTMLElement | null;
     expect(inset).not.toBeNull();
     // In flow, unlike the band: this one's job is to take up the space the
-    // lights are drawn in, so the switcher below it starts clear of them.
+    // lights are drawn in, so the switcher beside it starts clear of them.
     expect(inset?.className).not.toContain("absolute");
     expect(inset?.className).toContain("flex-none");
-    expect(inset?.style.height).toBe("28px");
+    // Horizontal, not vertical. The switcher moved out of the sidebar's top-left
+    // corner and into a full-width title row, so the lights now collide with it
+    // along the x axis and the reservation follows.
+    expect(inset?.style.width).toBe("72px");
+    expect(inset?.style.height).toBe("");
   });
 });

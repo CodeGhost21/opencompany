@@ -48,6 +48,8 @@ pub mod capability;
 pub mod daily_budget;
 mod finances;
 pub mod inference;
+/// Issue #1866: semantic workflow sufficiency calls, charged to the company.
+pub mod judge;
 /// Issue #1749: [`ModelSlug`], the closed vocabulary a metered sample names its
 /// model in. See [`model`].
 pub mod model;
@@ -64,6 +66,7 @@ pub mod profile_draft;
 pub mod roster_build;
 pub mod search;
 pub mod selector;
+pub mod title;
 pub mod triage;
 mod types;
 mod usage;
@@ -79,6 +82,7 @@ pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
     inference_sample, record_inference_usage,
 };
+pub use judge::{judge_sample, record_judge_usage};
 pub use model::ModelSlug;
 pub use oauth::{
     MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
@@ -91,6 +95,7 @@ pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
 pub use selector::{record_selector_usage, selector_sample};
+pub use title::{record_title_usage, title_sample};
 pub use triage::{record_triage_usage, triage_sample};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,

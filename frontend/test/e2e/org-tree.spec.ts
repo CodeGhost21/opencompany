@@ -375,11 +375,12 @@ test("#311 the org chart is reachable, which it was not before", async ({
   // Start somewhere else, so arriving at the chart is a real navigation and not
   // the page it happened to load on. Before this change there was no nav entry
   // and no hash that reached this surface at all.
-  await page.goto("/#/overview");
-  // `exact`, because the sidebar header's host switcher is a button too and its
-  // accessible name ends "… Current company" (#1142). Without it the substring
-  // match picks the switcher — which is above the nav — and clicking it opens a
-  // menu instead of routing.
+  await page.goto("/#/chat");
+  // `exact`, because the window title row's host switcher is a button too and
+  // its accessible name ends "… Current company" (#1142). Without it the
+  // substring match picks the switcher and clicking it opens a menu instead of
+  // routing. `exact` also keeps this on the section's own row rather than on
+  // one of the rows it expands, none of which is called "Company".
   const nav = page
     .getByRole("link", { name: "Company", exact: true })
     .or(page.getByRole("button", { name: "Company", exact: true }))
@@ -387,7 +388,7 @@ test("#311 the org chart is reachable, which it was not before", async ({
   await expect(nav).toBeVisible({ timeout: 30_000 });
 
   // Click it rather than `goto` a second hash. Two reasons, and the first is
-  // why this test flaked once before: `page.goto` from `#/overview` to
+  // why this test flaked once before: `page.goto` from `#/chat` to
   // `#/company` changes only the fragment, so the document never reloads and
   // the assertion can run against the view still on screen — a captured
   // failure snapshot showed the knowledge graph, not the chart. Clicking is

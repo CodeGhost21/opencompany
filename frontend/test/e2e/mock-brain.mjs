@@ -50,6 +50,11 @@
 // because a later arm would otherwise consume a directive that was not meant
 // for it.
 //
+//   0. a message carrying `__MOCK_BURN_THEN_FAIL__ <in> <out>` (B-120) — meter
+//      the first call and refuse every one after it, so a turn can spend real
+//      tokens and then die. Tried before the routing below rather than beside
+//      it: every other arm answers, and an answer is the one thing this arm
+//      must not produce.
 //   1. a **triage classification** (issue #678) — answer `chatter` and touch
 //      nothing else. It is handed the operator's raw message, so it carries any
 //      directive that message carried, and serving one here burns it.
@@ -68,7 +73,8 @@
 //      agent call a named MCP tool without a model that might decide not to.
 //   5. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
 //      `chat-to-card.spec.ts` needs an orchestrator to do.
-//   6. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
+//   6. a **card-titling pass** — answer with a short fixed name.
+//   7. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
 //
 // # Why the plain reply quotes nothing
 //
@@ -168,6 +174,62 @@ function slowMillis(messages) {
   return 0;
 }
 
+/**
+ * "Burn `<in>` input and `<out>` output tokens, then break" — e.g.
+ * `__MOCK_BURN_THEN_FAIL__ 1200 340` (B-120).
+ *
+ * The first call carrying it answers with a **metered tool call**: real usage in
+ * the envelope, and a call that keeps the turn going. Every call after it is
+ * refused outright, so the turn dies at its second model call having already
+ * spent. openhuman publishes a turn's totals only after the turn succeeds, so
+ * that spend is reported nowhere — which is the exact shape of the run a founder
+ * was shown as `0 tok / $0.000` after ten minutes of real work.
+ *
+ * Every other reply this server sends carries a zeroed usage block on purpose
+ * (see `completion`), so a lane that never asks for this directive still books
+ * no spend at all.
+ */
+const BURN_THEN_FAIL_DIRECTIVE = "__MOCK_BURN_THEN_FAIL__";
+
+/**
+ * How many calls carrying a given [`BURN_THEN_FAIL_DIRECTIVE`] payload have
+ * been served, **keyed by that payload** (CodeRabbit review, PR #2053) — not
+ * a single process-wide count. The mock brain is started once for the whole
+ * Playwright suite, so a bare counter metered only the very first call any
+ * spec anywhere in the run ever made with this directive; every other spec —
+ * or the same spec asking for a different `<in> <out>` pair — would have its
+ * first call refused outright instead of metered, which is the one thing
+ * this directive promises. Unlike `servedDirectives` (a `Set`, since a plan
+ * step either fired or did not), this needs a `Map`: "served" here is a
+ * count, because the *second* call for the same payload is the one meant to
+ * fail.
+ */
+const burnThenFailServed = new Map();
+
+/**
+ * The `<in> <out>` token pair a message asks to burn, or `null` when none does.
+ * `key` is the exact payload text, and doubles as this call's identity in
+ * {@link burnThenFailServed}.
+ *
+ * @param {any[]} messages
+ * @returns {{ input: number, output: number, key: string } | null}
+ */
+function burnThenFail(messages) {
+  for (const message of messages) {
+    const content = typeof message?.content === "string" ? message.content : "";
+    const at = content.indexOf(BURN_THEN_FAIL_DIRECTIVE);
+    if (at === -1) continue;
+    const key = content.slice(at + BURN_THEN_FAIL_DIRECTIVE.length).trim();
+    const [input, output] = key
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((word) => Number.parseInt(word, 10));
+    if (!Number.isFinite(input) || !Number.isFinite(output)) return null;
+    return { input: Math.max(0, input), output: Math.max(0, output), key };
+  }
+  return null;
+}
+
 /** The cue that makes the orchestrator open exactly one board card. */
 const SPAWN_DIRECTIVE = "SPAWNONE";
 
@@ -213,6 +275,48 @@ const SPAWN_DIRECTIVE = "SPAWNONE";
  * stay two plans rather than sharing one cursor.
  */
 const PLAN_DIRECTIVE = "__MOCK_PLAN__";
+
+/**
+ * The host's own briefing blocks, appended to an operator message before it
+ * reaches a model.
+ *
+ * These matter here because two of them quote **other messages verbatim**.
+ * `THREAD_INDEX_ANNOTATION` lists the opening words of the channel's other
+ * threads, truncated — so once a spec has opened a thread with a directive in
+ * it, every later message in that channel carries a chopped-off copy of that
+ * directive. A directive cut mid-payload is not a directive; it is a decoy that
+ * parses as nothing.
+ *
+ * Cutting at the earliest of these is what the host itself does to recover the
+ * operator's own words (`operator_words` in `src/runtime/delegation.rs`), and
+ * for the same reason: everything past the first marker was written by the
+ * host, not by the spec.
+ *
+ * Keep in step with the constants in `src/runtime/cycle.rs` and
+ * `src/brain/medulla/effects.rs`.
+ */
+const HOST_ANNOTATIONS = [
+  "\n\n[Open work already handed to you",
+  "\n\n[Other conversations in this channel",
+  "\n\n[Work raised in this conversation",
+  "\n\n[This request is already being built",
+  "\n\n[Attached file:",
+];
+
+/**
+ * The spec's own half of a message, with the host's briefings removed.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function specWords(text) {
+  let cut = text.length;
+  for (const marker of HOST_ANNOTATIONS) {
+    const at = text.indexOf(marker);
+    if (at >= 0 && at < cut) cut = at;
+  }
+  return text.slice(0, cut);
+}
 
 /**
  * How many steps of each plan have been served, keyed by the plan's own text.
@@ -419,17 +523,42 @@ function findDirective(messages) {
  */
 function findPlan(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const text = textOf(messages[i]);
-    const at = text.indexOf(PLAN_DIRECTIVE);
-    if (at < 0) continue;
-    const steps = readJsonValue(text, at + PLAN_DIRECTIVE.length, "[", "]");
+    const text = specWords(textOf(messages[i]));
+    // Every occurrence, newest first — not just the first one.
+    //
+    // The host prepends context to an operator message: a `## Relevant prior
+    // work` digest of earlier tasks, then the operator's own words under
+    // `## Task`. The digest quotes those earlier messages *truncated*, so when
+    // a spec opens a thread with a directive in it, later messages carry a
+    // chopped-off copy of it BEFORE the live one.
+    //
+    // `indexOf` found the decoy, and a decoy is unparsable by construction.
+    // Scanning back through occurrences puts the operator's own directive --
+    // the last one in the text -- ahead of anything quoted above it.
+    const found = [];
+    for (let at = text.indexOf(PLAN_DIRECTIVE); at >= 0; at = text.indexOf(PLAN_DIRECTIVE, at + 1)) {
+      found.push(at);
+    }
+    let at = -1;
+    let steps = null;
+    for (let k = found.length - 1; k >= 0; k -= 1) {
+      const parsed = readJsonValue(text, found[k] + PLAN_DIRECTIVE.length, "[", "]");
+      if (Array.isArray(parsed)) {
+        at = found[k];
+        steps = parsed;
+        break;
+      }
+    }
+    if (found.length === 0) continue;
     if (!Array.isArray(steps)) {
-      // A broken spec, not a plain turn. Say so loudly rather than answering
-      // with text the spec will then fail on obscurely.
+      // Loud, because a spec that wrote bad JSON deserves to hear it — but keep
+      // scanning older messages rather than abandoning the thread. Returning
+      // null here let one truncated echo silence every real plan behind it.
       process.stderr.write(
-        `[mock brain] ${PLAN_DIRECTIVE} found but its JSON payload did not parse\n`,
+        `[mock brain] ${PLAN_DIRECTIVE} appears ${found.length}x in message ${i}; none of ` +
+          `them parsed, looking further back\n`,
       );
-      return null;
+      continue;
     }
     // Identity is the directive and the rest of its LINE — the same key shape
     // `SPAWNONE` uses, and for both of its reasons. It is stable across the
@@ -600,6 +729,45 @@ function isPlanningRequest(messages) {
 }
 
 /**
+ * A card-titling pass, recognised by its own system prompt.
+ *
+ * Beside the triage and planning arms and for their reasons: it runs with no
+ * tools and is not an agent turn, so it must not reach the directive arms — a
+ * request whose text happened to carry `SPAWNONE` would otherwise burn that
+ * directive here and leave the real turn without it.
+ *
+ * @param {any[]} messages
+ * @returns {boolean}
+ */
+function isTitleRequest(messages) {
+  const first = messages[0];
+  return typeof textOf(first) === "string" && textOf(first).includes("You name tasks");
+}
+
+/**
+ * The name this lane gives every card it is asked to title.
+ *
+ * # Why it does not echo the request
+ *
+ * Echoing the first few words back would make every card's headline a prefix
+ * of the message that opened it — which is the exact defect the titling pass
+ * exists to remove, reproduced inside the fixture. A spec that keyed a request
+ * against a title would then pass here and be wrong against any real model, so
+ * the coupling would be hidden rather than gone. A card is identified by its
+ * `note`, which carries the operator's words verbatim; nothing needs the title
+ * to carry them too.
+ *
+ * # Why it carries no `__MOCK_LLM__`
+ *
+ * Every other reply here carries the marker so a spec can prove the reply is
+ * ours. A title is different: it is rendered as a card's headline all over the
+ * console, and specs assert that raw mock text does NOT leak into the UI
+ * (`orchestration-live.spec.ts`). A marker in a title would put it on the board
+ * by construction.
+ */
+const MOCK_TITLE = "Mock titled task";
+
+/**
  * The plan this lane answers every planning pass with (issue #1106).
  *
  * Deliberately **ambiguous**: it names two teammates the `e2e_harness` roster
@@ -678,6 +846,15 @@ function chatCompletion(body) {
   if (isPlanningRequest(messages)) {
     process.stderr.write("[mock brain] planning pass (ambiguous plan, no directive consumed)\n");
     return completion(model, { role: "assistant", content: AMBIGUOUS_PLAN }, "stop");
+  }
+
+  // Third of the not-a-turn arms. Without it a titling pass fell through to the
+  // turn arms and every card in this lane was headlined with the canned reply —
+  // marker and all — which is both unlike anything a real titler returns and a
+  // way for `__MOCK_LLM__` to reach the board.
+  if (isTitleRequest(messages)) {
+    process.stderr.write("[mock brain] card titling pass (no directive consumed)\n");
+    return completion(model, { role: "assistant", content: MOCK_TITLE }, "stop");
   }
 
   // Ahead of the directive arms, and only when the instruction is the LAST
@@ -873,9 +1050,54 @@ const server = createServer((request, response) => {
         return;
       }
       if (path.endsWith("/chat/completions")) {
+        const messages = Array.isArray(body?.messages) ? body.messages : [];
+        // B-120: spend, then break. Tried before every other arm, because the
+        // point of it is that no reply ever ends this turn — an arm that
+        // answered first would turn the failure this stages into a success.
+        const burn = burnThenFail(messages);
+        if (burn) {
+          const served = (burnThenFailServed.get(burn.key) ?? 0) + 1;
+          burnThenFailServed.set(burn.key, served);
+          if (served > 1) {
+            process.stderr.write(`[mock brain] refusing the follow-up call for <${burn.key}>\n`);
+            sendJson(response, 500, {
+              error: { message: `${BURN_THEN_FAIL_DIRECTIVE} scripted outage`, type: "server_error" },
+            });
+            return;
+          }
+          process.stderr.write(
+            `[mock brain] burning ${burn.input} in / ${burn.output} out, then failing\n`,
+          );
+          // A **tool call**, not a blank message. A blank one also fails the
+          // turn, but tinyagents classifies that as a degenerate completion and
+          // retries at the provider, so the usage of the call it threw away
+          // never reaches the progress stream — the run under test would then be
+          // genuinely free rather than wrongly reported as free. A tool call is
+          // an ordinary, fully-accounted model call that happens not to end the
+          // turn, which is what lets the NEXT call be the one that dies.
+          // `workspace_list` needs no arguments and the harness company grants it.
+          const metered = completion(body?.model ?? "mock", {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "mock-burn-call",
+                type: "function",
+                function: { name: "workspace_list", arguments: "{}" },
+              },
+            ],
+          }, "tool_calls");
+          metered.usage = {
+            prompt_tokens: burn.input,
+            completion_tokens: burn.output,
+            total_tokens: burn.input + burn.output,
+          };
+          sendJson(response, 200, metered);
+          return;
+        }
         // Issue #863: hold the reply back when the prompt asks for it, so a
         // spec can watch a workflow run while it is still walking the graph.
-        const held = slowMillis(Array.isArray(body?.messages) ? body.messages : []);
+        const held = slowMillis(messages);
         if (held > 0) {
           setTimeout(() => sendJson(response, 200, chatCompletion(body)), held);
           return;

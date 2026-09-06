@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 
-import { WindowDragBar } from "@/components/window-chrome";
 
 /**
  * The console's single content sheet — the "card" half of the two-layer shell
@@ -55,25 +54,26 @@ import { WindowDragBar } from "@/components/window-chrome";
  */
 const CARD =
   "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden " +
-  "m-(--frame-inset) rounded-2xl border border-chrome-border bg-background shadow-sm";
+  // `--frame-inset` on three sides, and a thinner top.
+  //
+  // The frame used to be one quantity because nothing sat above the card. The
+  // title row does now, so a full inset there stacks the row's own bottom
+  // padding on top of the card's margin and reads as a gap twice the size of
+  // the one on the other three edges — which is what it is.
+  "mx-(--frame-inset) mb-(--frame-inset) mt-0.5 rounded-2xl border border-chrome-border bg-background shadow-sm";
 
 export function ContentSurface({ children }: { children: ReactNode }) {
   return (
     <div className={CARD} data-testid="content-surface">
-      {/* The desktop window draws no title bar of its own, so the top of this
-          card is what a person reaches for to move the window — see
-          `window-chrome.tsx`. It renders nothing in a browser, and nothing off
-          macOS, where the native bar is still there.
+      {/* No drag band here any more.
 
-          Over the card rather than the whole window: the sidebar's own strip
-          drags in place, and a band spanning both would sit on top of the
-          switcher. The cost is that a page's top 28px stops taking a press,
-          which is only visible on the two canvases you can drag — the graph and
-          the workflow editor — and both have the rest of the sheet to grab.
-          OpenHuman's `WindowDragBar` makes the same trade for the same reason.
-
-          `CARD` is already `relative`, which is what this positions against. */}
-      <WindowDragBar />
+          This card carried one because the window drew no title bar of its own,
+          so the top of the content was the only thing left to grab. There is a
+          real full-width title row now (`window-title-bar.tsx`), which drags
+          where it is not covered by a control — so this band stopped being the
+          handle and stayed only as 28px at the top of every page that quietly
+          refused a press. It was the spacing under the new row, and the reason
+          the two canvases you can drag lost their top edge. */}
       {children}
     </div>
   );

@@ -2516,6 +2516,7 @@ impl RuntimeBuilder {
                 let grants = crate::runtime::grants::GrantSet::default();
                 grants.rehydrate(journal.replayed_grants());
                 grants.rehydrate_continuations(journal.replayed_approval_continuations());
+                grants.rehydrate_blocker_resolutions(journal.replayed_blocker_resolutions());
                 grants
             }
         };
@@ -2570,7 +2571,7 @@ impl RuntimeBuilder {
             Some(h) => h.blocked_nodes.clone(),
             None => {
                 let blocked_nodes = crate::runtime::blocked_nodes::BlockedNodeQueue::default();
-                blocked_nodes.rearm(journal.blocked_stashes());
+                blocked_nodes.rearm_checkpointed(journal.blocked_stashes());
                 // Issue #1816: fold in whichever of those rehydrated stashes
                 // already had an approve banked before the restart — the fact
                 // `ContinuationQueue`'s own rearm cannot carry (see its docs),
@@ -2583,6 +2584,18 @@ impl RuntimeBuilder {
                 blocked_nodes
             }
         };
+
+        #[cfg(feature = "openhuman")]
+        let workflow_checkpoints = handover
+            .as_ref()
+            .and_then(|handover| handover.workflow_checkpoints.clone())
+            .unwrap_or_else(|| {
+                Arc::new(crate::workflows::WorkflowCheckpointStore::new(
+                    Bundle::new(home.clone(), &id)
+                        .dir()
+                        .join("workflow-checkpoints"),
+                ))
+            });
 
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
@@ -3680,7 +3693,8 @@ impl RuntimeBuilder {
                             // agent lands on that lane's engine instead of the
                             // default pool.
                             let runner: Arc<dyn WorkflowRunner> = Arc::new(
-                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone()),
+                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone())
+                                    .with_checkpoint_store(workflow_checkpoints.clone()),
                             );
                             // Issue #67: fill the shared handle on `deps` (a clone
                             // of which the runner holds, and which moves into the
@@ -3979,11 +3993,18 @@ impl RuntimeBuilder {
         // against a snapshot predating the other. Adopting them is also what
         // makes the quiesce drain mean something after the swap.
         if let Some(h) = handover.as_ref() {
-            runtime.adopt_locks(h.serial.clone(), h.per_agent.clone(), h.task_writes.clone());
+            runtime.adopt_locks(
+                h.serial.clone(),
+                h.per_agent.clone(),
+                h.task_writes.clone(),
+                h.blocker_resolutions.clone(),
+            );
         }
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
         runtime.adopt_blocked_nodes(blocked_nodes);
+        #[cfg(feature = "openhuman")]
+        runtime.set_workflow_checkpoints(workflow_checkpoints);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see
@@ -4136,6 +4157,7 @@ impl RuntimeBuilder {
         // finds ready has somewhere real to resume to.
         if handover.is_none() {
             runtime.arm_replayed_continuation_recovery();
+            runtime.arm_replayed_blocker_recovery();
             runtime.reconcile_stranded_blocked_nodes().await;
         }
 
@@ -6428,13 +6450,13 @@ mod test {
 
         let card = |id: &str, column: &str| crate::ports::tasks::TaskRecord {
             id: id.to_string(),
-            title: "Do the thing".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Do the thing"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6442,6 +6464,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
             planning_attempts: Vec::new(),
         };
@@ -6804,13 +6827,13 @@ mod test {
         let id = CompanyId::new("acme");
         let card = |task: &str, column: &str| TaskRecord {
             id: task.to_string(),
-            title: "Draft the spec".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Draft the spec"),
             note: Some("[maya] started".to_string()),
             column: column.to_string(),
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6819,6 +6842,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -6932,13 +6956,13 @@ mod test {
         let id = CompanyId::new("acme");
         let card = |task: &str, column: &str| TaskRecord {
             id: task.to_string(),
-            title: "Draft the spec".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Draft the spec"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
             assignee: "ceo".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -6947,6 +6971,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         };
 
@@ -7804,6 +7829,8 @@ needs_reason = true
             requires_approval: None,
             repeatable: None,
             destination: None,
+            postcondition: None,
+            verify: None,
         };
         RawWorkflow {
             id: id.to_string(),

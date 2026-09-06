@@ -9,14 +9,16 @@
 //! the filter + projection logic.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::CompanyStore;
 use crate::ports::types::{
-    Actor, ActorKind, Attachment, CompanyEvent, CompanyRecord, EventSeq, Mention, MentionTarget,
-    StoredEvent, TurnStep,
+    Actor, ActorKind, Attachment, CompanyEvent, CompanyId, CompanyRecord, EventSeq, Mention,
+    MentionTarget, StoredEvent, TurnStep,
 };
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
@@ -32,6 +34,115 @@ pub const MAIN_THREAD_ID: &str = "main";
 /// the limit beside the shared reader prevents a new caller from turning its
 /// `Vec` reservation back into an allocation controlled by the request.
 pub const CHAT_HISTORY_PAGE_LIMIT: usize = 200;
+
+/// Where this lives, and why it is not beside its first caller.
+///
+/// It began in the chat seed, under `src/harness/`, which compiles only
+/// with the `openhuman` feature. Two later callers — the thread index in
+/// [`crate::runtime::cycle`] and `read_thread` — need the same resolution,
+/// and the first of those is in the ungated runtime, so the default build
+/// stopped compiling. Beside [`owns`] is where it belonged anyway: this
+/// module is the one place that answers what a desk id means, and a
+/// second copy is exactly what it exists to prevent.
+/// Resolves an incoming `chat_id` to the `(desk_id, desk_name)` pair
+/// [`owns`] filters on, exactly as the REST history route's
+/// `resolve_desk` does (issue #65).
+///
+/// `owns` matches a stored event's chat id against *both* the desk id and the
+/// desk name, because a named desk's messages can be journaled under either
+/// spelling. Passing `(chat_id, chat_id)` for a desk the operator addressed by
+/// id would therefore silently miss any line stored under its name — a seed that
+/// "looks fixed" but is empty. So a non-General selector is resolved against the
+/// manifest's group chats the same way the console resolves it.
+///
+/// * `None` → the synthetic General/operator desk.
+/// * A General spelling (`"main"` / `"general"` / `""`) short-circuits: every
+///   spelling folds together in [`same_conversation`], so no
+///   manifest read is needed and `(chat, chat)` already owns all of them.
+/// * Anything else is matched (case-insensitive, by id or name) against the
+///   manifest's group chats; an unmatched selector passes through as `(id, name)
+///   = (chat, chat)`, so an ad-hoc thread id still finds what was journaled under
+///   that exact string.
+pub async fn resolve_seed_desk(
+    store: &Arc<dyn CompanyStore>,
+    company: &CompanyId,
+    chat_id: Option<&str>,
+) -> (String, String) {
+    let Some(desk) = trivially_resolved(chat_id) else {
+        // Only a named desk needs the manifest, and only then is it read.
+        return match store.load(company).await {
+            Ok(Some(record)) => desk_aliases(&record, chat_id),
+            // A store miss or read error must not fail the turn — fall back to
+            // the verbatim selector, which still owns everything journaled
+            // under that exact string (the common case, where the console
+            // addresses id == name).
+            Ok(None) | Err(_) => {
+                let desk = chat_id.unwrap_or(GENERAL_DESK);
+                (desk.to_string(), desk.to_string())
+            }
+        };
+    };
+    desk
+}
+
+/// [`resolve_seed_desk`] for a caller that already holds the record.
+///
+/// The cycle's briefings do: they are handed a `&CompanyRecord` and were paying
+/// for a `load` per message to answer a question the record in their hand
+/// already answers. Same resolution, no store round-trip — and one body, so the
+/// two cannot drift into disagreeing about what a desk id means.
+pub fn desk_aliases(record: &CompanyRecord, chat_id: Option<&str>) -> (String, String) {
+    if let Some(resolved) = trivially_resolved(chat_id) {
+        return resolved;
+    }
+    let desk = chat_id.unwrap_or(GENERAL_DESK);
+    // **Through `resolve_desk_id`, not a second lookup of its own** (codex +
+    // coderabbit on #1972). That function already answers "which desk is this
+    // key", and it answers two things a one-pass `id == key || name == key`
+    // find gets wrong: an **overlay desk** — one created from the console, which
+    // lives in `overlay_desks` and not in the manifest at all — is a routable
+    // desk, and an **exact id beats a display-name alias**, because desk
+    // creation enforces unique ids but not unique names, so `{id: "ops", name:
+    // "sales"}` can sit ahead of `{id: "sales", …}` and answer for it. Getting
+    // that wrong here does not merely miss lines, it *merges* two desks: `owns`
+    // would then be handed one desk's id and another's name.
+    let Some(id) = record.resolve_desk_id(desk) else {
+        // Not a desk this company declares — an ad-hoc thread id or a DM. It
+        // still owns everything journaled under that exact string, which is
+        // what the verbatim pair says.
+        return (desk.to_string(), desk.to_string());
+    };
+    let name = record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == id)
+        .map(|chat| chat.name.clone())
+        .or_else(|| {
+            record
+                .overlay_desks
+                .iter()
+                .find(|overlay| overlay.id == id)
+                .map(|overlay| overlay.name.clone())
+        })
+        .unwrap_or_else(|| id.clone());
+    (id, name)
+}
+
+/// The two selectors that resolve without consulting a manifest at all.
+///
+/// `None` is the General desk — an unaddressed message is *routed* there
+/// (`chat_and_emit`), so treating it as "addressed to nothing" is what left
+/// those turns out of every desk-scoped read. Any other General spelling
+/// short-circuits too: they all fold in [`same_conversation`], so `(chat, chat)`
+/// already owns each other's lines.
+fn trivially_resolved(chat_id: Option<&str>) -> Option<(String, String)> {
+    match chat_id {
+        None => Some((GENERAL_DESK.to_string(), GENERAL_DESK.to_string())),
+        Some(desk) if is_general_chat(Some(desk)) => Some((desk.to_string(), desk.to_string())),
+        Some(_) => None,
+    }
+}
 
 /// Does this stored chat id mean the General desk?
 ///
@@ -537,10 +648,21 @@ impl MessageView {
             // shared with the GraphQL `Message` projection, and the reuse is
             // what keeps #377 additive on both wire surfaces at once.
             //
-            // No `steps` and no `parent_id`: a marker is not a turn and is
-            // never threaded, so `ThreadPanel` needs nothing from it.
+            // No `steps`: a marker is not a turn, so there is no timeline on it.
+            //
+            // `parent_id` **is** carried, since issue #1890 B. A marker was
+            // never threaded because a card recorded no thread to thread it
+            // into — not because a marker cannot be threaded — so a card raised
+            // inside a thread settled flat in the channel and the thread that
+            // asked for the work never showed it finishing. The card carries
+            // its root now, the terminal captures it, and this is where it
+            // reaches the reader. `None` is still the overwhelmingly common
+            // case: it is every card raised straight into a channel.
             CompanyEvent::DeskTaskCompleted {
-                task_id, column, ..
+                task_id,
+                column,
+                origin_parent,
+                ..
             } => MessageView {
                 id,
                 channel: crate::ports::SYSTEM_AUTHOR.to_string(),
@@ -552,7 +674,10 @@ impl MessageView {
                 by_person: false,
                 steps: Vec::new(),
                 task_id: Some(task_id),
-                parent_id: None,
+                // Rendered the same way an `OperatorMessage`'s parent is, a few
+                // arms up — the console keys a thread off this string and does
+                // not care which event minted it.
+                parent_id: origin_parent.map(|seq| seq.value().to_string()),
                 reactions: Vec::new(),
                 mentions: Vec::new(),
                 attachments: Vec::new(),
@@ -1645,6 +1770,15 @@ mod test {
     /// an agent id (`engineer`) and never a channel id (`engineering`) — that
     /// difference is the whole reason the origin has to be carried.
     fn desk_task_completed(origin: Option<&str>, column: &str) -> CompanyEvent {
+        threaded_desk_task_completed(origin, None, column)
+    }
+
+    /// The same settle, for a card raised inside a thread (#1890 B).
+    fn threaded_desk_task_completed(
+        origin: Option<&str>,
+        origin_parent: Option<u64>,
+        column: &str,
+    ) -> CompanyEvent {
         CompanyEvent::DeskTaskCompleted {
             task_id: "t-1".to_string(),
             desk: "engineer".to_string(),
@@ -1652,6 +1786,7 @@ mod test {
             column: column.to_string(),
             artifact_ids: Vec::new(),
             origin_chat_id: origin.map(str::to_string),
+            origin_parent: origin_parent.map(EventSeq::new),
         }
     }
 
@@ -1773,8 +1908,43 @@ mod test {
         );
         assert!(!view.mine);
         assert!(view.steps.is_empty(), "a marker is not a turn");
-        assert!(view.parent_id.is_none(), "a marker is never threaded");
+        assert!(
+            view.parent_id.is_none(),
+            "a card raised at channel level settles flat in the channel",
+        );
         assert_eq!(view.id, "21", "the host id the console dedupes a reload on");
+    }
+
+    /// Issue #1890 B — the whole of what this sub-issue repairs.
+    ///
+    /// A card raised inside a thread used to settle flat in the channel, so the
+    /// thread that asked for the work never showed it finishing. The marker
+    /// carries the root now, in the same field and the same rendering an
+    /// operator message's parent takes, so the console files it into the thread
+    /// with no renderer change at all.
+    #[test]
+    fn a_terminal_raised_in_a_thread_projects_into_that_thread() {
+        let view = MessageView::project(
+            at(
+                50,
+                threaded_desk_task_completed(Some("engineering"), Some(41), COLUMN_IN_REVIEW),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(
+            view.parent_id.as_deref(),
+            Some("41"),
+            "the marker hangs off the root the card recorded",
+        );
+        // The channel half is unchanged: routing still runs through `owns` on
+        // the origin channel, and the thread only narrows within it. A marker
+        // that threaded but stopped belonging to its channel would vanish.
+        assert!(owns(
+            "engineering",
+            "Engineering desk",
+            &threaded_desk_task_completed(Some("engineering"), Some(41), COLUMN_IN_REVIEW),
+        ));
     }
 
     /// The run's prose stays out of the marker. It already reaches this same
@@ -2146,6 +2316,7 @@ mod test {
 mod dead_card_test {
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
     use crate::ports::types::CompanyId;
     use crate::runtime::RuntimeBuilder;
@@ -2159,13 +2330,13 @@ mod dead_card_test {
     fn card(id: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Draft the launch note".to_string(),
+            title: TaskTitle::authored("Draft the launch note"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: 1,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -2174,6 +2345,7 @@ mod dead_card_test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -2640,5 +2812,184 @@ mod dead_card_test {
             .await
             .expect("audit");
         assert_eq!(as_admin.replies, 2, "an admin's count must count both rows");
+    }
+}
+
+/// How a chat selector becomes the `(desk id, desk name)` pair [`owns`] filters
+/// on — the one answer to "which desk is this", shared by the seed, the cycle's
+/// briefings and `read_thread`.
+#[cfg(test)]
+mod desk_resolution_test {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::{CompanyId, CompanyRecord};
+
+    struct RecordStore(Option<CompanyRecord>);
+
+    #[async_trait]
+    impl CompanyStore for RecordStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(self.0.clone())
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            unreachable!("resolve only reads")
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            unreachable!("resolve only reads")
+        }
+        async fn append_ledger(
+            &self,
+            _id: &CompanyId,
+            _entry: crate::ports::types::LedgerEntry,
+        ) -> crate::Result<()> {
+            unreachable!("resolve only reads")
+        }
+    }
+
+    use crate::ports::types::CompanySummary;
+
+    fn record_with_group_chat(id: &str, name: &str) -> CompanyRecord {
+        let manifest = toml::from_str(&format!(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+
+[[group_chat]]
+id = "{id}"
+name = "{name}"
+"#,
+        ))
+        .expect("valid manifest");
+        CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_tool_grants: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            setup: None,
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        }
+    }
+
+    async fn resolve(store: RecordStore, chat_id: Option<&str>) -> (String, String) {
+        let store: Arc<dyn CompanyStore> = Arc::new(store);
+        resolve_seed_desk(&store, &CompanyId::new("acme"), chat_id).await
+    }
+
+    /// A desk created from the console is a desk.
+    ///
+    /// It lives in `overlay_desks` and never in the manifest, so a lookup that
+    /// reads only `group_chats` fell through to the verbatim selector — and
+    /// every line journaled under the desk's *other* spelling was orphaned from
+    /// the thread index, `read_thread` and the seed alike (coderabbit + codex
+    /// on #1972).
+    #[test]
+    fn an_overlay_desk_resolves_by_either_spelling() {
+        let mut record = record_with_group_chat("growth_desk", "Growth");
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "ops_desk".to_string(),
+            name: "Operations".to_string(),
+            description: None,
+            members: Vec::new(),
+            responder: crate::ports::types::ResponderMode::default(),
+        });
+        for spelling in ["ops_desk", "Operations"] {
+            assert_eq!(
+                desk_aliases(&record, Some(spelling)),
+                ("ops_desk".to_string(), "Operations".to_string()),
+                "{spelling:?} is the console-created desk"
+            );
+        }
+    }
+
+    /// An exact id beats another desk's display name.
+    ///
+    /// Desk creation enforces unique ids but **not** unique names, so
+    /// `{id: "ops_desk", name: "sales"}` is valid and can sit ahead of
+    /// `{id: "sales", …}`. A single pass matching `id == key || name == key`
+    /// answers with whichever came first, so asking for the desk `sales` got
+    /// `ops_desk` — and since this returns a *pair*, the damage is worse than a
+    /// miss: `owns` would be handed one desk's id and another's name, merging
+    /// two conversations that have nothing to do with each other.
+    ///
+    /// The precedence itself is `CompanyRecord::resolve_desk_id`'s, which this
+    /// now defers to rather than keeping a second, laxer copy of.
+    #[test]
+    fn an_exact_id_wins_over_an_earlier_desks_display_name() {
+        let mut record = record_with_group_chat("ops_desk", "sales");
+        record
+            .manifest
+            .group_chats
+            .push(toml::from_str("id = \"sales\"\nname = \"Sales\"").expect("a desk"));
+        assert_eq!(
+            desk_aliases(&record, Some("sales")).0,
+            "sales",
+            "the desk whose id is `sales` owns that key"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_none_is_the_general_desk() {
+        assert_eq!(
+            resolve(RecordStore(None), None).await,
+            (GENERAL_DESK.to_string(), GENERAL_DESK.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_general_spelling_short_circuits_without_a_store_read() {
+        // The store would panic on `save`/`list`, but a General spelling must not
+        // even reach `load` — it returns `(chat, chat)`, which owns folds.
+        assert_eq!(
+            resolve(RecordStore(None), Some("main")).await,
+            ("main".to_string(), "main".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_named_desk_by_id_returns_the_manifest_name() {
+        // Addressed by id; the seed must carry the name too, or a line journaled
+        // under the name would be missed. This is the exact "looks fixed but seeds
+        // nothing" trap the resolution guards against.
+        let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
+        assert_eq!(
+            resolve(store, Some("eng-123")).await,
+            ("eng-123".to_string(), "Engineering".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_unmatched_selector_passes_through_verbatim() {
+        let store = RecordStore(Some(record_with_group_chat("eng-123", "Engineering")));
+        assert_eq!(
+            resolve(store, Some("ad-hoc-thread")).await,
+            ("ad-hoc-thread".to_string(), "ad-hoc-thread".to_string())
+        );
     }
 }

@@ -100,7 +100,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/ledgers.md](runtime/ledgers.md) | Dynamic ledgers: declared record shapes, the append-only fold, who may delete, the `derived/` folder |
 | [runtime/ledger-statuses.md](runtime/ledger-statuses.md) | How many statuses a ledger may declare, the board's phase/stage split, and how a retired status word heals |
-| [runtime/ledgers-console-ia.md](runtime/ledgers-console-ia.md) | The console surface over ledgers: naming ("ledger" is internal-only), per-list sidebar rows, Manage Lists, the declare wizard |
+| [runtime/ledgers-console-ia.md](runtime/ledgers-console-ia.md) | The console surface over ledgers: naming ("ledger" is internal-only), per-list sidebar rows, Manage Lists, the declare wizard — and, as the console's IA record, Rule 6 on nav-vs-routing, Rule 7 on the Connections section and Rule 8 on the four-section sidebar |
+| [runtime/console-sections.md](runtime/console-sections.md) | Rule 8 written out: the four sidebar sections, sub-navigation in the sidebar rather than a content rail, Room as the chat column moved whole, the collapsed rail, Room at its real cap, and the nine Rule 6 calls |
 | [runtime/pages.md](runtime/pages.md) | Agent-authored internal dashboard pages: the `pages/<slug>/` convention, the compile-on-write contract, and the two-part isolation model |
 | [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
 | [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
@@ -116,9 +117,12 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [runtime/desktop-instances.md](runtime/desktop-instances.md) | Several local hosts on one machine: the roster, onboarding, dev runs |
+| [runtime/desktop-updates.md](runtime/desktop-updates.md) | Desktop auto-update: the silent-until-actionable prompt, the signed release artifacts, and the keypair an operator must generate before any of it works |
 | [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, and the switch that turns it off |
+| [runtime/crash-reporting.md](runtime/crash-reporting.md) | Errors and panics to the operator's own Sentry: the two DSNs, what a report carries, the credential scrubber, and how to prove it works |
+| [runtime/tracing.md](runtime/tracing.md) | Performance tracing and the request timeline: the sample-rate knobs and what they cost, the console-to-host distributed trace, transaction scrubbing, and why Session Replay is not shipped |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
 | [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |

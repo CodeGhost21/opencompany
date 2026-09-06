@@ -60,10 +60,10 @@ const backdrop = (page: Page) => page.locator('[data-slot="alert-dialog-overlay"
 /** Sidebar navigation only succeeds if nothing is intercepting pointer events. */
 async function expectConsoleInteractive(page: Page) {
   await page
-    .locator('[data-tour="nav-overview"]')
+    .locator('[data-tour="nav-chat"]')
     .getByRole("button")
     .click({ timeout: 10_000 });
-  await expect(page).toHaveURL(/#\/overview$/);
+  await expect(page).toHaveURL(/#\/chat/);
 }
 
 /** The dialog, and the backdrop it made the console inert with, are both gone. */

@@ -84,6 +84,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 
 /** A node row being edited. `key` is a stable React key, independent of the
  * user-editable `id` field (which can be blank or duplicated mid-edit).
@@ -140,6 +141,16 @@ export interface DraftNode {
    * the same hazard as a dropped `requiresApproval`.
    */
   repeatable?: boolean;
+  /**
+   * Issue #1866. Same "carried but not authored" contract as `repeatable`
+   * above: an operator sets a postcondition through the write route (agent
+   * nodes only today), this dialog has no control for it, and dropping it on
+   * an unrelated edit silently removes a run-safety gate rather than merely
+   * an operational-tuning field (issue #1937 review).
+   */
+  postcondition?: WorkflowNode["postcondition"];
+  /** Semantic judge policy, authored only on agent nodes. */
+  verify?: WorkflowNode["verify"];
 }
 
 /** How long the graph must sit still before the host is asked about it (issue
@@ -414,6 +425,14 @@ export function assembleGraph(draft: GraphDraft): AssembledGraph {
       // a dropped `repeatable: false` is a repeat guard removed by an unrelated
       // edit, the same hazard as a dropped `requiresApproval`.
       repeatable: n.repeatable,
+      // Round-trips a declared postcondition (issue #1866) the same way —
+      // this dialog has no control for it, so a Save must not silently clear
+      // a run-safety gate an operator set through the write route.
+      postcondition: n.postcondition,
+      verify:
+        n.kind === "agent" && n.verify
+          ? { criteria: n.verify.criteria?.trim() || undefined }
+          : undefined,
     });
   }
   return {
@@ -670,6 +689,13 @@ export function changeKind(kind: string): Partial<DraftNode> {
     // switching away from a call node leaves a value `submit()` still sends,
     // and the save fails on a field the author can no longer see.
     repeatable: undefined,
+    // Same reasoning as `repeatable` immediately above, for the same reason:
+    // a postcondition (issue #1866) is valid on `agent` nodes only, this
+    // dialog has no control to author or clear it, and a kind change is the
+    // one place left to reset a value that would otherwise survive onto a
+    // kind the host rejects it on.
+    postcondition: undefined,
+    verify: undefined,
   };
 }
 
@@ -701,8 +727,13 @@ function starterNodes(): DraftNode[] {
  * and a real bug: `fieldErrors` is keyed on `key`, so two graphs that share a
  * node id (`start` is the starter row's id, so most of them do) would share an
  * error map, and a complaint raised on one graph would render on the next.
+ *
+ * Exported for the tests, the same reason {@link assembleGraph} is: proving a
+ * carried-but-not-authored field (issue #1866 review, #1937) survives a
+ * round trip needs THIS function, not a hand-built `GraphDraft` that could
+ * never reproduce the read-side half of the bug.
  */
-function draftNodes(graph: WorkflowGraph): DraftNode[] {
+export function draftNodes(graph: WorkflowGraph): DraftNode[] {
   return graph.nodes.map((n) => {
     const common = {
       id: n.id,
@@ -717,6 +748,8 @@ function draftNodes(graph: WorkflowGraph): DraftNode[] {
       retry: n.retry,
       requiresApproval: n.requiresApproval,
       repeatable: n.repeatable,
+      postcondition: n.postcondition,
+      verify: n.verify,
     };
     // A form kind (#541) hydrates its config into per-field strings plus a
     // preserved `extra` bag; a form-less kind keeps the raw overlay in `config`.
@@ -2593,6 +2626,33 @@ function NodeRow({
             onChange={(schedule) => onChange({ schedule })}
             onBlurValidate={(value) => onValidateField("schedule", value)}
           />
+        )}
+        {node.kind === "agent" && (
+          <div className="mt-1 space-y-1 rounded-md border p-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor={`${rowId}-verify`} className="text-2xs">
+                Verify semantic sufficiency
+              </Label>
+              <Switch
+                id={`${rowId}-verify`}
+                checked={node.verify !== undefined}
+                onCheckedChange={(checked) =>
+                  onChange({ verify: checked ? (node.verify ?? {}) : undefined })
+                }
+              />
+            </div>
+            {node.verify && (
+              <Textarea
+                value={node.verify.criteria ?? ""}
+                onChange={(event) =>
+                  onChange({ verify: { criteria: event.target.value || undefined } })
+                }
+                rows={2}
+                placeholder="Success criteria (optional)"
+                aria-label="Semantic verification criteria"
+              />
+            )}
+          </div>
         )}
         {/* Only an output node reports back, so only it can route that report
             somewhere. "Nowhere" stays the default: the result still shows in the

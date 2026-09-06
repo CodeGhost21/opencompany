@@ -85,7 +85,7 @@ pub use secrets::SecretStore;
 pub use sessions::{SessionKind, SessionRecord, SessionStore};
 pub use skills_state::{SkillSource, SkillState, SkillStateStore};
 pub use store::CompanyStore;
-pub use tasks::{TaskRecord, TaskStore};
+pub use tasks::{TaskOrigin, TaskRecord, TaskStore};
 pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
@@ -97,9 +97,10 @@ pub use workflow_revisions::{
     MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
 };
 pub use workflow_runner::{
-    DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowApprovalOutcome,
-    WorkflowBlockedNode, WorkflowBoardAction, WorkflowRun, WorkflowRunApprovalRow,
-    WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
+    DeliveryReason, DeliveryReport, DeliveryStatus, ResumeSemantic, RunCancel,
+    WorkflowApprovalOutcome, WorkflowBlockedNode, WorkflowBoardAction, WorkflowCheckpointResume,
+    WorkflowRun, WorkflowRunApprovalRow, WorkflowRunBoardRow, WorkflowRunContext,
+    WorkflowRunNodeRow, WorkflowRunner,
 };
 pub use workflow_verdict::{
     RunVerdictFacts, WorkflowRunVerdict, awaiting_count, is_undelivered, undelivered_count,

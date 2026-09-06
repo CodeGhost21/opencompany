@@ -42,7 +42,6 @@ export type View =
   | "overview"
   | "company"
   | "chat"
-  | "conversation"
   | "inbox"
   | "tasks"
   | "ledgers"
@@ -64,6 +63,15 @@ export type View =
   | "observatory"
   | "pages"
   | "finances"
+  /**
+   * What this company can reach outside itself: the apps its teammates act
+   * through, and the tool servers they can call.
+   *
+   * Two settings sub-pages (`#/settings/oauth`, `#/settings/mcp`) until they
+   * got a section of their own. Both old addresses still resolve, rewritten by
+   * `console-route-rewrites.ts`.
+   */
+  | "connections"
   | "settings"
   | "feedback"
   /** The first-run setup dialog, opened from a direct address or Settings. */
@@ -86,14 +94,6 @@ const ROUTABLE: Record<View, true> = {
   overview: true,
   company: true,
   chat: true,
-  /**
-   * No nav row: the surface the Chat workspace replaces. Everything it can do
-   * chat can do in one screen — including the teammate budget controls
-   * `MembersPane` ported from Team (issue #360) — but it keeps answering
-   * `#/conversation` until chat covers the last of what it still does better (a
-   * desk's persisted transcript).
-   */
-  conversation: true,
   /** No nav row: parked by issue #302, host routes and per-agent store intact. */
   inbox: true,
   /**
@@ -153,6 +153,13 @@ const ROUTABLE: Record<View, true> = {
    * routes all three; see docs/spec/runtime/finance-console.md.
    */
   finances: true,
+  /**
+   * Apps (the third-party accounts, Composio included) and MCP Servers, under
+   * one nav row. Its sub-pages ride the second hash segment
+   * (`#/connections/mcp`), so this one entry routes both — the same shape
+   * `finances` above uses. See docs/spec/runtime/ledgers-console-ia.md, Rule 7.
+   */
+  connections: true,
   settings: true,
   /** No nav row: linked from the sidebar footer instead. */
   feedback: true,
@@ -172,12 +179,46 @@ const ROUTABLE: Record<View, true> = {
 export const VIEWS: View[] = Object.keys(ROUTABLE) as View[];
 
 /**
+ * Where the console opens: an empty hash, a bare `#/`, or an address whose view
+ * no longer exists.
+ *
+ * A constant rather than a literal at the `useHashView` call site, because two
+ * things have to agree on it and they are 120 lines apart. The other is the
+ * shell's `deepLinked`, which asks "did the operator arrive at a *specific*
+ * address, or just open the console?" and answers it by comparing the resolved
+ * view against this one. First-run setup only offers itself when the answer is
+ * "just opened" — so a default view changed in one place and not the other is
+ * not a cosmetic drift, it is a company that can never be set up.
+ *
+ * There is a third place, and it is the one that actually broke (#1999): a test
+ * that opens the console at a *named* view is asserting against whatever this
+ * constant said the day it was written. When this moved from `overview` to
+ * `chat`, `company-setup.spec.ts` started arriving deep-linked and the
+ * first-run specs went red against a console that was working correctly. Tests
+ * that mean "just opened the console" must navigate to `/` — an empty hash
+ * resolves here by definition and cannot drift.
+ */
+export const DEFAULT_VIEW: View = "chat";
+
+/**
  * Whether a sidebar destination owns the current view.
  *
- * Task cards keep their own deep-linkable `tasks` route, but the board that
- * owns them lives under Work (`ledgers`). Keeping that parent destination
- * active makes the detail screen read as part of the same work surface.
+ * The two views with no row of their own but an obvious owner. Each is a
+ * Rule-6 deep-link destination (`docs/spec/runtime/ledgers-console-ia.md`):
+ * routable, linked to from all over the console, and not a place you navigate
+ * to from the sidebar.
+ *
+ * - A task card (`#/tasks/<id>`) is a card on the board Work draws.
+ * - A teammate (`#/team/<id>`) is a seat on the org chart Agents draws.
+ *
+ * Without this the sidebar empties the moment an operator opens one of them:
+ * the row they came from goes dark, and — since the restructure into sections —
+ * the whole section collapses, taking its sub-navigation with it. The detail
+ * screen should read as part of the surface it was opened from.
  */
 export function isNavigationActive(item: View, view: View): boolean {
-  return item === view || (item === "ledgers" && view === "tasks");
+  if (item === view) return true;
+  if (item === "ledgers" && view === "tasks") return true;
+  if (item === "company" && view === "team") return true;
+  return false;
 }

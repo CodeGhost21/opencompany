@@ -103,6 +103,97 @@ export interface SetPolicyInput {
   approvalTtlHours?: number | null;
 }
 
+/**
+ * One renderable tier.
+ *
+ * Split out because `Array.isArray(tiers)` alone is not the fence it looks
+ * like: `{"tiers": [null]}` satisfies it, and the very next thing every reader
+ * does is `tiers.find((tier) => tier.value === ...)`, which throws on the first
+ * member. A body that passes the shape check and then crashes the render is the
+ * exact failure {@link isPolicyStatus} exists to stop, one level down.
+ *
+ * All three fields are required rather than optional, and that is safe against
+ * a real host: `TierDto` (`src/server/ops/policy.rs:96`) declares `value`,
+ * `label` and `description` as `&'static str`, so every tier the runtime serves
+ * carries all three. The leniency this fence deliberately keeps is at the
+ * *status* level — an optional field a host may not have grown yet — not here,
+ * where a partial member is a member the menu cannot draw.
+ */
+function isPolicyTier(value: unknown): value is PolicyTier {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const tier = value as Partial<PolicyTier>;
+  return (
+    typeof tier.value === "string" &&
+    typeof tier.label === "string" &&
+    typeof tier.description === "string"
+  );
+}
+
+/**
+ * What a *renderable* policy is, as distinct from what the host sent.
+ *
+ * ## The crash this fences
+ *
+ * A 200 whose body is not a policy used to reach the render untouched, and the
+ * first `status.tiers.find(...)` threw. `AutonomyPill` is mounted for the entire
+ * life of the console on every view (`window-title-bar.tsx`), there is no error
+ * boundary anywhere in `src/`, and React unmounts the whole tree on a throw
+ * during render — so one malformed `/policy` response blanked the ENTIRE
+ * console, on every page, with no way back but a reload. The console E2E lane
+ * met it as `TypeError: Cannot read properties of undefined (reading 'find')`
+ * against an empty document, and thirty-plus specs sat on their timeouts.
+ *
+ * ## Why it is a predicate here and not a check on the fetch
+ *
+ * Because "usable" depends on the reader. `useApprovalDeadline` wants
+ * `approvalTtlHours` and documents that an older host omits it; making the
+ * transport insist on the tier list would break a hook that is deliberately
+ * lenient. So the three functions below stay plain typed requests and each
+ * consumer that puts a policy ON SCREEN gates on this instead — `useAutonomy`
+ * for the title row, `apply`/`load` for the settings page.
+ *
+ * ## Why these three fields and no more
+ *
+ * They are exactly what the render paths dereference without a guard —
+ * `tiers.find`, `tiers.map`, `alwaysApprove.join` — plus the `mode` they
+ * compare against. Every optional field stays optional: this is a crash fence,
+ * not a schema, and a host that grows or drops a field must keep working. See
+ * `knownTools` above.
+ *
+ * The two required lists are checked to their MEMBERS, though, because the
+ * container check alone does not fence what it is here to fence: `tiers: [null]`
+ * is an array, passes, and throws inside `tiers.find` on the very next line —
+ * the same blank console this predicate was written to stop. See
+ * {@link isPolicyTier}.
+ */
+export function isPolicyStatus(body: unknown): body is PolicyStatus {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+  const candidate = body as Partial<PolicyStatus>;
+  return (
+    typeof candidate.mode === "string" &&
+    Array.isArray(candidate.tiers) &&
+    // Each MEMBER, not just the container. See `isPolicyTier`: `[null]` passes
+    // `Array.isArray` and throws in `tiers.find` a moment later, which is the
+    // same blank console by a slightly longer route.
+    candidate.tiers.every(isPolicyTier) &&
+    Array.isArray(candidate.alwaysApprove) &&
+    // The list is rendered with `.join(", ")` and typed `string[]`, and a
+    // non-string member is a wrong sentence rather than a crash — the settings
+    // page would seed its always-ask box with "[object Object]" and save that
+    // back as a gate. A policy the console cannot state truthfully is not a
+    // renderable policy.
+    candidate.alwaysApprove.every((entry) => typeof entry === "string")
+  );
+}
+
+/**
+ * What a reader says when it is handed something that is not a policy.
+ *
+ * One sentence, shared, so the settings page's `loadError` and the title row's
+ * failed write read as the same fact rather than as two unrelated faults.
+ */
+export const NOT_A_POLICY = "The host did not answer with an autonomy policy.";
+
 /** The company's effective policy. */
 export function getPolicy(
   client: OpenCompanyClient,

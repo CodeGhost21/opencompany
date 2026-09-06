@@ -45,7 +45,7 @@ async function tourKey(page: Page): Promise<string> {
   return key!;
 }
 
-test("a legacy hash callback lands on the OAuth page with its cancellation message", async ({ page }) => {
+test("a legacy hash callback lands on the Apps page with its cancellation message", async ({ page }) => {
   // This is the query the former callback used after an operator cancelled at
   // the provider consent screen. Before the original fix it answered with
   // `{"error":"provider returned: access_denied"}` as the document body.
@@ -57,7 +57,7 @@ test("a legacy hash callback lands on the OAuth page with its cancellation messa
 
   // The console renders — the operator is not stranded on raw JSON.
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "OAuth", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Apps", level: 1 })).toBeVisible();
 
   // The fragment query is stripped, so a refresh doesn't re-fire the toast.
   await expect
@@ -88,7 +88,7 @@ test("an unknown failure code still produces a usable message", async ({ page })
   await page.goto("/connections?connect_error=something_new_2099");
   await expect(page.getByText(/couldn't connect/i)).toBeVisible();
   await dismissWelcome(page);
-  await expect(page.getByRole("heading", { name: "OAuth", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Apps", level: 1 })).toBeVisible();
 });
 
 test("the tour resumes on the accounts stop after a redirect", async ({ page }) => {
@@ -101,25 +101,30 @@ test("the tour resumes on the accounts stop after a redirect", async ({ page }) 
   await skip.click();
   const key = await tourKey(page);
 
-  // Seed exactly what `armTourResume` writes just before the OAuth page hands
+  // Seed exactly what `armTourResume` writes just before the Apps page hands
   // the browser to the provider: mid-tour, on the accounts stop, no
   // completed/skipped flag (the tour never finished).
   //
-  // `"settings"`, NOT `"connections"`. The marker stores the stop's `view`
-  // (`TourController`'s `before` hook publishes `stop.view` through
-  // `setActiveTourStop`), and the accounts page is a *page of the Settings
-  // section* — the stop is `{ view: "settings", sub: "oauth" }`. This
-  // spec seeded the pre-move value, which no `TOUR` stop matches, so the
-  // controller's `findIndex` returned -1 and the resume was correctly skipped.
-  // The spec had gone stale against a deliberate product change; it was not
-  // catching a resume bug. See the unit suite's `tour-resume.test.ts`, which
-  // pins the stop-view ⇄ marker coupling directly so this cannot rot again
-  // without a fast test saying so.
+  // `"connections"`. The marker stores the stop's `view` (`TourController`'s
+  // `before` hook publishes `stop.view` through `setActiveTourStop`), and the
+  // accounts page is a page of the **Connections** section — the stop is
+  // `{ view: "connections", sub: "apps" }`.
+  //
+  // This literal has been wrong twice, in opposite directions, which is why it
+  // is commented at this length. It first read `"connections"` against a tour
+  // whose stop was `{ view: "settings", sub: "oauth" }`, so `findIndex`
+  // returned -1 and the resume was silently skipped — the spec had gone stale
+  // against a deliberate product change rather than catching a bug. It was
+  // corrected to `"settings"`, and the section move has now made
+  // `"connections"` right again. Nothing about a hand-seeded string tells you
+  // which of those worlds you are in, so the coupling is pinned by
+  // `test/unit/tour-resume.test.ts` instead: it asserts the stop's literal
+  // `view` and fails in seconds when the tour is reorganised.
   await page.evaluate(
     ([k]) =>
       window.localStorage.setItem(
         k,
-        JSON.stringify({ pendingResume: { view: "settings", at: Date.now() } }),
+        JSON.stringify({ pendingResume: { view: "connections", at: Date.now() } }),
       ),
     [key],
   );

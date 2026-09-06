@@ -29,6 +29,16 @@ describe("failureDisposition", () => {
     );
   });
 
+  it("treats a paused company as a refusal, never as a run that may have started", () => {
+    // B-037: the host's pause gate returns above the runner lookup, so nothing
+    // was spawned. Before this arm the code fell through to `cautious`, whose
+    // copy sends the operator to a History row that does not exist.
+    expect(failureDisposition({ ...FAILURE, code: "lifecycle_conflict" })).toBe(
+      "refusal-lifecycle",
+    );
+    expect(PRE_EXECUTION_REFUSAL_CODES.has("lifecycle_conflict")).toBe(true);
+  });
+
   it("claims a history row only after this console saw the run start", () => {
     expect(failureDisposition({ ...FAILURE, sawRunStart: true })).toBe("journaled");
     expect(failureDisposition(FAILURE)).toBe("cautious");

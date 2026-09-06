@@ -164,19 +164,20 @@ pub(super) fn reconcile(
 mod tests {
     use super::*;
     use crate::ports::runs::{RunRecord, RunStatus};
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::tasks::{TaskDeliverable, TaskPlanningUsage};
     use crate::ports::types::{CompanyId, TokenUsage};
 
     fn task(id: &str, parent: Option<&str>, planning_cost: f64) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: id.to_string(),
+            title: TaskTitle::authored(id),
             note: None,
             column: "done".to_string(),
             priority: "low".to_string(),
             assignee: "ops".to_string(),
             updated_at_millis: 1,
-            origin_chat_id: None,
+            origin: None,
             parent_task_id: parent.map(str::to_string),
             output: None,
             plan: None,
@@ -194,6 +195,7 @@ mod tests {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -208,6 +210,7 @@ mod tests {
             attempt: 1,
             status,
             trigger_event_seq: None,
+            thread_root: None,
             created_at_millis: 3,
             started_at_millis: Some(3),
             finished_at_millis: Some(4),

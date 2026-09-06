@@ -45,7 +45,7 @@ type Page = import("@playwright/test").Page;
  * per run.
  */
 async function openConnections(page: Page): Promise<void> {
-  await page.goto("/#/settings/oauth");
+  await page.goto("/#/connections/apps");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })

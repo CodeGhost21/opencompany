@@ -46,7 +46,7 @@ impl From<TaskRecord> for TaskGql {
     fn from(record: TaskRecord) -> Self {
         Self {
             id: ID(record.id),
-            title: record.title,
+            title: record.title.to_string(),
             note: record.note,
             column: record.column,
             priority: record.priority,

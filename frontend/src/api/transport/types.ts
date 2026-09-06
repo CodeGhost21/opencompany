@@ -39,6 +39,14 @@ export interface TransportRequest {
    * request, and has no equivalent teardown-survival problem to solve.
    */
   keepalive?: boolean;
+  /**
+   * Tears the request down when it fires. `BrowserTransport` threads it to
+   * `fetch`, which cancels the socket; `ProxyTransport` cannot cancel an
+   * in-flight Tauri `invoke` and ignores it, the same way it ignores
+   * `keepalive`. The client races the abort itself either way, so a transport
+   * that cannot honour the signal still stops the caller waiting.
+   */
+  signal?: AbortSignal;
 }
 
 export interface TransportResponse {

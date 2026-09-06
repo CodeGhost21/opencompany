@@ -42,6 +42,14 @@ Supporting docs:
   - [analytics.md](analytics.md) — what the product reports about its own use:
     hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
     structurally carry content, and how to turn it off
+  - [crash-reporting.md](crash-reporting.md) — errors and panics sent to a
+    Sentry project the **operator** owns: the two DSNs, what a report carries,
+    the credential scrubber that runs in every build (not only in a reporting
+    one), and the two ways to prove it is working
+  - [tracing.md](tracing.md) — the timeline half: the performance-tracing
+    sample rates and what a rate costs in Sentry quota, the console-to-host
+    distributed trace, why a transaction is scrubbed at the transport rather
+    than in a `before_send`, and why Session Replay is evaluated and declined
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
@@ -49,6 +57,11 @@ Supporting docs:
     `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
     interrupted-run sweep, and operator stop/cancel semantics (issues
     #371/#382/#383/#398)
+  - [events-settle-marker.md](events-settle-marker.md) — the card-linked
+    marker a settled dispatch leaves in the conversation that raised it: the
+    captured origin (channel and, since #1890, thread), why `None` means no
+    conversation rather than the General desk, and the identity dedupe that
+    keeps the live line and its rehydrated twin one line (issues #377/#1890)
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge

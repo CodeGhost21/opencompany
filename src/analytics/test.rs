@@ -196,6 +196,7 @@ fn vocabulary() -> Vec<&'static str> {
         SampleKind::OauthCall,
         SampleKind::SearchCall,
         SampleKind::PlanningCall,
+        SampleKind::JudgeCall,
         SampleKind::TriageCall,
         SampleKind::SetupCall,
         SampleKind::AuthoringCall,

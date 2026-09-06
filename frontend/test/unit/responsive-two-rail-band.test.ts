@@ -26,37 +26,41 @@ import { describe, expect, it } from "vitest";
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
-describe("chat rails collapse to single-rail below lg (issue #1383)", () => {
+describe("chat has no second rail left to band with (issues #1383, four-row sidebar)", () => {
   const chatView = read("views/ChatView.tsx");
   const chatHeader = read("views/chat/ChatHeader.tsx");
 
-  it("shows the full channel rail below lg only when toggled", () => {
-    // The mobile rail stays full-width and is governed by the shared-pane toggle.
-    expect(chatView).toContain('cn("lg:hidden", mobilePane === "rail" ? "flex" : "hidden")');
-    // Regression guard: the `md` rail is what produced the two-rail band.
-    expect(chatView).not.toContain('cn("md:hidden", mobilePane === "rail" ? "flex" : "hidden")');
+  it("renders exactly one channel rail, and renders it through the sidebar's slot", () => {
+    // #1383 was two rails plus content in one viewport. There are not two rails
+    // any more and there is no second column: the channel list is a section of
+    // the app sidebar, portalled in. Counted at the JSX element boundary — a
+    // bare `toContain("<ChannelRail")` is satisfied by `<ChannelRailRemoved`.
+    expect(chatView.match(/<ChannelRail[\s/>]/g) ?? []).toHaveLength(1);
+    expect(chatView).toContain("createPortal(");
+    expect(chatView).toContain("roomRail.element,");
   });
 
-  it("keeps a separate desktop rail from lg onward", () => {
-    // A desktop-local compact rail must not affect the 768–1023px mobile-pane flow.
-    expect(chatView).toContain('className="hidden lg:flex"');
-    expect(chatView).not.toContain('className="hidden md:flex"');
+  it("leaves no breakpoint of its own on the rail or the pane", () => {
+    // The regression guard that matters now is the opposite of the old one: the
+    // rail must NOT reintroduce a media query of its own. The sidebar already
+    // decides, once, whether it is a column, a 3rem rail or a sheet, and a
+    // second opinion here is how the band came back.
+    expect(chatView).not.toContain('mobilePane');
+    expect(chatView).not.toMatch(/className="hidden lg:flex"/);
+    expect(chatView).not.toMatch(/className=\{cn\("lg:hidden"/);
   });
 
-  it("shows the chat pane full-width below lg (single pane), split at lg", () => {
-    expect(chatView).toContain('mobilePane === "chat" ? "flex" : "hidden lg:flex"');
-    expect(chatView).not.toContain('mobilePane === "chat" ? "flex" : "hidden md:flex"');
-  });
-
-  it("keeps the header's rail toggle visible across the single-rail band", () => {
-    // The "Show channels" affordance must reach up to lg, matching the rail.
-    expect(chatHeader).toContain("size-8 lg:hidden");
-    expect(chatHeader).not.toContain("size-8 md:hidden");
-  });
-
-  it("offers the desktop channel collapse separately from the mobile rail toggle", () => {
-    expect(chatHeader).toContain('className="hidden size-8 lg:inline-flex"');
-    expect(chatHeader).toContain('aria-label={channelsCollapsed ? "Expand channels" : "Collapse channels"}');
+  it("offers the phone's reveal at the sidebar's own breakpoint, and nothing else", () => {
+    // `useIsMobile` flips at exactly 768px, which is Tailwind's `md`. This
+    // control acts on the sidebar, so it changes hands there and not at `lg` —
+    // the two agree by construction rather than by coincidence.
+    expect(chatHeader).toContain("size-8 md:hidden");
+    // And the header's density toggle is GONE: collapsing the channel list is
+    // collapsing the sidebar now, and `SidebarCollapseButton` already does
+    // that, forty pixels to its left (issue #1177). `chat-rail-focus.test.ts`
+    // holds the focus hand-off that moved with it.
+    expect(chatHeader).not.toContain("Collapse channels");
+    expect(chatHeader).not.toContain("md:inline-flex");
   });
 });
 
@@ -127,18 +131,16 @@ describe("mention clearing is gated on the transcript being visible (codex P1)",
   const chatView = read("views/ChatView.tsx");
 
   it("only reports a channel viewed while the chat pane is actually on screen", () => {
-    // The view-report effect that clears mentions must not fire while a sub-`lg`
-    // pane shows only the rail — a mention landing then would be marked read
-    // behind the operator's back. A jsdom render cannot prove it (the whole
-    // failure is the `lg` media query), so this pins the gate to the same
-    // `mobilePane` toggle and `lg` breakpoint the pane's class contract above
-    // uses: a future move of the rail off `lg` trips that class test too.
+    // The view-report effect that clears mentions must not fire while the rail
+    // is covering the transcript — a mention landing then would be marked read
+    // behind the operator's back. That is now a phone-only state (the sidebar
+    // is a sheet over the whole screen), and the sidebar is the one that knows
+    // it, so the gate reads from the room-rail slot rather than from a
+    // breakpoint this view guesses at.
     expect(chatView).toMatch(/if \(channel && chatPaneVisible\)/);
-    expect(chatView).toContain(
-      'const chatPaneVisible = mobilePane === "chat" || isDesktop;',
-    );
-    // The visibility flag is a dependency, so re-opening the pane from the rail
-    // re-runs the report and clears whatever is newly visible.
+    expect(chatView).toContain("const chatPaneVisible = !roomRail.covering;");
+    // The visibility flag is a dependency, so closing the sheet re-runs the
+    // report and clears whatever is newly visible.
     expect(chatView).toContain("chatPaneVisible,\n  ]);");
   });
 });

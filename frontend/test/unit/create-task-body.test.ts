@@ -30,14 +30,16 @@ describe("newTaskBody", () => {
 
   /**
    * The load-bearing one: a card created without touching either new control
-   * must post what it posted before those controls existed. `column` is absent
-   * for the same reason it always was (#301) — the server's intake default is
-   * what keeps the human drag into In progress the only thing that spends.
+   * posts the prompt and nothing else. `column` is absent for the same reason it
+   * always was (#301) — the server's intake default is what keeps the human drag
+   * into In progress the only thing that spends. `title` is absent because the
+   * host names the card; the browser cutting the prompt into a headline is what
+   * made a board read as a list of half-sentences.
    */
-  it("posts the pre-#580/#1106 body when neither control is touched", () => {
+  it("posts only the prompt when neither control is touched", () => {
     expect(
       newTaskBody({ prompt: "ship the thing", deliverable: "once", priority: "medium", assignee: "" }),
-    ).toEqual({ title: "ship the thing", note: undefined });
+    ).toEqual({ note: "ship the thing" });
   });
 
   it("carries a chosen priority", () => {
@@ -83,21 +85,22 @@ describe("newTaskBody", () => {
     expect(body?.assignee).toBe("devrel");
   });
 
-  it("refuses a prompt with no title to derive", () => {
+  it("refuses a prompt with nothing in it to name a card from", () => {
     expect(
       newTaskBody({ prompt: "   \n  ", deliverable: "once", priority: "medium", assignee: "devrel" }),
     ).toBeNull();
   });
 
   /**
-   * The long-prompt split is #301's and is not re-specified here — this only
-   * pins that routing it through `newTaskBody` did not drop the note, since the
-   * operator's full text surviving on the card is what the planner reads.
+   * The operator's full text surviving on the card is what the planner reads,
+   * and it is now always the note — the dialog sends no title, so the host names
+   * the card instead of the browser cutting the prompt at its first line.
    */
-  it("keeps the full prompt on the note when the title was shortened", () => {
+  it("sends the whole prompt as the note and lets the host name the card", () => {
     const prompt = `${"a".repeat(100)}\nsecond line`;
     const body = newTaskBody({ prompt, deliverable: "once", priority: "medium", assignee: "" });
     expect(body?.note).toBe(prompt);
-    expect(body?.title).toBe(derivePromptCard(prompt).title);
+    expect(body).not.toHaveProperty("title");
+    expect(derivePromptCard(prompt).title).toBeUndefined();
   });
 });

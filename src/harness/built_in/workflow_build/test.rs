@@ -16,10 +16,10 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinyagents::harness::model::{ChatModel, ModelProfile, ModelResponse};
-use tinyagents::harness::tool::ToolCall;
-use tinyagents::harness::usage::Usage;
-use tinyagents::{Result as TaResult, TinyAgentsError};
+use tinyinference::model::{ChatModel, ModelProfile, ModelResponse};
+use tinyinference::tool::ToolCall;
+use tinyinference::usage::Usage;
+use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::agent::copilot_persona;
 use super::tools::{
@@ -29,6 +29,7 @@ use super::tools::{
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::openhuman::tools::traits::Tool;
@@ -117,7 +118,7 @@ impl ChatModel<()> for ScriptedModel {
             runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
         }
         if self.fail {
-            return Err(TinyAgentsError::Model("the brain is down".to_string()));
+            return Err(InferenceError::Model("the brain is down".to_string()));
         }
         let reply = self.replies[index.min(self.replies.len() - 1)].clone();
         Ok(ModelResponse::assistant(reply))
@@ -917,13 +918,13 @@ async fn runtime_with_agent(
 fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
-        title: "Automate the weekly digest".to_string(),
+        title: TaskTitle::authored("Automate the weekly digest"),
         note: Some("It should go out every Monday morning.".to_string()),
         column: COLUMN_IN_PROGRESS.to_string(),
         priority: "medium".to_string(),
         assignee: "maya".to_string(),
         updated_at_millis: 7,
-        origin_chat_id: None,
+        origin: None,
         parent_task_id: None,
         output: None,
         plan,
@@ -932,6 +933,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         workflow_proposal: None,
         origin_run_id: None,
         origin_workflow_id: None,
+        origin_message_seq: None,
         bounced: None,
     }
 }

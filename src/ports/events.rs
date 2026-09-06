@@ -298,6 +298,7 @@ mod test {
             run_id: format!("run-{n}"),
             scheduled: false,
             started_by: None,
+            resume_semantic: None,
         }
     }
 

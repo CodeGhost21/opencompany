@@ -16,6 +16,15 @@ function isGeneralChat(context: string | null | undefined): boolean {
 }
 
 /**
+ * The notification kinds that badge a channel on the rail: a mention (#65) and
+ * a parked blocker (#1862). Both are "somebody wants you here" — a named
+ * message, or a teammate blocked in this DM awaiting a verdict.
+ */
+export function isBadgingKind(kind: string): boolean {
+  return kind === "mention" || kind === "blocker_parked";
+}
+
+/**
  * The rendered channel a mention's `context` badges, or `undefined` when it has
  * nowhere to land.
  *
@@ -40,29 +49,6 @@ export function renderedChannelIdForContext(
   if (renderedChannelIds.has(context)) return context;
   if (isGeneralChat(context)) return mainChannelId;
   return context;
-}
-
-/**
- * Whether viewing `threadId` in Conversation counts as actually viewing the
- * channel it maps to — and therefore may advance that channel's read state.
- *
- * Almost always true: a desk thread's transcript *is* its channel's transcript,
- * and a DM thread's transcript is the DM channel's (different id, same store).
- * The one exception is the `main` thread on a company with real desks. The rail
- * is built from real desk ids and has no `General` row, so `channelMap` aliases
- * `main` onto the first desk's channel *for badging* — but the main thread's
- * transcript is the legacy General conversation, a different store from the
- * first desk's own. Marking that desk read because the operator read `main`
- * would permanently un-badge messages they never saw (Codex P1). The mention
- * clear stays: the thread's loaded ids prove the summoning message is on screen
- * ([`mentionsToClear`] is fed those ids, so the general-chat arm clears only
- * what actually rendered).
- */
-export function threadViewAdvancesChannel(
-  threadId: string,
-  channelId: string,
-): boolean {
-  return !(threadId === MAIN_THREAD_ID && channelId !== MAIN_THREAD_ID);
 }
 
 /**
@@ -109,8 +95,10 @@ export function mentionCountsByChannel(
     if (n.readAt !== undefined) continue;
     // `kind` rather than `subjectKind`: a future notification about a message
     // that is not a mention (a reply, a reaction) must not silently start
-    // badging as one.
-    if (n.kind !== "mention") continue;
+    // badging as one. A parked blocker (#1862) is the second summons that
+    // belongs on the rail — a teammate is blocked in this DM and wants a
+    // verdict — so it badges the same way a mention does.
+    if (!isBadgingKind(n.kind)) continue;
     // A row with no channel cannot be placed on the rail. Counted nowhere
     // rather than counted somewhere arbitrary.
     if (n.context === undefined || n.context === null) continue;
@@ -171,7 +159,7 @@ export function mentionsToClear(
 ): string[] {
   return notifications
     .filter((n) => {
-      if (n.readAt !== undefined || n.kind !== "mention" || n.context === undefined) {
+      if (n.readAt !== undefined || !isBadgingKind(n.kind) || n.context === undefined) {
         return false;
       }
       let inChannel: boolean;
@@ -192,6 +180,10 @@ export function mentionsToClear(
         inChannel = channelId === mainChannelId && isGeneralChat(n.context);
       }
       if (!inChannel) return false;
+      // A parked blocker has no summoning chat message — its card renders from
+      // the approvals feed, not the transcript — so opening the DM clears it
+      // outright, without the message-loaded gates the mention path needs.
+      if (n.kind === "blocker_parked") return true;
       // A mention inside a thread reply stays until that reply is actually on
       // screen. The main timeline folds replies into their parent
       // (`buildTimeline`), so a collapsed thread hides the text even while the

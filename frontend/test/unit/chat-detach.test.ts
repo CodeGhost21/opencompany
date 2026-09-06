@@ -351,7 +351,9 @@ describe("open turns read back from the run store", () => {
       { id: "turn-1", chatId: "main", status: "running" },
     ]);
 
-    expect(open).toEqual({ main: [{ turnId: "turn-1", queued: false }] });
+    // `chatId` rides alongside since #2042's follow-up: the map key can be a
+    // composite (`main#41`), and the settle poll needs the real desk to re-read.
+    expect(open).toEqual({ main: [{ turnId: "turn-1", queued: false, chatId: "main" }] });
   });
 
   it("calls a turn that has not taken the lock queued, not working", () => {
@@ -401,8 +403,8 @@ describe("open turns read back from the run store", () => {
 
     const expected = {
       main: [
-        { turnId: "turn-1", queued: false },
-        { turnId: "turn-2", queued: true },
+        { turnId: "turn-1", queued: false, chatId: "main" },
+        { turnId: "turn-2", queued: true, chatId: "main" },
       ],
     };
     expect(runningFirst).toEqual(expected);
@@ -429,37 +431,37 @@ describe("open turns read back from the run store", () => {
  */
 describe("merging armed turn lists", () => {
   it("appends a thread's turns beside an existing row", () => {
-    const before = { main: [{ turnId: "turn-1", queued: false }] };
+    const before = { main: [{ turnId: "turn-1", queued: false, chatId: "main" }] };
     const merged = mergeOpenTurns(before, {
-      main: [{ turnId: "turn-2", queued: true }],
+      main: [{ turnId: "turn-2", queued: true, chatId: "main" }],
     });
 
     expect(merged.main.map((t) => t.turnId)).toEqual(["turn-1", "turn-2"]);
     // A copy, never a mutation of the previous state.
-    expect(before.main).toEqual([{ turnId: "turn-1", queued: false }]);
+    expect(before.main).toEqual([{ turnId: "turn-1", queued: false, chatId: "main" }]);
   });
 
   it("collapses the same turn onto one entry, fresh reading wins", () => {
     // A reload mid-POST arms the same row the 202 just registered. One entry
     // survives, and the store's later answer is the honest `queued` reading.
     const merged = mergeOpenTurns(
-      { main: [{ turnId: "turn-1", queued: true }] },
-      { main: [{ turnId: "turn-1", queued: false }] },
+      { main: [{ turnId: "turn-1", queued: true, chatId: "main" }] },
+      { main: [{ turnId: "turn-1", queued: false, chatId: "main" }] },
     );
 
-    expect(merged.main).toEqual([{ turnId: "turn-1", queued: false }]);
+    expect(merged.main).toEqual([{ turnId: "turn-1", queued: false, chatId: "main" }]);
   });
 
   it("keeps id-less turns as separate entries", () => {
     const merged = mergeOpenTurns(
-      { main: [{ queued: true }] },
-      { main: [{ queued: false }, { queued: true }] },
+      { main: [{ queued: true, chatId: "main" }] },
+      { main: [{ queued: false, chatId: "main" }, { queued: true, chatId: "main" }] },
     );
 
     expect(merged.main).toEqual([
-      { queued: true },
-      { queued: false },
-      { queued: true },
+      { queued: true, chatId: "main" },
+      { queued: false, chatId: "main" },
+      { queued: true, chatId: "main" },
     ]);
   });
 
@@ -467,8 +469,8 @@ describe("merging armed turn lists", () => {
     // The re-arm came back listing only the newer turn; the running row the
     // POST leg registered must survive the merge, not be replaced by it.
     const merged = mergeOpenTurns(
-      { main: [{ turnId: "turn-1", queued: false }] },
-      { main: [{ turnId: "turn-2", queued: true }] },
+      { main: [{ turnId: "turn-1", queued: false, chatId: "main" }] },
+      { main: [{ turnId: "turn-2", queued: true, chatId: "main" }] },
     );
 
     expect(merged.main.map((t) => t.turnId)).toEqual(["turn-1", "turn-2"]);
@@ -477,11 +479,11 @@ describe("merging armed turn lists", () => {
 
   it("leaves untouched threads alone", () => {
     const merged = mergeOpenTurns(
-      { design: [{ turnId: "turn-x", queued: true }] },
-      { main: [{ turnId: "turn-1", queued: false }] },
+      { design: [{ turnId: "turn-x", queued: true, chatId: "main" }] },
+      { main: [{ turnId: "turn-1", queued: false, chatId: "main" }] },
     );
 
-    expect(merged.design).toEqual([{ turnId: "turn-x", queued: true }]);
+    expect(merged.design).toEqual([{ turnId: "turn-x", queued: true, chatId: "main" }]);
   });
 });
 

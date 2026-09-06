@@ -146,8 +146,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await openWorkflow(page, secondName);
     await expect(page).toHaveURL(new RegExp(`#/workflows/${secondId}$`));
 
-    await page.getByRole("button", { name: "Workspace" }).click();
-    await page.getByRole("button", { name: "Workflows" }).click();
+    // Room and Flows: two section rows, both reachable in one click from
+    // anywhere. Workspace is a child under Company now, so stepping away
+    // through it would take two clicks and test the sidebar rather than the
+    // remembered workflow this spec is about.
+    await page.getByRole("button", { name: "Room", exact: true }).click();
+    await page.getByRole("button", { name: "Flows", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(secondName);
 
     await page.goto(`/#/workflows/${firstId}`);
@@ -156,8 +160,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     // is the flake, not the console.
     await expect(openWorkflowName(page)).toHaveText(firstName, { timeout: 30_000 });
 
-    await page.getByRole("button", { name: "Workspace" }).click();
-    await page.getByRole("button", { name: "Workflows" }).click();
+    // Room and Flows: two section rows, both reachable in one click from
+    // anywhere. Workspace is a child under Company now, so stepping away
+    // through it would take two clicks and test the sidebar rather than the
+    // remembered workflow this spec is about.
+    await page.getByRole("button", { name: "Room", exact: true }).click();
+    await page.getByRole("button", { name: "Flows", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(firstName);
   } finally {
     await deleteWorkflow(request, firstId);
@@ -176,11 +184,13 @@ test("a company switch does not reuse the previous company's workflow route (#86
     timeout: 30_000,
   });
 
-  // Companies live in the host switcher's own menu now — the sidebar footer's
-  // "Switch company" row moved in there with the lifecycle line, leaving the
-  // footer to the profile alone. The trigger is named by its nameplate (the
-  // company and its state), so it is addressed by its test id rather than by a
-  // label it deliberately does not carry.
+  // Companies live in the host switcher's own menu — the sidebar footer's
+  // "Switch company" row moved in there with the lifecycle line, and the
+  // switcher itself has since left the sidebar altogether for the window's
+  // title row (`window-title-bar.tsx`), taking the profile control with it. The
+  // trigger is named by its nameplate (the company and its state), so it is
+  // addressed by its test id rather than by a label it deliberately does not
+  // carry.
   await page.getByTestId("host-switcher").click();
   await page.getByRole("menuitem", { name: "Other", exact: true }).click();
   // Issue #1110 sharpened what this test proves. It used to assert the switch

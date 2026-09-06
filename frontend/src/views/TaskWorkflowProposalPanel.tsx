@@ -54,15 +54,18 @@ export function TaskWorkflowProposalPanel({
   client,
   company,
   task,
-  onSaved,
   onReload,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   /** The In-Review card. The caller guarantees `task.workflowProposal` is set. */
   task: Task;
-  /** Hand the settled card back to the board/detail for reconciliation. */
-  onSaved: (t: Task) => void;
+  /*
+   * There is no `onSaved`. It handed the settled card to the board rendered
+   * beside the task detail, and since issue #1140 there is no such board: the
+   * only caller passed `() => {}` all the way from `TaskDetailRoute`. `onReload`
+   * is what actually refreshes the screen.
+   */
   /** Re-read the detail after a settle, so its poll picks up the new state. */
   onReload: () => Promise<void> | void;
 }) {
@@ -91,8 +94,7 @@ export function TaskWorkflowProposalPanel({
     setError(null);
     setProblems(null);
     try {
-      const saved = await applyWorkflowProposal(client, company, task.id);
-      onSaved(saved);
+      await applyWorkflowProposal(client, company, task.id);
       await onReload();
       toast.success("Workflow created — the card is done.");
     } catch (e) {
@@ -117,8 +119,7 @@ export function TaskWorkflowProposalPanel({
     setError(null);
     setProblems(null);
     try {
-      const saved = await rejectWorkflowProposal(client, company, task.id);
-      onSaved(saved);
+      await rejectWorkflowProposal(client, company, task.id);
       await onReload();
       toast.success("Proposal rejected — the card is back in Pending.");
     } catch (e) {

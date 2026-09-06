@@ -161,7 +161,7 @@ export function ProvidersSection({
           {noCredential && (
             <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
               {canManage
-                ? "No credential is available for this company yet, so there is nothing to authorize against. Set the company's TinyHumans credential — one key authorizes the providers the platform brokers — or paste a Composio token below to use a Composio account of your own."
+                ? "No credential is available for this company yet, so there is nothing to authorize against. Paste this company's own Composio API key below, and the providers it can reach become connectable here."
                 : "No credential is available for this company yet, so there is nothing to authorize against. An admin has to set the company's credential before providers can be connected."}
             </p>
           )}

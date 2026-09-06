@@ -6,6 +6,7 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 import type { LocalScope } from "@/connections/types";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { ReadTimeoutError, withReadTimeout } from "@/lib/read-timeout";
+import { settingsHref } from "@/views/settings-pages";
 import { SetupDialog } from "./SetupDialog";
 import {
   clearSetupRedesign,
@@ -20,8 +21,20 @@ import {
   setupSkipped,
 } from "./state";
 
-/** Where "Set up a model" sends the operator. */
-const MODEL_SETTINGS = "#/settings/connections";
+/**
+ * Where "Set up a model" sends the operator.
+ *
+ * `#/settings/inference`, via the typed helper, so this cannot name a page that
+ * does not exist. It said `#/settings/connections` for as long as the pre-split
+ * Connections page was where a model was wired — an address that matched no
+ * `SETTINGS_PAGES` id after the split and was therefore repaired onto
+ * **General**, which is not where a model is set up. The constant is named
+ * `MODEL_SETTINGS` and it now points at the model.
+ *
+ * `onModelSettings` below compares the live hash against this, so the two
+ * cannot drift: the check is the same string as the destination.
+ */
+const MODEL_SETTINGS = settingsHref("inference");
 
 /**
  * How long the gate's roster read (`client.listTeam`, just below) is allowed

@@ -22,7 +22,7 @@
 import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import {
   readTaskFocus,
   taskTabHref,
@@ -44,7 +44,8 @@ export function TaskDetailRoute({
   decided,
   failed,
   onDecide,
-  onOpenThread,
+  chatChannelByThread,
+  onOpenChannel,
   onLeave,
 }: {
   client: OpenCompanyClient;
@@ -60,9 +61,11 @@ export function TaskDetailRoute({
   deciding?: ReadonlyMap<string, Verdict>;
   decided?: Readonly<Record<string, DecidedApproval>>;
   failed?: Record<string, string>;
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
-  /** Opens the chat thread this card was created from (issue #246). */
-  onOpenThread?: (threadId: string) => void;
+  onDecide?: DecideApproval;
+  /** The shell's host thread → Room channel map, which places this card's origin. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
+  /** Opens the Room channel this card's conversation lives on (issue #246). */
+  onOpenChannel?: (channelId: string, threadId?: string) => void;
   /** Where Back, and a deleted card, go: the board, which lives in Ledgers. */
   onLeave: () => void;
 }) {
@@ -106,15 +109,16 @@ export function TaskDetailRoute({
           [LEDGER_VIEW_PARAM]: view === "list" ? "list" : null,
         });
       }}
-      onOpenThread={onOpenThread}
-      // Both of these used to hand a card back to the board rendered beside
-      // this screen, which held its own copy of the row. There is no such
-      // sibling now: the board is the `tasks` ledger, it re-reads from the host,
-      // and it is not mounted while this screen is. So a save reconciles
-      // nothing here — the board reads the change when the operator returns to
-      // it — and a delete leaves for the board rather than sitting on the
-      // detail of a card that no longer exists.
-      onSaved={() => {}}
+      chatChannelByThread={chatChannelByThread}
+      onOpenChannel={onOpenChannel}
+      // `onSaved` used to be here, as a literal `() => {}`. It handed a saved
+      // card back to the board rendered beside this screen, which held its own
+      // copy of the row; there is no such sibling now — the board is the `tasks`
+      // ledger, it re-reads from the host, and it is not mounted while this
+      // screen is. The prop survived the deletion as five components' worth of
+      // plumbing that ended in a no-op, so it has gone with it. A delete still
+      // has somewhere to go: leave for the board, rather than sit on the detail
+      // of a card that no longer exists.
       onDeleted={onLeave}
     />
   );

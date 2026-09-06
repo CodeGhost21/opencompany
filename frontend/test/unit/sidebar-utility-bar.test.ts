@@ -8,21 +8,23 @@ import { SidebarUtilityBar } from "@/components/sidebar-controls";
 import { SidebarProvider } from "@/components/ui/sidebar";
 
 /**
- * The sidebar's utility bar: Settings, Feedback, Discord and Collapse, as one
- * row of icons under the company switcher.
+ * The sidebar's utility bar: Settings, Feedback and Discord, as three labelled
+ * rows at the foot of the column.
  *
- * All four used to be full-width rows — Settings in the nav list, Feedback and
- * Discord in the footer, Collapse loose in the header — costing four rows of a
- * column whose other rows are the places an operator actually works. They are
- * utilities: three go somewhere, none is somewhere you stay. OpenHuman's shell
- * already groups the same four this way
- * (`app/src/components/layout/shell/SidebarHeader.tsx`).
+ * They were icon-only buttons while the bar sat *above* the destinations, where
+ * labelled rows would have pushed the company's own state further down the
+ * column every time the nav list grew. In the footer there is nothing left to
+ * push, and three unlabelled glyphs under a column whose every other entry says
+ * what it is were the cost of that shape. What keeps them from reading as
+ * destinations is now position — after the list — rather than a different
+ * shape.
  *
- * Rendering rather than pure functions, for the reason
- * `sidebar-collapse-button.test.ts` gives: every one of these is icon-only in
- * BOTH sidebar states, so the accessible NAME is the whole of what a screen
- * reader gets. An `aria-label` is exactly the kind of attribute a styling pass
- * drops without breaking a single render.
+ * Rendering rather than pure functions: the accessible NAME is the whole of
+ * what a screen reader gets, and it now comes from the row's own visible text
+ * rather than an `aria-label` — so these assertions pin the label a sighted
+ * operator reads and the one announced to a reader at the same time. On the
+ * collapsed rail the text is clipped and the row's tooltip carries it, which is
+ * what the nav rows beside it already do.
  */
 
 let host: HTMLDivElement;
@@ -56,9 +58,20 @@ function render(view: "overview" | "settings" | "feedback", onNavigate = () => {
   });
 }
 
-/** The bar's buttons, by their accessible name. */
+/**
+ * The bar's controls, by their accessible name.
+ *
+ * The name is the row's text content now, not an `aria-label`, so this walks
+ * the rendered controls and matches on what is actually on screen. An
+ * `aria-label` lookup would have kept passing against a row that had lost its
+ * label entirely, which is the regression these tests exist to catch.
+ */
 function byName(name: string): HTMLElement | null {
-  return host.querySelector(`[aria-label="${name}"]`);
+  const controls = host.querySelectorAll<HTMLElement>("button, a");
+  for (const control of controls) {
+    if (control.textContent?.trim() === name) return control;
+  }
+  return null;
 }
 
 beforeEach(() => {
@@ -79,9 +92,14 @@ describe("the sidebar utility bar", () => {
   it("names every control it carries", () => {
     render("overview");
 
-    // The four, in the order they are read. Discord keeps its full label —
+    // The three, in the order they are read. Discord keeps its full label —
     // "Discord" alone would not say that the control leaves the console.
-    for (const name of ["Settings", "Feedback", "Join our Discord", "Collapse sidebar"]) {
+    //
+    // Collapse is deliberately NOT here any more. It used to be, which put the
+    // control that hides this panel inside the panel it hides — collapsing took
+    // the button with it. It rides the content card's leading corner instead,
+    // where it survives both states.
+    for (const name of ["Settings", "Feedback", "Join our Discord"]) {
       expect(byName(name), name).not.toBeNull();
     }
   });

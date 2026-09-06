@@ -221,10 +221,11 @@ impl RunTurn for HarnessRouter {
         agent_id: &str,
         message: &str,
         control: &SteerControl,
+        chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.engine_for(agent_id)?
-            .run_steered_background(company, agent_id, message, control, run_sink)
+            .run_steered_background(company, agent_id, message, control, chat, run_sink)
             .await
     }
 
@@ -375,6 +376,7 @@ mod tests {
             agent_id: &str,
             message: &str,
             _control: &SteerControl,
+            _chat: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             self.run(company, agent_id, message, ChatTarget::default())
@@ -449,6 +451,7 @@ mod tests {
             agent_id: &str,
             message: &str,
             _control: &SteerControl,
+            _chat: ChatTarget<'_>,
             _run_sink: Option<Arc<RunTraceSink>>,
         ) -> Result<TurnOutcome> {
             self.run(company, agent_id, message, ChatTarget::default())
@@ -556,7 +559,14 @@ mod tests {
         );
         assert_eq!(
             router
-                .run_steered_background(&company(), "researcher", "hi", &control, None)
+                .run_steered_background(
+                    &company(),
+                    "researcher",
+                    "hi",
+                    &control,
+                    ChatTarget::default(),
+                    None,
+                )
                 .await
                 .unwrap()
                 .reply,

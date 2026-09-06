@@ -7,14 +7,13 @@
 //! Those locks live in one process-wide registry (`path_lock`) rather than on
 //! each store, so two instances over one bundle actually meet (issue #388).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex as TokioMutex, broadcast};
 
 use crate::Result;
@@ -161,6 +160,152 @@ pub(crate) async fn append_line_durable(path: &Path, line: &str) -> Result<()> {
 /// Shared rather than duplicated so the two entry points can never drift on the
 /// part that matters to both of them: the single whole-record `write_all` under
 /// `O_APPEND`.
+/// How much of a JSONL file [`read_lines_backwards`] pulls per seek.
+///
+/// Sized so an ordinary transcript page — `EVENT_PAGE` events of a few hundred
+/// bytes each — lands in one or two reads, without holding a large buffer for
+/// the common case of a page that needs far less.
+const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
+
+/// Yields the non-empty lines of `path` **newest-first**, stopping as soon as
+/// `keep` has taken all it wants (issue #1890 G).
+///
+/// # Why backwards
+///
+/// Every reader of a transcript opens at the *tail*, and the forward walk this
+/// replaces parsed every line in the file to keep the last few: one page cost
+/// O(total company events) however few pages were asked for. That cost was
+/// always there, paid on each channel switch — but scoping the chat seed to a
+/// thread (#1890 A) turned a rebind from per-channel into per-*thread*, so it
+/// is now paid far more often, and on a company with a long history it is the
+/// dominant cost of answering a message.
+///
+/// Reading from the end makes the first page O(page) instead of O(log): it
+/// touches only the bytes it returns. A page behind a cursor still walks back
+/// from the tail to reach it, which is the same shape a transcript's own
+/// pagination has — each page is one step further back, and no page re-reads
+/// the whole file to find its start.
+///
+/// # The contract `keep` has
+///
+/// Called with each line, newest-first, and returns whether to keep going.
+/// Parsing lives there rather than here so a caller that can decide from the
+/// first field never pays for the rest — and so this function has no opinion
+/// about what a line means.
+///
+/// Blank lines are skipped, exactly as the forward walk skipped them, and a
+/// file that does not end in a newline reads the same as one that does.
+async fn read_lines_backwards<F>(path: &Path, mut keep: F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_err(path, error)),
+    };
+    let mut pos = file
+        .metadata()
+        .await
+        .map_err(|error| io_err(path, error))?
+        .len();
+
+    // Fragments of a line whose start lies further back than the chunk just
+    // read, in file order. They are carried until the read that contains that
+    // start, and only then is the line complete.
+    //
+    // **A list, not one buffer** (coderabbit on #1972). Splicing the carry into
+    // each chunk and the grown fragment back out copied the pending line once
+    // per read, so a record spanning n chunks cost O(n²) bytes moved — and
+    // nothing bounds a journaled message's length, so the shape of a history
+    // read was decided by whatever the largest record in the file happened to
+    // be. Each fragment is now written once and joined once, at the read that
+    // completes the line.
+    let mut carry: Vec<Vec<u8>> = Vec::new();
+    while pos > 0 {
+        let take = TAIL_CHUNK_BYTES.min(pos);
+        pos -= take;
+        file.seek(std::io::SeekFrom::Start(pos))
+            .await
+            .map_err(|error| io_err(path, error))?;
+        let mut chunk = vec![0u8; take as usize];
+        file.read_exact(&mut chunk)
+            .await
+            .map_err(|error| io_err(path, error))?;
+
+        let mut segments: Vec<&[u8]> = chunk.split(|byte| *byte == b'\n').collect();
+        // The last segment runs to the end of the chunk, so it is the *head* of
+        // whatever is already pending — never a line of its own.
+        let tail = segments.pop().expect("split yields at least one segment");
+        if segments.is_empty() {
+            // No newline in this read at all: the whole chunk is more of the
+            // same line, and nothing can be emitted yet.
+            carry.insert(0, tail.to_vec());
+            if pos == 0 {
+                // The head of the file, so the pending line is complete. The
+                // walk is over either way, so the caller's "stop" needs no
+                // separate exit here.
+                let line = carry.concat();
+                let _ = emit(path, &line, &mut keep)?;
+            }
+            continue;
+        }
+        carry.insert(0, tail.to_vec());
+        let completed = std::mem::take(&mut carry).concat();
+        if !emit(path, &completed, &mut keep)? {
+            return Ok(());
+        }
+        // The first segment starts before `pos`, so it is only a whole line
+        // once the read has reached the head of the file.
+        let whole = if pos == 0 {
+            &segments[..]
+        } else {
+            carry.push(segments[0].to_vec());
+            &segments[1..]
+        };
+        for segment in whole.iter().rev() {
+            if !emit(path, segment, &mut keep)? {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One line from the backwards walk, handed to the caller.
+///
+/// Returns whether the walk should continue, so a caller that has what it
+/// wants stops the reads rather than the loop.
+///
+/// **Strict, like the walk this replaced.** `BufReader::lines` failed the
+/// request on invalid UTF-8, and that is the posture a request-time reader has
+/// to keep: silently omitting a corrupted reply or approval makes it
+/// indistinguishable from an event that never happened, and a history page that
+/// is quietly short is worse than one that says it could not be read (codex on
+/// #1972).
+fn emit<F>(path: &Path, segment: &[u8], keep: &mut F) -> Result<bool>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    let line = std::str::from_utf8(segment)
+        .map_err(|error| {
+            io_err(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("an event-log line is not valid UTF-8: {error}"),
+                ),
+            )
+        })?
+        .trim();
+    if line.is_empty() {
+        return Ok(true);
+    }
+    keep(line)
+}
+
 async fn append_line_inner(path: &Path, line: &str, sync: bool) -> Result<()> {
     let owned_path = path.to_path_buf();
     let mut record = String::with_capacity(line.len() + 1);
@@ -2306,35 +2451,31 @@ impl EventLog for FsEventLog {
             return Ok(Vec::new());
         }
         let path = self.bundle(id).events_jsonl();
-        let file = match tokio::fs::File::open(&path).await {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(io_err(&path, error)),
-        };
-        let mut lines = BufReader::new(file).lines();
+        // Read from the **end** (issue #1890 G). The walk this replaced started
+        // at the head and parsed every line to keep the last few, so one page
+        // cost O(total company events) however few pages were asked for —
+        // see [`read_lines_backwards`] for why that became the dominant cost of
+        // answering a message once the chat seed was scoped to a thread.
+        //
         // `usize::MAX` means an unlimited read for the EventLog port. Do not
-        // treat that sentinel as an allocation request before streaming lines.
-        let mut tail = VecDeque::new();
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|error| io_err(&path, error))?
-        {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let event: StoredEvent = serde_json::from_str(&line)?;
-            // Event logs are ordered by sequence. Once the cursor is reached,
-            // no later line belongs to this page, so do not scan the tail.
+        // treat that sentinel as an allocation request; the page grows as lines
+        // are actually kept.
+        let mut page: Vec<StoredEvent> = Vec::new();
+        read_lines_backwards(&path, |line| {
+            let event: StoredEvent = serde_json::from_str(line)?;
+            // Event logs are ordered by sequence, so walking back from the tail
+            // meets everything at-or-after the cursor first. Those are skipped
+            // rather than ending the walk: the page this call wants begins on
+            // the far side of them.
             if before.is_some_and(|cursor| event.seq >= cursor) {
-                break;
+                return Ok(true);
             }
-            if tail.len() == limit {
-                tail.pop_front();
-            }
-            tail.push_back(event);
-        }
-        Ok(tail.into_iter().rev().collect())
+            page.push(event);
+            Ok(page.len() < limit)
+        })
+        .await?;
+        // Already newest-first: the walk yielded them that way.
+        Ok(page)
     }
 
     fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
@@ -3060,6 +3201,138 @@ mod test {
             .prefix("opencompany-test-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    /* ---- issue #1890 G: the tail is read from the end ---- */
+
+    /// Collects a file's lines newest-first, for the cases below.
+    async fn backwards(path: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        read_lines_backwards(path, |line| {
+            out.push(line.to_string());
+            Ok(true)
+        })
+        .await
+        .expect("read");
+        out
+    }
+
+    async fn write_file(root: &tempfile::TempDir, name: &str, body: &str) -> std::path::PathBuf {
+        let path = root.path().join(name);
+        tokio::fs::write(&path, body).await.expect("write");
+        path
+    }
+
+    #[tokio::test]
+    async fn a_tail_walk_yields_lines_newest_first() {
+        let root = tmp_root();
+        let path = write_file(&root, "a.jsonl", "one\ntwo\nthree\n").await;
+        assert_eq!(backwards(&path).await, vec!["three", "two", "one"]);
+    }
+
+    /// A file that does not end in a newline reads the same as one that does —
+    /// the last line is a whole line, not a fragment to be dropped.
+    #[tokio::test]
+    async fn a_missing_trailing_newline_does_not_lose_the_last_line() {
+        let root = tmp_root();
+        let path = write_file(&root, "b.jsonl", "one\ntwo\nthree").await;
+        assert_eq!(backwards(&path).await, vec!["three", "two", "one"]);
+    }
+
+    /// Blank lines are skipped, exactly as the forward walk skipped them.
+    #[tokio::test]
+    async fn blank_lines_are_skipped() {
+        let root = tmp_root();
+        let path = write_file(&root, "c.jsonl", "one\n\n\ntwo\n\n").await;
+        assert_eq!(backwards(&path).await, vec!["two", "one"]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_absent_file_yields_nothing() {
+        let root = tmp_root();
+        let path = write_file(&root, "d.jsonl", "").await;
+        assert!(backwards(&path).await.is_empty());
+        assert!(backwards(&root.path().join("nope.jsonl")).await.is_empty());
+    }
+
+    /// **The chunk-boundary case, and the reason this helper is tested
+    /// directly.** A line longer than one read, and lines straddling a read
+    /// boundary, are where a backwards walk silently truncates or duplicates —
+    /// and a transcript that lost one line in the middle would still render.
+    #[tokio::test]
+    async fn lines_spanning_and_straddling_chunk_boundaries_survive_whole() {
+        let root = tmp_root();
+        // Far larger than TAIL_CHUNK_BYTES, so the walk crosses many reads and
+        // one single line is itself longer than a whole chunk.
+        let long = "x".repeat(TAIL_CHUNK_BYTES as usize * 2 + 7);
+        let mut body = String::new();
+        for n in 0..400 {
+            body.push_str(&format!("line-{n}\n"));
+        }
+        body.push_str(&long);
+        body.push('\n');
+        for n in 400..800 {
+            body.push_str(&format!("line-{n}\n"));
+        }
+        let path = write_file(&root, "e.jsonl", &body).await;
+
+        let read = backwards(&path).await;
+        assert_eq!(read.len(), 801, "every line, once");
+        assert_eq!(read[0], "line-799");
+        assert_eq!(read[400], long, "the over-long line is whole");
+        assert_eq!(read[800], "line-0");
+    }
+
+    /// A record spanning **many** reads, not just two.
+    ///
+    /// The carry is a list of fragments joined once at the read that completes
+    /// the line, so the order they are collected in is what a wrong
+    /// front-insert would scramble — and a scrambled join is still a valid
+    /// string of the right length, which the two-chunk case above is too short
+    /// to expose. Forty chunks also puts a floor under the copying: the
+    /// splice-per-read version this replaced moved ~40x more bytes for this one
+    /// record than the file contains (coderabbit on #1972).
+    #[tokio::test]
+    async fn a_record_spanning_many_reads_is_joined_in_order() {
+        let root = tmp_root();
+        // Distinguishable content, so a mis-ordered join fails rather than
+        // matching a repeated byte by luck.
+        let mut long = String::new();
+        let mut n = 0u64;
+        while (long.len() as u64) < TAIL_CHUNK_BYTES * 40 {
+            long.push_str(&format!("{n:012} "));
+            n += 1;
+        }
+        let body = format!("before\n{long}\nafter\n");
+        let path = write_file(&root, "e.jsonl", &body).await;
+
+        let read = backwards(&path).await;
+        assert_eq!(read.len(), 3, "three lines, however many reads they took");
+        assert_eq!(read[0], "after");
+        assert_eq!(read[1], long.trim(), "the record is whole and in order");
+        assert_eq!(read[2], "before");
+    }
+
+    /// The walk stops the moment the caller has what it wants — the whole
+    /// point of reading from the end. Without this the first page still costs
+    /// the file.
+    #[tokio::test]
+    async fn the_walk_stops_as_soon_as_the_caller_is_done() {
+        let root = tmp_root();
+        let mut body = String::new();
+        for n in 0..5_000 {
+            body.push_str(&format!("line-{n}\n"));
+        }
+        let path = write_file(&root, "f.jsonl", &body).await;
+
+        let mut seen = 0usize;
+        read_lines_backwards(&path, |_| {
+            seen += 1;
+            Ok(seen < 3)
+        })
+        .await
+        .expect("read");
+        assert_eq!(seen, 3, "three lines read out of five thousand");
     }
 
     #[tokio::test]

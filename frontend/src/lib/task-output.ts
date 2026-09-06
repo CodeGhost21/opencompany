@@ -116,12 +116,9 @@ function linksFor(taskId: string, output: TaskOutput): TaskLink[] {
       hint: "Opens what this attempt actually did, step by step.",
     });
   } else {
-    // `#/conversation/<id>` is deliberately NOT used here: `conversation` is a
-    // view in the hash router but the active thread is component state, so no
-    // such address resolves today. The card is where the conversation is
-    // reachable from ("Opened from a conversation", issue #246), so this points
-    // there and says so rather than minting a link that would silently land on
-    // the wrong thread. Deep-linking the thread is its own change.
+    // The card, not the chat channel: the card's own origin row resolves the
+    // thread to a Room address and offers the jump only when one exists
+    // (issue #246), so pointing here cannot mint a link that lands nowhere.
     links.push({
       kind: "card",
       href: cardHref(taskId),
@@ -180,12 +177,33 @@ export interface TaskFocus {
   runId?: string;
 }
 
-/** The task-detail tabs that every card renders. */
-export const TASK_TABS = ["timeline", "attempts", "artifacts", "discussion"] as const;
+/**
+ * The task-detail tabs that can be written into an address.
+ *
+ * Four of the five are on every card. **`plan` is not** — the Plan tab renders
+ * only for a card somebody planned (issue #337) — and it is in this list all
+ * the same, because the alternative is the state it was in: selecting Plan
+ * wrote nothing to the URL, so a reload, a copied link or a Back/Forward
+ * dropped the operator onto Timeline while the tab they were reading was the
+ * only reason they were on the screen. An address that cannot name a tab is an
+ * address that silently disagrees with what is on screen.
+ *
+ * The cost of admitting it is a `?tab=plan` that names a tab a *particular*
+ * card has not got — a link that has gone stale, or one card's link opened on
+ * another. `TaskDetailView` resolves that the way {@link readTaskFocus} handles
+ * every other stale query: it falls back to Timeline rather than rendering an
+ * empty screen. That is a screen-level fallback and not one this list can make,
+ * because whether the tab exists is a property of the card, not of the address.
+ */
+export const TASK_TABS = ["timeline", "attempts", "plan", "artifacts", "discussion"] as const;
 
 export type TaskTab = (typeof TASK_TABS)[number];
 
-/** Whether a query value names a task-detail tab that can always be opened. */
+/**
+ * Whether a query value names an addressable task-detail tab.
+ *
+ * Addressable, not always-present: see {@link TASK_TABS} on `plan`.
+ */
 export function isTaskTab(value: string): value is TaskTab {
   return (TASK_TABS as readonly string[]).includes(value);
 }

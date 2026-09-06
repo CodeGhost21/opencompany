@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { WorkflowGraph } from "@/api/workflows";
 import {
+  noNodeResultsNotice,
   nodeOutputFor,
   parseNodeMessages,
   parseRunNodes,
@@ -120,5 +121,58 @@ describe("parseSingleNode", () => {
       port: "yes",
       messages: [{ text: "went left", agentRef: null }],
     });
+  });
+});
+
+/**
+ * B-005 and B-039: what the drawer says when a run produced no per-node cards.
+ *
+ * One sentence used to cover every way of getting here — "The run finished, but
+ * its output didn't match the expected node shape" — and it was wrong twice at
+ * once for the two commonest ones. A run parked on an approval has not
+ * finished, and `{"nodes": {}}` is the correct shape for a run that reached no
+ * node; a stopped run has not finished either, and its `null` output is not a
+ * malformed one. Both surfaces said so on the same screen while this paragraph
+ * contradicted them.
+ */
+describe("noNodeResultsNotice", () => {
+  it("says nothing at all when the run produced cards", () => {
+    const cards = parseRunNodes({ nodes: { a: { items: [{ json: { text: "x" } }] } } }, null);
+    expect(noNodeResultsNotice(cards, { nodes: {} }, "ok")).toBeNull();
+  });
+
+  it("calls an empty nodes map a run that produced nothing, not a bad shape", () => {
+    const notice = noNodeResultsNotice([], { nodes: {} }, "awaiting-approval");
+    expect(notice?.message).toBe(
+      "No step produced output before this run stopped for an approval.",
+    );
+    expect(notice?.showRaw).toBe(false);
+  });
+
+  it("never claims a stopped run finished, and does not push its null output forward", () => {
+    const notice = noNodeResultsNotice(parseRunNodes(null, null), null, "stopped");
+    expect(notice?.message).toBe("You stopped this run before any step produced output.");
+    expect(notice?.showRaw).toBe(false);
+  });
+
+  it("still reports a genuine shape fault, and opens the raw output for it", () => {
+    // Present and wrong — the only thing a shape complaint is true of.
+    const notice = noNodeResultsNotice(parseRunNodes("a bare string", null), "a bare string", "ok");
+    expect(notice?.message).toContain("didn't match the shape");
+    expect(notice?.showRaw).toBe(true);
+  });
+
+  it("says only what it knows when the host sent no verdict", () => {
+    const notice = noNodeResultsNotice([], { nodes: {} }, undefined);
+    expect(notice?.message).toBe("This run produced no step output.");
+  });
+
+  it("never claims a failed run finished either (tinysweeper: untested-branch)", () => {
+    // Same wrongness as "stopped" — the old sentence said "The run finished"
+    // for this arm too. A regression back to it would pass every other test
+    // here, since none of them pass `verdict: "failed"` through.
+    const notice = noNodeResultsNotice(parseRunNodes(null, null), null, "failed");
+    expect(notice?.message).toBe("This run failed before any step produced output.");
+    expect(notice?.showRaw).toBe(false);
   });
 });

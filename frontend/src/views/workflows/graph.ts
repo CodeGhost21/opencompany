@@ -352,7 +352,8 @@ function applyFrames(
       if (
         states[e.nodeId] !== "ok" &&
         states[e.nodeId] !== "error" &&
-        states[e.nodeId] !== "blocked"
+        states[e.nodeId] !== "blocked" &&
+        states[e.nodeId] !== "declined"
       ) {
         states[e.nodeId] = "running";
       }
@@ -486,6 +487,7 @@ export function windowHasRunStart(
 function nodeStateFrom(status: string): NodeRunState {
   if (status === "ok") return "ok";
   if (status === "blocked") return "blocked";
+  if (status === "declined") return "declined";
   return "error";
 }
 

@@ -23,6 +23,8 @@ import {
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
+import { VirtualList } from "@/components/virtual-list";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { DropZone } from "@/views/memory/DropZone";
 import { EngineSection } from "@/views/memory/EngineSection";
 import { Markdown } from "@/components/markdown";
@@ -124,6 +126,8 @@ export function MemoryView({ client, company }: Props) {
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<string>("all");
   const [addOpen, setAddOpen] = useState(false);
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  const lanes = useMediaQuery("(min-width: 640px)") ? 2 : 1;
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
   const gen = useRef(0);
@@ -301,7 +305,10 @@ export function MemoryView({ client, company }: Props) {
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6">
+      <div
+        ref={setScrollEl}
+        className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6"
+      >
 
         <EngineSection
           client={client}
@@ -371,11 +378,15 @@ export function MemoryView({ client, company }: Props) {
         ) : filtered.length === 0 ? (
           <EmptyMemory hasEntries={entries.length > 0} />
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {filtered.map((e) => (
-              <MemoryCard key={e.id} entry={e} onDelete={() => void remove(e)} />
-            ))}
-          </div>
+          <VirtualList
+            items={filtered}
+            scrollElement={scrollEl}
+            lanes={lanes}
+            estimateRowHeight={132}
+            getKey={(e) => e.id}
+            renderItem={(e) => <MemoryCard entry={e} onDelete={() => void remove(e)} />}
+            data-testid="memory-list"
+          />
         )}
       </div>
 

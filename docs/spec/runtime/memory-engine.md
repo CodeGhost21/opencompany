@@ -26,11 +26,20 @@ mode were removed in #1568; a deployment that still sets
 naming the removed value. Only the `store` default, the hosted `remote` modes
 and `null` remain.
 
+Whether Cortex could return as a *hosted* engine under `remote` — the opposite
+question from #1568 — is investigated in
+[`memory-engine-cortex.md`](memory-engine-cortex.md), which records what a
+deployed CortexDB instance actually provides. The driver is now registered and
+`cortex` is selectable, but that record argues against choosing it and its open
+decisions still stand. A companion,
+[`memory-engine-cortex-driver.md`](memory-engine-cortex-driver.md), records what a
+driver against v0.9.8 has to do and what each call costs.
+
 ## Choosing a hosted engine (`remote`)
 
 | Env var | Required | Notes |
 |---|---|---|
-| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, `cognee`, or `cortexdb`. No default — see below. |
+| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, `cognee`, `cortexdb`, or `cortex`. No default — see below. `cortexdb` and `cortex` are two adapters for the same CortexDB service: `cortexdb` is this repo's own and sends `X-Cortex-Actor` (see `OPENCOMPANY_MEMORY_ACTOR`), `cortex` is the dialect `tinymemory-remote` ships. Read [`memory-engine-cortex.md`](memory-engine-cortex.md) before choosing either. |
 | `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
 | `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
 | `OPENCOMPANY_MEMORY_ACTOR` | no (`cortexdb` only) | The `X-Cortex-Actor` header value, `type:id` (type one of `user`, `agent`, `service`, `system` — a bare id is refused). CortexDB hard-refuses a request whose actor does not match the bearer token's subject; unset falls back to the token's own `sub` JWT claim, then to `service:opencompany`. |
@@ -80,7 +89,7 @@ be embedded and skip the egress and trust checks that class gates.
 
 `capabilities()` is a claim the driver writes by hand; `provides()` is derived
 from the accessors it actually returns. The host compares the two once, at bind
-(`audit_capabilities` in `src/store/memory/driver.rs`), because it registers RPC
+(`audit_provider`, called from `src/store/memory/driver.rs`), because it registers RPC
 methods and assembles agent tools from the *claim* and never re-checks. A driver
 advertising a family it does not implement would otherwise produce a surface
 that exists, is offered to an agent, and fails on its first call — inside a
@@ -103,9 +112,49 @@ accessors. The check runs anyway because that guarantee lives upstream, in a
 submodule this repository pins by gitlink, and a gitlink bump is exactly when it
 would quietly stop holding.
 
+### What the audit cannot catch, and the boot probe that does
+
+Both sides of that comparison are properties of the **adapter**: `provides()` is
+`self.as_x().is_some()`, a Rust-object check. Neither asks whether the engine
+behind the adapter answers. An engine that exposes a family's surface, reports
+itself healthy, and serves nothing passes the bind and then returns empty on
+every read — the same harm the audit exists to prevent, arriving by a route the
+audit cannot see.
+
+The three **mandatory** families are the sharp case: `provides()` returns `true`
+for Core, Recall and Portability unconditionally, so the audit cannot fail them
+by construction — and they are exactly the three this host binds `MemoryStore`,
+`ContextStore` and `FactStore` to.
+
+`MemoryOverlay::refresh_health` therefore reads once against the mandatory
+families that answer in a single round trip — Core and Recall — and records the
+ones that did not answer on the descriptor, surfaced as `unreachableFamilies` on
+the authenticated engine route. At boot it is advisory, like the health probe
+beside it: it warns loudly and does not refuse, because a transient vendor
+outage must not crash-loop a tenant. The console apply route *does* refuse,
+matching what it already does for a failed health probe — an operator applying a
+change is present, and the previous engine stays in force.
+
+Portability is deliberately not probed: its only read is `export_page`, which
+enumerates every namespace and then lists one in full, so on a hosted engine it
+is tens of sequential round trips that grow with the corpus. It would time out
+and report a working engine broken.
+
+The optional families are **not** covered by the audit either — `provides()` is
+the same `self.as_x().is_some()` check for those — but each needs its own call
+shape, so probing them is separate work rather than a line beside these two.
+
+**An empty answer is success.** A freshly provisioned engine holds nothing, so
+reading "no rows" as "not implemented" would refuse every family on day one;
+only an error or a timeout counts. That also bounds what this catches: an engine
+answering `Ok(empty)` forever while storing nothing is indistinguishable from a
+new one without an engine-specific signal, which belongs in the adapter and its
+conformance suite rather than here. Tracked in issue #1968.
+
 ## Which contract this binds
 
-`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/api` — the same path
+`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/crates/tinymemory-api`
+— the same path
 `vendor/openhuman` itself path-depends on, which is what keeps the
 `MemoryProvider` trait identity single across the process. The historical
 `tinycortex-api` re-export and the in-pod `tinycortex` engine that used to back

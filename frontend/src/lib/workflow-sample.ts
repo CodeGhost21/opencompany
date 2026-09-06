@@ -49,7 +49,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
  * console lights the node up because it was told to, not because it inferred it.
  * `ok` and `error` come from the finish frame, exact as before.
  */
-export type NodeRunState = "running" | "ok" | "error" | "blocked";
+export type NodeRunState = "running" | "ok" | "error" | "blocked" | "declined";
 
 /**
  * Ring + glow per run state, layered over the node's own kind accent.
@@ -69,6 +69,7 @@ export const RUN_STATE_CLASSES: Record<NodeRunState, string> = {
   // would put a run that is merely waiting into the same visual bucket as one
   // that fell over.
   blocked: "ring-2 ring-status-blocked/80",
+  declined: "ring-2 ring-status-idle/70",
 };
 
 /** Per-kind emoji + accent, mirroring OpenHuman's node-kind metadata. */

@@ -328,6 +328,23 @@ pub fn build_agent(
             deps.approval_requests.clone(),
         ),
     ));
+    // Issue #1890 F: reading another thread of the channel this turn is in.
+    //
+    // On **every** roster agent's belt, not just the orchestrator's — the agent
+    // that needs it is the one answering in the channel, and gating it on
+    // delegation grants would leave a desk lead able to see #1890 E's thread
+    // index and unable to follow any of it.
+    //
+    // Intrinsic on the same terms as the approval tool above: it reads this
+    // company's own journal, scoped at call time to the conversation the turn
+    // is in, so there is no grant for it to be covered by.
+    if let Some(events) = deps.events.clone() {
+        tools.push(Box::new(crate::harness::thread_tools::ReadThreadTool::new(
+            company.clone(),
+            events,
+            deps.store.clone(),
+        )));
+    }
     #[cfg(feature = "mcp")]
     {
         // These read the installed-server registry, so installs and lifecycle
@@ -882,11 +899,25 @@ pub fn build_agent(
     // budget is exhausted, `filter_by_capabilities` strips every
     // `composio_*` tool from the belt below — without this check the brief
     // would still tell the agent to call one.
+    //
+    // The native side of that same check was missed here: `tools` above is
+    // still the pre-filter belt (`filter_by_capabilities` does not run until
+    // below), so a tier denying e.g. `search` while admitting `composio`
+    // rendered a brief claiming the built-in search tool as a Composio
+    // fallback reason — a tool absent from this agent's actual final belt.
+    // [`toolbelt::native_caps_for_composio_brief`] applies the same
+    // `namespace_denied` check `filter_by_capabilities` is about to apply per
+    // tool, so this stays in lockstep with the filter below without needing
+    // the already-filtered belt in hand.
     #[cfg(feature = "composio")]
     if toolbelt::composio_capability_admits(composio_toolkits.is_some(), &deps.capabilities)
         && let Some(toolkits) = composio_toolkits.as_deref()
     {
-        persona.push_str(&crate::harness::composio_catalog::composio_brief(toolkits));
+        let native_caps = toolbelt::native_caps_for_composio_brief(&tools, &deps.capabilities);
+        persona.push_str(&crate::harness::composio_catalog::composio_brief(
+            toolkits,
+            &native_caps,
+        ));
     }
 
     // Skill read surface (read-only catalogue slice). Only materializes when the
@@ -994,6 +1025,12 @@ pub fn build_agent(
             company.clone(),
             deps.facts.clone(),
             deps.events.clone(),
+            // Issue #1859: the board + run-history read surface `list_tasks` /
+            // `read_task` / `read_run` need, and `query_company`'s `## Board`
+            // section reads `tasks` too.
+            deps.tasks.clone(),
+            deps.workflow_runs.clone(),
+            deps.artifacts.clone(),
             &deps.delegations,
             // The company source dir (`companies/<name>`) also houses `workflows/`,
             // which the `run_workflow` tool loads graphs from.
@@ -1066,7 +1103,6 @@ pub fn build_agent(
 
     let prompt_builder = SystemPromptBuilder::for_subagent(
         persona, /* omit_identity */ true, /* omit_safety_preamble */ false,
-        /* omit_skills_catalog */ true,
     );
 
     let model = deps
@@ -1141,9 +1177,9 @@ pub fn build_agent(
     let agent_definition_name = manifest_agent.id.as_str();
 
     let mut agent = AgentBuilder::default()
-        // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
+        // `HarnessModel` upcasts to the tinyinference `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
-        .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
+        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)
@@ -2117,6 +2153,76 @@ mod tests {
         let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
         names.sort();
         names
+    }
+
+    /// The native capabilities `native_capabilities_on_belt` reads off the SAME
+    /// agent [`built_tool_names_with_search`] builds — proving the brief's native
+    /// set is derived from tools that were actually wired, not from the grants.
+    fn built_native_caps_with_search(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            tools: None,
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+            model: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        toolbelt::native_capabilities_on_belt(agent.tools())
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The brief's native set is read off the wired belt: an explicit `search`
+    /// grant with a credential wires `web_search`, so `search` shows up in the
+    /// belt's native capabilities — and a bare `*` (which never wires the metered
+    /// tool) does not.
+    #[test]
+    fn native_capabilities_on_belt_track_the_wired_search_tool() {
+        let granted = built_native_caps_with_search(&["search"]);
+        assert!(
+            granted.contains(&"search".to_string()),
+            "an explicit search grant wires web_search, so `search` is native on the belt: {granted:?}"
+        );
+        let wildcard = built_native_caps_with_search(&["*"]);
+        assert!(
+            !wildcard.contains(&"search".to_string()),
+            "a bare `*` wires no metered search tool, so `search` is not native on the belt: {wildcard:?}"
+        );
     }
 
     /// Build one agent under `grants` with BOTH a managed search backend and a

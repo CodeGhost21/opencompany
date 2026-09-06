@@ -17,14 +17,26 @@ import { operatorChannelFrom } from "@/views/chat/model";
  * before the server's read-only guard finally refused it, after the operator
  * had already written and submitted the reply.
  *
- * These pin that a read-only thread disables the composer the same way the
- * main one does, and that neither a click nor Enter reaches `onSend` at all —
- * not just that the request would eventually be rejected server-side.
- *
  * Issue #1757 rework: the Operator channel is its own surface now (`GET
  * {scope}/operator-channel`), not an entry `list_desks` returns, so the
  * fixture channel is built through `operatorChannelFrom` — the same
  * projection `ChatView` uses — rather than a hand-rolled literal.
+ *
+ * # The read-only answer changed: no composer, not a disabled one
+ *
+ * The first fix left the composer on screen and disabled, with the
+ * placeholder "This channel is read-only". That still reads as a claim that
+ * replying is a thing you do here — a textarea, an `@` button, a paperclip, a
+ * formatting toggle and a Send button, under a notice that has just said
+ * there is nothing to reply to. The panel now renders the notice and **no
+ * composer at all**.
+ *
+ * So these assert absence, not disabledness: no textarea, no Send button, no
+ * mention/attach/formatting controls, and a notice in their place. The
+ * "never reaches `onSend`" pins that carried the old fix are subsumed — there
+ * is no control left to click or press Enter in — and the writable cases
+ * below are what keeps this from being satisfiable by a panel that renders
+ * nothing at all.
  */
 
 const CHANNEL = operatorChannelFrom({
@@ -87,32 +99,35 @@ async function type(text: string) {
 }
 
 describe("thread composer on a read-only channel (issue #1757)", () => {
-  it("disables the thread composer for a read-only channel", async () => {
+  it("renders no composer at all for a read-only channel", async () => {
     await render(true);
-    await type("can I help?");
 
-    expect(textarea().placeholder).toBe("This channel is read-only");
-    expect(sendButton().disabled).toBe(true);
+    expect(textarea()).toBeNull();
+    expect(sendButton()).toBeNull();
   });
 
-  it("never calls onSend from a click on a read-only thread", async () => {
+  it("renders none of the composer's affordances either", async () => {
     await render(true);
-    await type("can I help?");
-    await act(async () => sendButton().click());
 
-    expect(sent).not.toHaveBeenCalled();
+    // Each of these is a separate claim that some action exists here. A
+    // disabled one is still that claim, so absence is what is asserted.
+    for (const label of ["Mention someone", "Attach a file", "Formatting"]) {
+      expect(container.querySelector(`[aria-label="${label}"]`)).toBeNull();
+    }
+    // The keyboard hint describes a send there is no longer any way to make.
+    expect(container.textContent).not.toContain("to send");
   });
 
-  it("never calls onSend from Enter on a read-only thread", async () => {
+  it("puts the explanation in the space the composer used to occupy", async () => {
     await render(true);
-    await type("can I help?");
-    await act(async () => {
-      textarea().dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
-      );
-    });
 
-    expect(sent).not.toHaveBeenCalled();
+    const notice = container.querySelector('[data-testid="thread-read-only-notice"]');
+    expect(notice).not.toBeNull();
+    expect(notice?.getAttribute("role")).toBe("status");
+    expect(notice?.textContent).toContain("There is nothing to reply to here");
+    // It is the last thing in the panel: the composer is not below it, hidden
+    // or otherwise. `lastElementChild` fails the moment one is rendered again.
+    expect(container.querySelector("aside")?.lastElementChild).toBe(notice);
   });
 
   it("keeps the thread composer working on an ordinary channel", async () => {
@@ -121,6 +136,7 @@ describe("thread composer on a read-only channel (issue #1757)", () => {
 
     expect(textarea().placeholder).toBe("Reply…");
     expect(sendButton().disabled).toBe(false);
+    expect(container.querySelector('[data-testid="thread-read-only-notice"]')).toBeNull();
 
     await act(async () => sendButton().click());
     expect(sent).toHaveBeenCalledTimes(1);

@@ -60,9 +60,20 @@ already exist rather than a new taxonomy:
 2. **money named in the arguments** — a positive `amount_usd`, whatever the
    tool's own class says;
 3. **unbounded reach** — a named set (`shell`, `curl`, `http_request`,
-   `web_fetch`, `git_operations`, `run_workflow`) that is `Consequence`.
-   This is how a *delete* stops: destruction has no `EffectGroup` of its own,
-   and `shell` is how a run deletes.
+   `git_operations`, `run_workflow`) that is `Consequence`. This is how a
+   *delete* stops: destruction has no `EffectGroup` of its own, and `shell` is
+   how a run deletes. `web_fetch` is not in this set, resolvable URL or not:
+   its `EffectGroup` is `Other`, so rule 1 never applies to it, and rule 3 does
+   not name it — so whether it parks is decided entirely at step 4 by its
+   `Reach`: free when the URL names a concrete host, `Consequence` (so it
+   parks under `supervised`) when it does not. `http_request` reaches the same
+   step-4 `Reach` check when its method reads GET/HEAD/OPTIONS, but "free"
+   there is earned by the **whole call**, not the method in isolation: a `body`
+   or a header outside an explicit safe allowlist keeps it `Consequence` even
+   though the method alone would have read as a fetch — the method names the
+   request's intent, but `to_tool_args` forwards `body`/`headers` unconditionally
+   and the wired tool sends both regardless of method, so either is a channel a
+   method-only check would have missed.
 
 Rule 3 is a **list, and was briefly a derivation**. `Consequence` +
 `Standing::PerCall` looks like it names exactly this set, since #444 refuses a
@@ -139,8 +150,10 @@ at step 4 and is a thing they can see, change and revoke.
 
 `http_request`, `curl` and `web_fetch` **were** deferred pending #674 and are
 not any more. They are **scoped by path**, not excluded from the rule: governed
-by #614 on the authored-node path and by #338 on the agent path. `shell`,
-`git_operations` and `run_workflow` are the same.
+by #614 on the authored-node path and by #338 on the agent path — same as
+`shell`, `git_operations` and `run_workflow`. On the agent path, `http_request`
+and `curl` can still pick up a stop from rule 3 above; `web_fetch` cannot — see
+the note there — so the path split still applies to it, but rule 3 never fires.
 
 `every_deferred_tool_would_otherwise_be_stopped` asserts every remaining
 carve-out *qualifies* on the declaration and is silent anyway — and fails if the

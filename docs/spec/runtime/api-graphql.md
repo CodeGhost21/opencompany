@@ -123,8 +123,10 @@ conversational surface) and the `/events` work feed
   `delegate_to_desk` is deliberately **not** refused — it is how a question the
   orchestrator cannot answer alone reaches a desk that can — so it runs the
   desk lead and relays their reply, and only its board card stands down.
-  `query_company` / `run_workflow` / `read_run_output` run inline and are
-  untouched throughout. The turn loses the ability to *write*, never the
+  `query_company` / `run_workflow` / `read_run_output` — and, since issue
+  #1859, the board/run-history read trio `list_tasks` / `read_task` /
+  `read_run` — run inline and are untouched throughout. The turn loses the
+  ability to *write*, never the
   ability to answer. Ambiguity falls to `Chatter`, which neither cards nor gates: a
   missed card costs one follow-up message, a spurious card pollutes the board
   permanently. The gate is harness-only — `HostedMedullaBrain` has no
