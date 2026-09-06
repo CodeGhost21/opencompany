@@ -113,6 +113,13 @@ pub struct ReferralConfig {
 pub const REACH_WORDS: &[&str] = &["local", "channels", "desks"];
 
 impl ReferralConfig {
+    /// Whether this block says nothing at all, so a serialized manifest keeps
+    /// omitting it exactly as it did before referral existed.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
     /// Whether this desk refers anything.
     #[must_use]
     pub fn enabled(&self) -> bool {
