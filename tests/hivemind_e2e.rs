@@ -616,7 +616,7 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
     let client = Client::new(address);
     client.sign_in().await;
 
-    client
+    let body = client
         .say(DESK, "Settle the closed form of the recurrence.")
         .await;
 
