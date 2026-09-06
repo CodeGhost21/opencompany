@@ -707,7 +707,14 @@ def main() -> int:
             f"{r.get('distinct_speakers', 0):>8} | {move_cols} | {r.get('mentions', 0):>4} | "
             f"{r.get('citations', 0):>4} | {diverse_s:>7}"
         )
-    return sum(1 for r in results if r["verdict"] != "correct")
+    # A room that converged with no known answer to grade against is a
+    # success by `--stop-after-failures`'s own predicate (it resets
+    # `consecutive_failures` to 0 for exactly this verdict) — the exit code
+    # must agree, or a ladder run against an incomplete answers file exits
+    # non-zero even though every room actually converged.
+    return sum(
+        1 for r in results if r["verdict"] not in ("correct", "converged (no known answer)")
+    )
 
 
 if __name__ == "__main__":
