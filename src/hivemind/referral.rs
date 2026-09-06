@@ -36,7 +36,7 @@
 //! A crossing forward runs a real turn on the far desk, journaled there under
 //! the far teammate's own id, because that is a turn that teammate genuinely
 //! took on its own desk. The **answer** comes back as a system row under
-//! [`HIVE_REPORT_AUTHOR`](super::HIVE_REPORT_AUTHOR), not under the far
+//! [`HIVE_REFERRAL_AUTHOR`](super::HIVE_REFERRAL_AUTHOR), not under the far
 //! teammate's id. That is not a formatting choice: a row authored by a roster
 //! id folds as a trace and can be counted as a supporter, so carrying the far
 //! desk's answer back under its author's name would let one supporter count on
@@ -482,7 +482,7 @@ impl<'a> EpisodeReferrals<'a> {
                 let _ = self
                     .journal(
                         &self.home,
-                        super::HIVE_REPORT_AUTHOR,
+                        super::HIVE_REFERRAL_AUTHOR,
                         unanswered_note(&referral.target_id, &self.desk_name(&referral.to.desk_id)),
                     )
                     .await;
@@ -526,7 +526,7 @@ impl<'a> EpisodeReferrals<'a> {
         let desk = self.desk_name(&referral.from.desk_id);
         let text = returned_note(&referral.source_id, &desk, &referral.content);
         if let Err(error) = self
-            .journal(&referral.to, super::HIVE_REPORT_AUTHOR, text)
+            .journal(&referral.to, super::HIVE_REFERRAL_AUTHOR, text)
             .await
         {
             tracing::warn!(

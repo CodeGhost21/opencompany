@@ -100,3 +100,13 @@ pub use types::{
 /// summary misattributed to it, and the read path can tell an unauthored
 /// outcome row from a teammate's line without consulting a roster.
 pub const HIVE_REPORT_AUTHOR: &str = "hive-report";
+
+/// The `agent_id` an answer carried back from another desk is journaled under.
+///
+/// Hyphenated for exactly the reason [`HIVE_REPORT_AUTHOR`] is — no roster id
+/// can spell it — but a **second** reserved id rather than a reuse of that one,
+/// because the two rows say different things and a reader that cannot tell them
+/// apart is a reader that has been told a peer desk's answer is this room's own
+/// summary. Both fold as system rows, so neither can ever be counted as a
+/// supporter; only this one may appear more than once in an episode.
+pub const HIVE_REFERRAL_AUTHOR: &str = "hive-referral";
