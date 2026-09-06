@@ -39,6 +39,11 @@ struct MockState {
     valid_token: String,
     valid_actor: String,
     next_id: Mutex<u64>,
+    /// Simulates ranked-recall's own indexing lag, distinct from
+    /// `/v1/events` listing: while positive, `/v1/recall` reports no hits at
+    /// all (as if the write had not indexed into ranked recall yet) and
+    /// decrements by one per call, regardless of query or scope.
+    recall_lag_calls: Mutex<u32>,
 }
 
 const TOKEN: &str = "test-token";
@@ -279,6 +284,7 @@ async fn spawn_mock(valid_actor: &str) -> (String, Arc<MockState>) {
         valid_token: TOKEN.to_string(),
         valid_actor: valid_actor.to_string(),
         next_id: Mutex::new(0),
+        recall_lag_calls: Mutex::new(0),
     });
     let app = Router::new()
         .route("/v1/admin/ready", get(ready))
