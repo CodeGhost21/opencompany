@@ -422,8 +422,12 @@ impl<'a> EpisodeDriver<'a> {
             // desk that asks a peer and then votes before the answer lands has
             // voted past the information it paid a turn for, so an answer that
             // arrives one row late is an answer that arrives never.
-            if let Some((federation, queue, policy)) = referrals.as_ref()
-                && super::referral::consider(
+            //
+            // `last_seq` is deliberately not advanced by what a referral
+            // journals: it names the episode's last *turn*, and a question's
+            // answer is a row the room reads, not a turn the room took.
+            if let Some((federation, queue, policy)) = referrals.as_ref() {
+                super::referral::consider(
                     queue,
                     *policy,
                     federation,
@@ -435,9 +439,7 @@ impl<'a> EpisodeDriver<'a> {
                     &line,
                     seq,
                 )
-                .await
-            {
-                last_seq = self.latest_seq().await.or(last_seq);
+                .await;
             }
             lines.push((seq, turn.agent_id.clone(), line));
             if !spoken.contains(&turn.agent_id) {
