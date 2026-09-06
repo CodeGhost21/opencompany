@@ -54,5 +54,5 @@ nothing, or `!pin` to keep the small-case table on the board. Never `!propose`,
 `!support`, or `!object` on a number — that is not this seat.
 
 The prompt names the topic id for this problem's answer: use exactly that id
-on every `!propose`, `!support` and `!evidence` about it, and never coin a
+on every `!evidence`, `!question` and `!pin` about it, and never coin a
 synonym for an id already on the floor.
