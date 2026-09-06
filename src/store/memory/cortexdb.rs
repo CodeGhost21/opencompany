@@ -625,10 +625,37 @@ impl Memory for CortexdbMemory {
             .unwrap_or(tinymemory_api::types::GLOBAL_NAMESPACE);
         let mut records = self.recall_raw(namespace, query).await?;
         records.sort_by(|a, b| b.observed_at.cmp(&a.observed_at));
-        // Newest write per key wins — the read-side half of upsert semantics
-        // over an event log (see the module docs).
+        // Newest write per key wins, among the hits `/v1/recall` itself
+        // returned — necessary but not sufficient, see below.
         let mut seen = std::collections::HashSet::new();
         records.retain(|record| seen.insert(record.key.clone()));
+        // A surviving hit can still be a *superseded* event: `/v1/recall`
+        // ranks by relevance to `query`, so a stale event whose old content
+        // happens to match can be the only version of a key reachable
+        // through this particular query, even though a newer event for that
+        // key exists. Resolve every hit against the key's actual latest
+        // event before ranking further, so a corrected or
+        // forgotten-and-rewritten memory can never resurface superseded
+        // content through recall — the same "most recently observed event
+        // wins" rule `get`/`list` apply, via the shared `latest_by_key` fold.
+        // A key with nothing left to fold to (forgotten since the query ran)
+        // is dropped rather than resurrected.
+        if !records.is_empty() {
+            let canonical = self.latest_by_key(namespace).await?;
+            records = records
+                .into_iter()
+                .filter_map(|record| {
+                    let current = canonical.get(&record.key)?;
+                    let mut resolved = current.clone();
+                    // The hit's score is `/v1/recall`'s relevance answer for
+                    // `query`; keep it for ranking even though the content
+                    // underneath may have just been swapped for the current
+                    // version.
+                    resolved.score = record.score;
+                    Some(resolved)
+                })
+                .collect();
+        }
         if let Some(category) = &opts.category {
             records.retain(|record| &record.category == category);
         }
