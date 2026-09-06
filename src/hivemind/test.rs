@@ -341,6 +341,17 @@ fn a_member_with_an_empty_moves_list_counts_as_an_eligible_supporter() {
 }
 
 #[test]
+fn a_desk_that_never_deliberates_is_not_checked_for_reachable_quorum() {
+    // A one-member desk (no `members` list at all here) never opens a hive
+    // episode, whatever `hive.quorum` says — so an empty `hive.moves` and a
+    // desk of zero declared seats must not read as "quorum unreachable".
+    let manifest = "[company]\nname = \"X\"\n\
+         [[group_chat]]\nid = \"content\"\nname = \"Content desk\"\n";
+    let problems = record(manifest).manifest.validate();
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
 fn the_derived_policy_scales_with_the_room() {
     let policy = |members: usize| HivePolicy::from_config(&HiveConfig::default(), members).episode;
     // A pair can only ever need one supporter — the other one — so a majority
