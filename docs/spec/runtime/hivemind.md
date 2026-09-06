@@ -156,6 +156,14 @@ Your one line:
 - **Blind turns see less.** Under `Visibility::Blind`, peers' episode messages
   are withheld; the operator's task, system rows, the member's own lines, and
   everything at or below the watermark remain.
+- **The watermark divides the transcript.** A live six-seat run spent an
+  eighteen-turn episode arguing the *previous* Project Euler problem, because
+  the transcript rendered a prior episode's `!propose` and `!support` rows
+  exactly like this episode's own. Rows are never hidden — `EpisodeDriver::run`
+  promises the room may still read and cite them — but a divider is drawn
+  between the rows at or below `trigger` and the rows above it, once, only
+  when both sides are non-empty, so a live-looking line from before this
+  question was asked no longer reads as something on this episode's floor.
 
 ## The grammar
 
