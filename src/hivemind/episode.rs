@@ -30,6 +30,7 @@ use super::log::EventLogSessionLog;
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT};
 use super::moves::{self, MoveViolation};
 use super::prompt::{EpisodePrompt, marker_line};
+use super::referral::{EpisodeReferrals, HiveFederation, HiveReferralRunner, ReferralLedger};
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -89,6 +90,7 @@ pub struct EpisodeDriver<'a> {
     task: String,
     thread_root: Option<EventSeq>,
     memory: Arc<dyn HiveMemory>,
+    federation: Option<(HiveFederation, &'a dyn HiveReferralRunner)>,
 }
 
 impl std::fmt::Debug for EpisodeDriver<'_> {
@@ -120,7 +122,25 @@ impl<'a> EpisodeDriver<'a> {
             task: task.into(),
             thread_root: None,
             memory: Arc::new(NullHiveMemory),
+            federation: None,
         }
+    }
+
+    /// Let this desk ask another one a question.
+    ///
+    /// `federation` is the snapshot `@#desk` and `@teammate` resolve against
+    /// ([`desk_federation`](super::desk_federation)), and `runner` is how the
+    /// far teammate's turn is actually filled. Absent — the default — no line
+    /// is ever considered for a referral and the episode is byte-identical to
+    /// the one this driver ran before referral existed.
+    #[must_use]
+    pub fn with_federation(
+        mut self,
+        federation: HiveFederation,
+        runner: &'a dyn HiveReferralRunner,
+    ) -> Self {
+        self.federation = Some((federation, runner));
+        self
     }
 
     /// Give the desk a memory: recalled once before the first turn, written
