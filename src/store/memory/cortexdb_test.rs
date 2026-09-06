@@ -86,13 +86,15 @@ async fn experience(
         .to_string();
     let mut id_guard = state.next_id.lock().unwrap();
     *id_guard += 1;
-    let id = format!("evt_{}", *id_guard);
+    let ordinal = *id_guard;
+    let id = format!("evt_{ordinal}");
     drop(id_guard);
     state.events.lock().unwrap().push(StoredEvent {
         scope,
         id: id.clone(),
         content,
         observed_at,
+        score: 1.0 / f64::from(u32::try_from(ordinal).unwrap_or(u32::MAX)),
     });
     (
         StatusCode::OK,
