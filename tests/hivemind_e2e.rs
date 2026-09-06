@@ -660,7 +660,8 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
     let strays: Vec<_> = rows
         .iter()
         .filter(|(_, author, _)| {
-            author != HIVE_REPORT_AUTHOR && ![THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str())
+            author != HIVE_REPORT_AUTHOR
+                && ![THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str())
         })
         .collect();
     assert!(

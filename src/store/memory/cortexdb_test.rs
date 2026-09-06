@@ -264,6 +264,8 @@ async fn spawn_mock(valid_actor: &str) -> (String, Arc<MockState>) {
         .route("/v1/experience", post(experience))
         .route("/v1/recall", post(recall))
         .route("/v1/forget", post(forget))
+        .route("/v1/events", get(events_list))
+        .route("/v1/scopes/list", get(scopes_list))
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
