@@ -455,7 +455,8 @@ impl<'a> EpisodeReferrals<'a> {
         author: &str,
         text: String,
     ) -> Result<EventSeq> {
-        self.events
+        let seq = self
+            .events
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
@@ -469,7 +470,17 @@ impl<'a> EpisodeReferrals<'a> {
                     mention_depth: 0,
                 },
             )
-            .await
+            .await?;
+        // Only a row landing back on the asking episode's own desk and thread
+        // is this episode's own doing. A crossing forward's answer is
+        // journaled on the far desk's conversation instead (`forward`,
+        // below) — a real turn by a real member of *that* desk, which that
+        // desk's own concurrent episode (if any) must fold on its own terms,
+        // not one this episode's scope should ever admit.
+        if conversation == &self.home {
+            self.scope.record(seq);
+        }
+        Ok(seq)
     }
 
     /// Run one crossing (or local) question and journal its answer where the
