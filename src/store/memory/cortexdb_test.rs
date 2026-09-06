@@ -626,6 +626,67 @@ async fn forget_removes_every_version_of_a_key_not_only_the_latest() {
     );
 }
 
+/// Regression for the "recall now discards `/v1/recall`'s ranking" finding:
+/// canonicalizing each hit to its key's current content re-derives the list
+/// from a `HashMap` fold with no defined order, and the surrounding code only
+/// sorted by `observed_at` (to pick which duplicate of *one* key to keep) —
+/// nothing re-sorted the *distinct-key* results by relevance before
+/// `truncate(limit)`. A newer, weaker match could therefore displace an
+/// older, more relevant one.
+#[tokio::test]
+async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest() {
+    let (base_url, _state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    // Stored first, so the mock's insertion-order-derived score ranks it
+    // highest — but it is also the *older* write.
+    memory
+        .store(
+            "company-a",
+            "high-relevance",
+            "widget alpha",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .expect("store succeeds");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Stored second: newer `observed_at`, but a lower mock score.
+    memory
+        .store(
+            "company-a",
+            "low-relevance",
+            "widget beta",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .expect("store succeeds");
+
+    let hits = memory
+        .recall(
+            "widget",
+            1,
+            RecallOpts {
+                namespace: Some("company-a"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("recall succeeds");
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "limit=1 must return exactly one hit: {hits:?}"
+    );
+    assert_eq!(
+        hits[0].key, "high-relevance",
+        "truncating by score must keep the more relevant (older) hit, not the more recent \
+         (less relevant) one: {hits:?}"
+    );
+}
+
 /// Regression for the `recall` finding: deduplicating only within one
 /// query's own hits does not stop a superseded event from surfacing when its
 /// (now-stale) content still matches the query but the current content does
