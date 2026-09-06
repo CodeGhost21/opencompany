@@ -4592,7 +4592,16 @@ impl crate::hivemind::HiveTurnRunner for HiveDeskRunner {
                 // and in the assistant role — a peer's opening position
                 // reaching a *blind* turn, and every peer line reading as
                 // something this member had itself said.
-                ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root),
+                //
+                // `.answering(self.trigger_seq)`: this turn is still, at
+                // bottom, this desk's response to the operator message that
+                // opened the episode. Without it, `TurnStreamCtx::message_seq`
+                // is `None` for every hive turn, and a desk started inside a
+                // thread has its live tool frames fall back to the
+                // desk-level thread bucket instead of the active
+                // `desk#root`/message one.
+                ChatTarget::deliberating(self.chat_id.as_deref(), self.thread_root)
+                    .answering(self.trigger_seq),
             )
             .await?;
         if let Some(error) = terminal_budget_error(agent_id, &outcome) {
