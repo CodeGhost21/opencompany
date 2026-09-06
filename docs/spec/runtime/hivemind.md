@@ -202,7 +202,11 @@ the conversation they were folded from.
 | --- | --- | --- | --- |
 | each turn | the desk id | the teammate that spoke | its one marker line, or that line with its `!` stripped when the move was barred |
 | a failed turn | the desk id | `hive-report` | `@<id>'s turn did not finish: …` |
-| the close | the desk id | `hive-report` | how the episode ended, plus any failed turns and demotions |
+| the close | the desk id | `hive-report` | how the episode ended, plus any failed turns, demotions and questions asked elsewhere |
+
+A desk that opted in to [cross-desk referral](hivemind-referral.md) adds two
+more row shapes — the far desk's own turn, on the far desk, and its answer
+carried home under `hive-referral`. Both are off by default.
 
 Every row carries the same `parent` a single-responder reply would: the
 operator message's own parent, so an answer joins the thread its question was
@@ -316,6 +320,7 @@ is already durable in the turns above it. So is a memory note.
 | `src/hivemind/log.rs` | `EventLogSessionLog` — the journal as a `SessionLog` |
 | `src/hivemind/prompt.rs` | `EpisodePrompt`, `marker_line` |
 | `src/hivemind/episode.rs` | `EpisodeDriver`, `HiveTurnRunner` |
+| `src/hivemind/referral.rs` | `ReferralConfig`, `HiveFederation`, `HiveReferralRunner`, `EpisodeReferrals` — see [`hivemind-referral.md`](hivemind-referral.md) |
 | `src/harness/built_in/brain.rs` | the routing hook, `HiveDeskRunner`, and `HiveDeskMemory` (the `ContextStore` implementation) |
 
 ## Testing
@@ -345,6 +350,7 @@ it was given, which is the property a fixed reply queue cannot prove.
 | `a_room_that_settles_on_nothing_reports_itself_exhausted` | the budget is the only bound, and the report says the budget was spent rather than inventing a decision |
 | `two_carrying_topics_and_no_objection_deadlock` | two options carry, nobody is left to break the tie, and the close says `Deadlocked` |
 | `a_single_member_desk_answers_with_one_ordinary_turn` | the same company's desk of one is never handed an episode prompt: one reply, no `hive-report` |
+| `a_desk_asks_another_desk_and_only_the_information_crosses` | one question crosses to the desk of one, runs a real turn there under its own member, and comes home under `hive-referral` — so the far teammate informs the room without ever authoring a row in it |
 
 Two things the file asserts around rather than through, said here rather than
 left for a reader to assume:
@@ -360,5 +366,6 @@ left for a reader to assume:
   a live model that ignores the commit protocol is exactly how a real room gets
   there.
 
-See also [`hivemind-deliberation.md`](hivemind-deliberation.md) and
+See also [`hivemind-deliberation.md`](hivemind-deliberation.md),
+[`hivemind-referral.md`](hivemind-referral.md) and
 [`docs/modules/hivemind/README.md`](../../modules/hivemind/README.md).

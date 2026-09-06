@@ -92,6 +92,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
 | [runtime/hivemind.md](runtime/hivemind.md) | Hive-mind desks: when a `[[group_chat]]` answers as a deliberating room rather than through one responder, the episode loop, the trace grammar, and the `hive` manifest keys |
 | [runtime/hivemind-deliberation.md](runtime/hivemind-deliberation.md) | The four mechanisms that make a hive desk deliberate rather than vote: the per-member move grammar and its enforcement, desk memory, speaker diversity, and what happens when a member's turn fails |
+| [runtime/hivemind-referral.md](runtime/hivemind-referral.md) | Cross-desk referral: when a deliberating desk may put one question to another desk, how the answer comes home without carrying a vote with it, and the `hive.referral` manifest keys |
 | [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
 | [runtime/harnesses-acp.md](runtime/harnesses-acp.md) | The ACP transports in detail: `local` vs `runner`, readiness probing, resuming a teammate's session across a restart, and streaming its execution state while the turn runs |
 | [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
