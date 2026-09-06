@@ -11560,6 +11560,78 @@ members = ["engineer", "designer"]
         );
     }
 
+    /// **Regression: an approval request a hive turn queues is parked before
+    /// the episode ends, not only after it.**
+    ///
+    /// Before this fix, `HiveDeskRunner::speak` never touched
+    /// `self.deps.approval_requests` — only the *cycle's* single
+    /// `park_approval_requests(host)` call, after `driver.run(trigger)` had
+    /// already returned, ever drained it. A member's `request_approval` call
+    /// mid-episode therefore sat in the internal queue, invisible to
+    /// `scripts/hive-euler.py`'s concurrent approval pump, for every
+    /// remaining turn the room took.
+    ///
+    /// This drives exactly one `speak` call — the queue is populated by
+    /// `FixedOutcomeTurn` the same way a real `request_approval` refusal
+    /// would populate it during a turn — and asserts the request already
+    /// reached `host.park_effect` immediately after that single turn, with no
+    /// second turn and no `EpisodeDriver` in the picture. Before the fix this
+    /// assertion fails: nothing is parked until a cycle-level drain that
+    /// never runs here.
+    #[tokio::test]
+    async fn hive_speak_parks_a_queued_approval_before_the_episode_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        let host = ParkingHost::default();
+        let runner = HiveDeskRunner {
+            run_turn: Arc::new(FixedOutcomeTurn {
+                outcome: crate::harness::built_in::TurnOutcome {
+                    reply: "blocked, requires approval".to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: false,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                },
+                // Mirrors what a supervised `ApprovalPolicy` records when the
+                // agent reaches for a gated tool mid-turn: the request lands
+                // on the shared queue, and the turn still completes normally.
+                approval_requests: Some(requests.clone()),
+            }),
+            company: CompanyId::new("acme"),
+            chat_id: Some("lab".to_string()),
+            thread_root: None,
+            trigger_seq: None,
+            brain: &brain,
+            host: &host,
+        };
+
+        let reply = crate::hivemind::HiveTurnRunner::speak(
+            &runner,
+            "programmer",
+            "Run the computation.",
+        )
+        .await
+        .expect("a turn that only queued an approval request still replies");
+        assert_eq!(reply, "blocked, requires approval");
+
+        // The core regression: parked after this ONE turn, not after a whole
+        // episode of turns.
+        let parked = host.parked();
+        assert_eq!(
+            parked.len(),
+            1,
+            "the gated call from this single turn must already be on the operator's queue"
+        );
+        assert_eq!(parked[0].kind, "test_tool_0");
+        assert_eq!(
+            requests.queued(),
+            0,
+            "the shared queue is drained by the per-turn park, not left for a later cycle-level drain"
+        );
+    }
+
     /// A brain whose provider steers the dispatched card `key` with `actions`
     /// (one per turn). Returns the brain + its task store so a test can seed the
     /// card and read the disposition back.
