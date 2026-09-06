@@ -3700,6 +3700,8 @@ impl HarnessBrain {
                             chat_id: chat.clone(),
                             thread_root,
                             trigger_seq: Some(trigger),
+                            brain: self,
+                            host,
                         };
                         // The desk's own memory, over the same `ContextStore`
                         // the per-turn memory loop and the `memory_recall` belt
