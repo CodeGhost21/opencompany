@@ -109,10 +109,25 @@ async fn recall(
         .get("scope")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let query = body.get("query").and_then(Value::as_str).unwrap_or_default();
     let events = state.events.lock().unwrap();
     let items: Vec<Value> = events
         .iter()
         .filter(|event| event.scope == scope)
+        // A rough stand-in for CortexDB's BM25 ranking: an empty query
+        // matches everything (as the module docs describe), a non-empty one
+        // only matches events whose stored content contains it. This is
+        // enough to reproduce the real failure mode this driver has to
+        // correct for — a stale event that still matches `query` even though
+        // a newer, non-matching event has since superseded it.
+        .filter(|event| {
+            query.is_empty()
+                || event
+                    .content
+                    .pointer("/data/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.to_ascii_lowercase().contains(&query.to_ascii_lowercase()))
+        })
         .map(|event| {
             json!({
                 "id": event.id,
@@ -125,6 +140,78 @@ async fn recall(
         StatusCode::OK,
         Json(json!({ "layers": { "events": items } })),
     )
+}
+
+/// `GET /v1/events?scope=...&limit=...&cursor=...` — the paginated raw
+/// listing this driver's exhaustive reads (`get`/`list`/`forget`/
+/// `namespace_summaries`/recall's stale-hit correction) walk instead of
+/// `/v1/recall`, which cannot page. The mock pages by a plain numeric offset
+/// carried as the cursor — opaque to the driver, which only round-trips it.
+async fn events_list(
+    headers: HeaderMap,
+    State(state): State<Arc<MockState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
+    }
+    let scope = params.get("scope").cloned().unwrap_or_default();
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    let offset: usize = params
+        .get("cursor")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let events = state.events.lock().unwrap();
+    let matching: Vec<&StoredEvent> = events.iter().filter(|event| event.scope == scope).collect();
+    let page: Vec<Value> = matching
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|event| {
+            json!({
+                "id": event.id,
+                "content": event.content,
+                "observed_at": event.observed_at,
+            })
+        })
+        .collect();
+    let next_offset = offset + page.len();
+    let has_more = next_offset < matching.len();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "items": page,
+            "has_more": has_more,
+            "next_cursor": if has_more { Some(next_offset.to_string()) } else { None },
+        })),
+    )
+}
+
+/// `GET /v1/scopes/list` — every scope this mock has ever accepted a write
+/// under, unpaginated (the mock never holds enough scopes across a test to
+/// need a second page).
+async fn scopes_list(
+    headers: HeaderMap,
+    State(state): State<Arc<MockState>>,
+) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers, &state) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        );
+    }
+    let events = state.events.lock().unwrap();
+    let mut scopes: Vec<String> = events.iter().map(|event| event.scope.clone()).collect();
+    scopes.sort();
+    scopes.dedup();
+    let items: Vec<Value> = scopes.into_iter().map(|scope| json!({ "path": scope })).collect();
+    (StatusCode::OK, Json(json!({ "items": items })))
 }
 
 async fn forget(
