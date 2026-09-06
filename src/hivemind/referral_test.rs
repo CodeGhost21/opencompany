@@ -613,3 +613,77 @@ fn the_referral_prompt_frames_a_colleagues_question_not_a_deliberation_turn() {
          desk's board:\n{prompt}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The manifest
+// ---------------------------------------------------------------------------
+
+/// The referral block is parsed off `[[group_chat]].hive`, not invented here.
+#[test]
+fn the_manifest_parses_a_referral_block() {
+    let manifest = two_desks(
+        "hive = { referral = { enabled = true, max_hops = 3, reach = \"channels\", \
+         returns = false, peer_cap = 4 } }",
+    );
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let referral = &desk.config.referral;
+    assert!(referral.enabled());
+    assert_eq!(referral.peer_cap(), 4);
+    let policy = referral.policy();
+    assert_eq!(policy.max_hops, 3);
+    assert!(!policy.returns);
+    assert!(policy.reach.crosses());
+    assert!(
+        !policy.reach.addresses_desks(),
+        "`channels` lets a turn run elsewhere without making `@#desk` mean anything"
+    );
+}
+
+/// Every check here catches a policy that would be *silently* inert. A desk
+/// that asks nothing looks exactly like a desk whose members had nothing to
+/// ask, so a typo has to be a validation error rather than a quiet no-op.
+#[test]
+fn the_manifest_refuses_a_referral_policy_that_could_never_fire() {
+    let problems = |hive: &str| record(&two_desks(hive)).manifest.validate();
+
+    let found = problems("hive = { referral = { enabled = true, reach = \"everywhere\" } }");
+    assert!(
+        found.iter().any(|p| p.contains("hive.referral.reach")),
+        "{found:?}"
+    );
+
+    for key in ["max_hops", "peer_cap"] {
+        let found = problems(&format!(
+            "hive = {{ referral = {{ enabled = true, {key} = 0 }} }}"
+        ));
+        assert!(
+            found
+                .iter()
+                .any(|p| p.contains(&format!("hive.referral.{key} = 0"))),
+            "{key}: {found:?}"
+        );
+    }
+
+    // A round trip is two hops. One hop plus `returns` describes a question
+    // whose answer is thrown away, which is worse than refusing it.
+    let found = problems("hive = { referral = { enabled = true, max_hops = 1 } }");
+    assert!(
+        found
+            .iter()
+            .any(|p| p.contains("a round trip is two hops")),
+        "{found:?}"
+    );
+    // Declared one-way, it is a policy somebody meant.
+    let found = problems("hive = { referral = { enabled = true, max_hops = 1, returns = false } }");
+    assert!(
+        !found.iter().any(|p| p.contains("round trip")),
+        "{found:?}"
+    );
+
+    // And the ordinary opted-in block is accepted.
+    assert!(
+        problems(REFERRING).is_empty(),
+        "{:?}",
+        problems(REFERRING)
+    );
+}
