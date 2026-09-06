@@ -674,7 +674,7 @@ fn a_transcript_entirely_after_the_trigger_renders_with_no_divider() {
         "nothing precedes the watermark, so there is nothing to divide"
     );
     assert!(
-        !without_trigger.contains("not this episode's floor"),
+        !without_trigger.contains("this episode's floor"),
         "{without_trigger}"
     );
 }
