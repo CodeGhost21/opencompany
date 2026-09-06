@@ -338,6 +338,26 @@ fn a_desk_with_one_seat_of_slack_beyond_quorum_is_accepted() {
 }
 
 #[test]
+fn a_member_who_may_only_propose_counts_as_an_eligible_supporter() {
+    // `critic` holds `propose` but never `support`. `tinyhivemind_hive`
+    // counts a `!propose` as its own author's support unconditionally
+    // (`quorum::standings` gates `require_grounded`/`require_evidential` on
+    // `TraceKind::Support` only), so `critic` can still add itself as a
+    // distinct supporter — of its own proposal, or by re-proposing a topic
+    // already on the floor. Without it, `planner` and `scout` alone equal
+    // `quorum`, which this check refuses.
+    let manifest = format!(
+        "{}[group_chat.hive]\nquorum = 2\n\n[group_chat.hive.moves]\n\
+         planner = [\"support\", \"evidence\", \"defer\"]\n\
+         scout = [\"support\", \"evidence\", \"defer\"]\n\
+         critic = [\"propose\", \"evidence\", \"defer\"]\n",
+        three_member_manifest()
+    );
+    let problems = record(&manifest).manifest.validate();
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
 fn an_unnamed_member_counts_as_an_eligible_supporter() {
     // `critic` is not named in `hive.moves` at all, so it keeps every move,
     // `support` included. Without it only `planner` and `scout` could ever
