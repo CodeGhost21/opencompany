@@ -11516,7 +11516,10 @@ members = ["engineer", "designer"]
 
     #[tokio::test]
     async fn hive_refer_turns_a_spend_halt_into_an_error() {
-        let runner = hive_desk_runner(spend_halted_outcome("sre"));
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(&brain, &host, spend_halted_outcome("sre"));
         let err = runner
             .refer("platform", "sre", "What is the failover budget?")
             .await
