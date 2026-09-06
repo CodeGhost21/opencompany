@@ -373,6 +373,29 @@ impl<'a> EpisodePrompt<'a> {
         )
     }
 
+    /// The other desks this seat may ask, or nothing when it may ask none.
+    ///
+    /// One question per line, and only one seat's worth: the far desk answers
+    /// with a single turn by a single member, so this is a colleague to consult
+    /// and not a channel to broadcast into.
+    fn peers(&self) -> String {
+        if self.peers.is_empty() {
+            return String::new();
+        }
+        let listed = self
+            .peers
+            .iter()
+            .map(|(id, name, about)| match about {
+                Some(about) => format!("- @#{id} ({name}) — {about}"),
+                None => format!("- @#{id} ({name})"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Other desks you may put ONE question to, by writing their handle in your line:\n             {listed}\n             Ask only for a fact this desk does not hold and cannot check for itself, and ask it              EARLY — a room that has already backed an answer has voted past whatever comes back.              Exactly one member of that desk answers, and their answer arrives as a message you              can read and cite; it is not a vote, and it supports nothing here until one of us              spends a line on it.\n\n",
+        )
+    }
+
     /// Who else is in the room, what the desk is for, and what was asked.
     fn room(&self) -> String {
         let teammates: Vec<String> = self
