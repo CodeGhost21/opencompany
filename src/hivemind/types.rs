@@ -331,6 +331,11 @@ pub struct EpisodeOutcome {
     /// desk and steps on. Counted here so the operator is told the answer was
     /// reached with a seat missing rather than left to infer it.
     pub failed_turns: u32,
+    /// What this episode asked of other desks, if anything.
+    ///
+    /// Empty for every desk that did not opt in to referral, which is the
+    /// default and the overwhelmingly common case.
+    pub referrals: super::referral::ReferralLedger,
 }
 
 impl EpisodeOutcome {
@@ -343,11 +348,49 @@ impl EpisodeOutcome {
     #[must_use]
     pub fn summary(&self) -> String {
         format!(
-            "{}{}{}",
+            "{}{}{}{}",
             self.ending_summary(),
             self.failure_summary(),
-            self.violation_summary()
+            self.violation_summary(),
+            self.referral_summary()
         )
+    }
+
+    /// The sentence naming what the room asked of other desks, or nothing when
+    /// it asked nothing.
+    ///
+    /// Reported rather than left to the transcript because a crossing question
+    /// is the one thing an episode does that an operator reading *this* desk
+    /// cannot see: the far turn was journaled on the far desk, and only the
+    /// answer came home.
+    #[must_use]
+    pub fn referral_summary(&self) -> String {
+        let ledger = &self.referrals;
+        if ledger.asked.is_empty() && ledger.failed == 0 && ledger.over_cap == 0 {
+            return String::new();
+        }
+        let mut parts = Vec::new();
+        if !ledger.asked.is_empty() {
+            let named = ledger
+                .asked
+                .iter()
+                .map(|question| format!("@{} on {}", question.target, question.desk))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = ledger.asked.len();
+            let plural = if count == 1 { "question" } else { "questions" };
+            parts.push(format!("asked {count} {plural} of another desk ({named})"));
+        }
+        if ledger.failed > 0 {
+            parts.push(format!("{} went unanswered", ledger.failed));
+        }
+        if ledger.over_cap > 0 {
+            parts.push(format!(
+                "{} more were declined by this desk's `referral.peer_cap`",
+                ledger.over_cap
+            ));
+        }
+        format!(" The room {}.", parts.join("; "))
     }
 
     /// The sentence naming turns that did not finish, or nothing when they all
