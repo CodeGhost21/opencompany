@@ -63,7 +63,9 @@ models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "ma
 # three means an answer needs grounded support from three differently
 # equipped members, not just two identical proposals — see
 # `docs/spec/runtime/hivemind.md` for the moves each is restricted to and
-# `agents/prompts/*.md` for why.
+# `agents/prompts/*.md` for why. Four of the six may ever `!support` (below),
+# so a quorum of three has one seat of slack rather than needing every
+# eligible member every time.
 # ---------------------------------------------------------------------------
 
 [[group_chat]]
