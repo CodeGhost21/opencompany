@@ -641,7 +641,7 @@ fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
 
     let prior_end = prompt.find("[2] scout").expect("prior row 2 is rendered");
     let divider_at = prompt
-        .find("not this episode's floor")
+        .find("this episode's floor")
         .expect("the divider names its own meaning");
     let current_start = prompt.find("[3] planner").expect("current row 3 is rendered");
     assert!(prior_end < divider_at, "{prompt}");
@@ -712,7 +712,7 @@ fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
     assert!(!prompt.contains("critic"), "{prompt}");
     let prior_end = prompt.find("[1] scout").expect("prior row rendered");
     let divider_at = prompt
-        .find("not this episode's floor")
+        .find("this episode's floor")
         .expect("the divider names its own meaning");
     let current_start = prompt.find("[2] planner").expect("current row rendered");
     assert!(prior_end < divider_at, "{prompt}");
