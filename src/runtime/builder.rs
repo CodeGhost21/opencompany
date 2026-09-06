@@ -4275,24 +4275,6 @@ async fn seed_ledgers(
             continue;
         }
         ops.ledgers.put_spec(id, &spec).await?;
-        // Render the (empty) `derived/<slug>.md` immediately, the same way any
-        // later write to this ledger would: without this, a freshly declared
-        // ledger has no file under `derived/` until its first `record_entry`,
-        // so anything that links to it by name (a seeded workspace note's
-        // `[[…]]` link, an operator browsing the tree) finds nothing until
-        // then. Best-effort, exactly like every other call to `derived::publish`
-        // — a workspace hiccup here must not fail the ledger's own seeding.
-        let body = crate::ledger::engine::render(&spec, &crate::ledger::engine::Entries::default());
-        if let Err(error) =
-            crate::ledger::derived::publish(ops.workspace.as_ref(), id, &spec, &body).await
-        {
-            tracing::warn!(
-                company = %id,
-                ledger = %spec.slug,
-                %error,
-                "seeded ledger's derived file could not be written"
-            );
-        }
         seeded.push(spec);
     }
     Ok(())
