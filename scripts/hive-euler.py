@@ -574,9 +574,12 @@ def run_problem(host: Host, desk: str, pid: str, problem: dict, timeout: float, 
         outcome["verdict"] = "timeout"
     else:
         rtext = report.get("text", "")
-        # `EpisodeOutcome::summary()` says "settled on #topic" for a converged
-        # room; the other endings say deadlocked / ran out of turns / idle.
-        converged = "settled on" in rtext or "onverged" in rtext
+        # `ending_summary()` (src/hivemind/types.rs) says "The desk settled on
+        # #topic after N turns" for a converged room; the other endings say
+        # "deadlocked", "spent its N-turn budget", or the room never opened.
+        # "converged" itself never appears in any of those templates, so the
+        # only string worth matching on is "settled on".
+        converged = "settled on" in rtext
         found = integers_in(rtext)
         # The report names the carried topic; a topic is usually the number
         # itself (`#233168`) but a room may name it otherwise, so fall back to
