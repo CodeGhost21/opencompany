@@ -367,6 +367,52 @@ async fn store_then_recall_round_trips() {
     assert_eq!(fetched.content, "hello there");
 }
 
+/// Regression: `POST /v1/experience?wait=captured` only acknowledges
+/// durability, and listing visibility (`GET /v1/events`) is a separate,
+/// earlier indexing stage than ranked-recall visibility (`POST /v1/recall`)
+/// against a live CortexDB instance. `store` must not return until both have
+/// cleared — a caller that immediately calls `recall` after a successful
+/// `store` must see its own write, not an empty or stale result.
+#[tokio::test]
+async fn store_waits_for_ranked_recall_visibility_not_only_listing() {
+    let (base_url, state) = spawn_mock(ACTOR).await;
+    let memory = client(&base_url, ACTOR);
+
+    // The event is listable immediately (the mock's `/v1/events` has no lag
+    // of its own), but `/v1/recall` reports nothing for the next two calls —
+    // simulating the documented extra indexing delay into ranked recall.
+    *state.recall_lag_calls.lock().unwrap() = 2;
+
+    memory
+        .store(
+            "company-a",
+            "greeting",
+            "hello there",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .expect("store succeeds once ranked-recall visibility clears");
+
+    let hits = memory
+        .recall(
+            "hello",
+            10,
+            RecallOpts {
+                namespace: Some("company-a"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("recall succeeds");
+    assert_eq!(
+        hits.len(),
+        1,
+        "store must not return before its own write is visible through /v1/recall: {hits:?}"
+    );
+    assert_eq!(hits[0].key, "greeting");
+}
+
 #[tokio::test]
 async fn a_second_store_under_the_same_key_replaces_the_first_on_read() {
     let (base_url, _state) = spawn_mock(ACTOR).await;
