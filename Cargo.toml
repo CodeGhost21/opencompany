@@ -409,6 +409,19 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 bs58 = { version = "0.5", default-features = false, features = ["std"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
+# Bounded group deliberation on a desk (`src/hivemind/`): the trace grammar,
+# quorum with cross-inhibition, and the pure episode state machine that decides
+# which one teammate speaks next. Unconditional, and deliberately so — a desk
+# episode is a routing decision the default build makes as readily as the
+# harness one does, and the crate is pure Rust with `serde` + `thiserror` and
+# nothing else, executor-neutral, edition 2024, GPL-3.0 like this crate. It
+# adds no port and no storage: `step` is a fold over a transcript this host
+# already holds, and the state it returns is committed only after the reply is
+# durably journaled. Taking `tinyhivemind-hive` alone pulls the session runtime
+# and the pure algebra with it, so the types handed to `step` are the same
+# types rather than structural twins.
+tinyhivemind-hive = { path = "vendor/tinyhivemind/crates/tinyhivemind-hive" }
+
 [features]
 # `oauth` ships in the standard build: the connection write routes
 # (authorize-url + server-side token exchange) are a first-class console
@@ -558,6 +571,12 @@ tinymemory = [
     # `anyhow::Result`, so anything implementing or calling it has to name
     # `anyhow` directly. Already an optional dep for other features.
     "dep:anyhow",
+    # `src/store/memory/cortexdb.rs` speaks the CortexDB HTTP API directly
+    # (the vendored `tinymemory-remote` dialects are `pub(crate)` there and
+    # not reusable from this crate), so this feature needs its own `reqwest`
+    # rather than relying on `oauth`/`documents` pulling it into the default
+    # set. Already an optional dep, already in `Cargo.lock`.
+    "dep:reqwest",
 ]
 # Node sidecar brain for self-hosters (bring-your-own-inference). Adds
 # `SidecarBrain`, which speaks the same `/orchestration/v1` wire frames as the

@@ -2405,6 +2405,10 @@ enum LiveStream<'a> {
         /// `ChatTarget` the caller passes, so a turn can have a conversation
         /// and stream nothing — which an approval's re-issued call does, and
         /// which this enum could not express.
+        ///
+        /// The history seed (issue #1840) reads that same `ChatTarget`, for the
+        /// same reason: whether a turn is seeded is a fact about the
+        /// conversation it is in, not about whether anything is watching it.
         chat_id: Option<&'a str>,
     },
     /// A workflow agent node (issue #1702): it streams live like `On`, but its
@@ -4216,7 +4220,13 @@ impl HarnessPool {
         // recent history; a background task or workflow node carries no chat
         // thread to bind history to (issue #1840).
         let seed_chat: Option<Option<&str>> = match &live {
-            LiveStream::On { chat_id, .. } => Some(*chat_id),
+            // Whether to seed is `chat.history_seed`, not a field of this
+            // variant: since #1890 I the stream carries only the stream key,
+            // and the seed is a fact about the conversation. False for a
+            // hive-mind episode turn, which arrives carrying its own
+            // attributed, visibility-filtered transcript — see
+            // [`ChatTarget::history_seed`](crate::runtime::delegation::ChatTarget::history_seed).
+            LiveStream::On { chat_id, .. } if chat.history_seed => Some(*chat_id),
             _ => None,
         };
         let stream_ctx = match live {
