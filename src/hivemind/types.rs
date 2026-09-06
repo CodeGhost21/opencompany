@@ -467,6 +467,59 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
     })
 }
 
+/// Every desk and teammate the episode on `home` may refer a turn to.
+///
+/// Built from the same two sources [`desk_episode`] reads — the manifest's
+/// declared desks and [`CompanyRecord::effective_desk_members`] — so a desk a
+/// member can name is a desk the console agrees exists, and `@#id` can never
+/// resolve to a room nobody is in.
+///
+/// Returns `None` when there is nothing to refer to: referral not enabled on
+/// the home desk, or no peer desk with a member on it. `None` is what keeps the
+/// whole mechanism inert for the overwhelmingly common company — one that never
+/// wrote the block.
+#[must_use]
+pub fn desk_federation(
+    record: &CompanyRecord,
+    home: &HiveDesk,
+) -> Option<super::referral::HiveFederation> {
+    if !home.config.referral.enabled() {
+        return None;
+    }
+    let desks: Vec<super::referral::FederationDesk> = record
+        .manifest
+        .group_chats
+        .iter()
+        .map(|group| super::referral::FederationDesk {
+            id: group.id.clone(),
+            name: group.name.clone(),
+            description: group.description.clone(),
+            members: record
+                .effective_desk_members(&group.id)
+                .into_iter()
+                .filter(|id| record.is_roster_agent(id))
+                .collect(),
+        })
+        .collect();
+    let federation = super::referral::HiveFederation {
+        agents: desks
+            .iter()
+            .flat_map(|desk| desk.members.iter())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|id| {
+                let seat = member_of(record, id);
+                (seat.id, seat.label)
+            })
+            .collect(),
+        desks,
+    };
+    if federation.peers_of(&home.id).is_empty() {
+        return None;
+    }
+    Some(federation)
+}
+
 /// One seat, built from whichever roster half declares the teammate.
 fn member_of(record: &CompanyRecord, id: &str) -> HiveMember {
     if let Some(agent) = record.manifest.agents.iter().find(|a| a.id == id) {
