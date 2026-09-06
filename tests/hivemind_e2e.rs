@@ -653,13 +653,14 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
 
     // No single-responder bubble: the desk's only authored rows are the
     // episode's own turns and its report. In particular the orchestrator never
-    // answered on top of the room.
+    // answered on top of the room. Any author that is neither the report nor
+    // a seated member is a stray, whoever it is — narrowing this to only
+    // `ceo`/`greeter` would let a regression that journals under some OTHER
+    // non-member identity slip past silently.
     let strays: Vec<_> = rows
         .iter()
         .filter(|(_, author, _)| {
-            author != HIVE_REPORT_AUTHOR
-                && !["theorist", "programmer", "verifier"].contains(&author.as_str())
-                && ["ceo", "greeter"].contains(&author.as_str())
+            author != HIVE_REPORT_AUTHOR && ![THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str())
         })
         .collect();
     assert!(
