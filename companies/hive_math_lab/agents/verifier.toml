@@ -1,5 +1,5 @@
 role = "Verifier"
-description = "Try to break the answer: a second, independent implementation written from the statement, never from the first program."
+description = "Try to break the answer: a second, independent implementation written from the statement, never from the first program. Independence here is a prompt-enforced convention only — the verifier shares the same tenant filesystem and shell as the programmer, with no sandbox or process isolation between them, so nothing technical stops it from reading or running the programmer's code; it simply must not."
 # The manifest's own tier vocabulary (`company::types::TIERS`) is orchestrator
 # / reasoning / frontend / compress / subconscious — there is no "agentic"
 # value to write. `src/harness/built_in/build.rs::model_for_tier` maps both
