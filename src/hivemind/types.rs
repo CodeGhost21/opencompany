@@ -532,19 +532,39 @@ pub fn desk_federation(
     if !home.config.referral.enabled() {
         return None;
     }
+    // Manifest desks and console-created (`overlay_desks`) desks, deduplicated
+    // on id — the same union `effective_desk_members` already treats as the
+    // single source of truth for who is on a desk. Built from manifest first
+    // so a desk declared in both places (should it ever happen) keeps its
+    // manifest name/description rather than a console-authored duplicate's.
+    let mut seen = std::collections::HashSet::new();
     let desks: Vec<super::referral::FederationDesk> = record
         .manifest
         .group_chats
         .iter()
-        .map(|group| super::referral::FederationDesk {
-            id: group.id.clone(),
-            name: group.name.clone(),
-            description: group.description.clone(),
+        .map(|group| {
+            (
+                group.id.clone(),
+                group.name.clone(),
+                group.description.clone(),
+            )
+        })
+        .chain(
+            record
+                .overlay_desks
+                .iter()
+                .map(|desk| (desk.id.clone(), desk.name.clone(), desk.description.clone())),
+        )
+        .filter(|(id, ..)| seen.insert(id.clone()))
+        .map(|(id, name, description)| super::referral::FederationDesk {
             members: record
-                .effective_desk_members(&group.id)
+                .effective_desk_members(&id)
                 .into_iter()
-                .filter(|id| record.is_roster_agent(id))
+                .filter(|member_id| record.is_roster_agent(member_id))
                 .collect(),
+            id,
+            name,
+            description,
         })
         .collect();
     let federation = super::referral::HiveFederation {
@@ -567,8 +587,17 @@ pub fn desk_federation(
 }
 
 /// One seat, built from whichever roster half declares the teammate.
+///
+/// Resolved through [`CompanyRecord::effective_agent`] first, not the raw
+/// manifest row: a manifest teammate whose label or role was edited through
+/// the console overlay after the manifest was authored must be served under
+/// that edit, the same way every other reader of the roster is, rather than
+/// under a label the operator has since changed. `effective_agent` answers
+/// `None` for an agent that exists only as an overlay teammate (by its own
+/// contract), so that case still falls through to the `overlay_agents` lookup
+/// below exactly as it always did.
 fn member_of(record: &CompanyRecord, id: &str) -> HiveMember {
-    if let Some(agent) = record.manifest.agents.iter().find(|a| a.id == id) {
+    if let Some(agent) = record.effective_agent(id) {
         return HiveMember {
             id: agent.id.clone(),
             label: agent.name.clone().unwrap_or_else(|| agent.id.clone()),
