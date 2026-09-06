@@ -156,9 +156,15 @@ fn an_exclusive_table_still_leaves_question_and_defer() {
 async fn a_deferring_seat_is_never_corrected_however_narrow_its_entry() {
     let log = Arc::new(MemoryLog::default());
     let trigger = open(&log).await;
+    // Both narrow seats hold `support` so the desk can reach its quorum of
+    // three at all — `desk_episode` declines a room whose eligible supporters
+    // are fewer than its quorum. Neither entry lists `defer`, which is the
+    // only thing this test is about: an ungated move is never corrected,
+    // however narrow the entry that omits it.
     let manifest = manifest_with(
         "hive = { turn_budget = 3, quorum = 3, blind_round = false, \
-         moves = { scout = [\"evidence\"], critic = [\"evidence\"] } }",
+         moves = { scout = [\"evidence\", \"support\"], \
+         critic = [\"evidence\", \"support\"] } }",
     );
     let desk = desk_of(&manifest, "eng").expect("a room");
     let runner = Runner::new(&[

@@ -520,9 +520,16 @@ async fn two_bare_proposals_of_one_topic_do_not_carry_when_only_one_seat_may_pro
     // without a move grammar the topic reaches a quorum of two on nobody having
     // read anybody. Here only planner may propose, so scout's proposal is
     // demoted and deposits nothing.
+    // `scout` holds `support` so the desk can reach its quorum of two at all —
+    // `desk_episode` now declines a room whose eligible supporters are fewer
+    // than its quorum, and `manifest.rs` refuses the same shape outright. That
+    // is orthogonal to what this test asserts: `scout` still may not
+    // `!propose`, which is the whole claim, and the script never has it
+    // `!support` anything, so the topic still carries nothing.
     let manifest = manifest_with(
         "hive = { turn_budget = 4, quorum = 2, blind_round = false, \
-         moves = { scout = [\"question\", \"evidence\"], critic = [\"question\", \"evidence\"] } }",
+         moves = { scout = [\"question\", \"evidence\", \"support\"], \
+         critic = [\"question\", \"evidence\"] } }",
     );
     let desk = desk_of(&manifest, "eng").expect("a room");
     let runner = Runner::new(&[
