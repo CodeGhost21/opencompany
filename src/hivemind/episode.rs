@@ -349,6 +349,7 @@ impl<'a> EpisodeDriver<'a> {
                 .with_recall(&recall)
                 .with_unspoken(&unspoken)
                 .with_peers(peers.clone())
+                .with_trigger(Sequence(trigger.value()))
                 .render(&turn, &visible);
 
             let line = match self
