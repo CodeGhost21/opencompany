@@ -4493,16 +4493,16 @@ struct HiveDeskRunner {
 /// transcript cannot tell a real answer from a budget wall the room hit.
 fn terminal_budget_error(
     agent_id: &str,
-    outcome: &crate::harness::built_in::TurnOutcome,
-) -> Option<OpenCompanyError> {
+    outcome: &TurnOutcome,
+) -> Option<crate::OpenCompanyError> {
     if let Some(pause) = &outcome.budget_paused {
-        return Some(OpenCompanyError::Harness(format!(
+        return Some(crate::OpenCompanyError::Harness(format!(
             "{agent_id} paused for lack of inference budget mid-deliberation: {}",
             pause.summary
         )));
     }
     if let Some(halt) = &outcome.halted_for_spend {
-        return Some(OpenCompanyError::Harness(format!(
+        return Some(crate::OpenCompanyError::Harness(format!(
             "{agent_id} halted for spend mid-deliberation: spent ${:.2} against a cap of ${:.2}",
             halt.spent_usd, halt.cap_usd
         )));
