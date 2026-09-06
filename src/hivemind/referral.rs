@@ -401,6 +401,7 @@ impl<'a> EpisodeReferrals<'a> {
         home: DispatchConversation,
         federation: &HiveFederation,
         peer_cap: u32,
+        scope: Arc<EpisodeScope>,
     ) -> Self {
         Self {
             runner,
@@ -419,6 +420,7 @@ impl<'a> EpisodeReferrals<'a> {
                 .collect(),
             peer_cap,
             state: Mutex::new(ReferralState::default()),
+            scope,
         }
     }
 
