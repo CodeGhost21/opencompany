@@ -78,18 +78,39 @@ const EXPERIENCE_PATH: &str = "/v1/experience";
 const RECALL_PATH: &str = "/v1/recall";
 const FORGET_PATH: &str = "/v1/forget";
 const READY_PATH: &str = "/v1/admin/ready";
+const EVENTS_PATH: &str = "/v1/events";
+const SCOPES_LIST_PATH: &str = "/v1/scopes/list";
 
 /// How long a single request may take before it is abandoned.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many hits `recall`/`get`/`list` ask CortexDB for per layer.
+/// How many hits `recall` asks CortexDB for per layer through `/v1/recall`.
 ///
 /// CortexDB refuses a bare `limit` on `/v1/recall` ("ranked retrieval is not
 /// paginated"); the ceiling travels as `budgets.per_layer_limits` instead, and
 /// only the `events` layer is asked for since this driver only ever ingests
 /// under [`Modality::ToolResult`](Modality) via `Content::Json`, which never
-/// lands in `episodes`/`facts`/`beliefs`/`understanding`.
+/// lands in `episodes`/`facts`/`beliefs`/`understanding`. Because ranked
+/// recall cannot page, any read that must be *exhaustive* (`get`, `list`,
+/// `forget`, and `recall`'s own stale-hit correction) does not use this path
+/// at all — it walks `GET /v1/events` instead, which does page; see
+/// [`CortexdbMemory::scope_events`].
 const EVENTS_LAYER_LIMIT: u32 = 500;
+
+/// How many events one `GET /v1/events` listing page asks for.
+const EVENTS_PAGE_SIZE: u32 = 200;
+
+/// Longest walk [`CortexdbMemory::scope_events`] will take before refusing to
+/// answer from a possibly-truncated log, rather than silently reporting a
+/// partial scope as complete.
+const MAX_EVENT_PAGES: usize = 100;
+
+/// How many scopes one `GET /v1/scopes/list` listing page asks for.
+const SCOPES_PAGE_SIZE: u32 = 200;
+
+/// Longest walk [`CortexdbMemory::list_scopes`] will take before refusing to
+/// answer from a possibly-truncated listing.
+const MAX_SCOPE_PAGES: usize = 100;
 
 /// Largest response body this driver reads before giving up on decoding it.
 const MAX_ERROR_BODY_CHARS: usize = 512;
