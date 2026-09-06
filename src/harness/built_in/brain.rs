@@ -11607,13 +11607,10 @@ members = ["engineer", "designer"]
             host: &host,
         };
 
-        let reply = crate::hivemind::HiveTurnRunner::speak(
-            &runner,
-            "programmer",
-            "Run the computation.",
-        )
-        .await
-        .expect("a turn that only queued an approval request still replies");
+        let reply =
+            crate::hivemind::HiveTurnRunner::speak(&runner, "programmer", "Run the computation.")
+                .await
+                .expect("a turn that only queued an approval request still replies");
         assert_eq!(reply, "blocked, requires approval");
 
         // The core regression: parked after this ONE turn, not after a whole
