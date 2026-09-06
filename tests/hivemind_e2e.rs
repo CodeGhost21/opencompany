@@ -1497,14 +1497,14 @@ async fn a_desk_asks_another_desk_and_only_the_information_crosses() {
         carried[0].2
     );
 
-    // `greeter` never becomes a member of this desk's fold: every *turn* row
-    // here is one of the three seats.
-    for (author, _) in &turns(&rows) {
-        assert!(
-            [THEORIST, PROGRAMMER, VERIFIER].contains(&author.as_str()),
-            "a far teammate took a seat in the room: {rows:?}"
-        );
-    }
+    // `greeter` never becomes a member of this desk's fold. Asserted over the
+    // raw rows rather than over `turns`, which already filters to the three
+    // seats and so could not fail: the claim is that nothing on this desk is
+    // authored by the far teammate at all.
+    assert!(
+        rows.iter().all(|(_, author, _)| author != "greeter"),
+        "a far teammate authored a row in the asking room: {rows:?}"
+    );
 
     // The room still settles, and the closing report tells the operator it
     // went outside — which is the one thing an operator reading this desk
