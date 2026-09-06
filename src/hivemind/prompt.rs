@@ -156,6 +156,9 @@ pub struct EpisodePrompt<'a> {
     /// Members who have not taken a turn yet in this episode, when the fold has
     /// just handed the floor back to whoever spoke last.
     unspoken: &'a [String],
+    /// The other desks this seat may put a question to, when the desk opted in
+    /// to referral. Empty otherwise, and the block is then not rendered at all.
+    peers: Vec<(String, String, Option<String>)>,
 }
 
 impl<'a> EpisodePrompt<'a> {
@@ -176,6 +179,7 @@ impl<'a> EpisodePrompt<'a> {
             pins,
             recall: &[],
             unspoken: &[],
+            peers: Vec::new(),
         }
     }
 
@@ -204,6 +208,26 @@ impl<'a> EpisodePrompt<'a> {
         self
     }
 
+    /// Name the other desks this seat may ask a question of.
+    ///
+    /// Rendered only for a desk that opted in to referral and only when the
+    /// company has a peer with somebody on it, because a seat told it may ask
+    /// `@#platform` when no such desk exists has been handed a move it cannot
+    /// make — and a member that spends its one line on an impossible move has
+    /// spent a turn of the room's budget on nothing.
+    ///
+    /// Timing is why this is worth the tokens at all. tinyhivemind's own
+    /// benchmark found the largest single effect was not in the mechanism but
+    /// in *when* a desk asks: a room whose members share a blind spot reaches
+    /// quorum inside its own opening round, so a question asked after the desk
+    /// has backed something arrives as information it has already voted past.
+    /// The block therefore says to ask early, in as many words.
+    #[must_use]
+    pub fn with_peers(mut self, peers: Vec<(String, String, Option<String>)>) -> Self {
+        self.peers = peers;
+        self
+    }
+
     /// Render exactly what this turn is allowed to see.
     #[must_use]
     pub fn render(&self, turn: &HiveTurn, visible: &[&SessionMessage]) -> String {
@@ -220,7 +244,7 @@ impl<'a> EpisodePrompt<'a> {
             Phase::Deliberate => self.deliberate_protocol(),
         };
         format!(
-            "You are @{}, the {} on the {} desk. {sight}\n\n{}{}{}\n\n{protocol}\n\n{}{}{}{}\
+            "You are @{}, the {} on the {} desk. {sight}\n\n{}{}{}\n\n{protocol}\n\n{}{}{}{}{}\
              Shared attributed transcript:\n{}\n\nYour one line:",
             self.member.id,
             self.member.role,
@@ -231,6 +255,7 @@ impl<'a> EpisodePrompt<'a> {
             self.topic_discipline(turn.phase),
             self.floor(&standings),
             self.missing(),
+            self.peers(),
             self.last_line(visible),
             render_transcript(visible),
         )
