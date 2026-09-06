@@ -11617,12 +11617,15 @@ members = ["engineer", "designer"]
         assert_eq!(reply, "blocked, requires approval");
 
         // The core regression: parked after this ONE turn, not after a whole
-        // episode of turns.
+        // episode of turns. `FixedOutcomeTurn` queues
+        // `MAX_APPROVAL_REQUESTS_PER_TURN + 1` requests per call (mirroring the
+        // existing overflow fixtures), so a single `speak` already fills the
+        // per-turn cap.
         let parked = host.parked();
         assert_eq!(
             parked.len(),
-            1,
-            "the gated call from this single turn must already be on the operator's queue"
+            crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN,
+            "the gated calls from this single turn must already be on the operator's queue"
         );
         assert_eq!(parked[0].kind, "test_tool_0");
         assert_eq!(
