@@ -3682,6 +3682,7 @@ impl HarnessBrain {
                             company: self.record().id.clone(),
                             chat_id: chat.clone(),
                             thread_root: *parent,
+                            trigger_seq: Some(trigger),
                         };
                         // The desk's own memory, over the same `ContextStore`
                         // the per-turn memory loop and the `memory_recall` belt
