@@ -640,6 +640,20 @@ impl Memory for CortexdbMemory {
         // wins" rule `get`/`list` apply, via the shared `latest_by_key` fold.
         // A key with nothing left to fold to (forgotten since the query ran)
         // is dropped rather than resurrected.
+        //
+        // Known cost, not accidental: `latest_by_key` pages the *whole*
+        // namespace's raw events (`scope_events`), so this correction's cost
+        // grows with total events in the namespace, not with `limit` or the
+        // hit count — and every episode calls `recall` at its start. This is
+        // the deliberate trade-off of the "resolve to current content" fix
+        // above over raw recall latency: CortexDB's wire API has no per-key
+        // indexed lookup, only a paginated raw-event scan scoped to a whole
+        // namespace, so there is no cheaper way to ask "what does this key
+        // actually hold right now" without this driver maintaining its own
+        // index. A short-lived per-namespace cache of the fold (invalidated
+        // on write) would amortize repeated calls in one episode; not done
+        // here to avoid adding cache-invalidation surface without a concrete
+        // latency budget to design it against.
         if !records.is_empty() {
             let canonical = self.latest_by_key(namespace).await?;
             records = records
