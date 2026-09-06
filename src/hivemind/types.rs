@@ -578,8 +578,17 @@ pub fn desk_federation(
 }
 
 /// One seat, built from whichever roster half declares the teammate.
+///
+/// Resolved through [`CompanyRecord::effective_agent`] first, not the raw
+/// manifest row: a manifest teammate whose label or role was edited through
+/// the console overlay after the manifest was authored must be served under
+/// that edit, the same way every other reader of the roster is, rather than
+/// under a label the operator has since changed. `effective_agent` answers
+/// `None` for an agent that exists only as an overlay teammate (by its own
+/// contract), so that case still falls through to the `overlay_agents` lookup
+/// below exactly as it always did.
 fn member_of(record: &CompanyRecord, id: &str) -> HiveMember {
-    if let Some(agent) = record.manifest.agents.iter().find(|a| a.id == id) {
+    if let Some(agent) = record.effective_agent(id) {
         return HiveMember {
             id: agent.id.clone(),
             label: agent.name.clone().unwrap_or_else(|| agent.id.clone()),
