@@ -9721,6 +9721,7 @@ members = ["engineer", "designer"]
             if !all_text.contains("You are @engineer") && !all_text.contains("You are @designer") {
                 return Ok(ModelResponse::assistant("(not a hive turn)".to_string()));
             }
+            eprintln!("DEBUG PROMPT >>>\n{all_text}\n<<< END PROMPT");
             let line = if let Some(topic) = carried_topic(&all_text) {
                 format!("!commit #{topic} ^1 because the room already carried it.")
             } else {
