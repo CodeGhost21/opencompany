@@ -90,6 +90,10 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
 | [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
+| [runtime/hivemind.md](runtime/hivemind.md) | Hive-mind desks: when a `[[group_chat]]` answers as a deliberating room rather than through one responder, the episode loop, the trace grammar, and the `hive` manifest keys |
+| [runtime/hivemind-deliberation.md](runtime/hivemind-deliberation.md) | The four mechanisms that make a hive desk deliberate rather than vote: the per-member move grammar and its enforcement, desk memory, speaker diversity, and what happens when a member's turn fails |
+| [runtime/hivemind-referral.md](runtime/hivemind-referral.md) | Cross-desk referral: when a deliberating desk may put one question to another desk, how the answer comes home without carrying a vote with it, and the `hive.referral` manifest keys |
+| [runtime/hivemind-asides.md](runtime/hivemind-asides.md) | Private asides: when two members of one desk may say something the rest of it cannot read, why the row is elided rather than removed, and the `hive.aside` manifest keys |
 | [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
 | [runtime/harnesses-acp.md](runtime/harnesses-acp.md) | The ACP transports in detail: `local` vs `runner`, readiness probing, resuming a teammate's session across a restart, and streaming its execution state while the turn runs |
 | [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
@@ -115,9 +119,12 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [runtime/desktop-instances.md](runtime/desktop-instances.md) | Several local hosts on one machine: the roster, onboarding, dev runs |
+| [runtime/desktop-updates.md](runtime/desktop-updates.md) | Desktop auto-update: the silent-until-actionable prompt, the signed release artifacts, and the keypair an operator must generate before any of it works |
 | [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, and the switch that turns it off |
+| [runtime/crash-reporting.md](runtime/crash-reporting.md) | Errors and panics to the operator's own Sentry: the two DSNs, what a report carries, the credential scrubber, and how to prove it works |
+| [runtime/tracing.md](runtime/tracing.md) | Performance tracing and the request timeline: the sample-rate knobs and what they cost, the console-to-host distributed trace, transaction scrubbing, and why Session Replay is not shipped |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
 | [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |

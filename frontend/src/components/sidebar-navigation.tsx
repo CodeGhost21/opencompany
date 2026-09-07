@@ -42,7 +42,7 @@ export interface NavChild {
  * A top-level sidebar row, and everything filed under it.
  *
  * A view with no row of its own but an obvious owner — `#/tasks/<id>` under
- * Work, `#/team/<id>` under Agents, `#/conversation` under Room — is claimed by
+ * Work, `#/team/<id>` under Agents — is claimed by
  * `isNavigationActive` in `console-routes.ts` rather than by a list here, so
  * there is one place that decides it and the routing module owns it.
  */
@@ -283,13 +283,8 @@ export function SidebarNavigation({
 
   const active = sectionOwning(view);
   // Room's contents are not a table here, they are whatever `ChatView` portals
-  // in — so they exist only on the view `ChatView` renders on. Room is
-  // deliberately still the lit row on `#/conversation` (`isNavigationActive`
-  // claims it, so opening a desk transcript does not black out the sidebar),
-  // but `ChatView` is unmounted there and nothing fills the slot. Drawing it
-  // anyway left a 566px blank region under the Room row, with the conversation
-  // view drawing a desk rail of its own beside it — the two-rail band of issue
-  // #1383, re-created by the one route whose section contents are live data.
+  // in — so they exist only on the view `ChatView` renders on. A Room-owned
+  // view that does not mount `ChatView` would draw the slot with nothing in it.
   const roomContents = active?.slot === "room" && view === "chat";
   const hasContents = Boolean(active && (active.children || roomContents));
 

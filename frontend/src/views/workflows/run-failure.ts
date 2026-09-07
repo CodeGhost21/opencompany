@@ -16,14 +16,25 @@ import { ApiError } from "@/api/types";
 import { INFERENCE_RUN_CODES } from "./run-error";
 
 /**
+ * The host's refusal when the company itself is not running — paused or
+ * archived (issue B-037).
+ *
+ * Named rather than inlined so the registry below and the disposition arm
+ * cannot drift: a code in one and not the other is exactly how the panel came
+ * to claim a paused company's run "may have started".
+ */
+export const LIFECYCLE_RUN_CODE = "lifecycle_conflict";
+
+/**
  * The codes that prove the host refused a run before it could execute.
  *
  * Kept beside the failure record rather than derived from HTTP status or an
  * envelope flag: a host can return an ordinary error envelope after beginning
- * work, while these codes name the two cases in which it did not start a run.
+ * work, while these codes name the cases in which it did not start a run.
  */
 export const PRE_EXECUTION_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "not_wired",
+  LIFECYCLE_RUN_CODE,
   ...INFERENCE_RUN_CODES,
 ]);
 
@@ -79,6 +90,7 @@ export interface RunFailureContext {
 export type FailureDisposition =
   | "transport"
   | "refusal-inference"
+  | "refusal-lifecycle"
   | "refusal-not-wired"
   | "journaled"
   | "cautious";
@@ -94,6 +106,11 @@ export type FailureDisposition =
 export function failureDisposition(failure: RunFailure): FailureDisposition {
   if (!failure.fromHost) return "transport";
   if (INFERENCE_RUN_CODES.has(failure.code ?? "")) return "refusal-inference";
+  // Issue B-037: the host's pause gate returns BEFORE it spawns the run, so
+  // this is as certain a "nothing started" as the two above. Without an arm of
+  // its own it fell through to `cautious`, whose copy says the run may have
+  // started and points at a History row that does not exist.
+  if (failure.code === LIFECYCLE_RUN_CODE) return "refusal-lifecycle";
   if (failure.code === "not_wired") return "refusal-not-wired";
   if (failure.sawRunStart) return "journaled";
   return "cautious";

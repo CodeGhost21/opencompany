@@ -95,10 +95,10 @@ use serde_json::Value;
 use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
-    WorkflowNodeDef, WorkflowPostconditionDef, WorkflowRetryDef, courtesy_validate_draft,
-    create_company_workflow, delete_company_workflow, list_workflows_with_globals,
-    load_workflow_with_globals, rollback_company_workflow, seed_file_exists,
-    set_company_workflow_enabled, update_company_workflow, workflow_version,
+    WorkflowJudgeDef, WorkflowNodeDef, WorkflowPostconditionDef, WorkflowRetryDef,
+    courtesy_validate_draft, create_company_workflow, delete_company_workflow,
+    list_workflows_with_globals, load_workflow_with_globals, rollback_company_workflow,
+    seed_file_exists, set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -395,6 +395,8 @@ struct WorkflowNode {
     /// see [`WorkflowPostconditionDef`].
     #[serde(skip_serializing_if = "Option::is_none")]
     postcondition: Option<WorkflowPostconditionDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<WorkflowJudgeDef>,
 }
 
 /// The camelCase retry policy shape the console reads back (`maxAttempts` /
@@ -437,6 +439,7 @@ impl From<WorkflowNodeDef> for WorkflowNode {
             repeatable: n.repeatable,
             destination: n.destination,
             postcondition: n.postcondition,
+            verify: n.verify,
         }
     }
 }
@@ -689,6 +692,9 @@ struct CreateNode {
     /// silently discarded — see [`WorkflowPostconditionDef`].
     #[serde(default)]
     postcondition: Option<WorkflowPostconditionDef>,
+    /// Optional semantic sufficiency policy for an agent node.
+    #[serde(default)]
+    verify: Option<WorkflowJudgeDef>,
 }
 
 /// The camelCase retry policy the create body carries (`maxAttempts` /
@@ -755,6 +761,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 repeatable: n.repeatable,
                 destination: n.destination,
                 postcondition: n.postcondition,
+                verify: n.verify,
             });
         }
         Ok(Self {
@@ -1035,18 +1042,30 @@ struct DeleteWorkflowQuery {
 /// the workflow did, and that stays true after it is gone — `GET
 /// …/workflows/runs` keeps serving them. See the module doc.
 ///
+/// **A run still in flight is stopped** (B-121). Delete tore down the schedule
+/// and the revisions and left the run executing — and left it *uncontrollable*,
+/// because the only Stop button in the product lives on the workflow detail page
+/// this request removes. So the run went on calling models and spending with
+/// nothing anywhere able to reach it, while `GET …/workflows/runs` kept
+/// reporting it `running: true` under a workflow that no longer existed. See
+/// [`stop_runs_of_workflow`](crate::company::runtime::CompanyRuntime::stop_runs_of_workflow).
+///
 /// `expectedVersion` is **required** (issue #1013), for the same reason it is on
 /// `PUT`: an absent token used to mean an unconditional delete, so a console
 /// holding a stale graph could remove a workflow that changed underneath it. A
 /// missing `?expectedVersion=` is now a `400`.
 ///
-/// `204` on success. `400` for a missing `expectedVersion`; `404` for an unknown
-/// id; `409` for a source-defined or body-less id, or a stale `expectedVersion`.
+/// `200` with [`DeleteWorkflowResponse`] on success — **not** `204` (CodeRabbit
+/// review, PR #2053): the sweep's own count is the only truthful source for
+/// "was a run actually stopped", and a `204` has nowhere to carry it. See that
+/// type's doc for why the console cannot derive the same answer itself. `400`
+/// for a missing `expectedVersion`; `404` for an unknown id; `409` for a
+/// source-defined or body-less id, or a stale `expectedVersion`.
 async fn delete_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     Query(query): Query<DeleteWorkflowQuery>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<DeleteWorkflowResponse>, ApiError> {
     if !safe_wid(&wid) {
         return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "workflow {wid}"
@@ -1075,7 +1094,34 @@ async fn delete_workflow(
     )
     .await
     .map_err(ApiError)?;
-    Ok(StatusCode::NO_CONTENT)
+    // B-121: after the durable delete, never before. The workflow has to be gone
+    // first, or a run cancelled here could be replaced by one racing in behind
+    // it through a route that still resolves the graph — the same ordering
+    // Pause's sweep takes for the same reason.
+    let stopped_runs = company.runtime.stop_runs_of_workflow(&wid);
+    Ok(Json(DeleteWorkflowResponse { stopped_runs }))
+}
+
+/// The `DELETE …/workflows/{wid}` response body (CodeRabbit review, PR #2053).
+///
+/// The console used to guess "did this delete stop a run" from its own
+/// pre-request state (whether it was watching a run when the operator clicked
+/// Delete) and print that guess in the confirmation toast. That guess and this
+/// count can disagree in the most ordinary way possible, no race required: a
+/// long run the console was watching can finish **on its own**, normally, in
+/// the seconds between the operator clicking the confirm button and this
+/// request reaching the sweep — at which point [`stop_runs_of_workflow`]
+/// truthfully stops nothing, while the console's pre-request guess still says
+/// it did. `stopped_runs` is the sweep's own count, the only place that
+/// answer actually lives.
+///
+/// [`stop_runs_of_workflow`]: crate::company::runtime::CompanyRuntime::stop_runs_of_workflow
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteWorkflowResponse {
+    /// How many in-flight runs of this workflow the sweep fired a stop at.
+    /// Zero is a completely ordinary answer — see the type doc.
+    stopped_runs: usize,
 }
 
 /// The `PUT …/workflows/{wid}/enabled` body.
@@ -1539,6 +1585,33 @@ async fn run_workflow(
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
 ) -> Result<RunWorkflowOk, crate::server::Rejection> {
+    // **A paused company does not take new work, and pressing Run is new work.**
+    //
+    // Every other path already refuses on this: the workflow scheduler
+    // (`workflow_scheduler.rs`), the task scheduler, the mailbox poller, A2A,
+    // chat, and — verified, because the first draft of this comment claimed
+    // otherwise — the approve/resume route, which gates in `run_resolve`
+    // (`operator.rs`) above both `resolve_approval_spawned` and the workflow
+    // resume it forks into. This POST was the single unguarded door, which is
+    // exactly why the report reads "chat correctly refuses with 409, and
+    // pressing Run on a workflow starts a real billed run anyway": the console
+    // promises "Pause stops this company taking new work" on the same screen.
+    //
+    // Pause deliberately does **not** stop a run already executing — `pause`
+    // only writes the lifecycle (`provision.rs` `transition`), and the promise
+    // is about *taking new work*. That is a separate question from this one.
+    //
+    // **Before the runner lookup, not after.** Whether this company is paused
+    // does not depend on whether workflow execution is wired, and a host without
+    // a runner would otherwise answer `not_wired` to a paused company — a true
+    // sentence about the deployment that hides the one the operator needs. The
+    // cheap, always-correct refusal goes first so nothing can mask it.
+    //
+    // Refused with the same `LifecycleConflict` chat answers, so one pause reads
+    // identically wherever it is met, rather than a second rule with a second
+    // error shape.
+    company.runtime.ensure_running().await?;
+
     // No runner wired. THREE very different causes look identical from here —
     // `workflow_runner() == None` — and each points the operator at a different
     // next step (issues #266, #514):
@@ -1964,7 +2037,7 @@ async fn run_artifacts(
                 latest_version,
                 updated_at_millis: record.updated_at_millis,
                 workspace_node_id,
-                task_title: Some(card.title.clone()),
+                task_title: Some(card.title.to_string()),
             });
         }
     }
@@ -2412,8 +2485,8 @@ async fn fix_from_run(
     )?
     .ok_or_else(|| OpenCompanyError::NotFound(format!("workflow {wid}")))?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry`/`repeatable`/
-    // `postcondition` field on `WorkflowNodeSpec` (the builder never authors
-    // any of the four — see its own doc comment), so a node that had any of
+    // `postcondition`/`verify` fields on `WorkflowNodeSpec` (the builder never
+    // authors them), so a node that had any of
     // them set loses it silently once the operator saves the correction.
     // `repeatable` is the safety declaration issue #850 exists to protect;
     // `postcondition` (issue #1866) is the deterministic run-safety gate —
@@ -2432,6 +2505,7 @@ async fn fix_from_run(
                 || n.retry.is_some()
                 || n.repeatable.is_some()
                 || n.postcondition.is_some()
+                || n.verify.is_some()
         })
         .map(|n| n.name.clone())
         .collect();
@@ -2479,7 +2553,7 @@ async fn fix_from_run(
             let (ok, advisories) = workflow_readiness(&spec);
             if !dropped_policy_nodes.is_empty() {
                 notes.push(format!(
-                    "on_error/retry/repeatable/postcondition on {} — this correction does not \
+                    "on_error/retry/repeatable/postcondition/verify on {} — this correction does not \
                      carry these per-node policies through; reapply them after reviewing if the \
                      node is still there.",
                     dropped_policy_nodes.join(", ")
@@ -2739,32 +2813,40 @@ fn is_zero(n: &usize) -> bool {
 }
 
 /// One finished run as the console's history panel renders it (camelCase).
+///
+/// `pub(crate)` since issue #1859: [`fold_run_events`] and the fields below are
+/// the journal-fold surface the `read_run` orchestrator tool summarizes a
+/// workflow run's verdict/nodes/pending-approvals from — see that tool's
+/// doc comment for why it reads this rather than the full console history
+/// route's shape.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkflowRunOutcome {
+pub(crate) struct WorkflowRunOutcome {
     /// The journal sequence position — a stable, monotonic row key.
     seq: u64,
     /// Epoch-millis the outcome was journaled.
-    at_millis: u64,
-    workflow_id: String,
+    pub(crate) at_millis: u64,
+    pub(crate) workflow_id: String,
     /// Whether a cron started this run rather than an operator. The console
     /// shows the distinction because a scheduled run is the one nobody watched.
     scheduled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
+    pub(crate) run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_semantic: Option<crate::ports::ResumeSemantic>,
     /// The same delivery rows a manual run's response carries — including
     /// `target`, which the run response already ships to this same console.
     deliveries: Vec<crate::ports::DeliveryReport>,
-    pending_approvals: Vec<String>,
+    pub(crate) pending_approvals: Vec<String>,
     /// Set when the run failed outright instead of finishing with rows.
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     /// Per-node progress for this run, in the order the nodes finished (issue
     /// #371). Empty for a run journaled before #371, and for one whose nodes all
     /// failed to journal — so an empty list means "no per-node trail", never
     /// "the run did nothing".
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    nodes: Vec<WorkflowRunNode>,
+    pub(crate) nodes: Vec<WorkflowRunNode>,
     /// The nodes this run has *begun* executing, in start order (issue #1010),
     /// folded from `WorkflowNodeStarted` (issue #382).
     ///
@@ -2797,7 +2879,7 @@ struct WorkflowRunOutcome {
     /// start, so nothing sits here spinning forever. Omitted when false, which
     /// keeps every settled row's wire shape as short as it was.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    running: bool,
+    pub(crate) running: bool,
     /// `true` for a run an operator stopped (issue #383).
     ///
     /// Separate from [`error`](Self::error) because it is a separate outcome: a
@@ -2807,7 +2889,7 @@ struct WorkflowRunOutcome {
     /// failed, interrupted by a host restart, stopped by an operator. Omitted
     /// when false, like `running`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    cancelled: bool,
+    pub(crate) cancelled: bool,
     /// System notices raised about this run (issue #638) — today, that a node
     /// gated more tool calls than the per-batch cap allows and the excess was
     /// discarded.
@@ -2842,7 +2924,7 @@ struct WorkflowRunOutcome {
     /// rows arrive relabelled too — see the settle arm in [`list_runs`], which
     /// flips each blocked node's journaled `error` status to `blocked`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    pub(crate) blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
     /// The approvals this run parked (issue #880) — a receipt of what it
     /// opened, the failed parks included.
     ///
@@ -2888,7 +2970,7 @@ struct WorkflowRunOutcome {
     /// re-score on deploy with no migration — and, as issue #981 notes, anyone
     /// counting successful runs off this endpoint will see their rate drop with
     /// no change in behaviour, because the dropped reports were always there.
-    verdict: WorkflowRunVerdict,
+    pub(crate) verdict: WorkflowRunVerdict,
 }
 
 impl WorkflowRunOutcome {
@@ -2896,7 +2978,19 @@ impl WorkflowRunOutcome {
     ///
     /// Called once per row, in a pass over the whole page, after everything
     /// that can still change its inputs has run. See [`Self::verdict`].
-    fn derive_verdict(&self) -> WorkflowRunVerdict {
+    ///
+    /// `pub(crate)` since issue #1859: [`fold_run_events`] never calls this
+    /// itself (the field it derives from the `#1189` stranded-approvals join
+    /// runs *after* the fold, in [`list_runs`]), so `read_run` — which folds
+    /// a single run straight out of the journal with no such join — calls
+    /// this explicitly rather than trusting the placeholder [`Self::verdict`]
+    /// the fold construction sites leave on the row (always
+    /// [`WorkflowRunVerdict::Running`], since the fold never resolves it).
+    /// `read_run` accepts the one gap this leaves: without the live-queue
+    /// join, a run whose only remaining approval was orphaned reads as
+    /// `AwaitingApproval` rather than `Stranded` — a lesser distinction for a
+    /// chat answer than for the console's own history panel.
+    pub(crate) fn derive_verdict(&self) -> WorkflowRunVerdict {
         WorkflowRunVerdict::of(RunVerdictFacts {
             running: self.running,
             error: self.error.as_deref(),
@@ -2941,9 +3035,9 @@ impl WorkflowRunOutcome {
 /// appear here either.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkflowRunNode {
-    node_id: String,
-    status: WorkflowNodeStatus,
+pub(crate) struct WorkflowRunNode {
+    pub(crate) node_id: String,
+    pub(crate) status: WorkflowNodeStatus,
     elapsed_ms: u64,
     /// The node's null-resolved config paths (issue #1014) — the engine's own
     /// broken-wiring list, projected verbatim from the port row. Paths only, no
@@ -3010,7 +3104,20 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
 /// caller does that), and the highest `seq` seen among EVERY row, matched or
 /// not — the `read_through` high-water mark [`list_runs`]'s #1009 cross-check
 /// resumes reading from.
-fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<WorkflowRunOutcome>, u64) {
+///
+/// `pub(crate)` since issue #1859: the orchestrator's `read_run` tool reuses
+/// this same fold — reading the whole company journal, exactly like
+/// [`QueryCompanyTool`](crate::harness::built_in::orchestrator::QueryCompanyTool)
+/// already does for its recent-activity section — rather than re-deriving a
+/// second, drifting notion of "what a workflow run adds up to". It does not
+/// take on `list_runs`'s backward-paging or its #1009 live-run cross-check:
+/// a chat tool answering "what happened on this run" tolerates the rare
+/// eternal-spinner edge case that cross-check exists for, and paging the
+/// whole journal once is the same cost `QueryCompanyTool` already pays.
+pub(crate) fn fold_run_events(
+    rows: Vec<StoredEvent>,
+    wanted: Option<&str>,
+) -> (Vec<WorkflowRunOutcome>, u64) {
     let mut runs: Vec<WorkflowRunOutcome> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
@@ -3029,6 +3136,7 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                 // The run history fold does not surface who started a run
                 // (issue #1862 prerequisite is data-only for now).
                 started_by: _,
+                resume_semantic,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -3044,6 +3152,7 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                     workflow_id,
                     scheduled,
                     run_id: Some(run_id),
+                    resume_semantic,
                     deliveries: Vec::new(),
                     pending_approvals: Vec::new(),
                     error: None,
@@ -3195,6 +3304,7 @@ fn fold_run_events(rows: Vec<StoredEvent>, wanted: Option<&str>) -> (Vec<Workflo
                     workflow_id,
                     scheduled,
                     run_id,
+                    resume_semantic: None,
                     deliveries,
                     pending_approvals,
                     error,
@@ -4053,6 +4163,7 @@ mod tests {
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -4097,6 +4208,7 @@ mod tests {
                     repeatable: Some(false),
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 WorkflowNodeDef {
                     id: "read".into(),
@@ -4112,6 +4224,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: Vec::new(),
@@ -4308,6 +4421,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 WorkflowNodeDef {
                     id: "done".into(),
@@ -4323,6 +4437,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: Vec::new(),
@@ -4514,6 +4629,7 @@ mod tests {
                 workflow_id: "wf".to_string(),
                 scheduled: false,
                 run_id: Some("run-1".to_string()),
+                resume_semantic: None,
                 deliveries: Vec::new(),
                 pending_approvals: Vec::new(),
                 error: None,
@@ -4647,6 +4763,7 @@ mod tests {
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -4709,6 +4826,7 @@ mod tests {
                 approval_ids: Vec::new(),
                 unparkable: 2,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -4886,6 +5004,15 @@ mod tests {
         /// provisioned tenant) but whose persisted record declares an enabled
         /// workflow — the exact hosted-mode gap #70 reports.
         async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
+            state_with_hosted_company_lifecycle(home, "running").await
+        }
+
+        /// The same fixture at a chosen lifecycle, so a paused company is
+        /// reachable without a second copy of the record literal.
+        async fn state_with_hosted_company_lifecycle(
+            home: &std::path::Path,
+            lifecycle: &str,
+        ) -> AppState {
             let store = FsCompanyStore::new(home.to_path_buf());
             let id = CompanyId::new("acme");
             store
@@ -4895,7 +5022,7 @@ mod tests {
                     id: id.clone(),
                     manifest: manifest_with_enabled(),
                     ledger: Vec::new(),
-                    lifecycle: "running".to_string(),
+                    lifecycle: lifecycle.to_string(),
                     overlay_agents: Vec::new(),
                     overlay_desk_members: Vec::new(),
                     overlay_desk_order: Vec::new(),
@@ -4927,6 +5054,56 @@ mod tests {
             state.registry().insert(id, std::sync::Arc::new(runtime));
             crate::server::test_support::seed_fixed_admin(&state, "acme").await;
             state
+        }
+
+        /// **A paused company refuses Run**, the same way chat already refuses.
+        ///
+        /// Every background path gates on `ensure_running` — the workflow
+        /// scheduler, the task scheduler, the mailbox poller, A2A, chat. This
+        /// route did not, so the one surface the operator drives themselves was
+        /// the one that ignored the pause: the console promises "Pause stops
+        /// this company taking new work", and pressing Run started a real billed
+        /// run anyway.
+        #[tokio::test]
+        async fn a_paused_company_refuses_to_start_a_run() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let state = state_with_hosted_company_lifecycle(&home, "paused").await;
+
+            let response = router(state)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/company/workflows/demo/run")
+                        .header("content-type", "application/json")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Pinned to the exact status AND code, not merely "not 200"
+            // (CodeRabbit on this PR): a runner-gap 404 or an unrelated 409
+            // would satisfy `assert_ne!(.., OK)` while proving nothing about the
+            // lifecycle gate this test exists for — and the gate sits above the
+            // runner lookup precisely so the two cannot be confused.
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "a paused company must refuse the run as a lifecycle conflict"
+            );
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["code"], "lifecycle_conflict",
+                "the console triages on the structured code, never the prose: {body}"
+            );
+            let rendered = body.to_string();
+            assert!(
+                rendered.contains("paused"),
+                "the refusal must name the lifecycle that caused it: {rendered}"
+            );
         }
 
         #[tokio::test]
@@ -7144,6 +7321,7 @@ mod tests {
                         run_id: ctx.run_id.clone(),
                         scheduled: false,
                         started_by: None,
+                        resume_semantic: None,
                     },
                 )
                 .await
@@ -7236,14 +7414,13 @@ mod tests {
         ) -> crate::ports::TaskRecord {
             crate::ports::TaskRecord {
                 id: id.into(),
-                title: title.into(),
+                title: crate::ports::tasks::TaskTitle::authored(title),
                 note: None,
                 column: "in_review".into(),
                 priority: "medium".into(),
                 assignee: "ceo".into(),
                 updated_at_millis: 1,
-                origin_chat_id: None,
-                origin_parent: None,
+                origin: None,
                 parent_task_id: None,
                 output: None,
                 plan: None,
@@ -7252,6 +7429,7 @@ mod tests {
                 workflow_proposal: None,
                 origin_run_id: origin_run_id.map(str::to_string),
                 origin_workflow_id: None,
+                origin_message_seq: None,
                 bounced: None,
             }
         }
@@ -7711,6 +7889,7 @@ mod tests {
                         run_id: run_id.to_string(),
                         scheduled,
                         started_by: None,
+                        resume_semantic: None,
                     },
                 )
                 .await
@@ -8076,6 +8255,7 @@ mod tests {
                             approval_ids: vec!["appr-1".to_string()],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 0,
                         }],
                         approvals: vec![crate::ports::WorkflowRunApprovalRow {
                             node_id: Some("spec".to_string()),
@@ -8144,6 +8324,7 @@ mod tests {
                             approval_ids: vec!["appr-gone".to_string()],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 0,
                         }],
                         approvals: Vec::new(),
                     },
@@ -8238,6 +8419,7 @@ mod tests {
                             approval_ids: vec![approval_id.as_ref().to_string()],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 0,
                         }],
                         approvals: Vec::new(),
                     },
@@ -9046,6 +9228,7 @@ mod tests {
                 workflow_id: "wf".to_string(),
                 scheduled: false,
                 run_id: Some(format!("run-{seq}")),
+                resume_semantic: None,
                 deliveries: Vec::new(),
                 pending_approvals: Vec::new(),
                 error: None,
@@ -9981,7 +10164,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
 
             // Gone from the picker…
             let response = router(state.clone())
@@ -10038,7 +10221,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
 
             let response = router(state)
                 .oneshot(request(
@@ -10175,7 +10358,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         /// A manifest-`enabled` id with no saved graph is listed but NOT
@@ -10567,6 +10750,25 @@ label = "ok"
                 .unwrap()
         }
 
+        fn get_workflow_request() -> Request<Body> {
+            Request::builder()
+                .uri("/api/v1/company/workflows/demo")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        fn delete_workflow_request(version: &str) -> Request<Body> {
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/v1/company/workflows/demo?expectedVersion={version}"
+                ))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        }
+
         async fn json_body(response: axum::response::Response) -> serde_json::Value {
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
@@ -10817,6 +11019,123 @@ label = "ok"
             assert!(
                 !c.completed.load(Ordering::SeqCst),
                 "the run must not have completed its work"
+            );
+        }
+
+        /// **B-121: deleting a workflow stops the run of it still in flight.**
+        ///
+        /// Delete used to take the schedule and the revisions and leave the run
+        /// executing — and, worse, leave it *uncontrollable*: the only Stop
+        /// button in the product is on the workflow detail page the delete
+        /// removes, so the run went on calling models and spending with nothing
+        /// anywhere able to reach it, still reporting `running: true` under a
+        /// workflow that no longer existed.
+        ///
+        /// The assertion that carries the weight is `completed`: the stalled
+        /// runner finishes its work only when released, so a run that reaches
+        /// its own completion here is one the delete failed to stop.
+        #[tokio::test]
+        async fn deleting_a_workflow_stops_the_run_of_it_still_in_flight() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+
+            let response = c
+                .app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "detach": true })))
+                .await
+                .unwrap();
+            let run_id = json_body(response).await["runId"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            c.entered.notified().await;
+            assert_eq!(
+                c.runtime.run_supervisor().live().len(),
+                1,
+                "the run has to be genuinely live, or this proves nothing"
+            );
+
+            let response = c.app.clone().oneshot(get_workflow_request()).await.unwrap();
+            let version = json_body(response).await["version"]
+                .as_str()
+                .expect("the graph carries its version token")
+                .to_string();
+            let response = c
+                .app
+                .clone()
+                .oneshot(delete_workflow_request(&version))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            // CodeRabbit review (PR #2053): the count the console's toast now
+            // reads has to be the sweep's own answer, not a client-side guess —
+            // pin it here so a regression back to "no body" or a miscounted
+            // sweep shows up as a body assertion rather than only as a wrong
+            // toast nobody is testing.
+            assert_eq!(json_body(response).await["stoppedRuns"], 1);
+
+            let CompanyEvent::WorkflowRunFinished {
+                cancelled,
+                error,
+                run_id: journaled_id,
+                ..
+            } = await_finished(&c.runtime)
+                .await
+                .expect("the deleted workflow's run settles rather than running on")
+            else {
+                unreachable!()
+            };
+            assert!(
+                cancelled,
+                "the run of a deleted workflow settles stopped, on the Stop button's own path"
+            );
+            assert!(
+                error.is_none(),
+                "a stop that follows from a delete is not a failure: {error:?}"
+            );
+            assert_eq!(
+                journaled_id.as_deref(),
+                Some(run_id.as_str()),
+                "the same run the run route handed back — no second identifier"
+            );
+            assert!(
+                !c.completed.load(Ordering::SeqCst),
+                "the run must not have gone on to finish the work of a workflow that no \
+                 longer exists"
+            );
+        }
+
+        /// The mirror: a delete with **no** run in flight cancels nothing.
+        /// Without it the sweep above could quietly grow into "delete stops
+        /// something" for a company that had nothing to stop.
+        #[tokio::test]
+        async fn deleting_an_idle_workflow_stops_nothing() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+
+            assert!(c.runtime.run_supervisor().live().is_empty());
+            let response = c.app.clone().oneshot(get_workflow_request()).await.unwrap();
+            let version = json_body(response).await["version"]
+                .as_str()
+                .expect("version")
+                .to_string();
+            let response = c
+                .app
+                .clone()
+                .oneshot(delete_workflow_request(&version))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            // CodeRabbit review (PR #2053): the response body is what the
+            // console's toast now reads, so pin the zero here too — the same
+            // reason the in-flight case above pins its 1.
+            assert_eq!(json_body(response).await["stoppedRuns"], 0);
+            assert_eq!(
+                c.runtime.stop_runs_of_workflow("demo"),
+                0,
+                "nothing was in flight, so nothing was stopped"
             );
         }
 

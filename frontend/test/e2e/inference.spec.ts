@@ -49,23 +49,49 @@ async function openConnections(page: Page) {
     });
 }
 
-test("a key typed for a BYOK provider is not discarded by switching to managed", async ({
+test("the managed brain is not offered as something to switch to", async ({ page }) => {
+  await openConnections(page);
+
+  // The company has no `[inference]` section, so the host still answers
+  // `provider: "managed"` — unchanged, this is a console-only change. What the
+  // card must not do is render that as a route: the header reports the state,
+  // and the form opens on something the operator can actually finish.
+  await expect(page.getByTestId("inference-current-provider")).toHaveText("Not configured", {
+    timeout: 30_000,
+  });
+  await expect(page.locator("#inference-provider")).toHaveText(/OpenRouter/);
+  await expect(page.locator("body")).not.toContainText("Managed (TinyHumans)");
+
+  // And it is not in the list, so nothing can be switched *to* it.
+  await page.locator("#inference-provider").click();
+  await expect(page.getByRole("option", { name: "OpenRouter", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("option", { name: "Managed (TinyHumans)", exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+});
+
+test("a key typed for a BYOK provider is not discarded by switching provider", async ({
   page,
 }) => {
   await openConnections(page);
 
-  // Managed is the default selection, and since #585 it offers the key input
-  // like every other provider but Ollama — with the line that says what paying
-  // for the company actually means.
+  // Since #585 the key input is offered for every provider but Ollama — with
+  // the line that says what paying for the company actually means.
   await expect(page.locator("#inference-key")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("inference-key-note")).toBeVisible();
 
-  // Type a key under a BYOK provider, then switch back to managed. The value
-  // survives the switch — that is the state that used to lose it.
+  // Type a key under one provider, then switch to another and back. The value
+  // survives the switch — that is the state that used to lose it. The pair used
+  // to be OpenRouter and managed; managed is no longer selectable, and the
+  // defect was never about *which* two providers, only about crossing between
+  // any of them.
   await pickProvider(page, "OpenRouter");
   const typed = `pw-e2e-${Date.now()}`;
   await page.locator("#inference-key").fill(typed);
-  await pickProvider(page, "Managed (TinyHumans)");
+  await pickProvider(page, "Custom (OpenAI-compatible)");
+  await expect(page.locator("#inference-key")).toHaveValue(typed);
+  await pickProvider(page, "OpenRouter");
   await expect(page.locator("#inference-key")).toHaveValue(typed);
 
   // Saving now stores it rather than reverting past it. The credential is
@@ -80,7 +106,9 @@ test("a key typed for a BYOK provider is not discarded by switching to managed",
   expect(after.ok()).toBeTruthy();
   const body = await after.json();
   expect(body.keyConfigured).toBe(true);
-  // Setting only a key must not move the company off the managed brain.
+  // Setting a key under OpenRouter lands on OpenRouter — which is also what the
+  // legacy `managed` alias normalizes to, so this stays the same assertion it
+  // was when the switch above ended on managed.
   expect(body.provider).toBe("openrouter");
 
   // And it can be taken back off again — set / rotate / clear, all from here.

@@ -28,7 +28,8 @@ const TIERS = [
   {
     value: "readonly",
     label: "Read-only",
-    description: "The agents can look at things but change nothing and spend nothing.",
+    description:
+      "The agents can look at things but change nothing, contact nobody, and use no connected account. Billed tool calls are refused too — but the agents still think, and the company is billed for that.",
   },
   {
     value: "supervised",

@@ -298,6 +298,7 @@ mod test {
             run_id: format!("run-{n}"),
             scheduled: false,
             started_by: None,
+            resume_semantic: None,
         }
     }
 
@@ -507,6 +508,7 @@ mod test {
                 attachments: Vec::new(),
             },
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 chat_id: "desk".into(),

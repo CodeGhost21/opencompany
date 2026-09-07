@@ -214,6 +214,12 @@ fn translate_node(def: &WorkflowNodeDef) -> Node {
                 .expect("WorkflowPostconditionDef always serializes"),
         );
     }
+    if let Some(verify) = &def.verify {
+        config.insert(
+            "verify".to_string(),
+            serde_json::to_value(verify).expect("WorkflowJudgeDef always serializes"),
+        );
+    }
 
     Node {
         id: def.id.clone(),
@@ -549,6 +555,7 @@ mod tests {
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -656,6 +663,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verify_lowers_to_the_exact_agent_config_key() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "researcher"
+            [node.verify]
+            criteria = "Cite the evidence."
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let graph = translate(&parse_workflow(src).expect("parses"));
+        let worker = graph.nodes.iter().find(|node| node.id == "worker").unwrap();
+        assert_eq!(worker.config["verify"]["criteria"], "Cite the evidence.");
+    }
+
     /// An "error"-labeled edge leaving a routing node maps onto the engine's
     /// `error` port; a non-error edge from the same node stays on `main`.
     #[test]
@@ -735,6 +767,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 node_stub("yes_path"),
                 node_stub("no_path"),
@@ -802,6 +835,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 }],
                 edges: Vec::new(),
             };
@@ -835,6 +869,7 @@ mod tests {
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 node_stub("paid"),
                 node_stub("error_case"),
@@ -943,6 +978,7 @@ to = "done"
             repeatable: None,
             destination: None,
             postcondition: None,
+            verify: None,
         }
     }
 

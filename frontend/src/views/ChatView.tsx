@@ -15,8 +15,8 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { deleteTask, type MessageIntent, type TaskStatus } from "@/api/tasks";
-import type { OpenTurn } from "@/lib/live-reply";
+import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } from "@/api/tasks";
+import { turnStateKey, type OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
@@ -26,7 +26,7 @@ import {
   type ApprovalSummary,
   type AttachmentDto,
   type CognitionState,
-  type GrantScope,
+  type DecideApproval,
   type OperatorChannelDto,
   type TeamMemberDto,
   type TurnStep,
@@ -41,6 +41,7 @@ import {
   isGeneralChannel,
   makeMessage,
   reconcileIds,
+  replyVoice,
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
@@ -52,6 +53,7 @@ import {
   reportAddMember,
   type AddMemberOutcome,
 } from "@/lib/member-feedback";
+import { usd } from "@/lib/money";
 import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { personAvatar, personName } from "@/lib/person";
 import { useAskerNames } from "@/components/approval-card";
@@ -63,6 +65,7 @@ import { ChannelRail } from "./chat/ChannelRail";
 import { ChatHeader } from "./chat/ChatHeader";
 import { MembersPane } from "./chat/MembersPane";
 import { TypingLine } from "./chat/TypingLine";
+import { InflightRunBar } from "./chat/InflightRunBar";
 import { MessageComposer } from "./chat/MessageComposer";
 import {
   mentionablesFor,
@@ -82,6 +85,7 @@ import {
   buildTimeline,
   buildTimelineItems,
   budgetPauseRedeemId,
+  canSubmitReview,
   channelIdFromSegment,
   channelMembers,
   channelTitle,
@@ -102,7 +106,9 @@ import {
   mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
   operatorSection,
+  repliesInThread,
   resolveDmChannelId,
+  reviewAnchorsForThread,
   toggleReaction,
   type DecidedApproval,
   type HistoryHydration,
@@ -207,7 +213,7 @@ interface Props {
    * this one says the POST is over and the turn is not, so the shell keeps the
    * working row up and stops suppressing the live reply frame.
    */
-  onSendDetached?: (threadId: string, turnId?: string, gen?: number) => void;
+  onSendDetached?: (threadId: string, turnId?: string, gen?: number, chatId?: string) => void;
   /**
    * The chat POST **threw** rather than answering (issue #1000).
    *
@@ -255,6 +261,14 @@ interface Props {
    * started, which is most of what issue #367 is about.
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
+  /**
+   * Live rows per query, keyed by the asking message's id (see
+   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
+   * nothing here has to resolve a key for it: the message id is the key, so it
+   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
+   * their load order.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
   /**
    * The live receipt for a synchronous chat turn in flight, keyed by **host
    * thread id** (issue #1934) — resolved to this channel's thread the same way
@@ -335,6 +349,14 @@ interface Props {
   chatChannelByThread?: Record<string, string>;
   /** Board task id -> live state for card-linked background turns (#1758). */
   taskStatusByTaskId?: Readonly<Record<string, TaskStatus>>;
+  /**
+   * The company's steerable runs, whole. Separate from `taskStatusByTaskId`
+   * because that map is card-keyed and a delegation has no card, so the runs
+   * that most need a control here are exactly the ones it cannot carry.
+   */
+  inflightRuns?: readonly InflightRun[];
+  /** Re-read the in-flight list after a steer lands. */
+  onInflightSteered?: () => void | Promise<void>;
   /** Now, for a card's "waiting N minutes" line. */
   now?: number;
   /**
@@ -342,7 +364,7 @@ interface Props {
    * witnessed verdict survives this view unmounting — the operator can walk to
    * Approvals and back mid-turn.
    */
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecideApproval?: DecideApproval;
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;
@@ -380,6 +402,19 @@ const FIRST_TEAM_BRIEF =
  * backend. Threads and reactions are console-local for the same reason: the
  * host has no surface for either yet.
  */
+/**
+ * The host seq a console message id names, for keying live-turn state.
+ *
+ * `undefined` for an unthreaded send and for a local id the host has not
+ * reconciled yet — both of which key at the channel, which is what they are.
+ */
+function threadRootOf(parentId: string | undefined): number | undefined {
+  const seq = toHostMessageId(parentId);
+  if (seq === null) return undefined;
+  const n = Number(seq);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function ChatView({
   client,
   company,
@@ -402,6 +437,7 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  liveStepsByMessage,
   receiptByThread,
   agentNames,
   unread,
@@ -412,6 +448,8 @@ export function ChatView({
   approvals,
   chatChannelByThread,
   taskStatusByTaskId,
+  inflightRuns,
+  onInflightSteered,
   now,
   onDecideApproval,
   decidingApprovals,
@@ -484,6 +522,13 @@ export function ChatView({
   } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
+  /** Every card whose review verdict is currently in flight — one entry per
+   * task, not a single global slot, so a click on one card's Approve/Revise
+   * control never gets silently dropped by a DIFFERENT card's in-flight
+   * verdict (Codex #3906779123). See {@link canSubmitReview}. */
+  const [reviewingCardIds, setReviewingCardIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /** Issue #1846: which teammate's budget-pause redeem is in flight, if any —
    * so only that notice's button shows a busy state. */
   const [redeemingBudgetPauseAgent, setRedeemingBudgetPauseAgent] = useState<string | null>(
@@ -728,7 +773,7 @@ export function ChatView({
       // Update the one card from the host's answer rather than refetching the
       // roster: the response IS the new state, so a refetch could only disagree.
       setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, ...fromDto(row) } : m)));
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to $${cap.toFixed(2)}.`);
+      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
     } catch (error) {
       toast.error(budgetError(error, "Couldn't change the daily cap."));
     }
@@ -1282,8 +1327,20 @@ export function ChatView({
 
   // An open thread only makes sense while its parent is on screen; switching
   // channels closes it rather than leaving a panel pointing at nothing.
+  // `?thread=<id>` on the hash opens straight into that thread instead, and
+  // is consumed (stripped via `replaceState`) so it does not reopen on a
+  // later switch back to this channel.
   useEffect(() => {
-    setOpenThreadId(null);
+    if (!channel?.id) return;
+    const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+    const params = new URLSearchParams(query);
+    const threadId = params.get("thread");
+    setOpenThreadId(threadId);
+    if (threadId !== null) {
+      params.delete("thread");
+      const qs = params.toString();
+      window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+    }
   }, [channel?.id]);
 
   // Whoever owns the unread counts needs to know what is actually being looked
@@ -1476,7 +1533,52 @@ export function ChatView({
    * false on every reload and on every walk to another view. An open turn is a
    * fact about the company, so the indicator survives both.
    */
-  const openTurn = activeThreadId ? openTurns?.[activeThreadId]?.[0] : undefined;
+  /**
+   * The turns open in this channel, split by whether they belong to the thread
+   * the panel is showing.
+   *
+   * They used to be one lookup on the channel id, which could not tell the two
+   * apart — so `ChatView` suppressed the channel's indicator whenever any
+   * thread was open, and a turn the host was actively running showed nowhere at
+   * all. The shell now keys them per thread (`turnStateKey`), which is what
+   * makes this split expressible.
+   *
+   * `channelTurn` deliberately spans *every other* thread in the channel rather
+   * than only channel-rooted turns: from the channel timeline, a turn running in
+   * a thread you are not reading is still this channel's work, and saying
+   * nothing about it is the failure this replaces.
+   */
+  // Only when a thread is actually open. Without the `openThreadId` guard this
+  // collapses to the channel key for an unthreaded view, and `openTurn` below —
+  // which excludes it — would then hide the channel's own turn: the exact
+  // silence this change exists to remove, reintroduced one line down.
+  const threadTurnKey =
+    activeThreadId && openThreadId
+      ? turnStateKey(activeThreadId, threadRootOf(openThreadId))
+      : undefined;
+  const threadTurn = threadTurnKey ? openTurns?.[threadTurnKey]?.[0] : undefined;
+  const openTurn = (() => {
+    if (!activeThreadId) return undefined;
+    const candidates = Object.entries(openTurns ?? {})
+      .filter(
+        ([key, turns]) =>
+          key !== threadTurnKey &&
+          (key === activeThreadId || key.startsWith(`${activeThreadId}#`)) &&
+          turns.length > 0,
+      )
+      // Every turn, not each list's head. `mergeOpenTurns` appends rather than
+      // re-sorts, so a reload re-arm racing a detached POST can leave a running
+      // row *behind* a queued one in the same list — and a search over heads
+      // alone would never see it, which is the same "Queued…" over live work
+      // this is here to prevent (Codex review on #2044).
+      .flatMap(([, turns]) => turns);
+    // A running turn outranks a queued one. Taking the first match instead
+    // would let map order decide the wording, and map order follows `/runs`,
+    // which is newest-first — so the ordinary serialized case (an older turn
+    // working while a newer one waits on the company lock) rendered "Queued…"
+    // over live work (Codex review on #2042).
+    return candidates.find((t) => !t.queued) ?? candidates[0];
+  })();
   /**
    * The count beside the channel title.
    *
@@ -1607,7 +1709,19 @@ export function ChatView({
     // this POST reaches below, so a clear this send triggers can never delete
     // a receipt a *later* send has since armed for the same (possibly
     // cross-company-reused) thread id — see `shouldClearReceipt`.
-    const gen = chatId ? onSendStart?.(chatId) : undefined;
+    // Armed under the same key the reload leg folds runs into, or the two
+    // legs describe the same turn under two names and the indicator that
+    // survives a reload is not the one the POST armed. Unthreaded sends key at
+    // the channel exactly as before — `turnStateKey` returns `chatId` for them.
+    // Derived from `openThreadId`, not from `parentId`. A review reply is
+    // anchored to a *reply* (`threadReviewAnchor.anchorId`), not to the thread
+    // root, so keying on the parent would arm a key the panel's own lookup —
+    // which keys on the open thread — could never match. `parentId` stays what
+    // it was: the host's `parent`, for `client.chat` alone.
+    const stateKey = chatId
+      ? turnStateKey(chatId, threadRootOf(openThreadId ?? undefined))
+      : undefined;
+    const gen = stateKey ? onSendStart?.(stateKey) : undefined;
     // Which of the POST's three outcomes actually happened, decided here and
     // reported once in the `finally`. Only `"resolved"` means the reply is on
     // screen; the other two leave a turn running on the host and the stream as
@@ -1672,13 +1786,17 @@ export function ChatView({
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
-        if (chatId) onSendDetached?.(chatId, answer.turnId, gen);
+        // The desk goes with the state key: the key can be composite and the
+        // shell's settle poll has to ask the host about a real desk.
+        if (stateKey) onSendDetached?.(stateKey, answer.turnId, gen, chatId);
         return true;
       }
       const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
-            makeMessage("company", r.text, {
+            // Same rule as the live path and `fromHistory`: a host-authored
+            // response renders as a centred row, not an agent bubble.
+            makeMessage(replyVoice(r.channel), r.text, {
               channel: r.channel,
               parentId,
               steps: r.steps,
@@ -1687,7 +1805,9 @@ export function ChatView({
               mentions: r.mentions,
             }),
           )
-        : [makeMessage("system", "(no reply)", { parentId })];
+        : reply.reviewFeedbackApplied
+          ? []
+          : [makeMessage("system", "(no reply)", { parentId })];
       append(target, ...replies);
       // The synchronous response predates mention metadata on some hosts. A
       // reply is already journaled by the time this response arrives, so fetch
@@ -1768,9 +1888,9 @@ export function ChatView({
       // carries on regardless, so the frame it holds is the only copy of the
       // answer. Routing the throw here is the drop this whole change removes,
       // put back on the one path the feature exists for.
-      if (chatId) {
-        if (outcome === "resolved") onSendEnd?.(chatId, gen);
-        else if (outcome === "failed") onSendFailed?.(chatId, gen);
+      if (stateKey) {
+        if (outcome === "resolved") onSendEnd?.(stateKey, gen);
+        else if (outcome === "failed") onSendFailed?.(stateKey, gen);
       }
       setSending(false);
     }
@@ -1863,6 +1983,40 @@ export function ChatView({
   /** Drop the card from every channel — see {@link clearTaskCardEverywhere}. */
   function clearCardEverywhere(taskId: string) {
     setTranscripts((t) => clearTaskCardEverywhere(t, taskId));
+  }
+
+  /**
+   * Settle the in-review dispatch card a finished card's settle pill links to.
+   * Approve finishes it; Revise re-runs it with a note — though the console
+   * reaches Revise through a thread reply, not this button.
+   *
+   * The board move is left to the host's own `task_card_changed` over the SSE
+   * feed — the same path a drag settles through — so the Approve control drops
+   * off the pill the moment the card leaves `in_review`. This only carries the
+   * verdict and its busy state; `taskId` is the pill's card, sent so the host
+   * settles that specific card rather than whichever one it would otherwise
+   * pick for the thread.
+   */
+  async function reviewCard(taskId: string, decision: "approve" | "revise") {
+    if (activeThreadId === undefined || !canSubmitReview(reviewingCardIds, activeThreadId, taskId))
+      return;
+    setReviewingCardIds((prev) => new Set(prev).add(taskId));
+    try {
+      await client.reviewCard(activeThreadId, taskId, decision, undefined, company);
+      toast.success(decision === "approve" ? "Card approved." : "Sent for another pass.");
+    } catch (error) {
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : "Couldn't record that review.",
+      );
+    } finally {
+      setReviewingCardIds((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
   }
 
   /**
@@ -2093,7 +2247,26 @@ export function ChatView({
   }
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
-  const threadReplies = parent ? messages.filter((m) => m.parentId === parent.id) : [];
+  const threadReplies = parent ? repliesInThread(parent, messages) : [];
+  // Asked of `buildTimeline`'s own rule rather than re-derived, for the reason
+  // the mention map above gives: the panel's count and the channel's chip must
+  // not drift about what is already on screen. See `ThreadPanel`'s prop docs.
+  const threadInlineReplyIds = parent ? inlineReplyIds(messages) : undefined;
+  // Every review surface this thread hangs off, newest first — the thread
+  // root itself when opened directly on the pill/relay, or one of its
+  // replies when the card that produced them was sent inside an
+  // already-open thread. Usually zero or one entry; two when a second card
+  // was dispatched into this thread before the first was settled (Codex
+  // #3906594069) — the newest still drives the composer's own target and
+  // "ready for review" notice below, but every other entry gets its own
+  // Approve control so it does not have to wait on the newest one settling.
+  const threadReviewAnchors =
+    parent !== undefined && taskStatusByTaskId !== undefined
+      ? reviewAnchorsForThread(parent, threadReplies, messages, taskStatusByTaskId)
+      : [];
+  const threadReviewAnchor = threadReviewAnchors[0];
+  const threadReviewing = threadReviewAnchor !== undefined;
+  const additionalThreadReviewAnchors = threadReviewAnchors.slice(1);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -2163,9 +2336,18 @@ export function ChatView({
               openThreadId={openThreadId}
               // An open turn keeps the row up after the POST has resolved, and
               // puts it back on a console that reloaded mid-turn (#983).
-              typing={(sending || !!openTurn) && !openThreadId}
+              // `!openThreadId` used to be here, blanking the channel's row for
+              // every turn whenever any thread was open. `openTurn` now
+              // excludes the open thread's own turn, so the row can stay for
+              // the work that is genuinely the channel's.
+              typing={sending || !!openTurn}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
+              // NOT excluded when a thread is open: these rows render inside
+              // their own message rather than as one strip for the channel, so
+              // there is no ambiguity about which turn they describe — which is
+              // the whole reason `liveSteps` above is withheld.
+              liveStepsByMessage={liveStepsByMessage}
               // Thread-panel receipts are out of v1 (issue #1934): excluded here
               // the same way `liveSteps` is when a thread is open.
               receipt={openThreadId ? undefined : receipt}
@@ -2174,6 +2356,8 @@ export function ChatView({
               onReact={react}
               onDismissCard={(taskId) => void dismissCard(taskId)}
               dismissingCardId={dismissingCardId}
+              onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+              reviewingCardIds={reviewingCardIds}
               resolveAttachmentUrl={resolveAttachmentUrl}
               taskStatusByTaskId={taskStatusByTaskId}
               onStartBrief={() =>
@@ -2379,6 +2563,17 @@ export function ChatView({
                 DOM gets nothing — no textarea, no Send, no `data-tour` anchor —
                 while the draft survives. See that prop's doc for why a
                 `display:none` wrapper is not the same thing. */}
+            {/* Above the composer, and outside the read-only branch: a channel
+                nobody may post in is still a place the company's runs are
+                visible, and stopping one is not posting. */}
+            {inflightRuns !== undefined && onInflightSteered !== undefined && (
+              <InflightRunBar
+                client={client}
+                company={company}
+                runs={inflightRuns}
+                onSteered={onInflightSteered}
+              />
+            )}
             <MessageComposer
               suppressed={readOnly}
               placeholder={`Message ${channelTitle(channel)}`}
@@ -2418,10 +2613,24 @@ export function ChatView({
               members={members}
               parent={parent}
               replies={threadReplies}
+              inlineReplyIds={threadInlineReplyIds}
+              // A query typed into this panel renders only here — parented
+              // messages never reach the channel timeline — so the panel needs
+              // the per-query rows too, or its turns show nothing at all.
+              liveStepsByMessage={liveStepsByMessage}
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
               readOnly={readOnly}
+              reviewing={threadReviewing}
+              reviewTaskId={threadReviewAnchor?.taskId}
+              onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
+              reviewInFlight={
+                threadReviewAnchor !== undefined &&
+                reviewingCardIds.has(threadReviewAnchor.taskId)
+              }
+              additionalReviewAnchors={additionalThreadReviewAnchors}
+              reviewingTaskId={reviewingCardIds}
               youAvatar={youAvatar}
               resolveAttachmentUrl={resolveAttachmentUrl}
               onSend={(text, _intent, _attachments, mentions) => {
@@ -2429,10 +2638,11 @@ export function ChatView({
                 // state or call `client.chat` for a channel the server's
                 // read-only guard will refuse anyway (issue #1757).
                 if (readOnly) return;
-                void send(text, undefined, parent.id, undefined, mentions);
+                void send(text, undefined, threadReviewAnchor?.anchorId ?? parent.id, undefined, mentions);
               }}
               onClose={() => setOpenThreadId(null)}
               typingNames={resolveTypingNames?.(active.id, parent.id) ?? []}
+              openTurn={threadTurn}
               onTyping={() => onTyping?.(active.id, parent.id)}
               // A thread is not a lesser transcript (issue #1734): an echoed
               // reply read here is the same false attribution as one read in

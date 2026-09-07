@@ -1,0 +1,101 @@
+# What the desks decided, and what they decided it against.
+#
+# Named `episodes` rather than `decisions` because `decisions` is a built-in
+# ledger the runtime ships and every prompt and route is written against; a
+# declared slug may not shadow one. The two are genuinely different records
+# anyway: `decisions` holds the company's standing calls, this holds what one
+# deliberation episode concluded and what it weighed to get there.
+#
+# The operational truth lives in the MCP server — what is on a shelf, what a
+# machine took, who is unhappy. None of that belongs here, and duplicating it
+# would produce two records that disagree by the end of the week.
+#
+# What this ledger holds is the thing the MCP server cannot: the *reasoning*. A
+# room that converged on a route left a transcript, but a transcript scrolls out
+# of a thirty-message window and nobody re-reads one to find out why the van
+# skipped Vulcan for a fortnight. The commit line, its grounds, and what the
+# desk chose not to do are what make a decision reviewable a month later.
+
+title = "Desk episodes"
+purpose = """
+Every call a desk carried: what it decided, which desk decided it, what it was \
+grounded in, and what it chose not to do. Read the last few before proposing \
+anything — most bad plans here are ones this company already rejected.\
+"""
+written_by = "`record_entry` when a desk commits, `close_entry` once the outcome is known"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "Short slug for the episode, e.g. `d34-route-skip-vulcan`."
+
+[[field]]
+name = "decision"
+role = "title"
+required = true
+description = "What was decided, in one line, in the active voice."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "desk"
+required = true
+description = "Which desk carried it: ops, commercial or intel."
+
+[[field]]
+name = "day"
+role = "date"
+required = true
+description = "The simulated day it was decided."
+
+[[field]]
+name = "grounds"
+role = "prose"
+required = true
+description = "The figures it rested on — the actual numbers, not the adjectives. A decision whose grounds cannot be restated was not grounded."
+
+[[field]]
+name = "not_doing"
+role = "prose"
+description = "What the desk chose against, and the cost of choosing against it. The most useful field here and the one most likely to be left empty."
+
+[[field]]
+name = "referred_to"
+description = "Any peer desk this episode asked, and what came back. Blank when the desk decided alone."
+
+[[field]]
+name = "outcome"
+role = "prose"
+description = "What actually happened. Written when the decision is closed, and the only thing that makes the rest of this row worth keeping."
+
+[[status]]
+name = "carried"
+
+[[status]]
+name = "stalled"
+description = "The room spent its budget without converging. Not a decision — a question that needs breaking."
+
+[[status]]
+name = "done"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "reversed"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Live"
+statuses = ["carried", "stalled"]
+order = "recent"
+
+[[section]]
+heading = "Settled"
+statuses = ["done", "reversed"]
+order = "recent"

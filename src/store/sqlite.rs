@@ -2682,6 +2682,7 @@ impl crate::ports::runs::RunStore for SqliteStore {
             task_id: spec.task_id,
             agent_id: spec.agent_id,
             chat_id: spec.chat_id,
+            thread_root: spec.thread_root,
             workflow_run_id: spec.workflow_run_id,
             node_id: spec.node_id,
             attempt: attempt as u32,

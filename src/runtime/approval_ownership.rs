@@ -147,6 +147,8 @@ mod test {
             broadly_deniable: false,
             contents_hidden: false,
             batch: None,
+            group_key: None,
+            blocker_step_kind: None,
         }
     }
 

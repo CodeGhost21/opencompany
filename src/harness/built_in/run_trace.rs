@@ -455,6 +455,7 @@ mod tests {
                     attempt: 1,
                     status: RunStatus::Pending,
                     trigger_event_seq: None,
+                    thread_root: None,
                     created_at_millis: 0,
                     started_at_millis: None,
                     finished_at_millis: None,

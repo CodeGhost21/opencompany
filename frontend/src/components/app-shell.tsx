@@ -3,6 +3,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   ApiError,
   type ApprovalSummary,
+  type BlockerVerdict,
   type CompanyStatus,
   type GrantScope,
   type NotificationDto,
@@ -53,6 +54,7 @@ import {
   listInflight,
   listTasks,
   taskStatusesById,
+  type InflightRun,
   type TaskStatus,
 } from "@/api/tasks";
 import { startVisiblePolling } from "@/lib/visible-poll";
@@ -75,7 +77,6 @@ import { useLedgerNav } from "@/hooks/use-ledger-nav";
 import {
   mentionCountsByChannel,
   mentionsToClear,
-  threadViewAdvancesChannel,
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
 import {
@@ -99,12 +100,16 @@ import { REWRITE_RETIRED } from "@/lib/console-route-rewrites";
 import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
+import { foldLiveFrame } from "@/lib/live-frame";
+
 import {
   type ChatMessage,
   dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
+  liveFrameThreadKey,
   liveReplyIdentity,
+  replyVoice,
   MAIN_THREAD_ID,
   makeMessage,
   mergeHistoryInOrder,
@@ -113,13 +118,17 @@ import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import { lifecycle } from "@/lib/language";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
-import { approvedLine, staleDecisionLine } from "@/lib/approval-wording";
+import {
+  approvedLine,
+  blockerDecidedLine,
+  staleDecisionLine,
+} from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { ProfileRow } from "@/components/profile-row";
 import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
-import { agentDmThreads, defaultThreads, operatorThread, threadsFromDesks } from "@/lib/threads";
-import { drainReReadQueue } from "@/lib/re-read-queue";
+import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
+import { drainReReadQueue, type PendingReRead } from "@/lib/re-read-queue";
 import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
@@ -139,7 +148,6 @@ import {
   type HistoryStatus,
   type Transcripts,
 } from "@/views/chat/model";
-import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
@@ -150,6 +158,7 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { canCreateCompanies } from "@/components/create-company-dialog";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
@@ -656,8 +665,6 @@ export function AppShell({
   // duplicate cannot leave a badge behind for a line that was never added.
   const [lastViewedChannel, setLastViewedChannel] = useState<Record<string, number>>({});
   const [unreadSince, setUnreadSince] = useState(() => Date.now());
-  const [threads, setThreads] = useState(defaultThreads);
-  const [activeThreadId, setActiveThreadId] = useState("main");
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) and the board itself
   // (issue #464) refetch live.
@@ -675,6 +682,12 @@ export function AppShell({
   const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
     Record<string, TaskStatus>
   >({});
+  /**
+   * The same in-flight read, kept whole rather than only as the card-keyed map
+   * above. A delegation has no card, so `taskStatusByTaskId` cannot hold it and
+   * a surface offering a control over a run needs the rows themselves.
+   */
+  const [inflightRuns, setInflightRuns] = useState<readonly InflightRun[]>([]);
   const taskStatusRead = useRef(0);
   // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
   // sees an attempt move rather than waiting up to four seconds for its poll —
@@ -770,6 +783,11 @@ export function AppShell({
   useEffect(() => {
     setOpenTurns((prev) => (Object.keys(prev).length === 0 ? prev : {}));
   }, [company]);
+  // Company-scoped for the reason `openTurns` above is: the keys are message ids
+  // from one company's journal, and two companies' sequences collide freely.
+  useEffect(() => {
+    setLiveStepsByMessage((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -779,6 +797,59 @@ export function AppShell({
   const [liveStepsByThread, setLiveStepsByThread] = useState<
     Record<string, (TurnStep & { toolCallId?: string })[]>
   >({});
+  // The same timeline, per **query** rather than per thread, for a frame that
+  // says which operator message its turn answers (`messageSeq`). Keyed by that
+  // message's console id, so a running turn's rows render under the question
+  // that asked them — the way a settled turn's folded steps already render under
+  // its reply.
+  //
+  // Two turns in one thread is the case this exists for. `liveStepsByThread`
+  // holds ONE row-list per thread, and `onSendStart` resets it, so asking a
+  // second question destroyed the first turn's rows outright — and a turn
+  // blocked on a teammate emits nothing further, so its timeline never came
+  // back. Measured on a real pair: the reset discarded two rows from a live
+  // delegated turn. Separate keys mean neither turn can clear the other, and
+  // the merged pile that would otherwise render is split back into the two
+  // questions it came from.
+  //
+  // Not a replacement: a frame with no `messageSeq` still keys by thread, which
+  // is every turn answering no journaled message and every older host.
+  const [liveStepsByMessage, setLiveStepsByMessage] = useState<
+    Record<string, (TurnStep & { toolCallId?: string })[]>
+  >({});
+  /**
+   * Retires the live rows of every message that now has durable steps of its
+   * own, and of every message named in `alsoDrop`.
+   *
+   * Two cleanup paths meet here because a turn can end two ways.
+   *
+   * A turn that **answers** journals its folded steps onto the message, so the
+   * arrival of those steps is the swap signal — the durable timeline is there
+   * to replace the transient one, with no empty frame between them. That is a
+   * fact about the message itself, unlike the reply's `parentId`, which names
+   * the thread root rather than the question (see `renderAgentReply`).
+   *
+   * A turn that **fails** journals a `TurnFailed` line and no reply at all, so
+   * nothing ever grows steps for it. Its bucket would sit there for the life of
+   * the session — quite possibly holding a row still marked `running`, since a
+   * result that never arrived cannot flip it. `alsoDrop` is how the terminal
+   * settle path retires those (Codex on #2069).
+   */
+  const clearLiveRowsSettledBy = useCallback(
+    (messages: readonly ChatMessage[], alsoDrop: readonly string[] = []) => {
+      setLiveStepsByMessage((prev) => {
+        const done = new Set(alsoDrop);
+        for (const m of messages) if (m.steps && m.steps.length > 0) done.add(m.id);
+        let hit = false;
+        for (const id of done) if (id in prev) { hit = true; break; }
+        if (!hit) return prev;
+        const next = { ...prev };
+        for (const id of done) delete next[id];
+        return next;
+      });
+    },
+    [],
+  );
   // The live receipt for each synchronous chat turn in flight (issue #1934),
   // keyed by host thread id — armed on `onSendStart`, bumped by every live
   // frame (which also captures who picked the turn up), and cleared on whichever
@@ -972,11 +1043,17 @@ export function AppShell({
         inflight.status === "fulfilled" ? inflight.value : [],
       ),
     );
+    // Only on a read that actually landed. A failed inflight poll must not empty
+    // the bar and take a still-running delegation's cancel with it.
+    if (inflight.status === "fulfilled") setInflightRuns(inflight.value);
   }, [client, company]);
 
   useEffect(() => {
     taskStatusRead.current += 1;
     setTaskStatusByTaskId({});
+    // A steer key is company-scoped, so a row held across a company switch
+    // would address the previous company's registry.
+    setInflightRuns([]);
   }, [client, company]);
 
   // Ride the existing visible-tab company poll, and also re-read immediately
@@ -1186,14 +1263,13 @@ export function AppShell({
         return { ...h, byChannel: { ...h.byChannel, [channelId]: status } };
       });
 
-    // One history fetch per thread, fanned into both transcript stores. The
-    // Chat workspace keeps `transcripts` keyed by channel id, and the parked
-    // Conversation keeps `threads` keyed by thread id; a desk's channel id *is*
-    // its thread id, and a DM's channel id is the console-local `dmChannelId`
-    // while its thread id is the roster agent id (see `ChatView`'s `send`).
-    // Fetching per unique thread instead of per store means a thread that
-    // renders as both a thread and a channel is read once, not twice, on every
-    // tick (issue #1690).
+    // One history fetch per thread, fanned into the channels that render it.
+    // `transcripts` is keyed by channel id while history is addressed by thread
+    // id: a desk's channel id *is* its thread id, and a DM's channel id is the
+    // console-local `dmChannelId` while its thread id is the roster agent id
+    // (see `ChatView`'s `send`). Fetching per unique thread means a thread
+    // rendered by more than one channel is read once, not twice, on every tick
+    // (issue #1690).
     const hydrateThread = (threadId: string, channels: readonly { channelId: string }[]) => {
       // Serialize: a tick that fires while the cold read is still in flight
       // does not fire a second request for the same thread (issue #1690).
@@ -1207,21 +1283,17 @@ export function AppShell({
         .then((entries) => {
           if (cancelled || requestCompany !== company) return;
           const hydrated = fromHistory(entries);
+          // Any message that came back carrying steps has a durable timeline
+          // now, so its transient one is spent. Covers the ordinary success
+          // swap, and re-converges a console that reloaded mid-turn.
+          clearLiveRowsSettledBy(hydrated);
           if (hydrated.length > 0) {
-            // Both folds use the same rule: persisted rows take the history's
-            // own oldest-first order, and local rows the host has not
-            // persisted yet stay at the tail — so a row the live SSE path
-            // missed lands where the host says it belongs, gap or tail
-            // (issue #1690). Durable rows outside the newest page remain in
-            // their existing prefix, while only browser-local rows are tail
-            // optimistic sends.
-            setThreads((ts) =>
-              ts.map((t) => {
-                if (t.id !== threadId) return t;
-                const messages = mergeHistoryInOrder(t.messages, hydrated);
-                return messages === t.messages ? t : { ...t, messages };
-              }),
-            );
+            // Persisted rows take the history's own oldest-first order, and
+            // local rows the host has not persisted yet stay at the tail — so
+            // a row the live SSE path missed lands where the host says it
+            // belongs, gap or tail (issue #1690). Durable rows outside the
+            // newest page remain in their existing prefix, while only
+            // browser-local rows are tail optimistic sends.
             channels.forEach(({ channelId }) => {
               setTranscripts((t) => {
                 const merged = mergeHistoryInOrder(t[channelId] ?? [], hydrated);
@@ -1301,20 +1373,7 @@ export function AppShell({
             team,
             deskThreads.map((t) => t.id),
           ),
-          // The legacy `#/conversation` route's own copy of the pinned
-          // Operator row — Chat's channel model gets it through
-          // `operatorSection`, but `Conversation` reads this thread list
-          // directly and never received one, so its `readOnly` plumbing had
-          // nothing to gate (issue #1781 review, Codex P2).
-          ...(operatorChannel ? [operatorThread(operatorChannel)] : []),
         ];
-        setThreads((prev) => {
-          const byId = new Map(prev.map((t) => [t.id, t]));
-          return resolved.map((t) => {
-            const existing = byId.get(t.id);
-            return existing ? { ...t, messages: existing.messages } : t;
-          });
-        });
         // The host answered, so this is the company's desk list — empty
         // included. `defaultDesks()` stands in only when `listDesks` itself
         // failed (`desks === null`, from the `.catch(() => null)` above); a
@@ -1487,7 +1546,7 @@ export function AppShell({
   // channel, parked for replay once it does (issue #1701). A ref, not state:
   // it must survive renders without itself provoking one, and the drain that
   // reads it is triggered by the channel map landing, not by this set changing.
-  const pendingReReadRef = useRef<Set<string>>(new Set());
+  const pendingReReadRef = useRef<Map<string, PendingReRead>>(new Map());
   // Mirrors `chatChannelByThread` so `reReadSettledThread`'s `.then()` always
   // reads the map's current value instead of the one closed over when the
   // request started (issue #1701 follow-up). `reReadSettledThread` is
@@ -1570,7 +1629,19 @@ export function AppShell({
    * settle racing a re-arm — adds nothing.
    */
   const reReadSettledThread = useCallback(
-    (threadId: string, settledTurnId?: string) => {
+    (threadId: string, settledTurnId?: string, stateKey?: string) => {
+      // Two identities, and after #2042 they are no longer the same string.
+      // `threadId` is the **desk** — what `chat/history`, the `threads` fold and
+      // `channelForThread` are addressed by. `liveKey` is the **open-turn state
+      // key**, which is what `openTurns`, `liveStepsByThread` and
+      // `receiptByThread` are keyed by, because `ChatView` hands `onSendStart`
+      // its `stateKey` and that key is `engineering#41` for a threaded send.
+      //
+      // Conflating them breaks one side or the other: reading the desk out of
+      // the map misses a queued sibling and leaves a threaded turn's receipt
+      // ticking forever, and asking the host about the composite recovers no
+      // history at all (Codex review on #2044).
+      const liveKey = stateKey ?? threadId;
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
@@ -1605,27 +1676,52 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!hasOtherOpenTurns(openTurnsRef.current, threadId, settledTurnId)) {
+          if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {
             setLiveStepsByThread((prev) =>
-              prev[threadId]?.length ? { ...prev, [threadId]: [] } : prev,
+              prev[liveKey]?.length ? { ...prev, [liveKey]: [] } : prev,
             );
+            // The receipt the detached turn carried through its queued/working
+            // window (issue #2021) is cleared on the same terminal transition
+            // that clears the live rows, under the same guard: a queued sibling
+            // still running keeps it, and this only runs once the scope checks
+            // above confirm the settle belongs to the company on screen — so a
+            // late cross-company settle cannot delete a newer company's receipt.
+            setReceiptByThread((prev) => {
+              if (!(liveKey in prev)) return prev;
+              const next = { ...prev };
+              delete next[liveKey];
+              return next;
+            });
+            // The per-query buckets retire on the same transition, inside the
+            // same guard and for the same reason: a queued sibling still
+            // running owns its rows, and this must not take them.
+            //
+            // Every message here, not only those carrying steps — which is what
+            // covers a turn that FAILED. It journals a `TurnFailed` line and no
+            // reply, so it never grows durable steps to swap for, and its bucket
+            // would otherwise hold a row marked `running` for the whole session
+            // (Codex on #2069).
+            clearLiveRowsSettledBy(hydrated, hydrated.map((m) => m.id));
           }
-          setThreads((ts) =>
-            ts.map((t) => {
-              if (t.id !== threadId) return t;
-              const known = new Set(t.messages.map((m) => m.id));
-              const fresh = hydrated.filter((m) => !known.has(m.id));
-              return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
-            }),
-          );
           const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
           // The thread settled before the desks/roster effect populated its
           // channel id — on a cold load, or the moment after a company switch
-          // (issue #1701). The `threads` fold above still ran; park the id so
-          // the drain effect replays the transcript fold once the map lands,
-          // rather than dropping it and leaving the Chat panel stale.
+          // (issue #1701). Park the id so the drain effect replays the
+          // transcript fold once the map lands, rather than dropping it and
+          // leaving the Chat panel stale.
           if (!channelId) {
-            pendingReReadRef.current.add(threadId);
+            // Both identities, not just the desk: the replay re-runs the
+            // cleanup above, and that cleanup is filed under the state key. A
+            // desk-only replay clears whatever sits under the desk — which on
+            // a cold load can be a live unthreaded send's own live steps and
+            // receipt, armed before its `openTurns` row landed (Codex on
+            // #2044). Keyed by the pair so two threads of one desk park
+            // separately rather than collapsing onto one entry.
+            pendingReReadRef.current.set(`${liveKey}\u0000${settledTurnId ?? ""}`, {
+              desk: threadId,
+              stateKey: liveKey,
+              turnId: settledTurnId,
+            });
             return;
           }
           setTranscripts((t) => {
@@ -1686,16 +1782,20 @@ export function AppShell({
     if (watching.length === 0) return;
     let cancelled = false;
 
-    const settle = (threadId: string, turnId: string) => {
+    // `stateKey` prunes the map; `chatId` is the desk the re-read talks to.
+    // They are different strings for a threaded turn — the map is keyed
+    // `engineering#41` while the desk is `engineering` — and asking the host
+    // for the composite recovers nothing at all (Codex review on #2042).
+    const settle = (stateKey: string, chatId: string, turnId: string) => {
       setOpenTurns((prev) => {
-        const turns = prev[threadId];
+        const turns = prev[stateKey];
         if (!turns) return prev;
         // Drop just this turn; a queued sibling behind it stays watched, so
         // its reply is still delivered when it settles in turn.
         const rest = turns.filter((t) => t.turnId !== turnId);
         const next = { ...prev };
-        if (rest.length) next[threadId] = rest;
-        else delete next[threadId];
+        if (rest.length) next[stateKey] = rest;
+        else delete next[stateKey];
         return next;
       });
       // Deliberately not awaited here, and deliberately not written inline —
@@ -1704,27 +1804,33 @@ export function AppShell({
       //
       // The turn id goes with it: the re-read's own clear must not be fooled
       // by a ref that has not caught up with the `setOpenTurns` above.
-      reReadSettledThread(threadId, turnId);
+      //
+      // Both identities, and both required. The desk is what `getChatHistory`
+      // is addressed by — a composite key names no desk the host knows — and
+      // the state key is what the per-turn cleanup is filed under. `chatId` is
+      // non-optional on `OpenTurn`, so this cannot silently lose the desk the
+      // way a derived fallback did.
+      reReadSettledThread(chatId, turnId, stateKey);
     };
 
     const poll = () => {
-      for (const [threadId, turn] of watching) {
+      for (const [stateKey, turn] of watching) {
         if (!turn.turnId) continue;
         getRun(client, company, turn.turnId)
           .then(({ run }) => {
             if (cancelled) return;
             if (run.phase === "terminal") {
-              settle(threadId, turn.turnId!);
+              settle(stateKey, turn.chatId, turn.turnId!);
               return;
             }
             // Still open: keep the queued/working distinction honest. `pending`
             // means it has not taken the per-company lock yet.
             const queued = run.status === "pending";
             setOpenTurns((prev) =>
-              prev[threadId]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
+              prev[stateKey]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
                 ? {
                     ...prev,
-                    [threadId]: prev[threadId].map((t) =>
+                    [stateKey]: prev[stateKey].map((t) =>
                       t.turnId === turn.turnId ? { ...t, queued } : t,
                     ),
                   }
@@ -1741,7 +1847,7 @@ export function AppShell({
             // settles through whatever terminal signal it does answer.
             if (cancelled) return;
             if (err instanceof ApiError && err.status === 404 && turn.turnId)
-              settle(threadId, turn.turnId);
+              settle(stateKey, turn.chatId, turn.turnId);
           });
       }
     };
@@ -2066,57 +2172,8 @@ export function AppShell({
   );
 
   /**
-   * The Conversation surface's own view report, mapped onto the Chat rail.
-   *
-   * Conversation renders the `main` thread (and every desk thread) that the
-   * rail maps to a channel, but it is a different store with its own view
-   * lifecycle — ChatView's `onChannelViewed` never fires for it. For a company
-   * with real desks the `main` conversation lives *only* here, so a mention
-   * whose subject sits in that thread could never clear: the rail channel it
-   * badges hydrates the first desk's own thread, whose loaded messages can
-   * never contain the main-thread subject. Reporting the view through the same
-   * channel id, gated by the *thread's* loaded ids, gives the badge its read
-   * path while keeping the clear honest — it still only fires once the named
-   * message is actually on screen.
-   *
-   * The mention clear is not the whole of `onChannelViewed`, though. A desk or
-   * DM thread view maps to the channel that owns that same transcript, so its
-   * ordinary channel-view side effects (advancing the unread floor and the
-   * persisted read marker) are correct. The `main` view is different: `main`
-   * aliases the first desk's channel for *badging*, but its transcript is the
-   * legacy General conversation, not the desk's own — so marking that desk read
-   * would permanently un-badge unread lines the operator never saw. That view
-   * reports the mention clear only ([`threadViewAdvancesChannel`]).
-   */
-  const onThreadViewed = useCallback(
-    (threadId: string, loadedMessageIds: ReadonlySet<string>) => {
-      const channelId = channelForThread(chatChannelByThreadRef.current, threadId);
-      if (!channelId) return;
-      onChannelViewed(
-        channelId,
-        false,
-        mentionFeedVersion,
-        undefined,
-        null,
-        loadedMessageIds,
-        threadViewAdvancesChannel(threadId, channelId),
-      );
-    },
-    [onChannelViewed, mentionFeedVersion],
-  );
-
-  const setThreadMessages = (
-    threadId: string,
-    updater: (m: ChatMessage[]) => ChatMessage[],
-  ) =>
-    setThreads((ts) =>
-      ts.map((t) => (t.id === threadId ? { ...t, messages: updater(t.messages) } : t)),
-    );
-
-  /**
    * Approval decisions and other unaddressed lines land in a transcript rather
-   * than vanishing. Both chat surfaces get the line: Chat appends it to a
-   * channel, and the parked Conversation to its active thread. The shell owns
+   * than vanishing: Chat appends the line to a channel. The shell owns
    * `transcripts`, not `ChatView`, so the write survives that view unmounting —
    * which it always has, because these lines are written from Approvals.
    *
@@ -2144,7 +2201,6 @@ export function AppShell({
         [target]: [...(t[target] ?? []), makeMessage("system", line)],
       }));
     }
-    setThreadMessages(activeThreadId, (m) => [...m, makeMessage("system", line)]);
   };
 
   /**
@@ -2172,52 +2228,16 @@ export function AppShell({
     }));
   };
 
-  // Render one `AgentReply` (issue #66) into its desk thread's transcript.
-  // Dedupe against our own optimistic echo: the backend journals an
-  // `AgentReply` for the operator's own chat turn too, and Conversation
-  // already rendered that reply locally. Local message ids are ephemeral
-  // counters (not content-addressed), so we key the dedupe on an identical
-  // company line already present in the thread's recent tail. Only desks that
-  // exist as a thread receive an injection; an unmatched chatId is a no-op
-  // rather than polluting the wrong thread.
+  // Render one `AgentReply` (issue #66) into the Chat workspace's transcripts.
   //
   // Split out from {@link injectAgentReply} so a frame `PendingSyncPosts` held
   // back (issue #983) can be rendered from the same code once its thread's POST
   // resolves, instead of the shell needing a second copy of this logic.
   const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
-      setThreads((ts) =>
-        ts.map((t) => {
-          if (t.id !== event.chatId) return t;
-          const dup = t.messages
-            .slice(-8)
-            .some((m) => m.from === "company" && m.text === event.text);
-          if (dup) return t;
-          return {
-            ...t,
-            messages: [
-              ...t.messages,
-              makeMessage("company", event.text, {
-                channel: event.agentId,
-                taskId: event.taskId,
-                mentions: event.mentions,
-                // Issue #483 — see `liveReplyIdentity`.
-                ...liveReplyIdentity(event),
-              }),
-            ],
-          };
-        }),
-      );
-
-      // …and into the Chat workspace's transcripts, which is a *different*
-      // store (issue #367). Chat became the nav-listed surface in #361 while
-      // this injection kept writing only to the parked Conversation's threads,
-      // so anything the console did not POST for — an inbound channel turn, a
-      // background desk turn — reached Chat only on a page reload.
-      //
       // The event names a thread; `chatChannelByThread` is the only thing that
-      // knows which channel renders it. An id no channel owns is a no-op, the
-      // same as the thread store above: better silent than in the wrong place.
+      // knows which channel renders it. An id no channel owns is a no-op:
+      // better silent than in the wrong place.
       //
       // `channelForThread`, for the reason `noteInChannel` gives: the map holds
       // four literal General spellings and the host echoes whatever casing the
@@ -2225,6 +2245,21 @@ export function AppShell({
       // only when polling recovers the durable history (issue #1743).
       const channelId = channelForThread(chatChannelByThread, event.chatId);
       if (!channelId) return;
+      // This turn's answer is here, carrying the authoritative folded steps, so
+      // the live rows filed under the question it answers have done their job.
+      // NOT keyed off `event.parentId`. That is the reply's *placement* parent,
+      // and `AcceptedTurn::thread_root` is explicit that "a reply is parented to
+      // its question's parent, never to the question" — so for a follow-up typed
+      // inside a thread it names the thread ROOT. Clearing by it would leave the
+      // follow-up's own rows resident and, far worse, delete the root's bucket:
+      // if the root's turn were still running this would erase a live sibling's
+      // timeline, which is the exact failure this whole change exists to stop
+      // (Codex on #2069).
+      //
+      // The swap is driven by the durable steps instead — see
+      // `clearLiveRowsSettledBy` below, which retires a bucket once the message
+      // it belongs to has real steps to render, and the terminal settle path,
+      // which covers a turn that failed and so journals no reply at all.
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
         // The same recent-tail content dedupe the thread store uses. It still
@@ -2247,7 +2282,12 @@ export function AppShell({
           ...t,
           [channelId]: [
             ...existing,
-            makeMessage("company", event.text, {
+            // `replyVoice`, not a literal: a host-authored line (the
+            // iteration-cap pause) is projected with `agentId: "system"` and
+            // must render as the same centred row `fromHistory` gives it, or
+            // whoever watched the turn live keeps an agent-style bubble that
+            // hydration will never correct.
+            makeMessage(replyVoice(event.agentId), event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,
@@ -2353,31 +2393,18 @@ export function AppShell({
    * reload recognise its own twin (#483/#498) — lives in
    * `dispatchMarkerPlacement`, so each stays assertable. This callback is only
    * the write.
-   *
-   * Written into **both** stores for the same reason `injectAgentReply` is: the
-   * parked Conversation reads `threads`, the Chat workspace reads
-   * `transcripts`, and a line written to one alone is invisible on the other
-   * until a reload.
    */
   const injectDispatchMarker = useCallback(
     (event: CompanyStreamEvent) => {
       if (event.type !== "desk_task_completed") return;
       const placement = dispatchMarkerPlacement(event, chatChannelByThread);
       if (!placement) return;
-      const { threadId, channelId, message } = placement;
-
-      setThreads((ts) =>
-        ts.map((t) => {
-          if (t.id !== threadId) return t;
-          // The same id guard hydration runs. A marker cannot arrive twice off
-          // one stream, but a reconnecting `EventSource` can replay a frame,
-          // and the id is what makes that harmless.
-          if (t.messages.some((m) => m.id === message.id)) return t;
-          return { ...t, messages: [...t.messages, message] };
-        }),
-      );
+      const { channelId, message } = placement;
 
       if (!channelId) return;
+      // The same id guard hydration runs. A marker cannot arrive twice off one
+      // stream, but a reconnecting `EventSource` can replay a frame, and the id
+      // is what makes that harmless.
       setTranscripts((t) => {
         const existing = t[channelId] ?? [];
         if (existing.some((m) => m.id === message.id)) return t;
@@ -2492,7 +2519,7 @@ export function AppShell({
    * suppression lose nothing: the frame was never dropped, only queued.
    */
   const onSendDetached = useCallback(
-    (threadId: string, turnId?: string, gen?: number) => {
+    (threadId: string, turnId?: string, _gen?: number, chatId?: string) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       // Append, never replace (issue #1000). The serial lock queues a second
       // send behind the running turn, and a replace would stop the poll
@@ -2502,14 +2529,28 @@ export function AppShell({
         const turns = prev[threadId] ?? [];
         // The reload arm can race this POST's answer on the same turn.
         if (turnId && turns.some((t) => t.turnId === turnId)) return prev;
-        return { ...prev, [threadId]: [...turns, { turnId, queued: true }] };
+        // The desk travels with the row, from the caller that knows it. The map
+        // key can be a composite (`engineering#41`) and no desk is called that,
+        // so a row minted here without it left the settle poll unable to ask the
+        // host anything — the poll being the only delivery path when SSE is
+        // unavailable. `threadId` is the desk for callers whose key is not
+        // composite (`Conversation`), which is why it is the fallback rather
+        // than a parse of the key (CodeRabbit on #2044).
+        return {
+          ...prev,
+          [threadId]: [...turns, { turnId, queued: true, chatId: chatId ?? threadId }],
+        };
       });
       held.forEach((frame) => renderAgentReply(frame));
-      // The turn is now the openTurns row's job, not the receipt's — from a
-      // 202 the working row is armed above and takes over (issue #1934).
-      clearReceipt(threadId, gen);
+      // The receipt is NOT cleared here (issue #2021). The 202 hands the turn to
+      // the open-turn row, but that row alone is a strict downgrade — bare
+      // "Queued…"/"Working…" with no elapsed clock, no picked-up-by name, no 30s
+      // stall notice. Keeping the receipt alive lets it ride the turn through the
+      // queued/working window with every #1934 affordance intact; its own frames
+      // keep bumping it, and the poll's terminal settle clears it (see
+      // `reReadSettledThread`), so it still never outlives the turn.
     },
-    [renderAgentReply, clearReceipt],
+    [renderAgentReply],
   );
   /**
    * The chat POST **threw** — no body, nothing rendered by the view (#1000).
@@ -2547,21 +2588,27 @@ export function AppShell({
     (threadId: string, gen?: number) => {
       const held = pendingPostThreadsRef.current.failed(threadId);
       held.forEach((frame) => renderAgentReply(frame));
-      // The request died; the view has rendered its `Couldn't send` line. Drop
-      // the receipt so it does not tick on over a dead POST (issue #1934) — any
-      // durable turn re-armed below drives the working row instead.
-      clearReceipt(threadId, gen);
 
       // Discover whether the host kept the turn after the request died. The
       // throw tells us nothing, but the run rows do: a `pending`/`running` row
       // naming this thread means the turn is durable and worth polling to its
       // terminal `chat/history` re-read — the SSE-less recovery path.
+      //
+      // The receipt clear now waits on this answer (issue #2021). A durable turn
+      // survived the dead request, so keeping the receipt alive lets it ride
+      // that turn through the queued/working window with its #1934 affordances
+      // (elapsed, picked-up-by, 30s stall) rather than dropping to the bare
+      // open-turn row — the poll's settle clears it. Only when NO durable turn
+      // exists is the receipt dropped here, so it never ticks on over a POST the
+      // host genuinely never kept, with the view's `Couldn't send` standing alone.
       listRuns(client, company, { status: ["pending", "running"] })
         .then((runs) => {
           if (!mountedRef.current) return;
           // A company switch that happened while the request was in flight
           // invalidates the result: the rows belong to the old company and
-          // would restore a stale turn into the new company's openTurns map.
+          // would restore a stale turn into the new company's openTurns map. The
+          // switch already wholesale-cleared this company's receipts, so leave
+          // the map alone rather than clearing a slot the new company may own.
           if (
             scopeRef.current.company !== company ||
             scopeRef.current.connection !== scope.connection ||
@@ -2573,9 +2620,13 @@ export function AppShell({
           // each has a reply to deliver. The merge appends and collapses by id.
           const durable = open[threadId];
           if (durable) setOpenTurns((prev) => mergeOpenTurns(prev, { [threadId]: durable }));
+          else clearReceipt(threadId, gen);
         })
         .catch(() => {
-          /* host without /runs, or offline — nothing to re-arm */
+          // Host without /runs, or offline — nothing to re-arm, so nothing will
+          // ever settle the receipt. Drop it (generation-guarded) so it does not
+          // tick on over a dead POST.
+          clearReceipt(threadId, gen);
         });
     },
     [client, company, renderAgentReply, clearReceipt],
@@ -2724,6 +2775,13 @@ export function AppShell({
     [typing.typers, companyPeople],
   );
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
+    // The three kinds this folds. `use-events` only routes these here, so the
+    // guard is a type narrowing rather than a runtime filter — but it is stated
+    // rather than assumed, because `foldLiveFrame` takes the narrow shape and a
+    // cast would let a fourth kind through silently if that routing ever grew.
+    if (event.type !== "tool_call" && event.type !== "tool_result" && event.type !== "thinking") {
+      return;
+    }
     // Workflow agent-node frames carry `workflowRunId`/`nodeId` instead of a
     // `chatId` (issue #1702) and belong to the run-trace sheet's own
     // subscription, not to any chat timeline. Route them out BEFORE the legacy
@@ -2733,70 +2791,49 @@ export function AppShell({
     // Route by the frame's own thread id so concurrent turns (even from the same
     // desk member) never cross-attribute; fall back to the in-flight ref only
     // when a frame carries no chatId (older host / background turn).
-    const threadId =
+    const frameThreadId =
       ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
+    // …then through the shared resolver, which normalizes General spellings and
+    // leaves every other id in the host-thread namespace these maps are keyed
+    // in. Its doc carries the reasoning for both halves and for why an
+    // unresolved General alias falls back to `MAIN_THREAD_ID` rather than to
+    // its own spelling.
+    const threadId = frameThreadId
+      ? liveFrameThreadKey(chatChannelByThreadRef.current, frameThreadId)
+      : frameThreadId;
     if (!threadId) {
-      // No chat bubble to fold the frame into. A dispatched card streams
-      // nothing at all — `run_steered_background` runs with `LiveStream::Off` —
-      // so a chat-less frame here is a host emitting a shape this console does
-      // not render, and the Observatory's live re-read is instead driven by the
+      // No chat bubble to fold the frame into. A dispatched card raised from a
+      // conversation now DOES stream — `run_steered_background` derives its
+      // stream from the `origin_chat_id` the card carries — but it streams
+      // *keyed*, so those frames arrive with a `chatId` and take the branch
+      // above. What still reaches here is a card no conversation raised (a
+      // board-raised card, a cron tick): its chat id is absent or empty, the
+      // host resolves that to `LiveStream::Off`, and nothing is published. So a
+      // chat-less frame is a host emitting a shape this console does not
+      // render, and the Observatory's live re-read is instead driven by the
       // workflow node events in `onWorkflowRunEvent`.
       return;
     }
-    setLiveStepsByThread((prev) => {
-      const rows = prev[threadId] ? [...prev[threadId]] : [];
-      if (event.type === "tool_call") {
-        const idx = event.toolCallId
-          ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
-          : -1;
-        const row = {
-          kind: "tool_call" as const,
-          status: "running" as const,
-          label: event.label ?? "Working",
-          toolCallId: event.toolCallId,
-        };
-        if (idx >= 0) rows[idx] = { ...rows[idx], ...row };
-        else rows.push(row);
-      } else if (event.type === "tool_result") {
-        let idx = event.toolCallId
-          ? rows.findIndex((r) => r.toolCallId === event.toolCallId)
-          : -1;
-        if (idx < 0 && event.toolCallId) return prev;
-        if (idx < 0) idx = rows.findIndex((r) => r.status === "running");
-        const status = event.status === "error" ? ("error" as const) : ("ok" as const);
-        if (idx >= 0) {
-          rows[idx] = {
-            ...rows[idx],
-            status,
-            detail: event.detail ?? rows[idx].detail,
-            // `result` is what came back — the summary `StepTimeline` renders
-            // under the label. Carried for the same reason `detail` is: the
-            // live row and the folded step it is replaced by should not say
-            // different amounts about the same call. It was dropped here while
-            // only the built-in harness streamed (its rows lean on `detail`,
-            // derived from the arguments); an ACP tool call carries its
-            // summary in `result` and nothing else, so a dropped `result` is
-            // the whole of what the row could have said.
-            result: event.result ?? rows[idx].result,
-            elapsedMs: event.elapsedMs,
-          };
-        } else {
-          rows.push({
-            kind: "tool_call",
-            status,
-            label: event.label ?? "Working",
-            detail: event.detail,
-            result: event.result,
-            elapsedMs: event.elapsedMs,
-            toolCallId: event.toolCallId,
-          });
-        }
-      } else if (event.type === "thinking") {
-        // The backend already coalesces a thinking run into one frame, so each
-        // arrival is a distinct row (mirrors the folded "Thinking" step).
-        rows.push({ kind: "thinking", status: "ok", label: "Thinking" });
-      }
-      return { ...prev, [threadId]: rows };
+    // Which bucket this row belongs in. A frame that names the operator message
+    // it answers is filed under that **query**; one that does not falls back to
+    // the thread, which is every turn answering no journaled message and every
+    // host older than `messageSeq`.
+    //
+    // Filing under one or the other — never both — is what keeps a row from
+    // rendering twice, and is why arming a second turn can no longer clear the
+    // first one's rows: they are not in the same list any more.
+    const messageKey =
+      "messageSeq" in event && event.messageSeq !== undefined
+        ? hostMessageId(String(event.messageSeq))
+        : undefined;
+    const setRows = messageKey ? setLiveStepsByMessage : setLiveStepsByThread;
+    const rowKey = messageKey ?? threadId;
+    setRows((prev) => {
+      const rows = foldLiveFrame(prev[rowKey] ?? [], event);
+      // `null` is "this frame belongs to rows we do not hold" — keep the
+      // previous object so React skips the re-render.
+      if (!rows) return prev;
+      return { ...prev, [rowKey]: rows };
     });
     // Keep this thread's receipt alive off the same frame (issue #1934): a frame
     // arriving means the turn is advancing, so bump `lastFrameAt` (which clears
@@ -2857,6 +2894,7 @@ export function AppShell({
     approval: ApprovalSummary,
     verdict: Verdict,
     scope: GrantScope = { kind: "once" },
+    blocker?: { verdict: BlockerVerdict; answer?: string },
   ) => {
     if (decidingApprovals.has(approval.id)) return;
     ownApprovalDecisionsRef.current.add(approval.id);
@@ -2868,7 +2906,14 @@ export function AppShell({
       const answer = await client.resolveApproval(approval.id, verdict, undefined, company, {
         detach: true,
         scope,
+        blocker,
       });
+      // A blocker answers for its whole root-cause group. Each sibling the host
+      // settled is this tab's decision too, so its SSE echo must not surface as
+      // a second toast for a card the operator decided once (#1211).
+      for (const settled of answer.settledIds ?? []) {
+        ownApprovalDecisionsRef.current.add(settled);
+      }
       // Issue #1449: the same read the Approvals page makes, for the same
       // reason. This card detaches, so it gets a `ResolveReceipt` — which, until
       // #1449, had no shape at all for "the host default-denied this because the
@@ -2898,14 +2943,21 @@ export function AppShell({
       }
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
-        verdict === "approve"
-          ? approvedLine(answer.stillAwaiting)
-          : "Declined — recorded.",
+        blocker
+          ? blockerDecidedLine(blocker.verdict, undefined, answer.settledIds)
+          : verdict === "approve"
+            ? approvedLine(answer.stillAwaiting)
+            : "Declined — recorded.",
       );
       // A decline ends the thread's story, and silence would read as a stall.
       // An approve needs no line: the continuation lands as a real reply, which
       // is the whole point of deciding here.
-      if (verdict === "deny") {
+      if (blocker) {
+        noteInChannel(
+          approval.thread,
+          blockerDecidedLine(blocker.verdict, undefined, answer.settledIds),
+        );
+      } else if (verdict === "deny") {
         noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
       }
     } catch (err) {
@@ -3309,7 +3361,7 @@ export function AppShell({
             onSwitchCompany={onSwitchCompany}
             onBackToPicker={onBackToPicker}
             onCreateCompany={onCreateCompany}
-            canCreateCompany={client.carriesPlatformBearer}
+            canCreateCompany={canCreateCompanies(client)}
           />
         }
         overview={
@@ -3538,6 +3590,7 @@ export function AppShell({
           scopeRef={scopeRef}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
+              liveStepsByMessage={liveStepsByMessage}
               receiptByThread={receiptByThread}
               agentNames={agentNames}
               unread={unread}
@@ -3548,34 +3601,17 @@ export function AppShell({
               approvals={feed.approvals}
               chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
+              inflightRuns={inflightRuns}
+              onInflightSteered={refreshTaskStatuses}
               now={feed.now}
-              onDecideApproval={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecideApproval={(approval, verdict, scope, blocker) =>
+                void decideApproval(approval, verdict, scope, blocker)
               }
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
               budgetProximity={budgetProximity}
               onDismissBudgetProximity={() => setBudgetProximity(null)}
-            />
-          )}
-          {view === "conversation" && (
-            <Conversation
-              client={client}
-              company={company}
-              threads={threads}
-              activeId={activeThreadId}
-              onSelect={setActiveThreadId}
-              onThreadViewed={onThreadViewed}
-              setMessages={setThreadMessages}
-              onReply={() => void feed.refresh()}
-              taskEventTick={taskEventTick}
-              liveStepsByThread={liveStepsByThread}
-              onSendStart={onSendStart}
-              onSendEnd={onSendEnd}
-              onSendDetached={onSendDetached}
-              onSendFailed={onSendFailed}
-              openTurns={openTurns}
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
@@ -3602,16 +3638,19 @@ export function AppShell({
               deciding={decidingApprovals}
               decided={decidedApprovals}
               failed={failedApprovals}
-              onDecide={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecide={(approval, verdict, scope, blocker) =>
+                void decideApproval(approval, verdict, scope, blocker)
               }
-              // Issue #246: the card → chat half of the round trip. A card
-              // opened from a conversation remembers which one, so its detail
-              // screen can put the operator back in that thread.
-              onOpenThread={(threadId) => {
-                setActiveThreadId(threadId);
-                setView("conversation");
-              }}
+              // Issue #246: the card → chat half of the round trip. The card
+              // carries the host thread it was opened from; the map is what
+              // turns that into the Room channel rendering it, which is the
+              // whole address (`#/chat/<channelId>`) — so the destination is
+              // linkable and Back returns to the card. The row states the
+              // origin without offering a jump when no channel carries it.
+              chatChannelByThread={chatChannelByThread}
+              onOpenChannel={(channelId, threadId) =>
+                navigate("chat", channelId, { thread: threadId ?? null })
+              }
               // Back, and a deleted card, go to the board — which is the
               // `tasks` ledger. Through `navigate` so the address follows.
               onLeave={() =>
@@ -3693,8 +3732,8 @@ export function AppShell({
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
               failedApprovals={failedApprovals}
-              onDecideApproval={(approval, verdict, scope) =>
-                void decideApproval(approval, verdict, scope)
+              onDecideApproval={(approval, verdict, scope, blocker) =>
+                void decideApproval(approval, verdict, scope, blocker)
               }
               // The switcher's in-place wizard declared a new list — re-read
               // the shared list so it shows up in the menu (and Manage
@@ -3852,8 +3891,8 @@ export function AppShell({
                 decidingApprovals={decidingApprovals}
                 decidedApprovals={decidedApprovals}
                 failedApprovals={failedApprovals}
-                onDecideApproval={(approval, verdict, scope) =>
-                  void decideApproval(approval, verdict, scope)
+                onDecideApproval={(approval, verdict, scope, blocker) =>
+                  void decideApproval(approval, verdict, scope, blocker)
                 }
               />
             </Suspense>

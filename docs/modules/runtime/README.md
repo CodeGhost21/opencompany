@@ -84,13 +84,13 @@ above keeps its own spawn body — it wraps the same two steps in a schedule cla
 and a per-delivery log sweep that only make sense for a fire nobody is watching.
 
 `workflow_resume.rs` is what approving a paused `requires_approval` node
-actually does (issue #395). The engine **settles** a paused run rather than
-suspending it, so there is nothing to resume: the module reads the workflow id,
-node id and trigger input off the parked `workflow.approve` effect, unions the
-gate id into the input's `approvals` array, and starts a fresh supervised run.
-That makes it restart-durable for free — the parked card is self-contained, so
-journal replay is all a continuation needs — at the documented cost that
-upstream nodes re-execute. See
+actually does. Openhuman builds keep tinyflows checkpoints in a durable,
+per-company store and put the checkpoint thread id on the parked approval. A
+continuation resumes at that node boundary; completed nodes are replayed from
+the checkpoint and are not executed again. A clean terminal settle prunes the
+lineage. If the checkpoint is absent, corrupt, or unavailable, the same path
+falls back to the trigger-input re-run and records `reRunFromTrigger` in run
+history. See
 [`docs/spec/company-brain/approvals.md`](../../spec/company-brain/approvals.md).
 
 A blocked *agent node's* gated tool call (issue #1816/#1825) is a different

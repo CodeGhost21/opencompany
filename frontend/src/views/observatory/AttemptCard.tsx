@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { formatUsdCost } from "@/lib/cost";
 import { cn } from "@/lib/utils";
 import { formatDuration, relativeTime } from "@/views/workflows/run-health";
 import { stepTotal, type ObservatoryRun } from "@/api/observatory";
@@ -142,7 +143,7 @@ export function AttemptCard({ run, nowMs, turn, focusStep, onOpen }: Props) {
         )}
         {run.usage.costUsd > 0 && (
           <span className="text-muted-foreground hidden shrink-0 text-xs tabular-nums sm:inline">
-            ${run.usage.costUsd.toFixed(3)}
+            {formatUsdCost({ amountUsd: run.usage.costUsd }, "line")}
           </span>
         )}
       </button>

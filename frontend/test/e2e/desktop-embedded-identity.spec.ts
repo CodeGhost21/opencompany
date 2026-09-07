@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { openHostMenu } from "./host-switcher";
+
 
 /**
  * Issue #615 — one "This computer" row, however many times the app restarts.
@@ -255,8 +255,11 @@ test("a relaunch at a new port re-addresses the connection instead of adding one
 
   // And the row that survived is the working one: this status comes back from a
   // real request to the real host, through the console's own probe.
-  await openHostMenu(page);
-  await expect(page.getByTestId(`host-row-${first.id}`)).toHaveAttribute("data-status", "live", {
+  // Read off the closed trigger. The roster it used to be read from is hidden
+  // (`src/product-scope.ts`), but the trigger still reports the worst status
+  // across every host — with one row left, that IS this row's status, and it
+  // still comes back from a real probe of the real host.
+  await expect(page.getByTestId("host-switcher")).toHaveAttribute("data-worst-status", "live", {
     timeout: 30_000,
   });
 });

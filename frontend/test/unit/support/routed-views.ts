@@ -131,7 +131,6 @@ export const NAMED_BY: Record<View, Names> = {
    * each carries a `hidden` header so the page is named before a channel is.
    */
   chat: [{ handRolled: "chat/ChatHeader.tsx" }, { pageHeader: "ChatView.tsx" }],
-  conversation: [{ pageHeader: "Conversation.tsx" }],
   inbox: [{ pageHeader: "InboxView.tsx" }],
   /**
    * `#/tasks/<id>` is the card detail pane, not the board. A `pageHeader` leaf

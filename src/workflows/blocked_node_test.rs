@@ -704,6 +704,7 @@ mod pure {
             approval_ids: vec!["appr-1".to_string(), "appr-2".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         });
         assert!(notice.contains("parked 2 approvals"), "{notice}");
         assert!(
@@ -727,12 +728,67 @@ mod pure {
             approval_ids: Vec::new(),
             unparkable: 1,
             stranded: 0,
+            blockers: 0,
         });
         assert!(
             notice.contains("could not be queued for approval"),
             "{notice}"
         );
         assert!(!notice.contains("parked"), "{notice}");
+    }
+
+    /// **Issue #2028.** A node held open by a question must not promise the
+    /// automatic continue only a gated call earns: a blocker is answered with
+    /// one of four verdicts and two of them never run the step again. The
+    /// notice names the four from the shared fragment, so it cannot drift from
+    /// what the host actually accepts or from the diagnosis the run logs.
+    #[test]
+    fn a_blocker_node_offers_the_four_verdicts_instead_of_an_automatic_continue() {
+        let notice = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+            node_id: "draft".to_string(),
+            tools: Vec::new(),
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+            stranded: 0,
+            blockers: 1,
+        });
+        assert!(
+            !notice.contains("continues on its own"),
+            "answering a question does not continue the run by itself: {notice}"
+        );
+        assert!(
+            notice.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "all four verdicts are reachable, so all four have to be named: {notice}"
+        );
+
+        let mixed = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+            node_id: "draft".to_string(),
+            tools: vec!["publish_artifact".to_string()],
+            approval_ids: vec!["appr-1".to_string(), "appr-2".to_string()],
+            unparkable: 0,
+            stranded: 0,
+            blockers: 1,
+        });
+        assert!(
+            mixed.contains("continues this run on its own")
+                && mixed.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "a mixed node has to describe both, since neither sentence is true of all of it: \
+             {mixed}"
+        );
+
+        let gated = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+            node_id: "draft".to_string(),
+            tools: vec!["publish_artifact".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+            stranded: 0,
+            blockers: 0,
+        });
+        assert!(
+            gated.contains("continues on its own")
+                && !gated.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "a gated call really does resume on approval, and has no verdicts to choose: {gated}"
+        );
     }
 
     /// A `WorkflowRun` written before either field existed still loads — the

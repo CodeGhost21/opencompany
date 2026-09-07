@@ -34,6 +34,9 @@ Supporting docs:
     applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
+  - [memory-engine-cortex.md](memory-engine-cortex.md) — the hosted-Cortex
+    design record for #1936, with its measurements split into
+    [memory-engine-cortex-evidence.md](memory-engine-cortex-evidence.md)
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
     and two processes wanting the same directory
   - [offline.md](offline.md) — running with no network at all: the documented
@@ -42,6 +45,14 @@ Supporting docs:
   - [analytics.md](analytics.md) — what the product reports about its own use:
     hosted tenants only, an opaque id, shape-and-outcome payloads that cannot
     structurally carry content, and how to turn it off
+  - [crash-reporting.md](crash-reporting.md) — errors and panics sent to a
+    Sentry project the **operator** owns: the two DSNs, what a report carries,
+    the credential scrubber that runs in every build (not only in a reporting
+    one), and the two ways to prove it is working
+  - [tracing.md](tracing.md) — the timeline half: the performance-tracing
+    sample rates and what a rate costs in Sentry quota, the console-to-host
+    distributed trace, why a transaction is scrubbed at the transport rather
+    than in a `before_send`, and why Session Replay is evaluated and declined
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress

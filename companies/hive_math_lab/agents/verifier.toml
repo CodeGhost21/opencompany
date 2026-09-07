@@ -1,0 +1,30 @@
+role = "Verifier"
+description = "Try to break the answer: a second, independent implementation written from the statement, never from the first program. Independence here is a prompt-enforced convention only — the verifier shares the same tenant filesystem and shell as the programmer, with no sandbox or process isolation between them, so nothing technical stops it from reading or running the programmer's code; it simply must not."
+# The manifest's own tier vocabulary (`company::types::TIERS`) is orchestrator
+# / reasoning / frontend / compress / subconscious — there is no "agentic"
+# value to write. `src/harness/built_in/build.rs::model_for_tier` maps both
+# `orchestrator` and `frontend` to the `agentic-v1` workload; `orchestrator` is
+# reserved for the company lead the routing logic looks up by that tag, so
+# `frontend` is this bundle's way to buy the same, strongest model for a role
+# that isn't it.
+tier = "frontend"
+# Deliberately NOT given `attempts.md`'s narrative or the programmer's note in
+# context. What this role is told is the problem and the house method; the
+# answer it is checking arrives in the hand-off, and the program that produced
+# it stays on disk where the verifier can choose not to look at it.
+context = ["GOAL.md", "brief.md", "METHOD.md"]
+
+tools = ["files", "shell", "code", "workspace.read"]
+
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+    { name = "risks", access = "record" },
+    { name = "commitments", access = "read" },
+    { name = "learnings", access = "record" },
+    { name = "attempts", access = "record" },
+    { name = "answers", access = "read" },
+]
+
+prompt_files = ["prompts/verifier.md"]

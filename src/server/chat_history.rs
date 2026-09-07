@@ -1203,6 +1203,7 @@ mod test {
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -1526,6 +1527,7 @@ mod test {
             at(
                 2,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -1727,6 +1729,7 @@ mod test {
             at(
                 13,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: Some(EventSeq::new(4)),
@@ -1974,6 +1977,7 @@ mod test {
             at(
                 seq,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     chat_id: "engineering".to_string(),
@@ -2316,6 +2320,7 @@ mod test {
 mod dead_card_test {
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
     use crate::ports::types::CompanyId;
     use crate::runtime::RuntimeBuilder;
@@ -2329,14 +2334,13 @@ mod dead_card_test {
     fn card(id: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Draft the launch note".to_string(),
+            title: TaskTitle::authored("Draft the launch note"),
             note: None,
             column: COLUMN_TODO.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -2345,6 +2349,7 @@ mod dead_card_test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }
@@ -2352,6 +2357,7 @@ mod dead_card_test {
     /// A reply that opened a card, exactly as the dispatch path journals it.
     fn reply_naming(task_id: &str) -> CompanyEvent {
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -2486,6 +2492,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2533,6 +2540,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2550,6 +2558,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2618,6 +2627,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2635,6 +2645,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2687,6 +2698,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2704,6 +2716,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2768,6 +2781,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -2785,6 +2799,7 @@ mod dead_card_test {
             .append(
                 &id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,

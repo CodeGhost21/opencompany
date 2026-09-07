@@ -68,6 +68,7 @@
 //! migration surface is ever added, it must carry its own operator-auth and
 //! per-tenant scoping; do not lift this function onto a route as-is.
 
+pub mod cortexdb;
 pub mod driver;
 pub mod facades;
 pub mod migrate;

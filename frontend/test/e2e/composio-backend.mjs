@@ -26,7 +26,9 @@
 //
 //   GET  /healthz     → readiness, for `playwright.config.ts`'s webServer wait
 //   GET  /__executes  → every execute body seen, oldest first
-//   POST /__reset     → forget them, and restore the seed connection list
+//   POST /__delay     → how long the catalog route takes to answer
+//   POST /__catalog   → which toolkits this backend publishes
+//   POST /__reset     → forget them, and restore the seed connections, catalog and delay
 //
 // # What it deliberately does not do
 //
@@ -77,6 +79,60 @@ const seedConnections = () => [
 /** The connections this company holds right now. */
 let connections = seedConnections();
 
+/**
+ * How long the catalog route takes to answer, in milliseconds.
+ *
+ * The host bounds its own catalog fetch (`composio_toolkits::FETCH_TIMEOUT`) and
+ * degrades to a flagged fallback when that budget runs out. A spec about what
+ * the console does with a slow or degraded catalog has to be able to *produce*
+ * that state, and the only honest way is to make this route actually slow —
+ * scripting the host's answer instead would assert against a shape nobody
+ * proved the host still emits.
+ *
+ * Zero by default, so every existing spec is unaffected. Set through
+ * `POST /__delay`, cleared by `POST /__reset` along with everything else this
+ * process carries between specs.
+ */
+let toolkitsDelayMs = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The catalog this backend publishes, as the seed serves it.
+ *
+ * A separate function rather than a constant for the same reason
+ * `seedConnections` is one: `POST /__catalog` replaces the live value, and a
+ * spec that did so must be able to hand the next spec the original back.
+ */
+const seedCatalog = () => [
+  {
+    slug: "gmail",
+    name: "Gmail",
+    enabled: true,
+    description: "Send and read email.",
+    categories: ["email"],
+  },
+  {
+    slug: "slack",
+    name: "Slack",
+    enabled: true,
+    description: "Post messages to channels.",
+    categories: ["communication"],
+  },
+];
+
+/**
+ * The catalog this backend publishes right now.
+ *
+ * Replaceable because a Composio *credential* is what decides which catalog a
+ * company gets: rotating a token can resolve a different Composio account, with
+ * a different set of integrations behind it. That is the entire reason the host
+ * evicts its cached catalog on a token write, and a spec cannot show the console
+ * picked up a re-read unless the answer it re-reads is distinguishable from the
+ * one it already had.
+ */
+let catalog = seedCatalog();
+
 /** Every `POST …/execute` body this process has seen, oldest first. */
 const executes = [];
 
@@ -111,8 +167,22 @@ const server = createServer(async (req, res) => {
     return res.end(JSON.stringify(executes));
   }
 
+  if (path === "/__catalog" && req.method === "POST") {
+    const body = await readBody(req);
+    catalog = Array.isArray(body.catalog) ? body.catalog : seedCatalog();
+    return ok(res, { catalog });
+  }
+
+  if (path === "/__delay" && req.method === "POST") {
+    const body = await readBody(req);
+    toolkitsDelayMs = Number(body.toolkitsMs) || 0;
+    return ok(res, { toolkitsMs: toolkitsDelayMs });
+  }
+
   if (path === "/__reset" && req.method === "POST") {
     executes.length = 0;
+    toolkitsDelayMs = 0;
+    catalog = seedCatalog();
     // The connection list is state this server changes too. Resetting only the
     // execute log would leave a spec that disconnected an account deciding what
     // every later spec in the process sees — a failure that surfaces in a spec
@@ -122,24 +192,10 @@ const server = createServer(async (req, res) => {
   }
 
   if (path === "/agent-integrations/composio/toolkits") {
+    if (toolkitsDelayMs > 0) await sleep(toolkitsDelayMs);
     return ok(res, {
-      toolkits: ["gmail", "slack"],
-      catalog: [
-        {
-          slug: "gmail",
-          name: "Gmail",
-          enabled: true,
-          description: "Send and read email.",
-          categories: ["email"],
-        },
-        {
-          slug: "slack",
-          name: "Slack",
-          enabled: true,
-          description: "Post messages to channels.",
-          categories: ["communication"],
-        },
-      ],
+      toolkits: catalog.map((entry) => entry.slug),
+      catalog,
     });
   }
 

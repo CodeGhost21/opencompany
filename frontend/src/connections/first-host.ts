@@ -31,6 +31,10 @@ export interface FirstHostCopy {
    * "add a host from the switcher above", which names a control instead of
    * being one. A dead end that describes its own exit is still a dead end —
    * and on the hub it was describing the exit from a different building.
+   *
+   * The desktop's is an action, not a choice: one machine runs one host, so
+   * "where should this run" has a single answer there. The hub still chooses,
+   * because a hub runs none and the answer is genuinely elsewhere.
    */
   action: string;
 }
@@ -45,9 +49,8 @@ export function firstHostCopy(desktop: boolean): FirstHostCopy {
       title: "No host to show",
       body:
         "The host on this computer didn't start — another copy of OpenCompany may be " +
-        "holding its data. Quit the other copy and reopen this one, or run your company " +
-        "somewhere else.",
-      action: "Choose where to run",
+        "holding its data. Quit the other copy, then start it again.",
+      action: "Start the host on this computer",
     };
   }
   return {

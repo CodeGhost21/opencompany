@@ -1,0 +1,80 @@
+# Faults, and what was actually done about them.
+#
+# The MCP server holds the live incident list and closes an incident when a
+# machine is serviced. This ledger is the half the server cannot keep: the
+# pattern. One jam is an event; VM-301 jamming four times in a month is a
+# machine that needs replacing, and nothing in a list of open incidents will
+# ever say so.
+
+title = "Incidents"
+purpose = """
+Every fault worth remembering after it was fixed: what it was, what it cost, \
+what was done, and whether it has happened before at that machine.\
+"""
+written_by = "`record_entry` when a fault is diagnosed, `close_entry` once it is resolved and the cost is known"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "The incident id from the fleet, e.g. `INC-0012`."
+
+[[field]]
+name = "fault"
+role = "title"
+required = true
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "machine"
+required = true
+
+[[field]]
+name = "opened_day"
+role = "date"
+required = true
+
+[[field]]
+name = "cost_estimate"
+description = "What it cost while open — lost sales, spoiled stock — in cents. An incident with no cost attached is one nobody will prioritise."
+
+[[field]]
+name = "recurrence"
+role = "prose"
+description = "Whether this machine has done this before, and when. The field this ledger exists for."
+
+[[field]]
+name = "resolution"
+role = "prose"
+
+[[status]]
+name = "open"
+
+[[status]]
+name = "diagnosed"
+
+[[status]]
+name = "resolved"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "accepted"
+closed = true
+needs_reason = true
+description = "Known, not being fixed, and someone said why."
+
+[[section]]
+heading = "Open"
+statuses = ["open", "diagnosed"]
+order = "recent"
+
+[[section]]
+heading = "Closed"
+statuses = ["resolved", "accepted"]
+order = "recent"

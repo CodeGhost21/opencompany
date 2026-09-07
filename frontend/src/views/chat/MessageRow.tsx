@@ -1,7 +1,7 @@
 import { MessageSquareReply } from "lucide-react";
 
 import type { TaskStatus } from "@/api/tasks";
-import type { CognitionState } from "@/api/types";
+import type { CognitionState, TurnStep } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -28,6 +28,21 @@ import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
   entry: TimelineEntry;
+  /**
+   * The live tool rows of a turn answering **this** message, while it runs.
+   *
+   * A settled turn's steps render under its reply, from `message.steps`. Until
+   * the reply exists there is nothing to hang them on, so a running turn's rows
+   * used to go to one per-thread strip at the foot of the channel — which meant
+   * two questions asked at once shared a single timeline, and arming the second
+   * turn cleared the first one's rows.
+   *
+   * Rendered through the same collapsed {@link StepTimeline} the settled steps
+   * use, so a turn looks the same while it runs as it does once it is done.
+   * Absent for a turn whose frames carry no `messageSeq`, which still uses the
+   * thread strip.
+   */
+  liveSteps?: readonly TurnStep[];
   /** True when the thread panel is showing this row's replies. */
   threadOpen: boolean;
   onOpenThread: (messageId: string) => void;
@@ -36,6 +51,14 @@ interface Props {
   onDismissCard: (taskId: string) => void;
   /** The card whose delete is in flight, if any. */
   dismissingCardId: string | null;
+  /**
+   * Settles the in-review dispatch card a settle pill links to: the operator's
+   * Approve control on the finished card's pill. Absent when the shell has not
+   * wired review — the pill still renders.
+   */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Every card whose review verdict is in flight, if any. */
+  reviewingCardIds?: ReadonlySet<string>;
   /**
    * Resolves an attachment's bytes to an object URL for preview/download
    * (issue #1682). Threaded from the shell, which holds the authenticated
@@ -105,7 +128,43 @@ interface Props {
    * with the whole channel's history) and passed straight through.
    */
   latestBudgetPauseMessageIdByAgent?: Map<string, string>;
+  /**
+   * This row's channel is the read-only Operator feed (issue #1986) — the same
+   * `Boolean(channel.system)` predicate `ChatView` derives `readOnly` from, and
+   * that `MessageTimeline`'s channel intro already reads off the channel
+   * directly.
+   *
+   * The operator's ruling on the question #1986 was opened to settle:
+   * **reactions are not allowed on a read-only feed.** Reacting writes into the
+   * company's transcript exactly as sending does — the host authorizes it
+   * through the very same gate (`chat_actor`, `src/server/operator.rs`, whose
+   * own doc says reacting "can be neither easier nor harder than saying
+   * something") — so a surface that states "there is nothing to reply to here"
+   * must not offer it either. The members pane has been gated on this flag
+   * since #1757 and the composer is removed outright by #1984; the hover
+   * toolbar's quick reactions were the last interactive affordance left.
+   *
+   * What this does **not** do is hide reactions that are already there. A
+   * reaction someone left is content, and this feed is the only record of it —
+   * dropping it would lose information rather than withdraw an offer. Existing
+   * chips still render, with the tooltip saying why they no longer toggle; only
+   * the ability to *add* one goes.
+   *
+   * Absent/false everywhere else, which is every ordinary channel and DM.
+   */
+  readOnly?: boolean;
 }
+
+/**
+ * Why a reaction cannot be added on a read-only channel (issue #1986).
+ *
+ * A sentence rather than a boolean, for the same reason
+ * {@link actionsUnavailableFor} is one: it is the tooltip left on the chips
+ * that stay on screen but no longer toggle, and a control that silently stops
+ * working reads as a bug.
+ */
+const READ_ONLY_REACTION_REASON =
+  "This channel is a read-only feed — reactions cannot be added here.";
 
 /**
  * Whether a card-linked reply still represents background work (#1758).
@@ -120,6 +179,15 @@ interface Props {
 export function isTaskWorking(status: TaskStatus | undefined): boolean {
   if (!status) return false;
   return status.startedAt !== undefined || IN_FLIGHT_COLUMNS.includes(status.column);
+}
+
+/**
+ * Whether a settle pill's linked card is still sitting in review — the one
+ * state its Approve control is offered in. A card already approved, re-running
+ * after feedback, or never settled shows no verdict button.
+ */
+export function isTaskInReview(status: TaskStatus | undefined): boolean {
+  return status?.column === "in_review";
 }
 
 /** The requested stable elapsed sentence, or nothing without a run clock. */
@@ -166,11 +234,14 @@ function actionsUnavailableFor(message: ChatMessage): string | undefined {
  */
 export function MessageRow({
   entry,
+  liveSteps,
   threadOpen,
   onOpenThread,
   onReact,
   onDismissCard,
   dismissingCardId,
+  onReviewCard,
+  reviewingCardIds,
   resolveAttachmentUrl,
   taskStatusByTaskId,
   now = Date.now(),
@@ -178,10 +249,23 @@ export function MessageRow({
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
+  readOnly,
 }: Props) {
-  const { message, sender, continuation, replies } = entry;
+  const { message, sender, continuation, replies, isLatestSettlePill } = entry;
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
+  // Issue #1986. Separate from `actionsUnavailable` on purpose: that one speaks
+  // for the *row* — a line the host has not journaled can be neither replied to
+  // nor reacted to — while read-only speaks for the *channel* and takes only
+  // reacting away. Opening a thread on an Operator report to read the replies
+  // under it stays available; it is `ThreadPanel` that answers what may be
+  // written there (#1757, #1984), and this must not quietly withdraw the way in.
+  //
+  // The row's own reason wins where both apply: "not saved yet" is the more
+  // specific fact, and it is the one that would still be true in a writable
+  // channel.
+  const reactionsUnavailable =
+    actionsUnavailable ?? (readOnly ? READ_ONLY_REACTION_REASON : undefined);
   const taskStatus = message.taskId ? taskStatusByTaskId?.[message.taskId] : undefined;
   const taskWorking = isTaskWorking(taskStatus);
   const elapsed = taskWorking ? taskElapsedLabel(taskStatus?.startedAt, now) : null;
@@ -190,6 +274,10 @@ export function MessageRow({
     return (
       <SystemPill
         message={message}
+        reviewInFlight={message.taskId !== undefined && (reviewingCardIds?.has(message.taskId) ?? false)}
+        onReviewCard={
+          isTaskInReview(taskStatus) && isLatestSettlePill !== false ? onReviewCard : undefined
+        }
         onRedeemBudgetPause={onRedeemBudgetPause}
         redeemingBudgetPauseAgent={redeemingBudgetPauseAgent}
         latestBudgetPauseMessageIdByAgent={latestBudgetPauseMessageIdByAgent}
@@ -248,6 +336,11 @@ export function MessageRow({
         )}
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
+        {/* The running turn this message asked for. Opens by default: unlike a
+            settled turn's steps — which sit behind a count because the answer
+            above them is what the reader came for — there is no answer yet, and
+            these rows are the only account of what is happening. */}
+        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
         {message.taskId && (
           <div className="flex flex-wrap items-center gap-2">
             <CardChip
@@ -275,7 +368,7 @@ export function MessageRow({
         {chips.length > 0 && (
           <Reactions
             chips={chips}
-            disabledReason={actionsUnavailable}
+            disabledReason={reactionsUnavailable}
             onReact={(e) => onReact(message.id, e)}
           />
         )}
@@ -306,6 +399,7 @@ export function MessageRow({
         onReact={(emoji) => onReact(message.id, emoji)}
         reacted={(emoji) => hasReacted(message.reactions, emoji)}
         disabledReason={actionsUnavailable}
+        offersReactions={!readOnly}
       />
     </article>
   );
@@ -332,11 +426,21 @@ export function MessageRow({
  */
 function SystemPill({
   message,
+  onReviewCard,
+  reviewInFlight,
   onRedeemBudgetPause,
   redeemingBudgetPauseAgent,
   latestBudgetPauseMessageIdByAgent,
 }: {
   message: ChatMessage;
+  /**
+   * Approves the in-review card this pill links to. Passed only when the linked
+   * card is still in review — so its presence is itself the gate the button
+   * renders behind.
+   */
+  onReviewCard?: (taskId: string, decision: "approve" | "revise") => void;
+  /** Whether this card's verdict is already in flight. */
+  reviewInFlight?: boolean;
   // Issue #1846 review (Codex #3868962374): carries `message.id` alongside
   // the agent id, so the caller can bind the redeem to the SPECIFIC marker
   // this card was rendered from — see `ChatView.redeemBudgetPause`'s doc for
@@ -362,17 +466,31 @@ function SystemPill({
     );
   }
 
+  const taskId = message.taskId;
+  const reviewable = taskId !== undefined && onReviewCard !== undefined;
+
   return (
-    <div className="flex justify-center px-4 py-1">
-      {message.taskId ? (
+    <div className="flex flex-wrap items-center justify-center gap-2 px-4 py-1">
+      {taskId ? (
         <a
-          href={`#/tasks/${encodeURIComponent(message.taskId)}`}
+          href={`#/tasks/${encodeURIComponent(taskId)}`}
           className={cn(className, "transition-opacity hover:opacity-80 hover:underline")}
         >
           {message.text}
         </a>
       ) : (
         <p className={className}>{message.text}</p>
+      )}
+      {reviewable && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-xs"
+          disabled={reviewInFlight}
+          onClick={() => onReviewCard(taskId, "approve")}
+        >
+          {reviewInFlight ? "Approving…" : "Approve"}
+        </Button>
       )}
     </div>
   );
@@ -469,6 +587,7 @@ function ActionBar({
   onReact,
   reacted,
   disabledReason,
+  offersReactions,
 }: {
   onReply: () => void;
   onReact: (emoji: string) => void;
@@ -476,29 +595,50 @@ function ActionBar({
   reacted: (emoji: string) => boolean;
   /** Why both actions are unavailable, shown as the tooltip when they are. */
   disabledReason?: string;
+  /**
+   * Whether this channel accepts a new reaction at all (issue #1986).
+   *
+   * `false` on the read-only Operator feed, and the quick-reaction buttons and
+   * the divider beside them are then **absent**, not disabled — the same answer
+   * #1984 gave the composer, for the same reason. A greyed-out emoji row that
+   * appears on hover is still a claim that reacting is a thing you do here,
+   * offered under a notice saying there is nothing to reply to. This strip is
+   * revealed by CSS alone (`group-hover/message:flex`), so leaving the buttons
+   * in the DOM would leave them reachable by pointer, by keyboard focus and by
+   * a screen reader; removing them is what actually withdraws the offer.
+   *
+   * The reply button stays either way. A thread on an Operator report is still
+   * worth *reading*, and what may be written in one is `ThreadPanel`'s question
+   * (#1757, #1984), already answered there.
+   */
+  offersReactions: boolean;
 }) {
   const disabled = !!disabledReason;
   return (
     <div className="absolute -top-3 right-4 z-10 hidden items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-sm group-hover/message:flex group-focus-within/message:flex">
-      {QUICK_REACTIONS.map((emoji) => (
-        <button
-          key={emoji}
-          type="button"
-          disabled={disabled}
-          onClick={() => onReact(emoji)}
-          title={disabledReason}
-          aria-pressed={reacted(emoji)}
-          className={cn(
-            "flex size-7 items-center justify-center rounded-md text-sm transition-colors hover:bg-accent",
-            reacted(emoji) && "bg-primary/10",
-            disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
-          )}
-          aria-label={`React with ${emoji}`}
-        >
-          <span aria-hidden>{emoji}</span>
-        </button>
-      ))}
-      <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
+      {offersReactions && (
+        <>
+          {QUICK_REACTIONS.map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              disabled={disabled}
+              onClick={() => onReact(emoji)}
+              title={disabledReason}
+              aria-pressed={reacted(emoji)}
+              className={cn(
+                "flex size-7 items-center justify-center rounded-md text-sm transition-colors hover:bg-accent",
+                reacted(emoji) && "bg-primary/10",
+                disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
+              )}
+              aria-label={`React with ${emoji}`}
+            >
+              <span aria-hidden>{emoji}</span>
+            </button>
+          ))}
+          <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
+        </>
+      )}
       <Button
         variant="ghost"
         size="icon"

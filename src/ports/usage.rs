@@ -70,6 +70,10 @@ pub enum SampleKind {
     /// company plan indefinitely after its tier budget was exhausted, which is
     /// exactly the leak the tier exists to close.
     PlanningCall,
+    /// One tool-less sufficiency judgment after a workflow node's deterministic
+    /// postcondition passes (issue #1866). The company owns this call; it is not
+    /// part of the agent turn and has no run-row attribution.
+    JudgeCall,
     /// One completed triage escalation — the tool-less model call an operator
     /// message makes when the lexical classifier abstained (issue #678).
     ///
@@ -103,6 +107,23 @@ pub enum SampleKind {
     /// leak: selection is per-message spend, so a company past its ceiling
     /// must not keep paying to route.
     SelectorCall,
+    /// One completed card-titling pass — the single tool-less model call that
+    /// names the work a request asks for.
+    ///
+    /// Charged to the whole-company bucket with no `run_id`, on
+    /// [`SampleKind::TriageCall`]'s exact terms: the pass runs while a card is
+    /// being opened, before any teammate has been handed it, so there is no
+    /// agent whose budget it could belong to.
+    ///
+    /// Its own kind rather than folded into `TriageCall` because the two are
+    /// driven by different things — triage by every abstained-on message,
+    /// titling only by messages that become cards — so a shared kind would move
+    /// the triage line whenever the board got busier, and neither number could
+    /// be tuned against the other.
+    ///
+    /// Counts toward the capability-tier token budget: it is per-card spend a
+    /// company past its ceiling must stop paying.
+    TitleCall,
     /// One completed first-run setup pass — the single tool-less model call
     /// that turns three answers into a starting roster
     /// (`docs/spec/runtime/company-setup.md`).

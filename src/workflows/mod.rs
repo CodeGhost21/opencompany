@@ -32,6 +32,7 @@ mod blocked_node_test;
 #[cfg(test)]
 mod board_turn_test;
 pub mod caps;
+pub mod checkpoint_store;
 pub mod delivery;
 /// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes
 /// stop for an operator, before the run reaches them.
@@ -44,6 +45,8 @@ mod gated_tool_call_test;
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #1866: one tool-less semantic sufficiency pass after deterministic checks.
+pub mod judge;
 /// Issue #978: a run that fans out to N gated nodes is cleared by approving,
 /// not multiplied by it — the composition of #395, #243 and #469 that each of
 /// their own suites is blind to.
@@ -60,6 +63,7 @@ pub mod translate;
 /// Issue #1098: a scheduled workflow granted a standing permission stops
 /// re-asking on every run — two runs, because a single-run test cannot see it.
 pub use caps::{HarnessAgentRunner, build_capabilities};
+pub use checkpoint_store::WorkflowCheckpointStore;
 pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs, deliver_outputs_dry};
 pub use runner::{HarnessWorkflowRunner, run_workflow};
 pub use translate::translate;

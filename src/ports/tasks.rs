@@ -939,14 +939,414 @@ pub struct TaskWorkflowProposal {
     pub run_id: String,
 }
 
+/// The conversation a card was raised in: a desk, and the thread within it.
+///
+/// One value because the two halves must agree. See
+/// [`TaskRecord::origin`] for the drift that made this a type rather than a
+/// pair of fields.
+///
+/// A **stand-in for the stored half** of `tinyhivemind`'s `Conversation`, not
+/// the same record: that one carries `desk_id` *and* `desk_name`, because a
+/// message can be journaled under either spelling and a reader matching only
+/// one loses the rest — the defect #1972's review found in the settled-work
+/// briefing. A card stores the single spelling it was addressed by, and a
+/// reader resolves both through `chat_history`. If the vendored crate ever
+/// lands (`docs/specs/thread-scoped-conversations.md`), this is the field that
+/// should hold its `Conversation` rather than a second definition of one.
+///
+/// Field names are the wire names the two fields already used, and this is
+/// `#[serde(flatten)]`ed into its holder, so adopting it costs no migration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOrigin {
+    /// The desk or chat the raising turn was addressed to.
+    ///
+    /// Required: a thread root without a desk names no conversation, which is
+    /// precisely the state the two loose fields could reach.
+    pub origin_chat_id: String,
+    /// The thread within that desk, or `None` for the channel-level
+    /// conversation.
+    ///
+    /// **`None` is the channel, not a gap.** The channel is where every
+    /// unparented line hangs — which is every line in a company that has never
+    /// opened a thread — so a card raised straight into a channel carries
+    /// `None` and settles exactly where it settled before threads existed.
+    ///
+    /// **One level deep**, like every thread here: an operator message's own
+    /// `parent` *is* its root (a reply is parented to its question's parent,
+    /// never to the question), so the raising turn's root is what gets stamped
+    /// and there is no chain to walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_parent: Option<EventSeq>,
+}
+
+impl TaskOrigin {
+    /// Build an origin from a desk and a thread root, if there is a desk.
+    ///
+    /// The single constructor every stamping site goes through, so "which
+    /// conversation did this card come from" has exactly one answer.
+    #[must_use]
+    pub fn new(chat_id: Option<String>, thread_root: Option<EventSeq>) -> Option<Self> {
+        chat_id.map(|origin_chat_id| Self {
+            origin_chat_id,
+            origin_parent: thread_root,
+        })
+    }
+}
+
+/// How many characters of a card title survive.
+pub const TASK_TITLE_MAX_CHARS: usize = 80;
+
+/// A card's headline: one short line naming the work to be done.
+///
+/// # Why this is a type and not a `String`
+///
+/// The contract — a short imperative name — was documented on the field and
+/// enforced by nothing, so each producer minted its own and three independently
+/// converged on the same shape: take the raw message, cut it at eighty
+/// characters. A board of those reads as a chat log. A bare `String` field gives
+/// the next producer the same freedom, which is why the fix is a type rather
+/// than a patch to the three truncators.
+///
+/// Every way in is a constructor named for **where the text came from**, and all
+/// of them run the same [`normalise`] pass: one line, no wrapping quotes or
+/// backticks, no markdown emphasis, no `Task:`-style preamble, no trailing
+/// sentence punctuation, bounded length. Shape is therefore total — no
+/// `TaskTitle` anywhere in the process can be a paragraph, and no `From<String>`
+/// or `From<&str>` impl exists to smuggle one in.
+///
+/// # What the type does not promise
+///
+/// Shape is checkable; *being a good name for the work* is not. That comes from
+/// the producer picking the right constructor, and the naming is the guardrail:
+/// a raw ask goes through [`summarised`](Self::summarised) with
+/// [`truncated`](Self::truncated) behind it, never through
+/// [`authored`](Self::authored).
+///
+/// # Stored titles are read back verbatim
+///
+/// `Deserialize` is transparent: a board written by an older build loads exactly
+/// as it was stored, raw-message titles included. Normalising on read would
+/// silently rewrite durable records, and re-summarising would cost a model call
+/// per card per load and make the board unstable between refreshes. The
+/// invariant is enforced where new titles enter, which is where the defect
+/// entered.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskTitle(String);
+
+impl TaskTitle {
+    /// A title a person typed for themselves.
+    ///
+    /// Authoritative: the console's create and edit dialogs and a `tasks.toml`
+    /// seed all land here, and nothing may re-word what they carry.
+    #[must_use]
+    pub fn authored(text: &str) -> Self {
+        Self(normalise(text))
+    }
+
+    /// A title that arrived as a structured title *field* rather than as prose
+    /// — a published file's name, a workflow's name, or the `title` argument of
+    /// a `spawn_task` tool call the model filled in deliberately.
+    ///
+    /// Already a name, whoever wrote it, so there is nothing for a summarising
+    /// pass to improve. This is the constructor for text that was **meant as a
+    /// title when it was written**; free text that merely gets used as one goes
+    /// to [`mint_task_title`].
+    #[must_use]
+    pub fn system(text: &str) -> Self {
+        Self(normalise(text))
+    }
+
+    /// A title a model wrote for a request.
+    ///
+    /// `None` when the reply has nothing nameable in it — an empty string, pure
+    /// punctuation, a refusal — which is the caller's signal to fall back to
+    /// [`truncated`](Self::truncated) rather than to leave a card unnamed.
+    ///
+    /// # Why this test lives here and not in [`normalise`]
+    ///
+    /// It was in `normalise` for one commit, which put it on every constructor
+    /// — and a person who titles a card `🚀` or `---` means it. Those are not
+    /// junk, they are somebody's title, and blanking them persisted a card with
+    /// no headline at all: worse than the punctuation title this check exists
+    /// to prevent. Only a *model's* reply is guessed at, so only a model's
+    /// reply can be rejected as unusable (codex on #2055).
+    #[must_use]
+    pub fn summarised(reply: &str) -> Option<Self> {
+        let title = normalise(reply);
+        title
+            .chars()
+            .any(char::is_alphanumeric)
+            .then_some(Self(title))
+    }
+
+    /// The deterministic fallback: the request itself, shortened.
+    ///
+    /// What every card was named before, kept because a dull title is better
+    /// than a failed card creation. Reached only when no model is configured or
+    /// the summarising pass could not answer in its budget.
+    #[must_use]
+    pub fn truncated(request: &str) -> Self {
+        Self(normalise(request))
+    }
+
+    /// The headline as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether this names nothing — the empty title an empty request produces.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for TaskTitle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for TaskTitle {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TaskTitle {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for TaskTitle {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for TaskTitle {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for TaskTitle {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<TaskTitle> for str {
+    fn eq(&self, other: &TaskTitle) -> bool {
+        self == other.0
+    }
+}
+
+impl PartialEq<TaskTitle> for &str {
+    fn eq(&self, other: &TaskTitle) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<TaskTitle> for String {
+    fn eq(&self, other: &TaskTitle) -> bool {
+        *self == other.0
+    }
+}
+
+/// Names the work a request asks for.
+///
+/// A port rather than a harness type because three of the four card-opening
+/// paths live outside the `openhuman` build — the REST chat handler, the
+/// desk hand-off tool, and the board's own create route — and every one of them
+/// mints a title from free text. A trait only the harness could name would have
+/// left them on the truncator that caused this.
+///
+/// The only implementation is the harness's metered titling pass. `None` in
+/// place of one — a default build, a company with no inference configured — is
+/// not an error condition: [`mint_task_title`] falls back and the card is named
+/// exactly as it was before.
+#[async_trait]
+pub trait TitleSummariser: Send + Sync {
+    /// Names the work `request` asks for, or `None` to leave the caller on its
+    /// deterministic fallback.
+    async fn title(&self, request: &str) -> Option<TaskTitle>;
+}
+
+/// Turn a free-text request into a card's headline. **The one way in.**
+///
+/// Every path that opens a card from something a person or an agent *said* goes
+/// through here: the REST chat handler, the direct and handed-off cards the
+/// delegation runner opens, and the desk hand-off tool. That is the whole of the
+/// fix — the three truncators those paths used to carry are gone, so there is no
+/// longer a second way to name a card from a message, and a fourth producer
+/// added tomorrow has one obvious function to call.
+///
+/// Titles that are **not** derived from free text do not belong here and must
+/// not be routed through it: a person's own words go to
+/// [`TaskTitle::authored`], and a name the host composes from facts it already
+/// holds goes to [`TaskTitle::system`]. Sending either to a model would re-word
+/// something that was already right.
+///
+/// Degrades in one direction only. No titler, an unreachable or slow model, a
+/// reply that sanitises to nothing — all of them land on `fallback`, which is
+/// the behaviour the caller had before. Card creation cannot fail here, and no
+/// inference error reaches the operator.
+///
+/// `fallback` is the name this caller would have used on its own, for the
+/// callers that have a better one than the request itself: the REST chat
+/// handler's lexical classifier already returns a tidied title, and throwing it
+/// away would make an offline company's cards *worse* than before rather than
+/// merely no better. `None` means "the request, shortened", which is what the
+/// paths with no lexical layer in front of them have always done.
+pub async fn mint_task_title(
+    request: &str,
+    fallback: Option<&str>,
+    titler: Option<&dyn TitleSummariser>,
+) -> TaskTitle {
+    if let Some(titler) = titler
+        && let Some(title) = titler.title(request).await
+    {
+        return title;
+    }
+    TaskTitle::truncated(fallback.unwrap_or(request))
+}
+
+/// Preambles a model reaches for when asked for a title, stripped so the answer
+/// is the name rather than a label plus the name.
+const TITLE_PREAMBLES: &[&str] = &[
+    "task title:",
+    "card title:",
+    "title:",
+    "task:",
+    "todo:",
+    "to-do:",
+    "here is the title:",
+    "here's the title:",
+];
+
+/// Reduce free text to the one bounded line a headline is allowed to be.
+///
+/// Order matters: the line is taken first so a model's chatty second paragraph
+/// cannot survive as content, the wrappers come off before the preamble so a
+/// quoted `"Title: x"` is caught, and the cap runs last so it bounds the final
+/// value rather than a prefix that later steps shorten anyway.
+///
+/// **Casing is left alone.** An earlier pass upper-cased the first character,
+/// which reads well on a sentence and corrupts every title that starts with a
+/// deliberately lower-case token — `iPhone sync is broken` became `IPhone …`,
+/// and a card named after a published `notes.md` became `Notes.md`. The model
+/// is asked for an imperative, which already starts capitalised; a human's own
+/// words and a file's own name are not this function's to restyle.
+fn normalise(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut current = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Wrappers, preambles and sentence punctuation all nest inside each other in
+    // real replies — `Title: "ship it"`, `"Title: ship it"`, `Task: "ship it".`
+    // — so all three come off together until a pass changes nothing. Running any
+    // one of them once, in a fixed order, leaves the others' leftovers behind:
+    // stripping the preamble off `Task: "ship it".` exposes quotes a one-shot
+    // wrapper pass has already been and gone past.
+    loop {
+        let before = current.clone();
+        current = strip_wrappers(&current);
+        let lowered = current.to_lowercase();
+        if let Some(preamble) = TITLE_PREAMBLES
+            .iter()
+            .find(|preamble| lowered.starts_with(**preamble))
+        {
+            current = current[preamble.len()..].trim_start().to_string();
+        }
+        // Sentence punctuation only. A closing bracket or a question mark that
+        // is part of the name (`Ship v2 (phase 1)`, `Why is checkout slow?`) is
+        // content, not decoration.
+        current = current
+            .trim_end_matches(['.', ',', ';', ':', '!', ' '])
+            .trim()
+            .to_string();
+        if current == before {
+            break;
+        }
+    }
+    cap(&current, TASK_TITLE_MAX_CHARS)
+}
+
+/// Peel one layer of quotes, backticks or markdown emphasis off both ends.
+fn strip_wrappers(text: &str) -> String {
+    const PAIRS: &[(&str, &str)] = &[
+        ("\"", "\""),
+        ("'", "'"),
+        ("`", "`"),
+        ("**", "**"),
+        ("__", "__"),
+        ("*", "*"),
+        ("_", "_"),
+        ("“", "”"),
+        ("‘", "’"),
+    ];
+    // Markdown heading syntax is `#` followed by a space, and only that is
+    // decoration: `#1` and `#launch` are somebody's title, and eating the hash
+    // silently renames their card.
+    let trimmed = text.trim();
+    let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+    let after = &trimmed[hashes..];
+    let mut current = match hashes > 0 && after.starts_with(char::is_whitespace) {
+        true => after.trim_start().to_string(),
+        false => trimmed.to_string(),
+    };
+    loop {
+        // `>=`, not `>`: a reply that is *only* a pair — `""`, `**` — has to
+        // strip to nothing, or a model that answered with bare punctuation puts
+        // that punctuation on the board as a title.
+        let Some((open, close)) = PAIRS.iter().find(|(open, close)| {
+            current.len() >= open.len() + close.len()
+                && current.starts_with(*open)
+                && current.ends_with(*close)
+        }) else {
+            return current;
+        };
+        current = current[open.len()..current.len() - close.len()]
+            .trim()
+            .to_string();
+    }
+}
+
+/// Shorten to `max` characters on a character boundary, preferring a whole word.
+///
+/// The ellipsis is budgeted inside `max`, so the result never exceeds the cap it
+/// advertises. Character-wise throughout: a byte slice would panic mid-codepoint
+/// on any title that is not ASCII.
+fn cap(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max - 1).collect();
+    let head = match head.rsplit_once(' ') {
+        Some((whole, _)) if !whole.is_empty() => whole,
+        _ => head.as_str(),
+    };
+    format!("{head}…")
+}
+
 /// One card on the company's task board.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRecord {
     /// Stable id for the task within the company.
     pub id: String,
-    /// The task's title.
-    pub title: String,
+    /// The card's headline. See [`TaskTitle`] for what is enforced and where
+    /// each producer's text is allowed to come from.
+    pub title: TaskTitle,
     /// An optional longer note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -963,50 +1363,33 @@ pub struct TaskRecord {
     pub assignee: String,
     /// Epoch-millis timestamp of the last update.
     pub updated_at_millis: u64,
-    /// The chat/desk thread the task was created from, when it came from a
-    /// delegation (issue #151 §3.2).
+    /// The conversation this card was raised in, or `None` for a card created
+    /// straight on the board (issue #151 §3.2, issue #1890 B and step 5).
     ///
     /// A dispatched card runs asynchronously, long after the turn that spawned
-    /// it has answered, so the completion reply has no ambient thread to post
-    /// onto — without this it can only be written into `note`, where the
+    /// it has answered, so the completion reply has no ambient conversation to
+    /// post onto — without this it can only be written into `note`, where the
     /// operator has to go looking for it. Stamped by `spawn_task` from the
-    /// delegating turn's chat id.
+    /// delegating turn.
     ///
-    /// `None` for a card created straight on the board (no originating
-    /// conversation) and for every card written before this field existed —
-    /// both simply get no post-back, exactly as today.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_chat_id: Option<String>,
-    /// The thread within [`origin_chat_id`](Self::origin_chat_id) the card was
-    /// raised in (issue #1890 B) — the root message the raising turn hung off,
-    /// or `None` for the channel-level conversation.
+    /// **One value, not two fields.** This was `origin_chat_id: Option<String>`
+    /// beside `origin_parent: Option<EventSeq>` — a hand-rolled conversation,
+    /// two fields that had to agree with nothing making them. They drifted:
+    /// #1890 B stamped the parent from the raising message's own `parent`,
+    /// recording only threads an operator opened by hand, and #1890 D then made
+    /// every question a root. For one channel-level message the answer went
+    /// into a thread while the card recorded none, so the settle marker landed
+    /// in the channel and the thread that asked never saw the work finish —
+    /// exactly the split B exists to prevent, reintroduced by D moving the
+    /// ground under it. A [`TaskOrigin`] cannot be half-built.
     ///
-    /// `origin_chat_id` names the *channel*, which is all a card recorded until
-    /// now, so a card raised inside a thread settled its `DeskTaskCompleted`
-    /// marker flat in the channel and the thread that asked for the work never
-    /// showed it finishing. This is the missing half of that origin: the two
-    /// fields are read as one pair, here and on the terminal.
-    ///
-    /// **`None` is the channel, not a gap.** The channel-level conversation is
-    /// where every unparented line hangs — which is every line in a company
-    /// that has never opened a thread — so a card raised straight into a
-    /// channel carries `None` and settles exactly where it settled before this
-    /// field existed. It is also `None` for a board-created card, but there
-    /// `origin_chat_id` is `None` too and the pair belongs to no conversation
-    /// at all; a reader asking "which conversation?" must check that field, not
-    /// this one.
-    ///
-    /// **One level deep**, like every thread here: an operator message's own
-    /// `parent` *is* its root (a reply is parented to its question's parent,
-    /// never to the question), so the raising turn's root is what gets stamped
-    /// and there is no chain to walk.
-    ///
-    /// Additive on the wire on exactly the terms
-    /// [`origin_chat_id`](Self::origin_chat_id) and
-    /// [`parent_task_id`](Self::parent_task_id) took, so no stored board needs
-    /// migrating on any backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_parent: Option<EventSeq>,
+    /// Flattened, so this is **byte-identical on the wire** to the two fields
+    /// it replaces and no stored board needs migrating on any backend. A card
+    /// persisted with the drifted pair — a parent and no chat — has no
+    /// conversation to name, and loads as `None`: the orphan is dropped on
+    /// read rather than carried forward.
+    #[serde(flatten)]
+    pub origin: Option<TaskOrigin>,
     /// The task whose dispatch turn spawned this card (issue #185) — the
     /// parent half of the Task Detail screen's lineage.
     ///
@@ -1116,6 +1499,33 @@ pub struct TaskRecord {
     /// like [`Self::parent_task_id`], so no stored board needs migrating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_run_id: Option<String>,
+    /// The operator message this card was opened for, by its position in the
+    /// company's event log.
+    ///
+    /// # Why a card needs to name its message
+    ///
+    /// The REST chat handler opens a card, and the runtime turn that follows has
+    /// to find it again to adopt it — one message, one card. It used to find it
+    /// by re-running the same lexical detector over the same words and matching
+    /// the two titles for byte equality, which made the headline an identity key
+    /// and pinned it to a pure function of the raw message. That is why the
+    /// board read as a chat log and could not be improved: a model-authored
+    /// title is not reproducible, so any better name broke adoption — the "Card
+    /// opened" chip vanished and a turn's workflow stranded its card in To-do,
+    /// all without an error.
+    ///
+    /// A sequence position is the identity that was wanted. It is stable, it is
+    /// unique per message, and it frees the headline to be a name. It also
+    /// settles a case title equality got wrong on its own terms: two messages in
+    /// one thread that happen to read alike are two cards, and the newest-first
+    /// scan adopted whichever came back first.
+    ///
+    /// `None` for a card raised anywhere but a chat handler, and for every card
+    /// written before this field existed — additive on the wire like
+    /// [`origin_run_id`](Self::origin_run_id), so no stored board needs
+    /// migrating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_message_seq: Option<EventSeq>,
     /// The workflow graph whose run opened this card (issue #661 / M5).
     ///
     /// Carried beside [`origin_run_id`](Self::origin_run_id) rather than derived
@@ -1149,6 +1559,31 @@ pub struct TaskRecord {
     pub bounced: Option<String>,
 }
 
+impl TaskRecord {
+    /// The desk this card was raised in, if it came from a conversation.
+    ///
+    /// Reads through [`origin`](Self::origin), so a card with a thread root and
+    /// no desk — the state the two loose fields could reach and this type
+    /// cannot — has no conversation to name and answers `None`.
+    #[must_use]
+    pub fn origin_chat_id(&self) -> Option<&str> {
+        self.origin
+            .as_ref()
+            .map(|origin| origin.origin_chat_id.as_str())
+    }
+
+    /// The thread within that desk, or `None` for the channel-level
+    /// conversation *and* for a card that belongs to no conversation at all.
+    ///
+    /// A reader that needs to tell those two apart must ask
+    /// [`origin_chat_id`](Self::origin_chat_id), exactly as it did when these
+    /// were two fields.
+    #[must_use]
+    pub fn origin_parent(&self) -> Option<EventSeq> {
+        self.origin.as_ref().and_then(|origin| origin.origin_parent)
+    }
+}
+
 /// Durable per-company task board. Company A's tasks MUST be invisible to
 /// company B.
 #[async_trait]
@@ -1164,6 +1599,311 @@ pub trait TaskStore: Send + Sync {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // ── the card headline's shape invariant ──────────────────────────────────
+
+    /// Every constructor bounds its result, whatever it was handed. This is the
+    /// property a `String` field could not have: a producer that shoved a
+    /// paragraph in used to get a paragraph back.
+    #[test]
+    fn no_constructor_can_produce_an_unbounded_title() {
+        let paragraph = "hey can you take a look at the pricing page, I think the tiers are \
+                         confusing and we should probably reword the middle one because \
+                         nobody I have shown it to can tell me what it is actually for";
+        for title in [
+            TaskTitle::authored(paragraph),
+            TaskTitle::system(paragraph),
+            TaskTitle::truncated(paragraph),
+            TaskTitle::summarised(paragraph).expect("a paragraph still names something"),
+        ] {
+            assert!(
+                title.as_str().chars().count() <= TASK_TITLE_MAX_CHARS,
+                "{title}"
+            );
+            assert!(!title.as_str().contains('\n'));
+        }
+    }
+
+    /// The cap counts characters, not bytes, and budgets the ellipsis inside
+    /// itself. A byte slice here would panic mid-codepoint; an unbudgeted
+    /// ellipsis would return one character more than the type advertises.
+    #[test]
+    fn the_cap_is_utf8_safe_and_includes_its_own_ellipsis() {
+        let long = "價".repeat(TASK_TITLE_MAX_CHARS + 40);
+        let title = TaskTitle::truncated(&long);
+        assert_eq!(title.as_str().chars().count(), TASK_TITLE_MAX_CHARS);
+        assert!(title.as_str().ends_with('…'));
+
+        let exact = "a".repeat(TASK_TITLE_MAX_CHARS);
+        assert_eq!(TaskTitle::truncated(&exact).as_str(), exact);
+    }
+
+    /// A title never breaks mid-word — the truncator prefers the last whole one.
+    #[test]
+    fn a_shortened_title_stops_at_a_word() {
+        let title = TaskTitle::truncated(
+            "Reword the middle pricing tier and also the top one and the bottom one              and everything else on that page",
+        );
+        assert!(title.as_str().ends_with('…'));
+        assert!(!title.as_str().contains("  "));
+    }
+
+    /// Whitespace-only and empty are the same answer: nothing. A caller that
+    /// gets this back is expected to refuse rather than open a blank card.
+    #[test]
+    fn nothing_in_is_nothing_out() {
+        for text in ["", "   ", "\n\t\n", "  \n  \n "] {
+            assert!(TaskTitle::authored(text).is_empty(), "{text:?}");
+            assert!(TaskTitle::truncated(text).is_empty(), "{text:?}");
+            assert!(TaskTitle::summarised(text).is_none(), "{text:?}");
+        }
+    }
+
+    /// A request that is already a good title is not degraded by passing
+    /// through — the commonest input on the board, and the easiest to break.
+    #[test]
+    fn an_already_good_title_survives_unchanged() {
+        for good in [
+            "Fix the login redirect",
+            "Draft the Q3 board update",
+            "Ship v2 (phase 1)",
+            "Why is the pricing page slow?",
+        ] {
+            assert_eq!(TaskTitle::authored(good).as_str(), good, "{good}");
+        }
+    }
+
+    /// A one-word ask is a one-word title, not padding and not an ellipsis.
+    #[test]
+    fn a_one_word_request_is_a_one_word_title() {
+        assert_eq!(TaskTitle::truncated("ship").as_str(), "ship");
+    }
+
+    /// Casing is never touched. Upper-casing the first character reads well on
+    /// a sentence and corrupts every name that starts with a deliberately
+    /// lower-case token — which is most tool names, some brands, and every
+    /// title derived from a file.
+    #[test]
+    fn a_deliberately_lower_case_name_is_not_restyled() {
+        for name in [
+            "iPhone sync is broken",
+            "notes.md",
+            "npm audit is failing",
+            "kubectl context keeps resetting",
+            "eBay listing export",
+        ] {
+            assert_eq!(TaskTitle::system(name).as_str(), name, "{name}");
+            assert_eq!(TaskTitle::authored(name).as_str(), name, "{name}");
+        }
+    }
+
+    /// A multi-paragraph brief is reduced to its first line, so the detail
+    /// cannot ride into the headline — the note is where it belongs.
+    #[test]
+    fn a_multi_paragraph_brief_keeps_only_its_first_line() {
+        let title = TaskTitle::summarised(
+            "Reword the middle pricing tier\n\nBackground: three customers have \
+             asked what it means.\n\nDeadline: Friday.",
+        )
+        .expect("a brief names something");
+        assert_eq!(title.as_str(), "Reword the middle pricing tier");
+    }
+
+    /// The wrappers and preambles a model reaches for come off, including when
+    /// they are nested the other way round.
+    #[test]
+    fn model_decoration_is_stripped_rather_than_trusted() {
+        for decorated in [
+            "\"Reword the middle pricing tier\"",
+            "**Reword the middle pricing tier**",
+            "`Reword the middle pricing tier`",
+            "Title: Reword the middle pricing tier",
+            "Task: \"Reword the middle pricing tier\"",
+            "\"Title: Reword the middle pricing tier\"",
+            // Decoration nested three deep. Each layer hides the next from a
+            // single-pass stripper, which is why the pass runs to a fixed point.
+            "Task: \"Reword the middle pricing tier\".",
+            "**Title: Reword the middle pricing tier.**",
+            "\"**Reword the middle pricing tier**\"",
+            "# Reword the middle pricing tier",
+            "### Reword the middle pricing tier",
+            "Reword the middle pricing tier.",
+            "_Reword the middle pricing tier_",
+            "“Reword the middle pricing tier”",
+        ] {
+            assert_eq!(
+                TaskTitle::summarised(decorated).expect(decorated).as_str(),
+                "Reword the middle pricing tier",
+                "{decorated}"
+            );
+        }
+    }
+
+    /// Punctuation that is part of the name stays. Only sentence-ending
+    /// decoration is stripped, or `Ship v2 (phase 1)` loses its bracket.
+    #[test]
+    fn punctuation_inside_a_name_is_content_not_decoration() {
+        assert_eq!(
+            TaskTitle::summarised("Ship v2 (phase 1)")
+                .expect("a title")
+                .as_str(),
+            "Ship v2 (phase 1)"
+        );
+        assert_eq!(
+            TaskTitle::summarised("Why is checkout slow?")
+                .expect("a title")
+                .as_str(),
+            "Why is checkout slow?"
+        );
+    }
+
+    /// A reply that is nothing but decoration names nothing, so the caller
+    /// falls back rather than putting punctuation on the board.
+    #[test]
+    fn decoration_with_no_name_in_it_is_no_title() {
+        for junk in [
+            "\"\"",
+            "**",
+            "...",
+            "Title:",
+            "``",
+            "#",
+            // Odd counts and unpaired marks: these do not peel to nothing, they
+            // peel to ONE punctuation character, which a length check passes.
+            "\"\"\"",
+            "*",
+            "-",
+            "—",
+            "?!",
+            "'",
+            "\"\"\"\"\"",
+            "   \"\"\"   ",
+        ] {
+            assert!(TaskTitle::summarised(junk).is_none(), "{junk:?}");
+        }
+    }
+
+    /// A person's own title is kept whatever it is made of. The junk test that
+    /// rejects an unusable *model reply* must never reach these constructors:
+    /// somebody who names a card `🚀` means it, and blanking it persists a card
+    /// with no headline — worse than the punctuation title the test prevents.
+    #[test]
+    fn a_symbol_only_title_a_person_chose_is_kept() {
+        for chosen in ["🚀", "✅", "---", "???", "42", "#1"] {
+            assert_eq!(TaskTitle::authored(chosen).as_str(), chosen, "{chosen}");
+            assert_eq!(TaskTitle::system(chosen).as_str(), chosen, "{chosen}");
+            assert!(!TaskTitle::truncated(chosen).is_empty(), "{chosen}");
+        }
+        // …and the same text from a model is still refused, because that is a
+        // guess at a name rather than somebody's choice of one.
+        assert!(TaskTitle::summarised("---").is_none());
+        assert!(TaskTitle::summarised("🚀").is_none());
+    }
+
+    /// Non-Latin scripts are neither mangled nor case-folded — the pass is
+    /// character-wise, and upper-casing is a no-op where a script has no case.
+    #[test]
+    fn a_non_english_title_is_left_intact() {
+        for text in [
+            "価格ページの中段プランを書き直す",
+            "Переписать средний тариф",
+            "إعادة صياغة الفئة الوسطى",
+        ] {
+            assert_eq!(
+                TaskTitle::summarised(text).expect(text).as_str(),
+                text,
+                "{text}"
+            );
+        }
+    }
+
+    /// A stored board loads back exactly as it was written, raw-message titles
+    /// and all. Normalising on read would silently rewrite durable records, and
+    /// re-summarising would make the board unstable between refreshes.
+    #[test]
+    fn a_title_stored_by_an_older_build_round_trips_verbatim() {
+        let legacy = "hey can you take a look at the pricing page, I think the tiers are…";
+        let json = serde_json::to_string(&legacy).expect("serialises");
+        let loaded: TaskTitle = serde_json::from_str(&json).expect("deserialises");
+        assert_eq!(loaded.as_str(), legacy);
+        assert_eq!(serde_json::to_string(&loaded).expect("re-serialises"), json);
+    }
+
+    /// The type is transparent on the wire, so no stored board needs migrating
+    /// and no console field changes shape.
+    #[test]
+    fn a_title_is_a_bare_string_on_the_wire() {
+        let json = serde_json::to_string(&TaskTitle::authored("Ship it")).expect("serialises");
+        assert_eq!(json, "\"Ship it\"");
+    }
+
+    /// No titler wired is the offline company and the default build: the card
+    /// is named exactly as it was before any of this existed.
+    #[tokio::test]
+    async fn without_a_titler_a_card_is_named_by_shortening_the_request() {
+        let request = "hey can you take a look at the pricing page, I think the tiers are \
+                       confusing and we should probably reword the middle one";
+        assert_eq!(
+            mint_task_title(request, None, None).await,
+            TaskTitle::truncated(request)
+        );
+    }
+
+    /// A titler that cannot answer — unreachable, too slow, unreadable — leaves
+    /// the card named, never unnamed and never failed.
+    #[tokio::test]
+    async fn a_titler_that_declines_falls_back_rather_than_failing() {
+        struct Silent;
+
+        #[async_trait]
+        impl TitleSummariser for Silent {
+            async fn title(&self, _request: &str) -> Option<TaskTitle> {
+                None
+            }
+        }
+
+        let request = "reword the middle pricing tier please";
+        assert_eq!(
+            mint_task_title(request, None, Some(&Silent)).await,
+            TaskTitle::truncated(request)
+        );
+        assert!(
+            !mint_task_title(request, None, Some(&Silent))
+                .await
+                .is_empty()
+        );
+    }
+
+    /// The fix itself, at the seam: a rambling ask is named after the **work**,
+    /// and the headline is no longer the message wearing an ellipsis.
+    #[tokio::test]
+    async fn a_rambling_ask_is_named_after_the_work() {
+        struct Names(&'static str);
+
+        #[async_trait]
+        impl TitleSummariser for Names {
+            async fn title(&self, _request: &str) -> Option<TaskTitle> {
+                TaskTitle::summarised(self.0)
+            }
+        }
+
+        let request = "hey can you take a look at the pricing page, I think the tiers are \
+                       confusing and we should probably reword the middle one";
+        let title = mint_task_title(
+            request,
+            None,
+            Some(&Names("Reword the middle pricing tier")),
+        )
+        .await;
+
+        assert_eq!(title.as_str(), "Reword the middle pricing tier");
+        // The property that actually broke: the headline is not the message.
+        assert!(
+            !request.starts_with(title.as_str().trim_end_matches('…')),
+            "the title is still an excerpt of the request: {title}"
+        );
+        assert!(!title.as_str().ends_with('…'));
+    }
 
     /// Pins the **Rust** list's ids and their order against a literal, so a
     /// reorder or a rename is a deliberate two-place edit rather than a
@@ -1560,14 +2300,13 @@ mod test {
     fn plain_card() -> TaskRecord {
         TaskRecord {
             id: "t-1".to_string(),
-            title: "Draft the spec".to_string(),
+            title: TaskTitle::authored("Draft the spec"),
             note: None,
             column: COLUMN_IN_REVIEW.to_string(),
             priority: "medium".to_string(),
             assignee: "maya".to_string(),
             updated_at_millis: 7,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             // #339's baseline fixture stays baseline: it exists to prove the
@@ -1578,8 +2317,79 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
+    }
+
+    /// Issue #1890 step 5: the origin is one value and **the same two keys**.
+    ///
+    /// The whole claim of the type change is that no stored board migrates, so
+    /// this pins the bytes rather than the shape: a card raised in a thread
+    /// serializes to `originChatId` + `originParent` exactly as it did when
+    /// those were two loose fields, and a board card writes neither key.
+    #[test]
+    fn an_origin_serializes_to_the_two_keys_it_always_did() {
+        let mut card = plain_card();
+        card.origin = TaskOrigin::new(Some("engineering".to_string()), Some(EventSeq::new(41)));
+        let json = serde_json::to_string(&card).expect("serializes");
+        assert!(json.contains(r#""originChatId":"engineering""#), "{json}");
+        assert!(json.contains(r#""originParent":41"#), "{json}");
+        assert!(
+            !json.contains(r#""origin":"#),
+            "the value is flattened away"
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskRecord>(&json).expect("round trip"),
+            card
+        );
+
+        // A channel-level card writes the desk and skips the thread, and a
+        // board card writes neither — so an existing card's stored bytes are
+        // unchanged rather than merely equivalent.
+        card.origin = TaskOrigin::new(Some("engineering".to_string()), None);
+        let channel = serde_json::to_string(&card).expect("serializes");
+        assert!(
+            channel.contains(r#""originChatId":"engineering""#),
+            "{channel}"
+        );
+        assert!(!channel.contains("originParent"), "{channel}");
+
+        card.origin = None;
+        let board = serde_json::to_string(&card).expect("serializes");
+        assert!(!board.contains("originChatId"), "{board}");
+        assert!(!board.contains("originParent"), "{board}");
+    }
+
+    /// A stored card carrying the **drifted pair** loads with no origin at all.
+    ///
+    /// A thread root beside no desk names no conversation. It was reachable
+    /// while these were two independent fields — #1890 B stamped the parent
+    /// from the raising message's own `parent` and D then changed what an
+    /// unparented message means — and a card in that state settled its marker
+    /// somewhere its thread could not see. `TaskOrigin` cannot represent it, so
+    /// the orphan is dropped on read instead of being carried forward.
+    #[test]
+    fn a_thread_root_without_a_desk_is_not_a_conversation() {
+        let drifted = r#"{
+            "id": "t-1",
+            "title": "Draft the spec",
+            "column": "in_review",
+            "priority": "medium",
+            "assignee": "maya",
+            "updatedAtMillis": 7,
+            "originParent": 41
+        }"#;
+        let card: TaskRecord = serde_json::from_str(drifted).expect("drifted card parses");
+        assert!(card.origin.is_none(), "a parent alone is not an origin");
+        assert_eq!(card.origin_chat_id(), None);
+        assert_eq!(card.origin_parent(), None);
+        assert!(
+            !serde_json::to_string(&card)
+                .expect("serializes")
+                .contains("originParent"),
+            "the orphan is dropped on read, not carried forward"
+        );
     }
 
     /// Issue #661 (M5): the run reference round-trips as camelCase, and — the

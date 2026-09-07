@@ -477,18 +477,19 @@ inert from anywhere but this computer; see
 [sign-in modes](auth-modes.md#none) for why, and note that pairing this desktop
 *to a remote host* is unaffected — that is the section below.
 
-## Several hosts on one machine
+## Several hosts, people, and ACP
 
-Moved to [desktop-hosts.md](desktop-hosts.md): how the roster of local hosts
-is stored and reconciled, and why instance_id rather than address is the
-identity rule.
+All moved to [desktop-hosts.md](desktop-hosts.md): how the roster of local
+hosts is stored and reconciled and why instance_id rather than address is the
+identity rule; device credentials, backend selection and the Linux
+session-keyring caveat; and the stdio harness client with the reserved /acp
+prefix.
 
-## Authenticating as a person
+## Replacing the application itself
 
-Moved to [desktop-hosts.md](desktop-hosts.md): device credentials, backend
-selection, and the Linux session-keyring caveat.
-
-## ACP
-
-Moved to [desktop-hosts.md](desktop-hosts.md): the stdio harness client and
-the reserved /acp prefix.
+In [desktop-updates.md](desktop-updates.md): the signed manifest on the newest
+release, a prompt that stays silent until there is a restart to authorise, the
+release artifacts that are not the DMG, and the minisign keypair an operator
+must generate before any of it does anything. It belongs to the shell rather
+than the console because it is the one thing a desktop cannot get from the
+host it talks to — a server upgrade does not reach a `.app` on a laptop.

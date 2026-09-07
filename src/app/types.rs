@@ -1179,6 +1179,13 @@ impl AppState {
     /// break a client that has not heard of the new entry.
     fn capabilities(&self) -> Vec<&'static str> {
         let mut out = vec!["rest", "graphql", "sse", "approvals"];
+        // The four-way blocker answer. Gated with the code that carries it out:
+        // a build without `openhuman` refuses `blocker_verdict` outright, so
+        // advertising it there would promise a resume this build cannot run.
+        // A console reading no entry must not send `skip` or `amend`, whose
+        // lowered two-way form asks an unaware host for a different action.
+        #[cfg(feature = "openhuman")]
+        out.push("blocker-verdict");
         if self.hub_identity.is_some() {
             out.push("hub-identity");
         }

@@ -361,6 +361,74 @@ async fn read_reprobes_the_live_memory_engine() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["active"], "null");
     assert_eq!(body["healthy"], true, "GET must return its fresh probe");
+    // Pins the wire name the console reads. `null` answers every read, so the
+    // list is present and empty rather than absent -- absent means "not
+    // probed", which is a different statement and renders differently.
+    assert_eq!(
+        body["unreachableFamilies"],
+        serde_json::json!([]),
+        "the probed-family verdict must reach the console under this name"
+    );
+    assert_eq!(body["slowFamilies"], serde_json::json!([]));
+}
+
+/// Apply must refuse a candidate that refused a mandatory family, and must not
+/// refuse one that was merely slow.
+///
+/// The verdict is extracted into `family_refusal` precisely so this is
+/// falsifiable: inverting the guard, or letting `slow_families` reach it, fails
+/// here. Driving the whole route would need a live engine that answers health
+/// and refuses a read, which is a bigger harness than the decision deserves.
+#[test]
+fn a_refused_family_blocks_a_bind_and_a_slow_one_does_not() {
+    let refusal = super::family_refusal("supermemory", Some(&["recall".to_string()]))
+        .expect("a refused family must block the bind");
+    assert!(refusal.contains("recall"), "{refusal}");
+    assert!(
+        refusal.contains("force=true"),
+        "the refusal must name the override, since nothing in the console sends it: {refusal}"
+    );
+
+    assert!(
+        super::family_refusal("supermemory", Some(&[])).is_none(),
+        "an engine that refused nothing must bind"
+    );
+    assert!(
+        super::family_refusal("supermemory", None).is_none(),
+        "an unprobed engine must bind -- absent is not the same as refused"
+    );
+}
+
+/// Test and Apply must agree: a candidate `apply` rejects must not come back
+/// from `test` as bindable.
+///
+/// Both answers derive from `refused_families`, and this drives the two real
+/// functions rather than restating their logic — an earlier version of this
+/// test recomputed `true && refused.is_empty()` locally, which is a constant
+/// and passed no matter what the route did.
+#[test]
+fn test_and_apply_agree_about_a_refusing_candidate() {
+    let refused = ["recall".to_string()];
+
+    assert!(
+        !super::probe_is_bindable(Some(true), Some(&refused)),
+        "test must not report a candidate bindable when apply will reject it"
+    );
+    assert!(
+        super::family_refusal("supermemory", Some(&refused)).is_some(),
+        "apply must reject the same candidate"
+    );
+
+    // The other direction, so the two cannot drift into disagreeing by both
+    // becoming permissive: nothing refused means bindable and no refusal.
+    assert!(super::probe_is_bindable(Some(true), Some(&[])));
+    assert!(super::family_refusal("supermemory", Some(&[])).is_none());
+
+    // Health still dominates: an engine that did not answer at all is not
+    // bindable regardless of the family list.
+    assert!(!super::probe_is_bindable(Some(false), Some(&[])));
+    // And an unprobed overlay -- no provider seam to ask -- stays bindable.
+    assert!(super::probe_is_bindable(None, None));
 }
 
 /// The refusal this surface exists for: a deployment that injects

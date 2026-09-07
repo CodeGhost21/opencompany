@@ -72,22 +72,14 @@ export interface ChatReceipt {
  * re-armed the slot in between, the generations differ and the clear is a
  * no-op, leaving the newer receipt alone.
  *
- * `gen === undefined` now REFUSES to clear (issue #1935 review, codex
+ * `gen === undefined` REFUSES to clear (issue #1935 review, codex
  * 3892702774 — reversing the original "clears unconditionally" reading of
- * this branch). That original reading treated an omitted generation as
- * `Conversation`'s calling convention, on the assumption the parked
- * conversation view "has no scope to switch out from under" — which was
- * wrong: `#/conversation` is a live, still-routable surface (`ROUTABLE.
- * conversation` in `console-routes.ts`), it stays mounted across a company
- * switch exactly like `ChatView`, and its own `useConversationRuntime` send
- * never generation-tagged its calls — so a slow Conversation POST from
- * company A could delete a newer `ChatView` (or Conversation) receipt on
- * company B through the identical reused-thread-id race, just missing the
- * `shouldClearReceipt` guard that was supposed to close it everywhere.
+ * this branch). A send surface that omits the generation is one whose slow
+ * POST from company A can delete a newer receipt on company B through the
+ * reused-thread-id race, which is exactly what this guard exists to close.
  *
- * `Conversation`'s `useConversationRuntime` is now generation-tagged too (see
- * `runtime.ts`), so every current caller always supplies a defined `gen` and
- * this branch is not load-bearing for them. It stays fail-closed rather than
+ * Every current caller supplies a defined `gen`, so this branch is not
+ * load-bearing for them. It stays fail-closed rather than
  * being deleted so a FUTURE send surface that forgets to capture and forward
  * `onSendStart`'s return value cannot reintroduce this exact leak by omission
  * — the failure mode of forgetting becomes a receipt that lingers until the
@@ -132,22 +124,28 @@ export function resolveReceiptAgentName(
 }
 
 /**
- * The one visible state line, progressing Sent → Picked up by <name> → On step
+ * The one visible state line, progressing Queued → Picked up by <name> → On step
  * <label>. A running step is the most specific thing to say, so it outranks the
- * name; the name outranks the bare "Sent". Pure, for the same reason
+ * name; the name outranks the base state. Pure, for the same reason
  * {@link formatElapsed} is.
+ *
+ * The base state is "Queued" while the turn is still waiting on the per-company
+ * serial lock (issue #2021 — the receipt now rides the detached turn past its
+ * 202 into the open-turn window, so the honest "waiting its turn" word must be
+ * available to it), and "Sent" otherwise.
  */
 export function receiptStateLine(
   receipt: ChatReceipt,
   steps: readonly TurnStep[] | undefined,
   agentNames: Record<string, string> | undefined,
   channel: Channel,
+  queued?: boolean,
 ): string {
   const step = runningStepLabel(steps);
   if (step) return `On step ${step}`;
   const name = resolveReceiptAgentName(receipt, agentNames, channel);
   if (name) return `Picked up by ${name}`;
-  return "Sent";
+  return queued ? "Queued" : "Sent";
 }
 
 export function ChatLiveReceipt({
@@ -155,6 +153,7 @@ export function ChatLiveReceipt({
   receipt,
   agentNames,
   steps,
+  queued,
 }: {
   channel: Channel;
   receipt: ChatReceipt;
@@ -162,6 +161,13 @@ export function ChatLiveReceipt({
   agentNames?: Record<string, string>;
   /** The turn's live steps, when any have arrived — folded below the line. */
   steps: TurnStep[];
+  /**
+   * The turn is accepted but has not taken the per-company serial lock (issue
+   * #2021). Words the base line "Queued" instead of "Sent" and stills the pulse,
+   * mirroring {@link WorkingIndicator}: a queued turn is not progressing, so the
+   * mark says so.
+   */
+  queued?: boolean;
 }) {
   const reduced = usePrefersReducedMotion();
   // Self-contained 1s clock, mounted only while this row is (the receipt is
@@ -172,7 +178,7 @@ export function ChatLiveReceipt({
   // Soft and reversible: a lull with no frame, seeded from `startedAt`, cleared
   // by the next frame that bumps `lastFrameAt`. Not an error state.
   const stalled = clock - receipt.lastFrameAt >= RECEIPT_STALL_AFTER_MS;
-  const line = receiptStateLine(receipt, steps, agentNames, channel);
+  const line = receiptStateLine(receipt, steps, agentNames, channel, queued);
 
   return (
     <div className="flex items-start gap-2.5 px-4 py-1">
@@ -192,10 +198,13 @@ export function ChatLiveReceipt({
           <span
             aria-hidden
             className={cn(
-              "size-1.5 shrink-0 rounded-full bg-status-running",
+              "size-1.5 shrink-0 rounded-full",
+              queued ? "bg-status-idle" : "bg-status-running",
               // The pulse is the "something is happening" signal; a reader who
-              // asked for stillness keeps the mark without the motion.
-              !reduced && "animate-pulse",
+              // asked for stillness keeps the mark without the motion, and a
+              // queued turn keeps it without the motion either — nothing is
+              // happening yet.
+              !reduced && !queued && "animate-pulse",
             )}
           />
           {/* `aria-hidden`, because the stable assistive line below is what a
