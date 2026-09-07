@@ -14,6 +14,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 use crate::ports::types::CompanyId;
 use crate::runtime::assignee::DM_PREFIX;
@@ -114,11 +118,68 @@ pub fn cwd_meta(server_workspace: &str) -> serde_json::Value {
     })
 }
 
+/// The most ACP sessions one connection id may hold open at once.
+///
+/// A `connectionId` is caller-supplied and otherwise unbounded, so a caller
+/// minting one session after another on the same id would grow that
+/// connection's entry forever.
+pub const MAX_SESSIONS_PER_CONNECTION: usize = 32;
+
+/// The most ACP sessions this host holds open at once, across every
+/// connection. A circuit breaker on total memory, not a business limit.
+pub const MAX_SESSIONS_TOTAL: usize = 8_192;
+
+/// How long an ACP session may sit unused before [`SessionRegistry::sweep_expired`]
+/// reclaims it. This surface has no heartbeat, so the bound has to be
+/// generous enough to outlast a normal gap between prompts — one working day.
+pub const SESSION_TTL_MILLIS: u64 = 24 * 60 * 60 * 1000;
+
+/// Why [`SessionRegistry::open`] refused a `session/new`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenSessionRefusal {
+    /// The connection id is already bound to a different caller, or this
+    /// caller never opened it.
+    NotOwned,
+    /// The connection already holds [`MAX_SESSIONS_PER_CONNECTION`] sessions.
+    PerConnectionCap,
+    /// The host already holds [`MAX_SESSIONS_TOTAL`] sessions.
+    TotalCap,
+}
+
+impl OpenSessionRefusal {
+    pub fn message(&self) -> &'static str {
+        match self {
+            // Deliberately the same wording as an unrecognized connection id:
+            // telling the two apart would let a caller learn that a foreign
+            // connection id exists by probing it.
+            Self::NotOwned => "unknown ACP connection",
+            Self::PerConnectionCap => "too many open ACP sessions on this connection",
+            Self::TotalCap => "too many open ACP sessions on this host",
+        }
+    }
+}
+
+struct SessionEntry {
+    session: Arc<AcpSession>,
+    last_used_millis: u64,
+}
+
+/// One connection's sessions, plus who is allowed to address it.
+struct Connection {
+    owner: String,
+    sessions: HashMap<String, SessionEntry>,
+}
+
 /// The live sessions on this host, keyed by connection so a disconnect can
 /// sweep them.
+///
+/// A connection id is bound to whichever caller first opens a session on it
+/// (see [`SessionRegistry::open`]); every other method refuses an id it does
+/// not recognize as that same caller's, rather than acting on whatever the
+/// request claims.
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
-    by_connection: Mutex<HashMap<String, HashMap<String, Arc<AcpSession>>>>,
+    by_connection: Mutex<HashMap<String, Connection>>,
 }
 
 impl SessionRegistry {
@@ -126,71 +187,184 @@ impl SessionRegistry {
         Self::default()
     }
 
-    pub fn insert(&self, connection: &str, session: AcpSession) -> Arc<AcpSession> {
+    /// Opens a session on `connection`, binding it to `owner` if this is the
+    /// first session opened on that id. Refuses an id already bound to a
+    /// different owner, and refuses once either cap is hit.
+    pub fn open(
+        &self,
+        connection: &str,
+        owner: &str,
+        session: AcpSession,
+        now_millis: u64,
+    ) -> Result<Arc<AcpSession>, OpenSessionRefusal> {
+        let mut by_connection = self
+            .by_connection
+            .lock()
+            .expect("session registry poisoned");
+        if let Some(existing) = by_connection.get(connection) {
+            if existing.owner != owner {
+                return Err(OpenSessionRefusal::NotOwned);
+            }
+            if existing.sessions.len() >= MAX_SESSIONS_PER_CONNECTION {
+                return Err(OpenSessionRefusal::PerConnectionCap);
+            }
+        }
+        let total: usize = by_connection.values().map(|c| c.sessions.len()).sum();
+        if total >= MAX_SESSIONS_TOTAL {
+            return Err(OpenSessionRefusal::TotalCap);
+        }
         let session = Arc::new(session);
-        self.by_connection
-            .lock()
-            .expect("session registry poisoned")
+        let conn = by_connection
             .entry(connection.to_string())
-            .or_default()
-            .insert(session.id.clone(), Arc::clone(&session));
-        session
+            .or_insert_with(|| Connection {
+                owner: owner.to_string(),
+                sessions: HashMap::new(),
+            });
+        conn.sessions.insert(
+            session.id.clone(),
+            SessionEntry {
+                session: Arc::clone(&session),
+                last_used_millis: now_millis,
+            },
+        );
+        Ok(session)
     }
 
-    pub fn get(&self, connection: &str, id: &str) -> Option<Arc<AcpSession>> {
-        self.by_connection
+    /// Looks up a session for `owner`, refusing a connection id it does not
+    /// hold. Renews the session's idle TTL on a hit.
+    pub fn get(
+        &self,
+        connection: &str,
+        owner: &str,
+        id: &str,
+        now_millis: u64,
+    ) -> Option<Arc<AcpSession>> {
+        let mut by_connection = self
+            .by_connection
             .lock()
-            .expect("session registry poisoned")
-            .get(connection)
-            .and_then(|sessions| sessions.get(id).cloned())
+            .expect("session registry poisoned");
+        let conn = by_connection.get_mut(connection)?;
+        if conn.owner != owner {
+            return None;
+        }
+        let entry = conn.sessions.get_mut(id)?;
+        entry.last_used_millis = now_millis;
+        Some(Arc::clone(&entry.session))
     }
 
-    /// Every session on a connection, for `session/list`.
-    pub fn list(&self, connection: &str) -> Vec<Arc<AcpSession>> {
-        self.by_connection
+    /// Every session on a connection `owner` holds, for `session/list`.
+    /// `None` when the connection is unknown or belongs to someone else.
+    pub fn list(&self, connection: &str, owner: &str) -> Option<Vec<Arc<AcpSession>>> {
+        let by_connection = self
+            .by_connection
             .lock()
-            .expect("session registry poisoned")
-            .get(connection)
-            .map(|sessions| sessions.values().cloned().collect())
-            .unwrap_or_default()
+            .expect("session registry poisoned");
+        let conn = by_connection.get(connection)?;
+        if conn.owner != owner {
+            return None;
+        }
+        Some(
+            conn.sessions
+                .values()
+                .map(|entry| Arc::clone(&entry.session))
+                .collect(),
+        )
     }
 
     /// Drops one session, for ACP's `session/delete`.
     ///
     /// Returns whether the session existed. Deleting a session that was never
-    /// there is a silent no-op, exactly as ACP specifies — an opaque id says
-    /// nothing useful by its absence.
-    pub fn remove(&self, connection: &str, id: &str) -> bool {
+    /// there — or addressing a connection `owner` does not hold — is a silent
+    /// no-op, exactly as ACP specifies for an opaque id: absence says nothing
+    /// useful.
+    pub fn remove(&self, connection: &str, owner: &str, id: &str) -> bool {
         let mut by_connection = self
             .by_connection
             .lock()
             .expect("session registry poisoned");
-        let removed = by_connection
-            .get_mut(connection)
-            .map(|sessions| sessions.remove(id).is_some())
-            .unwrap_or(false);
-        // A connection's last session going also takes the connection key with
-        // it. Without this, `session/new` + `session/delete` (or `disconnect`)
-        // over fresh caller-controlled connection ids grows the host-wide map
-        // by one empty entry per connection, forever.
-        if by_connection
-            .get(connection)
-            .is_some_and(|sessions| sessions.is_empty())
-        {
+        let Some(conn) = by_connection.get_mut(connection) else {
+            return false;
+        };
+        if conn.owner != owner {
+            return false;
+        }
+        let removed = conn.sessions.remove(id).is_some();
+        // A connection's last session going also takes the connection key
+        // (and its owner binding) with it — otherwise `session/new` +
+        // `session/delete` over fresh caller-controlled connection ids grows
+        // the host-wide map by one empty entry per connection, forever.
+        if conn.sessions.is_empty() {
             by_connection.remove(connection);
         }
         removed
     }
 
-    /// Drops every session a connection held.
-    ///
-    /// Keyed by connection precisely so this is possible: without it, a client
-    /// that reconnects repeatedly accumulates sessions nothing will ever close.
-    pub fn close_connection(&self, connection: &str) {
-        self.by_connection
+    /// Drops every session a connection `owner` holds, and reports their ids.
+    /// A connection `owner` does not hold is left untouched — reports none.
+    pub fn close_connection(&self, connection: &str, owner: &str) -> Vec<String> {
+        let mut by_connection = self
+            .by_connection
             .lock()
-            .expect("session registry poisoned")
-            .remove(connection);
+            .expect("session registry poisoned");
+        match by_connection.get(connection) {
+            Some(conn) if conn.owner == owner => by_connection
+                .remove(connection)
+                .expect("checked present above")
+                .sessions
+                .into_keys()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Forgets every session idle past [`SESSION_TTL_MILLIS`], and every
+    /// connection that leaves empty. Returns how many sessions were reclaimed.
+    pub fn sweep_expired(&self, now_millis: u64) -> usize {
+        let mut by_connection = self
+            .by_connection
+            .lock()
+            .expect("session registry poisoned");
+        let mut removed = 0;
+        by_connection.retain(|_, conn| {
+            let before = conn.sessions.len();
+            conn.sessions.retain(|_, entry| {
+                now_millis.saturating_sub(entry.last_used_millis) <= SESSION_TTL_MILLIS
+            });
+            removed += before - conn.sessions.len();
+            !conn.sessions.is_empty()
+        });
+        removed
+    }
+}
+
+/// Periodically reclaims ACP sessions idle past [`SESSION_TTL_MILLIS`].
+///
+/// Mirrors [`crate::server::presence::PresenceSweeper`]: this registry is
+/// host-global, not scoped to a registered company, so it gets its own
+/// always-on task rather than riding the per-company maintenance ticker.
+pub struct SessionSweeper {
+    registry: Arc<SessionRegistry>,
+}
+
+impl SessionSweeper {
+    pub fn new(registry: Arc<SessionRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Runs until `shutdown` is notified, sweeping once per [`SESSION_TTL_MILLIS`].
+    pub fn spawn(self, shutdown: Arc<Notify>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
+            loop {
+                tokio::select! {
+                    _ = &mut notified => break,
+                    _ = tokio::time::sleep(Duration::from_millis(SESSION_TTL_MILLIS)) => {
+                        self.registry.sweep_expired(crate::ports::now_millis());
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -248,15 +422,147 @@ mod test {
         // Two clients must not see each other's sessions — and a reconnecting
         // one must not resume into another's.
         let registry = SessionRegistry::new();
-        registry.insert("conn-a", session("s1", "acme"));
-        registry.insert("conn-b", session("s2", "globex"));
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        registry
+            .open("conn-b", "bob", session("s2", "globex"), 0)
+            .unwrap();
 
-        assert!(registry.get("conn-a", "s1").is_some());
+        assert!(registry.get("conn-a", "alice", "s1", 0).is_some());
         assert!(
-            registry.get("conn-b", "s1").is_none(),
+            registry.get("conn-b", "alice", "s1", 0).is_none(),
             "no cross-connection reads"
         );
-        assert_eq!(registry.list("conn-a").len(), 1);
+        assert_eq!(registry.list("conn-a", "alice").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_caller_cannot_open_a_session_on_a_connection_it_does_not_own() {
+        // The defect this registry exists to close: a caller-supplied
+        // `connectionId` is otherwise just a guessable string, and whoever
+        // guesses it could open sessions into somebody else's connection.
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+
+        let refusal = registry
+            .open("conn-a", "mallory", session("s2", "acme"), 0)
+            .unwrap_err();
+        assert_eq!(refusal, OpenSessionRefusal::NotOwned);
+        assert_eq!(
+            registry.list("conn-a", "alice").unwrap().len(),
+            1,
+            "the attempted takeover left alice's session set untouched"
+        );
+        assert!(
+            registry.list("conn-a", "mallory").is_none(),
+            "mallory never owned the connection, so it stays invisible to her too"
+        );
+    }
+
+    #[test]
+    fn a_caller_cannot_read_or_act_on_a_connection_it_does_not_own() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+
+        assert!(registry.get("conn-a", "mallory", "s1", 0).is_none());
+        assert!(registry.list("conn-a", "mallory").is_none());
+        assert!(!registry.remove("conn-a", "mallory", "s1"));
+        assert!(registry.close_connection("conn-a", "mallory").is_empty());
+        // None of mallory's attempts touched alice's session.
+        assert!(registry.get("conn-a", "alice", "s1", 0).is_some());
+    }
+
+    #[test]
+    fn a_session_over_the_per_connection_cap_is_refused() {
+        let registry = SessionRegistry::new();
+        for i in 0..MAX_SESSIONS_PER_CONNECTION {
+            registry
+                .open("conn-a", "alice", session(&format!("s{i}"), "acme"), 0)
+                .unwrap();
+        }
+        let refusal = registry
+            .open("conn-a", "alice", session("s-over", "acme"), 0)
+            .unwrap_err();
+        assert_eq!(refusal, OpenSessionRefusal::PerConnectionCap);
+        assert_eq!(
+            registry.list("conn-a", "alice").unwrap().len(),
+            MAX_SESSIONS_PER_CONNECTION
+        );
+    }
+
+    #[test]
+    fn a_session_over_the_host_wide_cap_is_refused_even_on_a_fresh_connection() {
+        let registry = SessionRegistry::new();
+        // Fan the total cap out across many connections rather than one, so
+        // this proves the cap is host-wide and not just per-connection.
+        let mut opened = 0;
+        for i in 0..MAX_SESSIONS_TOTAL {
+            let conn = format!("conn-{i}");
+            registry
+                .open(&conn, "alice", session("s0", "acme"), 0)
+                .unwrap();
+            opened += 1;
+        }
+        assert_eq!(opened, MAX_SESSIONS_TOTAL);
+        let refusal = registry
+            .open("conn-fresh", "alice", session("s0", "acme"), 0)
+            .unwrap_err();
+        assert_eq!(refusal, OpenSessionRefusal::TotalCap);
+    }
+
+    #[test]
+    fn an_idle_session_past_its_ttl_is_swept() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+
+        assert_eq!(
+            registry.sweep_expired(SESSION_TTL_MILLIS),
+            0,
+            "exactly at the boundary is not yet expired"
+        );
+        assert_eq!(registry.sweep_expired(SESSION_TTL_MILLIS + 1), 1);
+        assert!(registry.get("conn-a", "alice", "s1", SESSION_TTL_MILLIS + 1).is_none());
+    }
+
+    #[test]
+    fn using_a_session_renews_its_idle_ttl() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        // A `get` at half the TTL — a live prompt — renews the clock.
+        assert!(
+            registry
+                .get("conn-a", "alice", "s1", SESSION_TTL_MILLIS / 2)
+                .is_some()
+        );
+        assert_eq!(
+            registry.sweep_expired(SESSION_TTL_MILLIS),
+            0,
+            "renewed at TTL/2, so a full TTL later it is not yet idle that long"
+        );
+        assert!(registry.get("conn-a", "alice", "s1", SESSION_TTL_MILLIS).is_some());
+    }
+
+    #[test]
+    fn sweeping_prunes_the_connection_once_every_session_on_it_expires() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        registry.sweep_expired(SESSION_TTL_MILLIS + 1);
+        let by_connection = registry
+            .by_connection
+            .lock()
+            .expect("session registry poisoned");
+        assert!(!by_connection.contains_key("conn-a"));
     }
 
     #[test]
@@ -264,15 +570,41 @@ mod test {
         // Without this a client that reconnects repeatedly accumulates sessions
         // nothing will ever close.
         let registry = SessionRegistry::new();
-        registry.insert("conn-a", session("s1", "acme"));
-        registry.insert("conn-b", session("s2", "acme"));
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        registry
+            .open("conn-b", "bob", session("s2", "acme"), 0)
+            .unwrap();
 
-        registry.close_connection("conn-a");
-        assert!(registry.get("conn-a", "s1").is_none());
+        let closed = registry.close_connection("conn-a", "alice");
+        assert_eq!(closed, vec!["s1".to_string()]);
+        assert!(registry.get("conn-a", "alice", "s1", 0).is_none());
         assert!(
-            registry.get("conn-b", "s2").is_some(),
+            registry.get("conn-b", "bob", "s2", 0).is_some(),
             "other connections survive"
         );
+    }
+
+    #[test]
+    fn disconnect_sweeps_every_session_it_opened_with_none_stranded() {
+        let registry = SessionRegistry::new();
+        for i in 0..5 {
+            registry
+                .open("conn-a", "alice", session(&format!("s{i}"), "acme"), 0)
+                .unwrap();
+        }
+        let closed = registry.close_connection("conn-a", "alice");
+        assert_eq!(closed.len(), 5);
+        for i in 0..5 {
+            assert!(
+                registry
+                    .get("conn-a", "alice", &format!("s{i}"), 0)
+                    .is_none(),
+                "session s{i} was stranded"
+            );
+        }
+        assert!(registry.list("conn-a", "alice").is_none());
     }
 
     #[test]
@@ -280,13 +612,17 @@ mod test {
         // ACP's `session/delete`: one session goes, the connection and its
         // other sessions survive.
         let registry = SessionRegistry::new();
-        registry.insert("conn-a", session("s1", "acme"));
-        registry.insert("conn-a", session("s2", "acme"));
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        registry
+            .open("conn-a", "alice", session("s2", "acme"), 0)
+            .unwrap();
 
-        assert!(registry.remove("conn-a", "s1"));
-        assert!(registry.get("conn-a", "s1").is_none());
-        assert!(registry.get("conn-a", "s2").is_some());
-        assert_eq!(registry.list("conn-a").len(), 1);
+        assert!(registry.remove("conn-a", "alice", "s1"));
+        assert!(registry.get("conn-a", "alice", "s1", 0).is_none());
+        assert!(registry.get("conn-a", "alice", "s2", 0).is_some());
+        assert_eq!(registry.list("conn-a", "alice").unwrap().len(), 1);
     }
 
     #[test]
@@ -295,10 +631,14 @@ mod test {
         // connection ids must not grow the host-wide registry by one empty map
         // per connection, forever.
         let registry = SessionRegistry::new();
-        registry.insert("conn-a", session("s1", "acme"));
-        registry.insert("conn-b", session("s2", "acme"));
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        registry
+            .open("conn-b", "bob", session("s2", "acme"), 0)
+            .unwrap();
 
-        assert!(registry.remove("conn-a", "s1"));
+        assert!(registry.remove("conn-a", "alice", "s1"));
         let by_connection = registry
             .by_connection
             .lock()
@@ -319,10 +659,12 @@ mod test {
         // succeed silently — an opaque id leaking "I never had that" by an
         // error would tell a caller more than it needs to know.
         let registry = SessionRegistry::new();
-        registry.insert("conn-a", session("s1", "acme"));
-        assert!(!registry.remove("conn-a", "ghost"));
-        assert!(!registry.remove("conn-b", "s1"));
-        assert_eq!(registry.list("conn-a").len(), 1);
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        assert!(!registry.remove("conn-a", "alice", "ghost"));
+        assert!(!registry.remove("conn-b", "alice", "s1"));
+        assert_eq!(registry.list("conn-a", "alice").unwrap().len(), 1);
     }
 
     #[test]

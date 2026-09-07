@@ -27,7 +27,7 @@ pub mod session;
 mod transport;
 
 pub use approvals::{HeldPermission, PendingPermissions};
-pub use session::{AcpSession, SessionRegistry};
+pub use session::{AcpSession, SessionRegistry, SessionSweeper};
 
 /// The authenticated HTTP transport for ACP JSON-RPC requests.
 pub fn router() -> axum::Router<crate::AppState> {
