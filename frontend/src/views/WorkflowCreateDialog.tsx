@@ -51,7 +51,9 @@ import { draftBanners, draftLanding } from "@/lib/workflow-draft";
 import {
   createSurface,
   draftCapabilityGap,
+  draftDecline,
   nameFromDescription,
+  writeRefusalHandsOverForm,
 } from "@/lib/workflow-create-surface";
 import { isSafeId, slugifyWorkflowId } from "@/lib/workflow-id";
 import type { OpenCompanyClient } from "@/api/client";
@@ -1221,6 +1223,22 @@ export function WorkflowCreateDialog({
    * the offline brain, so there is no model to draft with and no host message to
    * quote yet. The rest arrive as a capability gap from a draft that was tried.
    */
+  /**
+   * A copilot decline, classified and worded (see {@link draftDecline}).
+   *
+   * `automatable: false` is one flag over two different events — the copilot's
+   * opinion about the work, and the copilot failing at it — and the one-box
+   * dialog used to render both as advice in the host's own words. For a failure
+   * those words are the internal gate diagnostics, which name `trigger` nodes
+   * and node ids: the exact vocabulary this dialog exists to stop putting in
+   * front of an operator, offered as if it were a considered recommendation.
+   *
+   * Only the one-box branch reads this. The manual form below still shows the
+   * reason verbatim — over there the operator is looking at the nodes it is
+   * talking about.
+   */
+  const decline = draftReason ? draftDecline(draftReason) : null;
+
   const draftUnavailable =
     draftGap ??
     (echoing
@@ -1916,10 +1934,17 @@ export function WorkflowCreateDialog({
       // graph-level field (`from`/`to`/`workflow_id`), a config key this kind
       // has no control for, or a node that no longer exists — falls through to
       // the banner, so nothing the host said is ever silently dropped.
-      // Before anything is rendered about the refusal: whatever the host said,
-      // the operator needs the controls to act on it. On the one-box dialog
+      // Before anything is rendered about the refusal: whatever the host ASKED
+      // FOR, the operator needs the controls to act on it. On the one-box dialog
       // that means the form, hydrated with the graph that was refused.
-      onRefused?.();
+      //
+      // Gated, and the gate is the point. This used to be the first statement in
+      // the block, so every failure counted as a refusal — a dropped connection
+      // or a 500 retired the one-box dialog for the rest of the open and left
+      // the operator hand-authoring a graph on a host that would have written
+      // theirs a second later. The hand-over is one-way, so the wrong answer
+      // here is not recoverable by trying again.
+      if (writeRefusalHandsOverForm(e)) onRefused?.();
       if (e instanceof ApiError && e.problems?.length) {
         const mapped: Record<string, string> = {};
         const leftovers: string[] = [];
@@ -2332,13 +2357,21 @@ export function WorkflowCreateDialog({
                 rename it, rewire it or delete it from there.
               </p>
             )}
-            {/* The copilot judged the work better done once. Advice, not a
-                verdict: an operator who disagrees gets a workflow anyway,
-                started from their own sentence, rather than an argument. */}
-            {draftReason && (
-              <Alert data-testid="workflow-draft-declined">
+            {/* Nothing was drafted, and WHY decides what this says. A judgment
+                is advice — the copilot's own words, and an operator who
+                disagrees gets a workflow anyway rather than an argument. A
+                failure is not advice, so it is not dressed as any: it says the
+                copilot did not manage it, in our words rather than in the
+                gates' node-and-trigger vocabulary, and the action beside it
+                offers the canvas instead of pretending to overrule an opinion
+                nobody expressed. */}
+            {decline && (
+              <Alert
+                data-testid="workflow-draft-declined"
+                data-decline-kind={decline.kind}
+              >
                 <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-                  <span>{draftReason}</span>
+                  <span>{decline.message}</span>
                   <Button
                     type="button"
                     variant="outline"
@@ -2347,7 +2380,7 @@ export function WorkflowCreateDialog({
                     disabled={submitting || drafting}
                     data-testid="workflow-create-anyway"
                   >
-                    Create it anyway
+                    {decline.action}
                   </Button>
                 </AlertDescription>
               </Alert>

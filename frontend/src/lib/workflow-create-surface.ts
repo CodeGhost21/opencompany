@@ -24,25 +24,12 @@ export type CreateSurface = "describe" | "form";
  * never shipped. A predicate spelled inline in the component would be provable
  * only by rendering it, and only for the cases somebody thought to render.
  *
- * ## Why the copilot's availability is not an input
- *
- * It used to be: an `echo` company (no model configured) and a build that
- * answered a capability gap both got the manual form, on the reasoning that a
- * description box is useless with nothing to draft with. Running it proved the
- * opposite — the operator on a host with no model got the full graph form, which
- * is the dialog this redesign exists to retire, and got it in exactly the case
- * where they are least likely to want to hand-author a graph.
- *
- * So the box is unconditional. What changes when the copilot cannot draft is
- * what Create *does*, not what the dialog *is*: the sentence becomes the name
- * and the description, the graph is the blank starter, and the canvas is where
- * it gets built. {@link draftCapabilityGap} still classifies the refusal, but it
- * now feeds the dialog's own copy — so the operator is told the copilot could
- * not draft this — rather than swapping the dialog out from under them.
- *
- * A create the host **refuses** is the one thing that still brings the fields
- * back, and it has to: the refusal that actually happens names an id, and there
- * is no id field on the one-box dialog to obey it with.
+ * The copilot's availability is deliberately **not** an input. It used to be,
+ * and running it proved that wrong: an operator on a host with no model got the
+ * full graph form — the dialog this redesign exists to retire — in exactly the
+ * case where they are least likely to want to hand-author a graph. So the box is
+ * unconditional, and what changes when the copilot cannot draft is what Create
+ * *does*, not what the dialog *is*.
  */
 export function createSurface(args: {
   /** Edit mode. An edit already has a graph, so there is nothing to draft. */
@@ -100,6 +87,130 @@ export function draftCapabilityGap(err: unknown): string | null {
   return err.message;
 }
 
+/**
+ * Whether a refused write is one the operator can **act on**, and so whether the
+ * one-box dialog should hand over the full form.
+ *
+ * This exists because the obvious spelling of "the write failed" was wrong. The
+ * hand-over is a one-way door — it retires the box for the rest of the open —
+ * and it used to fire from the first line of the write path's `catch`, so a
+ * dropped connection or a 500 collapsed the redesign into the graph form the
+ * operator had just been spared. That is the same failure
+ * {@link draftCapabilityGap} is written the long way round to avoid, one path
+ * over: a transport failure says nothing about what the operator should do next.
+ *
+ * So it is keyed on what the host actually **asked for**:
+ *
+ * - a `409` names an id that is taken — "pick a different id" is an instruction,
+ *   and the id field is the only way to obey it;
+ * - `problems` are per-node complaints (`workflow_invalid`), each of which wants
+ *   a control to land on.
+ *
+ * Everything else — a network blip, a 500, a 400 with no problems, a thrown
+ * `TypeError` — leaves the box up and the banner showing. The operator presses
+ * Create again.
+ */
+export function writeRefusalHandsOverForm(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false;
+  if (err.status === 409) return true;
+  return (err.problems?.length ?? 0) > 0;
+}
+
+/**
+ * What a copilot decline actually was, and what to say about it.
+ *
+ * `automatable: false` is one flag over two very different events, and the
+ * dialog used to render both as advice:
+ *
+ * - the copilot **judged** the work better done once — a real opinion about the
+ *   description, worth showing in the host's own words; and
+ * - the copilot **failed** — it ran out of time, errored, exhausted its step
+ *   budget, or could not produce a graph its own gates would accept.
+ *
+ * The second was reaching operators as advice, verbatim, and the verbatim text
+ * is the gate diagnostics: *"the described workflow could not be drafted into
+ * one that would be accepted: invalid request: a workflow needs exactly one
+ * `trigger` node to say what starts it (found 0)."* `trigger` nodes are the
+ * exact vocabulary the one-box dialog exists to stop putting in front of people,
+ * and calling a crash "better done by hand" is not true.
+ *
+ * ## Why this reads the prose
+ *
+ * The host sends no code with a decline — `DraftFromDescriptionResponse`
+ * carries `automatable` and a `reason` string, nothing more. So this keys on the
+ * four sentence stems `not_automatable_reason`
+ * (`src/harness/built_in/workflow_build.rs`) generates, which are literals in
+ * that function rather than model output.
+ *
+ * The failure direction is chosen to be harmless: anything unrecognised is a
+ * **judgment**, which is the behaviour that shipped before this and shows the
+ * host's own words. A reworded stem therefore degrades to today's dialog rather
+ * than to a wrong claim, and nothing about which dialog is on screen depends on
+ * it.
+ */
+export interface DraftDecline {
+  /** `judgment` — the copilot's opinion. `failure` — the copilot did not manage it. */
+  kind: "judgment" | "failure";
+  /** What to render: the host's own words for a judgment, ours for a failure. */
+  message: string;
+  /** The label on the action beside it — the two mean different things. */
+  action: string;
+}
+
+/**
+ * The stems {@link draftDecline} recognises as a failure, each with the honest
+ * sentence to say instead.
+ *
+ * Mirrors `not_automatable_reason`'s four arms. The stems are prefixes, matched
+ * case-insensitively, because each arm appends its own diagnostics.
+ */
+const DECLINE_FAILURES: ReadonlyArray<readonly [string, string]> = [
+  [
+    "drafting the workflow ran out of time",
+    "The copilot ran out of time before it had a draft.",
+  ],
+  [
+    "drafting the workflow could not complete",
+    "The copilot hit an error and did not finish a draft.",
+  ],
+  [
+    "the workflow copilot reached its step budget",
+    "The copilot ran out of steps before it had a draft.",
+  ],
+  [
+    "the described workflow could not be drafted into one that would be accepted",
+    "The copilot could not turn that into a workflow it would accept.",
+  ],
+];
+
+/** The tail every failure message carries — what the operator can do next. */
+const FAILURE_REMEDY =
+  " Reword it and press Create to try again, or start it on the canvas and build it there.";
+
+/**
+ * Classifies a decline and words it. See {@link DraftDecline} for why.
+ *
+ * An empty or missing reason is a judgment with the same default the banner
+ * reducer uses, so a host that sends nothing reads as it always did.
+ */
+export function draftDecline(reason: string | null | undefined): DraftDecline {
+  const stated = (reason ?? "").trim();
+  const lowered = stated.toLowerCase();
+  const failure = DECLINE_FAILURES.find(([stem]) => lowered.startsWith(stem));
+  if (failure) {
+    return {
+      kind: "failure",
+      message: `${failure[1]}${FAILURE_REMEDY}`,
+      action: "Start it on the canvas",
+    };
+  }
+  return {
+    kind: "judgment",
+    message: stated || "This is better done once than built into a workflow.",
+    action: "Create it anyway",
+  };
+}
+
 /** Cap on a derived name, so a rambling sentence cannot become a 400-character title. */
 const NAME_CAP = 60;
 
@@ -117,15 +228,23 @@ const NAME_CAP = 60;
  * and deliberately so: the name is renameable on the canvas a second later, and
  * a name that reads like the operator's own words beats one invented for them.
  *
- * Returns `""` when the sentence has nothing usable — the caller must treat that
- * as "no name derived" and ask for one, never write an empty name. An empty name
- * also derives an empty id, and an empty id is the permanent join key nothing
- * can fix afterwards.
+ * Returns `""` when the sentence has nothing usable — no letter and no digit in
+ * the first clause, so `"🎉🎉"` and `"---"` both derive nothing. The caller must
+ * treat that as "no name derived" and ask for one, never write an empty name: an
+ * empty name also derives an empty id, and an empty id is the permanent join key
+ * nothing can fix afterwards.
+ *
+ * The emptiness rule is stated here rather than left to the caller's
+ * `isSafeId` check because two callers now read it, and "the name is empty" is a
+ * fact about the sentence rather than about the id that happens to follow.
  */
 export function nameFromDescription(description: string): string {
   const firstClause = description.split(/[.;\n,!?]/, 1)[0] ?? "";
   const collapsed = firstClause.replace(/\s+/g, " ").trim();
-  if (!collapsed) return "";
+  // Not merely non-empty: a clause of punctuation or emoji reads as a name on
+  // screen and slugs to nothing, which is the empty permanent id this contract
+  // exists to refuse.
+  if (!/[\p{L}\p{N}]/u.test(collapsed)) return "";
   const capped =
     collapsed.length <= NAME_CAP ? collapsed : `${collapsed.slice(0, NAME_CAP).trimEnd()}…`;
   return capped.charAt(0).toUpperCase() + capped.slice(1);

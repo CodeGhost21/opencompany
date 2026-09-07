@@ -109,6 +109,45 @@ function describeBox(): HTMLTextAreaElement | null {
   return inDialog<HTMLTextAreaElement>('[data-testid="workflow-describe-box"]');
 }
 
+/**
+ * A `workflow_invalid` refusal: a 400 that carries per-node complaints.
+ *
+ * `problems` is a field rather than a constructor argument, so it is assigned
+ * here rather than passed — the fourth positional argument is `fromHost`, and a
+ * refusal built by passing the array there is one that silently has none.
+ */
+function perNodeRefusal(): ApiError {
+  const err = new ApiError(400, "workflow_invalid", "the graph was refused", true);
+  err.problems = [
+    { node_id: "write", field: "config.agent", message: "no such teammate" },
+  ];
+  return err;
+}
+
+/**
+ * The id the confirm is about to make permanent (issue #1808).
+ *
+ * Read from the document rather than through `inDialog`: the confirm is
+ * portalled onto `document.body`, and a dialog-scoped lookup misses it — which
+ * reads as "the confirm did not open" rather than "it opened elsewhere".
+ */
+function confirmedId(): string {
+  return (
+    document.querySelector('[data-testid="workflow-id-confirm-value"]')?.textContent ?? ""
+  );
+}
+
+/** Presses the confirm's own Create, which is what actually writes. */
+async function confirmCreate() {
+  const btn = document.querySelector<HTMLButtonElement>(
+    '[data-testid="workflow-id-confirm-create"]',
+  );
+  expect(btn, `no id confirm on screen in:\n${document.body.innerHTML}`).toBeTruthy();
+  await act(async () => {
+    btn!.click();
+  });
+}
+
 /** Sets a controlled textarea the way a keystroke would. */
 function typeDescription(value: string) {
   const box = describeBox();
@@ -464,5 +503,160 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
       "Give this workflow a name",
     );
+  });
+});
+
+describe("the New-workflow dialog when the write itself fails", () => {
+  /**
+   * The hand-over is a **one-way door**: it retires the box for the rest of the
+   * open. So it has to fire on a refusal the operator can act on, and only on
+   * one — a dropped connection or a 500 that collapsed the dialog would leave
+   * them hand-authoring a graph on a host that would have written theirs a
+   * second later, which is the exact outcome this redesign exists to prevent.
+   */
+  it("keeps the box when the write fails for a reason nobody can act on", async () => {
+    await open(
+      stubClient({
+        cognition: "hosted",
+        create: () => Promise.reject(new ApiError(500, "internal", "the host fell over")),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // The box is still the whole dialog, and the sentence is still in it.
+    expect(describeBox(), "a 500 must not retire the one-box dialog").toBeTruthy();
+    expect(describeBox()!.value).toBe("Every Monday, draft the digest and email it.");
+    expect(inDialog(NAME_INPUT), "the manual form must NOT come back").toBeNull();
+    expect(inDialog(ID_INPUT)).toBeNull();
+    expect(dialogText()).not.toContain("Nodes");
+    // …and the failure is still reported, so Create never reads as dead.
+    expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
+      "the host fell over",
+    );
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  it("keeps the box when the write never reached the host at all", async () => {
+    // A `TypeError` is what `fetch` throws on a dropped connection. It is not an
+    // `ApiError`, so there is nothing the host asked for and nothing to obey.
+    await open(
+      stubClient({
+        cognition: "hosted",
+        create: () => Promise.reject(new TypeError("Failed to fetch")),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(describeBox(), "a dropped connection must not retire the dialog").toBeTruthy();
+    expect(inDialog(ID_INPUT)).toBeNull();
+    expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
+      "Failed to fetch",
+    );
+  });
+
+  it("hands over the fields for a per-node refusal, which names controls", async () => {
+    // The other half of the gate: `workflow_invalid` carries per-node problems,
+    // and each one wants a control to land on. Those the box does not have.
+    await open(
+      stubClient({
+        cognition: "hosted",
+        create: () => Promise.reject(perNodeRefusal()),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(inDialog(ID_INPUT), "a per-node refusal must show the nodes").toBeTruthy();
+    expect(dialogText()).toContain("Nodes");
+  });
+});
+
+describe("the New-workflow dialog when the copilot declines", () => {
+  /**
+   * `automatable: false` covers two different events, and only one of them is
+   * advice. A failed draft used to arrive as advice **verbatim**, which meant
+   * the operator was shown the gate diagnostics — `trigger` nodes, node ids —
+   * by the one dialog built to stop mentioning them, and offered "Create it
+   * anyway" as if there were an opinion to overrule.
+   */
+  it("does not dress a failed draft as advice, or quote the gates at the operator", async () => {
+    await open(
+      stubClient({
+        cognition: "hosted",
+        draft: () =>
+          Promise.resolve({
+            automatable: false,
+            reason:
+              "the described workflow could not be drafted into one that would be accepted: " +
+              "invalid request: a workflow needs exactly one `trigger` node to say what " +
+              "starts it (found 0).",
+          }),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Friday, email the sales digest and file it in Dropbox.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    const declined = inDialog('[data-testid="workflow-draft-declined"]');
+    expect(declined, "a failed draft must still be reported").toBeTruthy();
+    expect(declined!.getAttribute("data-decline-kind")).toBe("failure");
+    // The vocabulary the one box exists to retire never reaches the operator.
+    expect(declined!.textContent).not.toContain("trigger");
+    expect(declined!.textContent).not.toContain("invalid request");
+    // What is said instead is true, and says what to do next.
+    expect(declined!.textContent).toContain("could not turn that into a workflow");
+    expect(declined!.textContent).toContain("start it on the canvas");
+    // And the action offered is the canvas, not the overruling of an opinion.
+    const action = inDialog<HTMLButtonElement>('[data-testid="workflow-create-anyway"]');
+    expect(action!.textContent).toContain("Start it on the canvas");
+    expect(action!.textContent).not.toContain("anyway");
+  });
+
+  it("still shows a real judgement in the copilot's own words", async () => {
+    await open(
+      stubClient({
+        cognition: "hosted",
+        draft: () =>
+          Promise.resolve({
+            automatable: false,
+            reason: "This is a one-off — just do it once rather than building it.",
+          }),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Email Priya the Q3 numbers, once.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    const declined = inDialog('[data-testid="workflow-draft-declined"]');
+    expect(declined!.getAttribute("data-decline-kind")).toBe("judgment");
+    expect(declined!.textContent).toContain("This is a one-off");
+    expect(
+      inDialog<HTMLButtonElement>('[data-testid="workflow-create-anyway"]')!.textContent,
+    ).toContain("Create it anyway");
   });
 });

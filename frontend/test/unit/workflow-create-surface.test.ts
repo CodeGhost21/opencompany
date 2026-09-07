@@ -4,7 +4,9 @@ import { ApiError } from "@/api/types";
 import {
   createSurface,
   draftCapabilityGap,
+  draftDecline,
   nameFromDescription,
+  writeRefusalHandsOverForm,
 } from "@/lib/workflow-create-surface";
 
 /**
@@ -130,5 +132,147 @@ describe("nameFromDescription", () => {
     expect(nameFromDescription("   ")).toBe("");
     expect(nameFromDescription(",,,")).toBe("");
     expect(nameFromDescription("...")).toBe("");
+    // "Nothing usable" is about letters and digits, not about emptiness. This
+    // one is the case the doc comment always cited and the code never met: it
+    // used to come back as the name "🎉🎉", which slugs to an empty id and was
+    // caught only by a separate check one caller happened to make.
+    expect(nameFromDescription("🎉🎉")).toBe("");
+    expect(nameFromDescription("— ///")).toBe("");
+  });
+
+  it("keeps a name that is usable but not ASCII", () => {
+    // Neither `slugifyWorkflowId` nor the host can make an id out of these, so
+    // the caller still hands over the form — but "no letters in it" would be a
+    // false thing to say about them, and this function's answer is about the
+    // sentence rather than about the id that follows.
+    expect(nameFromDescription("日次レポート")).toBe("日次レポート");
+  });
+});
+
+/**
+ * Which write failures hand the operator the manual form.
+ *
+ * The hand-over is a **one-way door** — it retires the one-box dialog for the
+ * rest of the open — so the cost of the two answers is wildly asymmetric.
+ * Answering `true` too eagerly is what shipped: the write path treated every
+ * throw as a refusal, so a dropped connection or a 500 collapsed the redesign
+ * into the graph form, permanently, over something that would have worked on
+ * the next press.
+ */
+describe("writeRefusalHandsOverForm", () => {
+  it("hands over for a taken id, which is an instruction with a field to obey it", () => {
+    expect(
+      writeRefusalHandsOverForm(
+        new ApiError(409, "conflict", "A workflow with id `x` already exists."),
+      ),
+    ).toBe(true);
+  });
+
+  it("hands over for per-node problems, which each want a control", () => {
+    const err = new ApiError(400, "workflow_invalid", "the graph was refused", true);
+    err.problems = [{ node_id: "write", message: "no such teammate" }];
+    expect(writeRefusalHandsOverForm(err)).toBe(true);
+  });
+
+  it("keeps the box for a failure that says nothing about what to do", () => {
+    expect(writeRefusalHandsOverForm(new ApiError(500, "internal", "it fell over"))).toBe(
+      false,
+    );
+    expect(writeRefusalHandsOverForm(new ApiError(503, "quiescing", "try later"))).toBe(
+      false,
+    );
+    // A 400 with no breakdown names no node and no field.
+    expect(writeRefusalHandsOverForm(new ApiError(400, "bad_request", "no"))).toBe(false);
+    // An empty `problems` array is "a breakdown with nothing in it".
+    const empty = new ApiError(400, "workflow_invalid", "refused", true);
+    empty.problems = [];
+    expect(writeRefusalHandsOverForm(empty)).toBe(false);
+  });
+
+  it("keeps the box for anything that never reached the host", () => {
+    // What `fetch` throws on a dropped connection, and what a bug throws.
+    expect(writeRefusalHandsOverForm(new TypeError("Failed to fetch"))).toBe(false);
+    expect(writeRefusalHandsOverForm(new Error("boom"))).toBe(false);
+    expect(writeRefusalHandsOverForm(undefined)).toBe(false);
+    expect(writeRefusalHandsOverForm("409")).toBe(false);
+  });
+});
+
+/**
+ * Telling the copilot's judgement from the copilot's failure.
+ *
+ * `automatable: false` is one flag over both, and the dialog rendered both as
+ * advice — so a draft that timed out, errored, or failed the host's own gates
+ * reached the operator as a recommendation, quoting the gate diagnostics
+ * verbatim. Those diagnostics name `trigger` nodes and node ids: the vocabulary
+ * the one-box dialog exists to stop putting in front of people.
+ *
+ * Each stem below is a literal in `not_automatable_reason`
+ * (`src/harness/built_in/workflow_build.rs`), not model output. The unrecognised
+ * case is asserted last and is the one that matters most: it must degrade to a
+ * judgement, which is the behaviour that shipped before this.
+ */
+describe("draftDecline", () => {
+  it("calls a timed-out draft what it was", () => {
+    const d = draftDecline(
+      "drafting the workflow ran out of time before a proposal was ready, so nothing " +
+        "was drafted — try again, or create it by hand",
+    );
+    expect(d.kind).toBe("failure");
+    expect(d.message).toContain("ran out of time");
+    expect(d.action).toBe("Start it on the canvas");
+  });
+
+  it("calls an errored draft what it was", () => {
+    const d = draftDecline(
+      "drafting the workflow could not complete, so nothing was drafted: upstream 500",
+    );
+    expect(d.kind).toBe("failure");
+    // The upstream's own words do not ride along — they are about the model
+    // plumbing, and there is nothing an operator does with them.
+    expect(d.message).not.toContain("upstream 500");
+  });
+
+  it("calls an exhausted step budget what it was", () => {
+    expect(
+      draftDecline(
+        "the workflow copilot reached its step budget before it could draft an " +
+          "acceptable workflow: a workflow needs exactly one `trigger` node",
+      ).kind,
+    ).toBe("failure");
+  });
+
+  it("never repeats the gates at the operator", () => {
+    const d = draftDecline(
+      "the described workflow could not be drafted into one that would be accepted: " +
+        "invalid request: a workflow needs exactly one `trigger` node to say what " +
+        "starts it (found 0).",
+    );
+    expect(d.kind).toBe("failure");
+    expect(d.message).not.toContain("trigger");
+    expect(d.message).not.toContain("invalid request");
+    expect(d.message).toContain("could not turn that into a workflow");
+    expect(d.message).toContain("start it on the canvas");
+  });
+
+  it("passes a real judgement through in the copilot's own words", () => {
+    const d = draftDecline("This is a one-off — just do it once rather than building it.");
+    expect(d.kind).toBe("judgment");
+    expect(d.message).toBe("This is a one-off — just do it once rather than building it.");
+    expect(d.action).toBe("Create it anyway");
+  });
+
+  it("treats an unrecognised reason as a judgement, which is the safe direction", () => {
+    // A reworded stem must degrade to the dialog that shipped before this, not
+    // to a claim about what the copilot did.
+    const d = draftDecline("Some future host phrasing nobody here has seen.");
+    expect(d.kind).toBe("judgment");
+    expect(d.message).toBe("Some future host phrasing nobody here has seen.");
+  });
+
+  it("has something to say when the host sends no reason at all", () => {
+    expect(draftDecline(null).kind).toBe("judgment");
+    expect(draftDecline("").message).toContain("better done once");
+    expect(draftDecline(undefined).message).toContain("better done once");
   });
 });
