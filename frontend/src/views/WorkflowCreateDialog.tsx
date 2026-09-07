@@ -843,10 +843,9 @@ function comparableGraph(graph: WorkflowGraph): string {
     const [x, y] = [JSON.stringify(canonical(a)), JSON.stringify(canonical(b))];
     return x < y ? -1 : x > y ? 1 : 0;
   };
+  // Destructured off and never read: `noUnusedLocals` exempts the siblings of
+  // an object rest element, which is exactly what this is doing.
   const { version, enabled, editable, ...sent } = graph;
-  void version;
-  void enabled;
-  void editable;
   return JSON.stringify(
     canonical({
       ...sent,
