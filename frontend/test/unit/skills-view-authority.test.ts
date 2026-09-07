@@ -51,18 +51,27 @@ const REGISTRY: Array<{
 ];
 
 /**
- * A client answering the two reads with fixed data, and `/auth/me` as an
- * admin by default — matching `HostingView`'s own fixture convention.
- * `carriesPlatformBearer` defaults to `false`, matching a browser session
- * authenticating by cookie.
+ * A client answering the two reads with fixed data.
+ *
+ * `session` and `carriesPlatformBearer` are independent, matching
+ * `resolve_principal` on the host: a hub console can carry both a platform
+ * bearer and a signed-in member (`authHeaders`'s own doc comment), and the
+ * host tries the session first, falling back to the bearer only when there is
+ * none at all. `session: "none"` makes `/auth/me` reject the way it does for
+ * an unauthenticated or bearer-only caller.
  */
-function clientWith(role: "admin" | "member" = "admin", carriesPlatformBearer = false): OpenCompanyClient {
+function clientWith(
+  session: "admin" | "member" | "none" = "admin",
+  carriesPlatformBearer = false,
+): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/companies/acme",
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return Promise.resolve({ id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true });
+        return session === "none"
+          ? Promise.reject(new Error("no session"))
+          : Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
       }
       if (path.endsWith("/skills/registry")) {
         return Promise.resolve(REGISTRY);
@@ -163,15 +172,33 @@ describe("SkillsView authority", () => {
     ).toBe(true);
   });
 
-  it("offers a platform bearer every control without calling /auth/me", async () => {
-    const client = clientWith("member", true);
-    const getSpy = vi.spyOn(client, "get");
-    await show(client);
+  it("offers a bearer-only caller every control once /auth/me finds no session", async () => {
+    await show(clientWith("none", true));
 
     expect(at("skills-admin-only")).toBeNull();
     expect(
       Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
     ).toBe(true);
-    expect(getSpy.mock.calls.some(([path]) => String(path).endsWith("/auth/me"))).toBe(false);
+  });
+
+  it("defers to a member session even when a platform bearer is also present", async () => {
+    // A hub console can carry both credentials at once (`authHeaders`), and
+    // resolve_principal tries the session first — so a bearer must never
+    // paper over a member's own 403 (codex review).
+    await show(clientWith("member", true));
+
+    expect(at("skills-admin-only")?.textContent).toContain("Only an admin");
+    expect(
+      Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
+    ).toBe(false);
+  });
+
+  it("defers to an admin session when a platform bearer is also present", async () => {
+    await show(clientWith("admin", true));
+
+    expect(at("skills-admin-only")).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
+    ).toBe(true);
   });
 });

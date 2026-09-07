@@ -101,23 +101,23 @@ export function SkillsView({ client, company }: Props) {
   const gen = useRef(0);
 
   useEffect(() => {
-    // A platform or tenant bearer has no human session for `/auth/me` to
-    // return, but the write routes below are AdminScopedCompany on the host,
-    // which admits that machine principal unconditionally once it has
-    // addressed this company. Asking `/auth/me` anyway would read the missing
-    // session as "not an admin" and hide controls whose write would in fact
-    // succeed.
-    if (client.carriesPlatformBearer) {
-      setCanManage(true);
-      return;
-    }
     let live = true;
     void (async () => {
       let admin = false;
       try {
         admin = (await fetchMe(client, company)).role === "admin";
       } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
+        // `resolve_principal` on the host tries a human session first and
+        // only falls back to the platform/tenant bearer when none is
+        // present — a hub console can carry both, and the write routes
+        // below are AdminScopedCompany, which admits that machine principal
+        // unconditionally once it has addressed this company. So `/auth/me`
+        // failing outright (no session at all) means the bearer is what the
+        // host will actually authorize on; `/auth/me` *succeeding* with a
+        // member role — even with a bearer also present — means the host
+        // resolved that member and will 403 the same as it would with no
+        // bearer at all, which the `try` above already handles correctly.
+        admin = client.carriesPlatformBearer;
       }
       if (live) setCanManage(admin);
     })();
