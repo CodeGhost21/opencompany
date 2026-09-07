@@ -208,10 +208,13 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
 
     expect(added).toHaveLength(1);
     expect(added[0].name).toBe("Nova");
-    // Derived from the first clause. Never blank: a blank role breaks the
-    // teammate's own system prompt and switches off the copilot on the page
-    // this create is about to open.
-    expect(added[0].role).toBe("Runs paid acquisition");
+    // The operator's whole sentence, unedited and un-truncated. Never blank: a
+    // blank role breaks the teammate's own system prompt and switches off the
+    // copilot on the page this create is about to open. And never a piece of
+    // one — the clause split that used to run here answered "Runs paid
+    // acquisition" and dropped the rest of the job on the floor. See
+    // `roleFromDescription`.
+    expect(added[0].role).toBe("Runs paid acquisition, and reports on ROAS weekly");
     expect(added[0].description).toBe("Runs paid acquisition, and reports on ROAS weekly.");
     // Not collected here — the copilot drafts it on the detail page, grounded
     // in a teammate the host has actually stored.
@@ -261,6 +264,65 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
     type("team-describe-box", "");
     await pressCreate();
     expect(added, "an empty box derives no role").toHaveLength(0);
+  });
+});
+
+describe("closing the Add-teammate dialog (issue #1989)", () => {
+  // The hand-over to the full form is meant to last for one open — the module
+  // says so in `reset`'s own comment. It did not. `reset` hung off the wrapper
+  // passed to Radix's `onOpenChange`, which Radix invokes for Escape and the
+  // overlay but which Cancel bypassed by calling the raw `onOpenChange(false)`
+  // prop. So one operator who tried a description the dialog could not read a
+  // role out of, then pressed Cancel, got the six-field form back on every
+  // subsequent add for the life of the page — still carrying the abandoned
+  // attempt's name and sentence, still showing the notice explaining a
+  // hand-over that had happened minutes ago. Escape, on the identical state,
+  // cleared everything. That asymmetry is what these two tests pin.
+
+  async function handOver() {
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "...");
+    await pressCreate();
+    expect(document.querySelector(roleField), "the hand-over must have happened").not.toBeNull();
+  }
+
+  async function pressCancel() {
+    await act(async () => {
+      byText("button", "Cancel")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+  }
+
+  it("Cancel clears the hand-over, so the next add starts reduced again", async () => {
+    await handOver();
+    await pressCancel();
+    await openDialog();
+
+    expect(document.querySelector(box), "the reduced dialog must be back").not.toBeNull();
+    expect(document.querySelector(roleField), "the full form must be gone").toBeNull();
+    expect(
+      document.querySelector('[data-testid="team-add-handover"]'),
+      "and the notice about a hand-over that is over",
+    ).toBeNull();
+  });
+
+  it("Cancel clears what was typed, so nothing leaks into the next add", async () => {
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition.");
+    await pressCancel();
+    await openDialog();
+
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.value,
+    ).toBe("");
+    expect(
+      document.querySelector<HTMLTextAreaElement>('[data-testid="team-describe-box"]')!.value,
+    ).toBe("");
+    expect(added, "and Cancel writes nothing").toHaveLength(0);
   });
 });
 

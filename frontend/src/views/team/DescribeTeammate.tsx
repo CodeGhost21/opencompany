@@ -21,8 +21,10 @@ import { Textarea } from "@/components/ui/textarea";
  * model in this path to name anybody; the only alternative is splitting the
  * sentence, and a teammate's name is not a phrase. "Runs paid acquisition"
  * would then be the name on every roster card, in every member list, and beside
- * every message that teammate sends. The role IS a phrase, so that split is
- * kept for the role — see `roleFromDescription`.
+ * every message that teammate sends. The role is not split out either — it is
+ * this box's sentence entire or it is nothing, and nothing hands the operator
+ * the full form to type one. See `roleFromDescription` for why a piece of a
+ * sentence is worse than no sentence at all.
  *
  * ## Why there is no copilot control in here
  *

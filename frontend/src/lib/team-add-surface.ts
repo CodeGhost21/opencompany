@@ -35,10 +35,12 @@
 // send. The workflow module can afford that because it is the fallback for one
 // rare path ("Create it anyway"); here it would be the only path.
 //
-// A **role** is a phrase, though, so that same split is the right shape for it
-// — and role cannot simply be left blank, because both the teammate's prompts
-// are written from it and the detail page's copilot refuses to draft without
-// one. See {@link roleFromDescription}.
+// The role is not split out of the sentence either, for the same reason at a
+// smaller scale — a clause is not reliably the job. It is the operator's
+// sentence entire, or it is nothing and the full form asks for one; role cannot
+// simply be left blank, because both the teammate's prompts are written from it
+// and the detail page's copilot refuses to draft without one. See
+// {@link roleFromDescription}.
 
 import type { CognitionPath } from "@/api/inference";
 
@@ -99,12 +101,14 @@ export function addTeammateSurface(args: {
    * Whether a Create was already attempted and the sentence yielded no role.
    *
    * The one dead end the reduced dialog can reach. {@link roleFromDescription}
-   * answers `""` for a sentence with no letters or digits in it ("🎉🎉"), and a
-   * blank role must never be written — see that function for the three things
-   * it breaks. So the operator is handed the full form, carrying what they did
-   * type, rather than a Create button that cannot work. The reduced dialog
-   * never dead-ends, which is the same promise `WorkflowCreateDialog` makes
-   * with its `writeRefused` input.
+   * answers `""` twice: for a description with no letter or digit in it
+   * ("🎉🎉"), and for one too long to be a role at all. A blank role must
+   * never be written — see that function for the four things it breaks — and a
+   * truncated one must never be stored, so both refusals arrive here. The
+   * operator is handed the full form carrying what they did type, rather than a
+   * Create button that cannot work or a job title assembled by machine out of
+   * half their sentence. The reduced dialog never dead-ends, which is the same
+   * promise `WorkflowCreateDialog` makes with its `writeRefused` input.
    */
   roleUnderivable: boolean;
 }): AddTeammateSurface {
@@ -131,8 +135,21 @@ export function addTeammateSurface(args: {
   return "describe";
 }
 
-/** Cap on a derived role, so a rambling sentence cannot become a 400-character job title. */
-const ROLE_CAP = 60;
+/**
+ * The longest sentence that can stand in as a role.
+ *
+ * A bound rather than a truncation point — see {@link roleFromDescription}.
+ * Sized against what a role is actually read as rather than picked round: the
+ * two consumers are `persona_prompt`'s "You are {name}, the {role} at
+ * {company}." and the orchestrator's `id — role` Team block, both of which
+ * carry one clause comfortably and neither of which carries a paragraph. Every
+ * role shipped in `companies/` and `globals/` today is under 25 characters;
+ * 120 leaves a whole descriptive sentence ("Runs wholesale outreach to boutique
+ * retailers and keeps the stockist pipeline warm", 82) inside the bound, and
+ * puts a two-sentence answer outside it, which is the line worth drawing: one
+ * sentence about a job is a verbose role, two is a description.
+ */
+const ROLE_CAP = 120;
 
 /**
  * A role from the sentence the operator typed.
@@ -164,28 +181,60 @@ const ROLE_CAP = 60;
  *    role, and the setup roster proposal drops the agent. Nothing in the
  *    repository produces a stored empty role today, so one would be a first.
  *
- * ## Why the first clause
+ * ## The whole sentence, or nothing — and never a piece of one
  *
- * Because that is where an English description of a job says what the job is,
- * and the rest says how. "Runs paid acquisition and reports on ROAS." → "Runs
- * paid acquisition". Crude, and deliberately so: unlike a name, a role IS a
- * phrase, so the crude answer is the right *shape*, and the operator lands on a
- * page where the field is one click from edited a second later.
+ * This used to take the first clause (`description.split(/[.;\n,!?]/, 1)[0]`)
+ * and truncate it at 60 characters with a literal `…`. Both halves of that were
+ * wrong, and wrong in the one way that matters here: the result is **stored**,
+ * as the teammate's permanent job title, read back on every roster card, in the
+ * persona line and in the delegation Team block. All four failures below were
+ * reproduced against a live host, creating the teammate and reading the record
+ * back over `GET …/team/<id>`:
  *
- * It is also the operator's own words rather than a model's, which is the line
- * the copilot is deliberately kept on the other side of.
+ * - **Truncation minted a job title out of half a sentence.** "Runs wholesale
+ *   outreach to boutique retailers and keeps the stockist pipeline warm." has
+ *   no clause break — extremely ordinary phrasing — so it was stored as
+ *   `"Runs wholesale outreach to boutique retailers and keeps the…"`, ellipsis
+ *   and all, and shipped into the persona as "You are Sable, the Runs wholesale
+ *   outreach to boutique retailers and keeps the… at Wick & Wax Co."
+ * - **The first clause is often not the job.** "Every Monday, reconciles the ad
+ *   spend against the invoices." stored the role `"Every Monday"`. A leading
+ *   adverbial is where an English sentence puts *when*, not *what*, and no
+ *   split can tell the two apart.
+ * - **`split(…, 1)` takes the first element, not the first non-empty one**, so
+ *   a description opening with a delimiter ("\n\nHello", "... ", "— ") derived
+ *   `""` from a sentence that plainly had a job in it.
+ * - **CJK never split at all**: `，。、；！？` are absent from that character
+ *   class, so a Chinese or Japanese description became a 60-character cut.
  *
- * Returns `""` when the sentence has nothing usable. The caller must treat that
- * as "no role derived" and ask for one — never write a blank role, which is
- * case 1–3 above.
+ * So: no splitting, and no truncation. A role is either the operator's sentence
+ * *entire* — their own words, unedited, which is the line the copilot is
+ * deliberately kept on the other side of — or it is nothing, and nothing means
+ * the caller hands over the full form and asks. A truncated role is worse than
+ * no role, because no role is a question the operator gets to answer and a
+ * truncated one is a permanent record they were never shown.
+ *
+ * The one liberty taken is a trailing sentence terminator: a role is a phrase,
+ * so "Runs paid acquisition and reports on ROAS." stores without its full stop.
+ *
+ * Returns `""` when the description cannot serve as a role — no letter or digit
+ * in it ("🎉🎉"), or longer than {@link ROLE_CAP}. The caller must treat that as
+ * "no role derived" and ask for one; it must never write a blank role, which is
+ * cases 1–4 above.
  */
 export function roleFromDescription(description: string): string {
-  const firstClause = description.split(/[.;\n,!?]/, 1)[0] ?? "";
-  const collapsed = firstClause.replace(/\s+/g, " ").trim();
-  if (!collapsed) return "";
-  const capped =
-    collapsed.length <= ROLE_CAP ? collapsed : `${collapsed.slice(0, ROLE_CAP).trimEnd()}…`;
-  return capped.charAt(0).toUpperCase() + capped.slice(1);
+  const collapsed = description.replace(/\s+/g, " ").trim();
+  // A role is a phrase; the sentence it came from was punctuated as a sentence.
+  // Full-width terminators too, so a Chinese or Japanese description is read as
+  // carefully as an English one — the class that is NOT here is `\p{P}` whole,
+  // which would eat the closing bracket off "Runs ads (paid)".
+  const phrase = collapsed.replace(/[.,;:!?…。，、；：！？]+$/u, "").trimEnd();
+  // Nothing a person could read as a job. Emoji, punctuation and whitespace all
+  // land here, which is what the hand-over exists for.
+  if (!/[\p{L}\p{N}]/u.test(phrase)) return "";
+  // Too long to BE a role. Deliberately not truncated: see above.
+  if (phrase.length > ROLE_CAP) return "";
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
 /** What the reduced dialog collects, before it is turned into a create. */
