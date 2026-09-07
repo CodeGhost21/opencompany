@@ -228,7 +228,20 @@ def describe(triggers: list[dict[str, Any]], day: int) -> str:
     )
 
 
-_CARRIED = re.compile(r"carried|converged|committed", re.I)
+# The four closes `EpisodeOutcome::summary` can write (`src/hivemind/types.rs`),
+# of which exactly one is a decision:
+#
+#   converged  "The desk settled on #topic after N turns (backed by …)."
+#   deadlocked "The desk deadlocked after N turns: #a and #b carried together…"
+#   exhausted  "The desk spent its N-turn budget without reaching a decision."
+#   idle       "Nobody on the desk had anything to add, so the room did not open."
+#
+# Anchored on "settled on #" and nothing looser. A first cut matched
+# `carried|converged|committed` and was wrong twice over: it missed every real
+# decision, because the converged summary says "settled" and never "carried",
+# and it would have scored a *deadlock* as a decision, because "carried
+# together" is how the deadlock line describes the tie it failed to break.
+_CARRIED = re.compile(r"settled on #", re.I)
 
 
 def run_desk(host: Host, desk: str, text: str, settle: float, log) -> dict[str, Any]:
