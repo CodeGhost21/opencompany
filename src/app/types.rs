@@ -1327,13 +1327,13 @@ mod tests {
         let state = AppState::new(AppConfig::default());
         let shutdown = Arc::new(tokio::sync::Notify::new());
         let handle = state.spawn_acp_session_sweeper(Arc::clone(&shutdown));
-        // Give the spawned task its first poll before notifying: `notify_waiters`
-        // wakes only a task already registered as waiting, not one still
-        // pending its first `.await` — the same race declined as out of scope
-        // for the sweeper itself (coderabbit review), worked around here so
-        // this test does not depend on it.
-        tokio::task::yield_now().await;
-        shutdown.notify_waiters();
+        // `notify_one`, not `notify_waiters`: this test is the only holder of
+        // `shutdown` and the sweeper its only waiter, and unlike
+        // `notify_waiters`, `notify_one` stores a permit for a task that has
+        // not registered as waiting yet — so this cannot lose the
+        // notification to the same scheduling race declined as out of scope
+        // for the sweeper's own shutdown convention (coderabbit review).
+        shutdown.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("the sweeper task must stop once notified, in every build")
