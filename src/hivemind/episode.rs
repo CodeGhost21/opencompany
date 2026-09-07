@@ -108,6 +108,24 @@ impl std::fmt::Debug for EpisodeDriver<'_> {
     }
 }
 
+/// What one turn writes back besides the line it is journaled under.
+///
+/// Bundled rather than passed as two `&mut` parameters because the turn path
+/// threads them through three functions (`line_from` → `grounded_and_regraded`
+/// → `grounded`), and the retries mean each of those has to be able to replace
+/// the aside as well as append a violation.
+///
+/// The two have different lifetimes on purpose: `violations` accumulates over
+/// the whole episode and is reported in the outcome, while `aside` belongs to
+/// one turn and is cleared before each.
+#[derive(Default)]
+struct TurnScratch {
+    /// Lines a member deposited that its seat was not entitled to make.
+    violations: Vec<MoveViolation>,
+    /// The private row this turn's reply carried, if any.
+    aside: Option<String>,
+}
+
 impl<'a> EpisodeDriver<'a> {
     /// Open a driver over `desk`, answering `task`.
     #[must_use]
@@ -237,7 +255,7 @@ impl<'a> EpisodeDriver<'a> {
         let mut turns = 0_u32;
         let mut first_seq: Option<EventSeq> = None;
         let mut last_seq: Option<EventSeq> = None;
-        let mut violations: Vec<MoveViolation> = Vec::new();
+        let mut scratch = TurnScratch::default();
         // Every line this episode journaled, in order, so the closing note is
         // written from what the room actually deposited rather than from a
         // second read of the journal that could disagree with it.
@@ -396,17 +414,11 @@ impl<'a> EpisodeDriver<'a> {
                 .with_trigger(Sequence(trigger.value()))
                 .render(&turn, &visible);
 
-            // The private row this turn's reply carried, if any. Set by
-            // `line_from` from whichever attempt produced the final desk line.
-            let mut rode: Option<String> = None;
+            // Cleared per turn: the aside belongs to the reply that produced
+            // this turn's line, never to the one before it.
+            scratch.aside = None;
             let line = match self
-                .line_from(
-                    &turn.agent_id,
-                    &prompt,
-                    &visible,
-                    &mut violations,
-                    &mut rode,
-                )
+                .line_from(&turn.agent_id, &prompt, &visible, &mut scratch)
                 .await
             {
                 Ok(line) => {
@@ -514,7 +526,7 @@ impl<'a> EpisodeDriver<'a> {
             // the desk would put a second desk-visible contribution on one
             // turn, which is the one thing a turn may not produce — and the
             // member has already said its piece in the row above.
-            if let Some(aside_line) = rode {
+            if let Some(aside_line) = scratch.aside.take() {
                 let audience = self.aside_audience(
                     &turn.agent_id,
                     &aside_line,
@@ -613,7 +625,7 @@ impl<'a> EpisodeDriver<'a> {
             first_seq,
             last_seq,
             report_seq: None,
-            violations,
+            violations: scratch.violations,
             failed_turns,
             referrals: referral_ledger,
         };
@@ -654,15 +666,14 @@ impl<'a> EpisodeDriver<'a> {
         agent_id: &str,
         prompt: &str,
         visible: &[tinyhivemind_hive::SessionMessage],
-        violations: &mut Vec<MoveViolation>,
-        aside: &mut Option<String>,
+        scratch: &mut TurnScratch,
     ) -> Result<String> {
         let allowed = self.desk.config.moves_for(agent_id);
         let (line, rode) = split_reply(&self.runner.speak(agent_id, prompt).await?);
-        *aside = rode;
+        scratch.aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations, aside)
+                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, scratch)
                 .await;
         };
         let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
@@ -671,10 +682,10 @@ impl<'a> EpisodeDriver<'a> {
         // a reply the room never saw would publish something its author did not
         // write on the turn it was written for.
         let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
-        *aside = rode;
+        scratch.aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations, aside)
+                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, scratch)
                 .await;
         };
         tracing::info!(
@@ -684,7 +695,7 @@ impl<'a> EpisodeDriver<'a> {
             attempted = %kind,
             "[hive] a member used a move its seat does not have, twice; the line was demoted"
         );
-        violations.push(MoveViolation {
+        scratch.violations.push(MoveViolation {
             agent_id: agent_id.to_owned(),
             attempted: kind.to_owned(),
         });
@@ -714,8 +725,7 @@ impl<'a> EpisodeDriver<'a> {
         visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
         allowed: &[&'static str],
-        violations: &mut Vec<MoveViolation>,
-        aside: &mut Option<String>,
+        scratch: &mut TurnScratch,
     ) -> Result<String> {
         let line = self
             .grounded(agent_id, prompt, visible, line, aside)
@@ -731,7 +741,7 @@ impl<'a> EpisodeDriver<'a> {
             "[hive] a member's evidential retry used a move its seat does not have; \
              the line was demoted"
         );
-        violations.push(MoveViolation {
+        scratch.violations.push(MoveViolation {
             agent_id: agent_id.to_owned(),
             attempted: kind.to_owned(),
         });
@@ -758,7 +768,7 @@ impl<'a> EpisodeDriver<'a> {
         prompt: &str,
         visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
-        aside: &mut Option<String>,
+        scratch: &mut TurnScratch,
     ) -> Result<String> {
         if self.desk.config.require_evidential != Some(true)
             || !evidential::support_misses_evidence(&line, agent_id, visible)
@@ -777,7 +787,7 @@ impl<'a> EpisodeDriver<'a> {
         // Same rule as the move correction: the retry is the turn that
         // happened, so its aside replaces whatever the first attempt carried.
         let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
-        *aside = rode;
+        scratch.aside = rode;
         Ok(line)
     }
 
