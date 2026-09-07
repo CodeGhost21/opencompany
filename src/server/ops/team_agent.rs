@@ -1698,10 +1698,7 @@ pub(super) async fn design_teammate(
     let designed = build_design(&company, &record, &subject).await;
     tracing::info!(
         company = %company.id(),
-        outcome = match designed.refusal().map(|r| r.as_str()) {
-            Some(reason) => reason,
-            None => "designed",
-        },
+        outcome = designed.refusal().map(|r| r.as_str()).unwrap_or("designed"),
         "[design] answered a teammate design request"
     );
     Ok(Json(DesignDto::from_designed(designed)))

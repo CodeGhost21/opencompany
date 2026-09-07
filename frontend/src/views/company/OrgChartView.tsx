@@ -400,6 +400,14 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
             name: fields.name,
             role: fields.role,
             description: fields.description || undefined,
+            // Issue #1989: the reduced dialog arrives with a persona the host
+            // designed alongside the role and the mandate. Dropping it here
+            // would leave a teammate created from this surface holding two of
+            // its three designed fields, while the same dialog opened from the
+            // roster kept all three — the drift two copies of a create path
+            // produce, and the reason an E2E test asserts the wire body rather
+            // than the screen.
+            instructions: fields.instructions?.trim() || undefined,
           },
           company,
         );
