@@ -213,14 +213,25 @@ def closing_report(messages: list[dict]) -> dict | None:
     )
 
 
-def describe(triggers: list[dict[str, Any]], day: int) -> str:
-    """Render one desk's share of a day as a message an operator would send."""
+def describe(desk: str, triggers: list[dict[str, Any]], day: int) -> str:
+    """Render one desk's share of a day as a message an operator would send.
+
+    The leading `topic:` line is load-bearing. `canonical_topic` prefers an
+    operator-declared id over any derivation, and without one it slugs the
+    message's first line — which on a first live run produced the topic
+    `#day1-came`, from "Day 1. What came in overnight". Every `!propose`,
+    `!support` and `!commit` in that episode, and the close in the `episodes`
+    ledger, then carried a name that says nothing about what was decided.
+    Declaring `#ops-day-1` costs one line and makes a fortnight of runs
+    greppable by desk and by day.
+    """
     shown = triggers[:MAX_TRIGGERS_PER_MESSAGE]
     lines = [f"- {t['detail']}" for t in shown]
     extra = len(triggers) - len(shown)
     if extra > 0:
         lines.append(f"- (and {extra} more of the same kind today)")
     return (
+        f"topic: #{desk}-day-{day}\n\n"
         f"Day {day}. What came in overnight:\n\n"
         + "\n".join(lines)
         + "\n\nDecide what to do about it. Read the fleet before you plan, and "
@@ -373,7 +384,7 @@ def main() -> int:
         for desk, items in by_desk.items():
             kinds = ", ".join(sorted({t["kind"] for t in items}))
             log(f"[sim]  -> {desk}: {len(items)} ({kinds})")
-            outcome = run_desk(host, desk, describe(items, world.day), args.settle, log)
+            outcome = run_desk(host, desk, describe(desk, items, world.day), args.settle, log)
             outcomes.append(outcome)
             log(
                 f"[sim]     {outcome['turns']} turns, {outcome['asides']} asides "
