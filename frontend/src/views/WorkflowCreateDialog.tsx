@@ -745,7 +745,12 @@ export function draftNodes(graph: WorkflowGraph): DraftNode[] {
     const common = {
       id: n.id,
       kind: n.kind,
-      name: n.name,
+      // Defaulted, not asserted. Every row control and `nodeLabel` call
+      // `name.trim()`, so a graph carrying a node with no `name` — which the API
+      // type says cannot happen and a copilot draft has produced — threw during
+      // render and white-screened the whole view. A hand-over is exactly when
+      // that graph arrives, so it must survive one.
+      name: n.name ?? "",
       summary: n.summary ?? "",
       agent: n.agent ?? "",
       schedule: n.schedule ?? "",
