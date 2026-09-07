@@ -22,6 +22,7 @@ import {
   destinationLabel,
   createWorkflow,
   draftWorkflowFromDescription,
+  getWorkflow,
   listWiredChannels,
   listWorkflowRevisions,
   listWorkflows,
@@ -783,6 +784,21 @@ function draftEdges(graph: WorkflowGraph): DraftEdge[] {
   }));
 }
 
+/**
+ * Everything the one box needs to finish a create it already started — the
+ * graph, the corrections that came with it, and the sentence that earned both.
+ *
+ * See `heldDraftRef` for why a failed write keeps this rather than throwing it
+ * away and drafting again.
+ */
+interface HeldDraft {
+  /** The sentence that produced `graph`. The retry is keyed on it. */
+  sentence: string;
+  /** The host's own drafted graph, written verbatim — id included. */
+  graph: WorkflowGraph;
+  /** The host's corrections (issue #813), owed to the canvas on success. */
+  notes: string[];
+}
 
 export function WorkflowCreateDialog({
   client,
@@ -1006,6 +1022,31 @@ export function WorkflowCreateDialog({
    * so there is no state the one-box dialog can leave them stuck in.
    */
   const [writeRefused, setWriteRefused] = useState(false);
+  /**
+   * A drafted graph whose write failed **ambiguously**, kept so the next Create
+   * settles that write instead of starting a new one.
+   *
+   * Without it the one box was a duplicate-workflow machine on exactly the
+   * failure it was hardened for. A `500`, a `502` or a dropped connection on
+   * `POST …/workflows` leaves the box up with the sentence still in it — the
+   * right call, because the write may not have landed. But the *commit* can
+   * land and only the *response* be lost, and the next Create would then draft
+   * from scratch: a second billed model call, and a host that mints the id by
+   * deduping against the workflows it has SAVED
+   * (`safe_workflow_id`, `src/harness/built_in/workflow_build/tools.rs`) —
+   * which now include the first one. So `weekly-digest` was stored and
+   * `weekly-digest-2` written beside it, permanently, with nothing on screen
+   * that had said anything twice.
+   *
+   * Holding the prepared graph makes the retry answer the open question rather
+   * than re-ask a settled one: it reads the id back first, and lands the
+   * operator on the workflow that already exists.
+   *
+   * Keyed on the **sentence**, so an operator who rewords the box is drafting a
+   * new thing and gets a new draft — which is what they asked for. Cleared with
+   * everything else on a fresh open: this is a fact about one attempt.
+   */
+  const heldDraftRef = useRef<HeldDraft | null>(null);
   const formId = useId();
   /** The fingerprint of the draft as this open hydrated it (issue #1006).
    * Rewritten by the hydration effect below — which is the only place the form
@@ -1081,6 +1122,10 @@ export function WorkflowCreateDialog({
     // one-box dialog for the rest of the session.
     setDraftGap(null);
     setWriteRefused(false);
+    // …nor a graph the previous open prepared and failed to write. It is an
+    // answer about one attempt on one sentence; carrying it into a fresh open
+    // would write a graph nobody on this open ever asked for.
+    heldDraftRef.current = null;
     // Issue #840 (PR-3): a copilot-corrected graph handed in hydrates the form
     // directly — nodes/edges/name from the correction, not the description round
     // trip — while `workflow` above still supplies the id + version token the
@@ -1919,6 +1964,16 @@ export function WorkflowCreateDialog({
      * operator cannot follow.
      */
     onRefused?: () => void,
+    /**
+     * Called when the write failed and the failure does **not** say whether it
+     * landed — a `500`, a `502`, a dropped connection. The exact complement of
+     * `onRefused`, so a caller cannot be told both or neither.
+     *
+     * The one-box dialog uses it to keep the graph it prepared: the commit can
+     * succeed with only the response lost, and its next Create has to settle
+     * that write rather than draft a second workflow over it.
+     */
+    onUnresolved?: () => void,
   ) {
     // Set before the first `await` — the caller has already run `validate()`, so
     // a draft the client rejects never latches the guard.
@@ -1964,6 +2019,7 @@ export function WorkflowCreateDialog({
       // theirs a second later. The hand-over is one-way, so the wrong answer
       // here is not recoverable by trying again.
       if (writeRefusalHandsOverForm(e)) onRefused?.();
+      else onUnresolved?.();
       if (e instanceof ApiError && e.problems?.length) {
         const mapped: Record<string, string> = {};
         const leftovers: string[] = [];
@@ -2037,12 +2093,21 @@ export function WorkflowCreateDialog({
    * The create write, gated behind the id confirm (issue #1808). The confirm's
    * primary action calls this; the shared guard in {@link runWrite} keeps it
    * single-fire even though it is reachable only after the confirm opens.
+   *
+   * `draftNotes` rides out with the created graph for the same reason the
+   * one-box path sends its own: they are the host's corrections to the graph
+   * being written (issue #813), and the canvas is where they are read. This
+   * used to send nothing, which lost them on the one route that most needs
+   * them — a one-box create the host refused hands over this form carrying the
+   * drafted graph, so the write that eventually succeeds here is the write that
+   * earned those corrections. Empty on a hand-authored graph, which is correct:
+   * nothing corrected it.
    */
   async function create() {
     if (submittingRef.current) return;
     await runWrite(async (graph) => {
       const created = await createWorkflow(client, company, graph);
-      onCreated?.(created);
+      onCreated?.(created, draftNotes);
     });
   }
 
@@ -2086,7 +2151,9 @@ export function WorkflowCreateDialog({
    *
    * A capability gap (`draftGap`) deliberately survives — it is a fact about
    * the deployment, not about the description, and rewording does not wire a
-   * model into the build.
+   * model into the build. `heldDraftRef` needs no clearing either: it is keyed
+   * on the sentence, so a changed one already fails to match, and a sentence
+   * typed back to what it was should still settle the write it started.
    */
   function describeBoxChanged(value: string) {
     setCopilotPrompt(value);
@@ -2107,6 +2174,14 @@ export function WorkflowCreateDialog({
   async function describeAndCreate() {
     const sentence = copilotPrompt.trim();
     if (!sentence || drafting) return;
+    // A graph this open already drafted, whose write failed without saying
+    // whether it landed. Settle THAT rather than drafting a second one — see
+    // `heldDraftRef` for why a second draft is the expensive wrong answer.
+    const held = heldDraftRef.current;
+    if (held && held.sentence === sentence) {
+      await writeDraftedGraph(held, true);
+      return;
+    }
     // Nothing to draft with — an `echo` company, or a draft this open already
     // came back with a capability gap. Take the route "Create it anyway" takes
     // rather than a request that is known to fail: the sentence becomes the
@@ -2160,15 +2235,63 @@ export function WorkflowCreateDialog({
       setDraftReason(banners.reason);
       return;
     }
-    const graph = drafted.workflow;
+    await writeDraftedGraph(
+      { sentence, graph: drafted.workflow, notes: banners.notes },
+      false,
+    );
+  }
+
+  /**
+   * Write a graph the copilot drafted, and remember it if the write fails in a
+   * way that does not say whether it landed.
+   *
+   * `reconcile` asks the host for the id first. It is set only on the retry of
+   * a {@link heldDraftRef} write, where the previous attempt may well have
+   * committed — the read is the difference between landing the operator on the
+   * workflow they already have and writing a second one beside it.
+   */
+  async function writeDraftedGraph(draft: HeldDraft, reconcile: boolean) {
+    if (submittingRef.current) return;
     await runWrite(
       async (g) => {
-        const created = await createWorkflow(client, company, g);
-        onCreated?.(created, banners.notes);
+        const landed = reconcile ? await savedWorkflow(g.id) : null;
+        const created = landed ?? (await createWorkflow(client, company, g));
+        heldDraftRef.current = null;
+        onCreated?.(created, draft.notes);
       },
-      graph,
-      () => handOverToForm(graph),
+      draft.graph,
+      () => {
+        heldDraftRef.current = null;
+        // The corrections the host made on the way to this graph (issue #813).
+        // The drafted path hands them to the canvas through `onCreated`; a
+        // refusal has no canvas to hand them to yet, so they are put on the
+        // form the operator is being handed instead — and `create()` carries
+        // them out to the canvas when that form's write finally succeeds.
+        // Without this they are dropped on the floor by the one path where the
+        // saved graph still has them.
+        setDraftNotes(draft.notes);
+        handOverToForm(draft.graph);
+      },
+      () => {
+        heldDraftRef.current = draft;
+      },
     );
+  }
+
+  /**
+   * The saved workflow under `wid`, or `null` if the host has none.
+   *
+   * A `404` is the answer that matters and the common one. Anything else — the
+   * connection is still down — leaves the question open, and the create that
+   * follows settles it: the id is fixed, so a write that already landed earns
+   * the host's own `409` and the form hand-over, rather than a silent duplicate.
+   */
+  async function savedWorkflow(wid: string): Promise<WorkflowGraph | null> {
+    try {
+      return await getWorkflow(client, company, wid);
+    } catch {
+      return null;
+    }
   }
 
   /**

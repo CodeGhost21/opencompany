@@ -57,21 +57,54 @@ interface Stub {
   create?: (body: unknown) => Promise<unknown>;
   /** The company's cognition path. `"hosted"` is a company that can draft. */
   cognition?: string;
+  /**
+   * The workflows the host has **saved**, keyed by id — what a reconcile read
+   * of `GET …/workflows/{id}` finds. An id that is not here answers `404`,
+   * which is how "the ambiguous write never landed" is expressed.
+   */
+  saved?: Record<string, WorkflowGraph>;
+  /** Counts reconcile reads, so "it asked before writing again" is provable. */
+  reads?: { count: number };
 }
 
+/** The prefix a single-workflow read sits under. */
+const WORKFLOW_PATH = `${SCOPE}/workflows/`;
+
 /**
- * Stubs the verbs the dialog reaches. The GETs other than `/inference` are
- * optional picker sources that each degrade on failure, so one rejection stands
- * in for "this host offers none of them".
+ * The GETs that share that prefix without naming a workflow — the picker
+ * sources the dialog fetches on mount. Counting one of these as a reconcile
+ * read would put `reads.count` at 1 before the operator had done anything.
+ */
+const PICKER_SUBROUTES = new Set(["tool-slugs", "wired-channels"]);
+
+/**
+ * Stubs the verbs the dialog reaches. The GETs other than `/inference` and a
+ * single-workflow read are optional picker sources that each degrade on
+ * failure, so one rejection stands in for "this host offers none of them".
  */
 function stubClient(opts: Stub): OpenCompanyClient {
   return {
     scopeFor: () => SCOPE,
     listTeam: () => Promise.reject(new Error("not offered by this host")),
-    get: (path: string) =>
-      path.endsWith("/inference")
-        ? Promise.resolve({ cognition: opts.cognition ?? "hosted" })
-        : Promise.reject(new Error("not offered by this host")),
+    get: (path: string) => {
+      if (path.endsWith("/inference")) {
+        return Promise.resolve({ cognition: opts.cognition ?? "hosted" });
+      }
+      // `${SCOPE}/workflows/{id}` only — the trailing slash keeps the LIST read
+      // (`${SCOPE}/workflows`) out, and `PICKER_SUBROUTES` the two named GETs
+      // that share the prefix. Everything else degrades below.
+      if (path.startsWith(WORKFLOW_PATH)) {
+        const wid = decodeURIComponent(path.slice(WORKFLOW_PATH.length));
+        if (!PICKER_SUBROUTES.has(wid)) {
+          if (opts.reads) opts.reads.count += 1;
+          const found = opts.saved?.[wid];
+          return found
+            ? Promise.resolve(found)
+            : Promise.reject(new ApiError(404, "not_found", `no workflow \`${wid}\``, true));
+        }
+      }
+      return Promise.reject(new Error("not offered by this host"));
+    },
     post: (path: string, body?: unknown) => {
       if (path.endsWith("/workflows/draft-from-description")) {
         if (opts.drafts) opts.drafts.count += 1;
@@ -691,6 +724,181 @@ describe("the New-workflow dialog when the copilot declines", () => {
 });
 
 /**
+ * **A write that fails ambiguously must not become a second workflow.**
+ *
+ * The one box was hardened so a `500` or a dropped connection keeps the box up
+ * with the sentence in it, rather than collapsing into the graph form. That is
+ * right, and it opened a worse hole one press later: the commit can land and
+ * only the *response* be lost, and the next Create used to draft from scratch.
+ * The host mints a draft's id by deduping against the workflows it has SAVED
+ * (`safe_workflow_id`, `src/harness/built_in/workflow_build/tools.rs`), so the
+ * second draft of the same sentence sees the first one already stored and mints
+ * `weekly-digest-2` — a permanent duplicate, plus a second billed model call,
+ * from an operator who pressed the same button twice on the same sentence.
+ */
+describe("the New-workflow dialog after a write that may have landed", () => {
+  /** The graph the host would answer a reconcile read with. */
+  const SAVED: WorkflowGraph = { ...DRAFTED, version: "v1" };
+
+  /** Fails the first `POST …/workflows` and lets every later one through. */
+  function failFirstCreate(posted: unknown[]) {
+    return (body: unknown) => {
+      posted.push(body);
+      return posted.length === 1
+        ? Promise.reject(new ApiError(500, "internal", "the host fell over", true))
+        : Promise.resolve({ ...(body as WorkflowGraph), version: "v1" });
+    };
+  }
+
+  it("reads the id back and lands on the workflow that already exists", async () => {
+    const posted: unknown[] = [];
+    const drafts = { count: 0 };
+    const reads = { count: 0 };
+    await open(
+      stubClient({
+        cognition: "hosted",
+        drafts,
+        reads,
+        // The write committed; only the answer was lost. So the host HAS it.
+        saved: { "weekly-digest": SAVED },
+        draft: () =>
+          Promise.resolve({
+            automatable: true,
+            summary: "a digest",
+            workflow: DRAFTED,
+            notes: ["Matched “the writer” to teammate `writer`."],
+          }),
+        create: failFirstCreate(posted),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(posted, "the first Create writes").toHaveLength(1);
+    expect(onCreated, "…and is told it failed").not.toHaveBeenCalled();
+    expect(describeBox(), "a 500 keeps the box").toBeTruthy();
+
+    // The operator presses Create again, on the same sentence.
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // No second model call: the graph from the first press is still the answer
+    // to this sentence, and asking again is what mints the duplicate id.
+    expect(drafts.count, "the copilot must not be asked twice").toBe(1);
+    // The id was read back before anything was written…
+    expect(reads.count, "the retry must ask whether the write landed").toBe(1);
+    // …and, finding it, nothing was written at all.
+    expect(posted, "a committed write must not be written a second time").toHaveLength(1);
+    // The operator lands on the workflow they already have, with the host's
+    // corrections still attached — not on a duplicate beside it.
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0]![0].id).toBe("weekly-digest");
+    expect(onCreated.mock.calls[0]![0].version).toBe("v1");
+    expect(onCreated.mock.calls[0]![1]).toEqual([
+      "Matched “the writer” to teammate `writer`.",
+    ]);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("writes the same graph again when the failed write never landed", async () => {
+    const posted: unknown[] = [];
+    const drafts = { count: 0 };
+    const reads = { count: 0 };
+    await open(
+      stubClient({
+        cognition: "hosted",
+        drafts,
+        reads,
+        // Nothing saved: the 500 was a genuine failure, so the retry must write.
+        saved: {},
+        create: failFirstCreate(posted),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(drafts.count, "the copilot must not be asked twice").toBe(1);
+    expect(reads.count).toBe(1);
+    // The SAME graph, under the SAME id — not a fresh draft that would have
+    // been deduped into `weekly-digest-2` had the first write in fact landed.
+    expect(posted).toHaveLength(2);
+    expect((posted[0] as WorkflowGraph).id).toBe("weekly-digest");
+    expect((posted[1] as WorkflowGraph).id).toBe("weekly-digest");
+    expect(posted[1]).toEqual(posted[0]);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("drafts afresh once the operator rewords the box", async () => {
+    // The held graph is an answer to a SENTENCE. Reword it and the operator is
+    // asking about something else, so the copilot is asked about it — the held
+    // graph must not be written for a description nobody typed.
+    const posted: unknown[] = [];
+    const drafts = { count: 0 };
+    await open(
+      stubClient({ cognition: "hosted", drafts, saved: {}, create: failFirstCreate(posted) }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      typeDescription("Every Friday, chase the overdue invoices.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(drafts.count, "a new sentence earns a new draft").toBe(2);
+  });
+
+  it("does not hold a graph the host actually refused", async () => {
+    // A `409` is not ambiguous — the host considered it and said no — and it
+    // hands over the form. Holding the graph as well would mean the form's
+    // Create raced a retry of the very write that was refused.
+    const drafts = { count: 0 };
+    const reads = { count: 0 };
+    await open(
+      stubClient({
+        cognition: "hosted",
+        drafts,
+        reads,
+        create: () =>
+          Promise.reject(
+            new ApiError(409, "conflict", "A workflow with id `x` already exists.", true),
+          ),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(inDialog(ID_INPUT), "a 409 hands over the form").toBeTruthy();
+    expect(reads.count, "a refusal is not a question about whether it landed").toBe(0);
+  });
+});
+
+/**
  * **A draft that rejects after the dialog moved on belongs to nobody.**
  *
  * The success path has checked the epoch since issue #1052; the failure path did
@@ -845,5 +1053,111 @@ describe("the New-workflow dialog after the sentence changes", () => {
       inDialog('[data-testid="workflow-draft-unavailable"]'),
       "a build with no copilot still has no copilot",
     ).toBeTruthy();
+  });
+});
+
+/**
+ * **The host's corrections have to survive the hand-over.**
+ *
+ * A drafted graph can carry `notes` (issue #813) — "matched “the writer” to
+ * teammate `writer`" — and the canvas is where they are read. The drafted path
+ * passed them to `onCreated`; the REFUSAL path hydrated the form and dropped
+ * them, and the form's own Create then called `onCreated` with nothing. So on
+ * the one route where the operator has least context — a refusal, a form they
+ * did not ask for — the saved graph had corrections nobody was ever shown.
+ */
+describe("the New-workflow dialog's corrections across a refusal", () => {
+  const NOTE = "Matched “the writer” to teammate `writer`.";
+
+  it("shows them on the handed-over form and carries them to the canvas", async () => {
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "hosted",
+        draft: () =>
+          Promise.resolve({
+            automatable: true,
+            summary: "a digest",
+            workflow: DRAFTED,
+            notes: [NOTE],
+          }),
+        create: (body) => {
+          posted.push(body);
+          return posted.length === 1
+            ? Promise.reject(
+                new ApiError(
+                  409,
+                  "conflict",
+                  "A workflow with id `weekly-digest` already exists. Pick a different id.",
+                  true,
+                ),
+              )
+            : Promise.resolve({ ...(body as WorkflowGraph), version: "v1" });
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // The form came back, and the corrections came with it — the operator is
+    // being asked to fix an id on a graph that was rewritten under them.
+    expect(inDialog(ID_INPUT), "the refusal hands over the form").toBeTruthy();
+    const notes = inDialog('[data-testid="workflow-copilot-notes"]');
+    expect(notes, "the host's corrections must survive the hand-over").toBeTruthy();
+    expect(notes!.textContent).toContain("Matched");
+
+    // Pick a different id, as the host asked, and create.
+    const idInput = inDialog<HTMLInputElement>(ID_INPUT)!;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(idInput, "weekly-digest-monday");
+      idInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await confirmCreate();
+
+    expect(posted).toHaveLength(2);
+    expect((posted[1] as WorkflowGraph).id).toBe("weekly-digest-monday");
+    // …and the canvas is told what the copilot changed, which is the whole
+    // point of a note: the saved graph does not say “the writer” anywhere.
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0]![1]).toEqual([NOTE]);
+  });
+
+  it("says nothing on a graph the operator wrote themselves", async () => {
+    // The complement: a hand-authored create has no corrections, so `onCreated`
+    // must not be handed a stale list from somewhere else.
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "echo",
+        create: (body) => {
+          posted.push(body);
+          return Promise.resolve({ ...(body as WorkflowGraph), version: "v1" });
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Chase the overdue invoices every Friday.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await confirmCreate();
+
+    expect(posted).toHaveLength(1);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0]![1]).toEqual([]);
   });
 });
