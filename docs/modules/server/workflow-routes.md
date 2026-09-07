@@ -105,6 +105,18 @@ from `GET …/workflows/runs`. The journal is append-only and shared with chat a
 audit, so there is no per-workflow table to cascade; and what a workflow *did*
 stays true after the workflow is gone. Retention is a separate design.
 
+**A run still in flight is stopped, after the durable delete (B-121).** Before
+this, delete tore down the schedule and the revisions and left an executing run
+uncontrollable — the only Stop button in the product lives on the workflow
+detail page the delete just removed. `200` now carries `{ "stoppedRuns": <n> }`,
+the count the post-delete sweep actually fired a stop at — **not** `204`, which
+had nowhere to carry it. `stoppedRuns: 0` is a completely ordinary answer (no
+run was in flight); a caller that only checked the status code before still
+sees success the same way. An older host predating this still answers `204`
+with no body — the console's own client treats an absent body as `stoppedRuns:
+0` rather than throwing, and any other caller doing a plain status check is
+unaffected either way.
+
 **No scheduler change is involved.** `WorkflowScheduler::tick` re-reads the
 company record and re-derives the schedule set from the overlay union every
 minute, so the tick *is* a continuous reconcile: a deleted workflow stops firing
@@ -138,9 +150,10 @@ curl -X PUT "$HOST/api/v1/company/workflows/weekly_digest" \
 }'
 # → 200 with the stored graph and a FRESH version; or 409 if it moved.
 
-# Remove it. 204 on success; past runs stay readable.
+# Remove it. Past runs stay readable; a run still in flight is stopped (B-121).
 curl -X DELETE "$HOST/api/v1/company/workflows/weekly_digest?expectedVersion=a60663c5…" \
      -H "Authorization: Bearer $TOKEN"
+# → 200 { "stoppedRuns": 0 }  — or a positive count if one was going.
 ```
 
 **In the console.** The Workflows view offers Edit and Delete side by side, both

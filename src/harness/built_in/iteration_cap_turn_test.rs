@@ -394,10 +394,8 @@ async fn a_turn_past_the_old_ten_iteration_ceiling_now_finishes() {
     let dir = tempfile::tempdir().unwrap();
     let agent = company_agent(model_url, dir.path(), None, reads).await;
 
-    let (outcome, _usages) = agent
-        .run("Draft and publish the pricing spec.")
-        .await
-        .expect("the turn runs");
+    let (outcome, _usages) = agent.run("Draft and publish the pricing spec.").await;
+    let outcome = outcome.expect("the turn runs");
 
     assert!(
         outcome.reply.contains("Spec published."),
@@ -446,10 +444,8 @@ async fn a_budget_halt_stops_the_turn_and_is_not_an_iteration_cap_pause() {
     let dir = tempfile::tempdir().unwrap();
     let agent = company_agent(model_url, dir.path(), Some(0.05), reads).await;
 
-    let (outcome, _usages) = agent
-        .run("Draft and publish the pricing spec.")
-        .await
-        .expect("the turn runs");
+    let (outcome, _usages) = agent.run("Draft and publish the pricing spec.").await;
+    let outcome = outcome.expect("the turn runs");
 
     assert!(
         !outcome.reply.contains("Spec published."),
@@ -496,10 +492,8 @@ async fn a_turn_with_no_declared_budget_gets_no_in_turn_brake_at_any_cost() {
         "the fixture must actually be undeclared for this test to prove anything"
     );
 
-    let (outcome, _usages) = agent
-        .run("Draft and publish the pricing spec.")
-        .await
-        .expect("the turn runs");
+    let (outcome, _usages) = agent.run("Draft and publish the pricing spec.").await;
+    let outcome = outcome.expect("the turn runs");
 
     assert!(
         outcome.reply.contains("Spec published."),
@@ -534,10 +528,8 @@ async fn exhausting_the_raised_cap_still_reports_an_iteration_cap_pause() {
     let dir = tempfile::tempdir().unwrap();
     let agent = company_agent(model_url, dir.path(), None, reads).await;
 
-    let (outcome, _usages) = agent
-        .run("Draft and publish the pricing spec.")
-        .await
-        .expect("the turn runs");
+    let (outcome, _usages) = agent.run("Draft and publish the pricing spec.").await;
+    let outcome = outcome.expect("the turn runs");
 
     assert!(
         hit_cap(&agent).await,
@@ -579,6 +571,7 @@ fn stream_for(chat: &str) -> crate::turn_stream::TurnStreamCtx {
         route: crate::turn_stream::LiveRoute::Chat {
             chat_id: chat.to_string(),
         },
+        message_seq: None,
     }
 }
 
@@ -628,8 +621,8 @@ async fn a_greeting_after_a_task_runs_no_tools_and_leaks_no_prior_context() {
             None,
             ChatTarget::channel(Some("sports")),
         )
-        .await
-        .expect("task A runs");
+        .await;
+    let outcome_a = outcome_a.expect("task A runs");
     assert!(
         !outcome_a.steps.is_empty(),
         "task A must actually run a tool step (the fetch) — otherwise the \
@@ -666,8 +659,8 @@ async fn a_greeting_after_a_task_runs_no_tools_and_leaks_no_prior_context() {
             ChatTarget::channel(Some("smalltalk")),
         ),
     )
-    .await
-    .expect("the greeting runs");
+    .await;
+    let outcome_b = outcome_b.expect("the greeting runs");
 
     // 1) Zero tool steps ran — the greeting never entered the agentic loop.
     assert!(
@@ -771,6 +764,7 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
             ChatTarget::channel(Some("sports")),
         )
         .await
+        .0
         .expect("chat turn 1 runs");
 
     // ── The background task: unthreaded — `stream: None`, same shared Agent. ──
@@ -784,8 +778,8 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
             // A background task names no conversation — the point of the case.
             ChatTarget::default(),
         )
-        .await
-        .expect("background task runs");
+        .await;
+    let outcome_bg = outcome_bg.expect("background task runs");
     assert!(
         !outcome_bg.steps.is_empty(),
         "the background task must actually run a tool step (the fetch) — \
@@ -814,6 +808,7 @@ async fn a_background_turn_does_not_leak_into_the_next_turn_on_its_bound_chat() 
             ChatTarget::channel(Some("sports")),
         )
         .await
+        .0
         .expect("chat turn 2 runs");
 
     assert_eq!(

@@ -564,6 +564,73 @@ export async function installAcpHarness(id: string): Promise<string | null> {
   }
 }
 
+/** What one probe of the update endpoint told us. Mirrors `AppUpdateInfo` in Rust. */
+export interface AppUpdateInfo {
+  /** The version running right now. */
+  currentVersion: string;
+  available: boolean;
+  /** What is being offered, when something is. */
+  availableVersion: string | null;
+  /** The manifest's release notes, when it carried any. */
+  notes: string | null;
+}
+
+/** What a background download left behind. Mirrors `AppUpdateStaged` in Rust. */
+export interface AppUpdateStaged {
+  ready: boolean;
+  version: string | null;
+  notes: string | null;
+}
+
+/**
+ * Asks whether a newer desktop build exists. Downloads nothing.
+ *
+ * `null` in a browser, which cannot replace itself and has no need to — the web
+ * console is whatever the host served on the last page load.
+ *
+ * **Never rejects.** The core already answers "no update" for every failure —
+ * offline, endpoint down, a build carrying no signing key — and this runs on a
+ * background timer nobody asked for, so an error here would be one nobody could
+ * act on. See `oc_app_update_check` in `src-tauri/src/commands.rs`.
+ */
+export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
+  const desktop = tauriCore();
+  if (!desktop) return null;
+  try {
+    return (await desktop.invoke<AppUpdateInfo>("oc_app_update_check")) ?? null;
+  } catch (error) {
+    // A shell built before this command existed rejects here. The same answer
+    // as "no update", for the same reason: nothing the console can do.
+    console.debug("[desktop] this shell cannot check for updates", error);
+    return null;
+  }
+}
+
+/**
+ * Downloads the offered build and holds it, verified, until someone restarts.
+ *
+ * **Rejects on failure**, unlike {@link checkAppUpdate}: this only runs after a
+ * check found something, so a failure here is a real one and worth a banner
+ * with a retry on it.
+ */
+export async function downloadAppUpdate(): Promise<AppUpdateStaged | null> {
+  const desktop = tauriCore();
+  if (!desktop) return null;
+  return desktop.invoke<AppUpdateStaged>("oc_app_update_download");
+}
+
+/**
+ * Applies the staged build and relaunches.
+ *
+ * Resolves only on failure — on success the process is replaced mid-call and
+ * nothing after the `await` runs.
+ */
+export async function installAppUpdate(): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) throw new Error("updating needs the desktop application");
+  return desktop.invoke<void>("oc_app_update_install");
+}
+
 /** Test seam: forget every registration. */
 export function resetDesktopRegistrations(): void {
   registrations.clear();

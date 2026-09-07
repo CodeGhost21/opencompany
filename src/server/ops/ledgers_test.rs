@@ -188,6 +188,81 @@ async fn a_ledger_round_trips_under_both_scope_forms() {
     assert_eq!(read["entries"][0]["id"], "vendor-slip");
 }
 
+/// `read_ledger` used to build `ledger.open`/`ledger.closed` from a second,
+/// independent fold (inside `summary`) after already folding once for the
+/// rows. A write landing between the two could flip a row's status after the
+/// first fold but before the second, so the count disagreed with the rows it
+/// was displayed beside — an open row on screen while the badge already
+/// counted it closed, until the next refresh.
+///
+/// Racing a read against a status flip, every response's `open`/`closed`
+/// must equal what the rows in that same response actually say — not merely
+/// most of the time. This does not assert the fix's code shape; it holds the
+/// invariant a two-fold response can violate under a real race.
+///
+/// Needs real OS-thread concurrency to land the write inside the narrow
+/// window between the two folds the old handler had: on the default
+/// current-thread runtime the pair never actually overlaps and the race
+/// never reproduces. Confirmed against the pre-fix handler (reintroducing
+/// `summary(&ctx, spec).await?` in place of `summary_from_counts`) that this
+/// fails within the first ~15 rounds; against the fix, 300 rounds passed
+/// clean across repeated runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_read_count_never_disagrees_with_its_own_rows_under_a_racing_write() {
+    let (state, _home) = state().await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(hazards())).await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/hazards/entries",
+        Some(json!({ "id": "r1", "fields": { "risk": "a" }, "status": "open" })),
+    )
+    .await;
+
+    for round in 0..80 {
+        // Alternate direction so the race is attempted flipping each way.
+        let write_body = if round % 2 == 0 {
+            json!({ "id": "r1", "status": "closed", "reason": "handled" })
+        } else {
+            json!({ "id": "r1", "status": "open" })
+        };
+
+        let read_state = state.clone();
+        let reader = tokio::spawn(async move {
+            send(&read_state, "GET", "/api/v1/company/ledgers/hazards", None).await
+        });
+
+        let write_state = state.clone();
+        let writer = tokio::spawn(async move {
+            send(
+                &write_state,
+                "POST",
+                "/api/v1/company/ledgers/hazards/entries",
+                Some(write_body),
+            )
+            .await
+        });
+
+        let (read_result, write_result) = tokio::join!(reader, writer);
+        let (read_status, read_body) = read_result.unwrap();
+        assert_eq!(read_status, StatusCode::OK, "round {round}: {read_body}");
+        let (write_status, write_body) = write_result.unwrap();
+        assert_eq!(write_status, StatusCode::OK, "round {round}: {write_body}");
+
+        let rows = read_body["entries"].as_array().expect("entries array");
+        let open_rows = rows.iter().filter(|row| row["closed"] == false).count();
+        let closed_rows = rows.iter().filter(|row| row["closed"] == true).count();
+        assert_eq!(
+            read_body["ledger"]["open"], open_rows,
+            "round {round}: open count disagrees with the rows beside it: {read_body}"
+        );
+        assert_eq!(
+            read_body["ledger"]["closed"], closed_rows,
+            "round {round}: closed count disagrees with the rows beside it: {read_body}"
+        );
+    }
+}
+
 /// **The wire regression, pinned.** `StatusSpec::needs_reason` used to
 /// serialize snake_case like every other declaration field, but the console
 /// reads `LedgerStatus.needsReason` — camelCase, matching `LedgerSummary`'s
@@ -323,6 +398,81 @@ async fn closing_without_a_reason_is_a_400_that_says_so() {
         "POST",
         "/api/v1/company/ledgers/hazards/entries",
         Some(json!({ "id": "r1", "status": "closed", "reason": "the vendor delivered" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// The shape the global `learnings` ledger has: a required prose field and the
+/// check that reports it.
+fn findings() -> Value {
+    json!({
+        "slug": "findings",
+        "title": "Findings",
+        "purpose": "What we found out.",
+        "derived": "derived/findings.md",
+        "fields": [
+            { "name": "id", "role": "id", "required": true },
+            { "name": "finding", "role": "title", "required": true },
+            { "name": "status", "role": "status", "required": true },
+            { "name": "evidence", "role": "prose", "required": true },
+            { "name": "reason", "role": "prose" }
+        ],
+        "statuses": [
+            { "name": "noted" },
+            { "name": "adopted", "closed": true, "needs_reason": true }
+        ],
+        "checks": ["required-field", "known-status", "closed-needs-reason"]
+    })
+}
+
+/// The route half of the write/read contract: a row the ledger would report as
+/// unreadable is refused with a 400 that names the field, rather than accepted
+/// with a 200 and then listed under the read's faults.
+#[tokio::test]
+async fn a_row_missing_a_required_field_is_a_400_rather_than_a_fault_on_read() {
+    let (state, _home) = state().await;
+    send(&state, "POST", "/api/v1/company/ledgers", Some(findings())).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/findings/entries",
+        Some(json!({
+            "id": "L-BAD-1",
+            "status": "noted",
+            "fields": { "finding": "a row with no evidence field" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        format!("{body}").contains("evidence"),
+        "the refusal must name the field: {body}"
+    );
+
+    // Refused means nothing landed — so the read has neither the row nor a
+    // fault about it, which is the contradiction this closes.
+    let (status, body) = send(
+        &state,
+        "GET",
+        "/api/v1/company/ledgers/findings/entries",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["entries"].as_array().map(Vec::len), Some(0), "{body}");
+    assert!(body["faults"].is_null(), "{body}");
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/ledgers/findings/entries",
+        Some(json!({
+            "id": "L-BAD-1",
+            "status": "noted",
+            "fields": { "finding": "a row with evidence", "evidence": "it happened three times" }
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

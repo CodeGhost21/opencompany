@@ -1,7 +1,7 @@
 import { MessageSquareReply } from "lucide-react";
 
 import type { TaskStatus } from "@/api/tasks";
-import type { CognitionState } from "@/api/types";
+import type { CognitionState, TurnStep } from "@/api/types";
 import { AgentAvatarButton, useAgentProfileOpener } from "@/components/agent-profile-sheet";
 import { Markdown } from "@/components/markdown";
 import { TeammateAvatar } from "@/components/teammate-avatar";
@@ -28,6 +28,21 @@ import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
   entry: TimelineEntry;
+  /**
+   * The live tool rows of a turn answering **this** message, while it runs.
+   *
+   * A settled turn's steps render under its reply, from `message.steps`. Until
+   * the reply exists there is nothing to hang them on, so a running turn's rows
+   * used to go to one per-thread strip at the foot of the channel — which meant
+   * two questions asked at once shared a single timeline, and arming the second
+   * turn cleared the first one's rows.
+   *
+   * Rendered through the same collapsed {@link StepTimeline} the settled steps
+   * use, so a turn looks the same while it runs as it does once it is done.
+   * Absent for a turn whose frames carry no `messageSeq`, which still uses the
+   * thread strip.
+   */
+  liveSteps?: readonly TurnStep[];
   /** True when the thread panel is showing this row's replies. */
   threadOpen: boolean;
   onOpenThread: (messageId: string) => void;
@@ -219,6 +234,7 @@ function actionsUnavailableFor(message: ChatMessage): string | undefined {
  */
 export function MessageRow({
   entry,
+  liveSteps,
   threadOpen,
   onOpenThread,
   onReact,
@@ -320,6 +336,11 @@ export function MessageRow({
         )}
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
+        {/* The running turn this message asked for. Opens by default: unlike a
+            settled turn's steps — which sit behind a count because the answer
+            above them is what the reader came for — there is no answer yet, and
+            these rows are the only account of what is happening. */}
+        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
         {message.taskId && (
           <div className="flex flex-wrap items-center gap-2">
             <CardChip

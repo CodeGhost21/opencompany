@@ -25,7 +25,9 @@ const SEEDED = ledgerPath() !== null;
 test.describe("Finance number agreement", () => {
   test.skip(
     !SEEDED,
-    "needs a host this suite brought up, so the ledger can be seeded on its disk (unset PW_BASE_URL)",
+    "needs a host on this suite's own disposable data root, so the ledger can " +
+      "be seeded and cleared safely (unset PW_BASE_URL, and leave PW_HOST_DATA_DIR " +
+      "unset or pointed inside target/e2e)",
   );
 
   test.beforeEach(async () => {
@@ -87,7 +89,9 @@ test.describe("Finance number agreement", () => {
 test.describe("negative half-cent agreement", () => {
   test.skip(
     !SEEDED,
-    "needs a host this suite brought up, so the ledger can be seeded on its disk (unset PW_BASE_URL)",
+    "needs a host on this suite's own disposable data root, so the ledger can " +
+      "be seeded and cleared safely (unset PW_BASE_URL, and leave PW_HOST_DATA_DIR " +
+      "unset or pointed inside target/e2e)",
   );
 
   test.beforeEach(async () => {

@@ -25,6 +25,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import type { LocalInstance } from "@/api/transport/desktop";
 import type { HostEdit } from "@/connections/registry";
 import type { Connection, ConnectionId, Connector, SshTarget } from "@/connections/types";
+import { HOSTS_HIDDEN } from "@/product-scope";
 
 export interface HostsValue {
   connections: Connection[];
@@ -186,6 +187,9 @@ export function HostsProvider({ value, children }: { value: HostsValue; children
   // the menu prints.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      // Hidden roster, hidden shortcuts: a key that selects a host nobody can see
+      // would swallow the browser's own and act invisibly.
+      if (HOSTS_HIDDEN) return;
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       const position = Number(event.key);
       if (!Number.isInteger(position) || position < 1 || position > HOST_SHORTCUT_LIMIT) return;

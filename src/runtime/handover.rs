@@ -111,6 +111,11 @@ pub struct RuntimeHandover {
     /// beside itself.
     pub(crate) per_agent: Arc<TokioMutex<std::collections::HashMap<String, Arc<TokioMutex<()>>>>>,
     pub(crate) task_writes: Arc<TokioMutex<()>>,
+    /// Issue #2028: the lock a blocker group's bank-arm-settle sequence holds
+    /// for its whole duration. Inherited for the same reason as `serial` — a
+    /// fresh mutex on a rebuild mid-resolve would let a request racing across
+    /// the swap interleave with one already in flight on the outgoing runtime.
+    pub(crate) blocker_resolutions: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
     pub(crate) harness: Option<Arc<crate::harness::HarnessPool>>,
     #[cfg(feature = "mcp")]
@@ -154,6 +159,7 @@ impl CompanyRuntime {
             serial: self.serial.clone(),
             per_agent: self.per_agent.clone(),
             task_writes: self.task_writes.clone(),
+            blocker_resolutions: self.blocker_resolutions.clone(),
             #[cfg(feature = "openhuman")]
             harness: self.harness.clone(),
             #[cfg(feature = "mcp")]

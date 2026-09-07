@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Bot, CircleDot, Hash, Lock, Send, UserPlus } from "lucide-react";
 
-import type { ApprovalSummary, CognitionState, GrantScope, TurnStep, Verdict } from "@/api/types";
+import type { ApprovalSummary, CognitionState, DecideApproval, TurnStep, Verdict } from "@/api/types";
 import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -49,6 +49,16 @@ interface Props {
    * an inbound message kicked off shows its work here too (issue #367).
    */
   liveSteps?: TurnStep[];
+  /**
+   * Live rows per **query**, keyed by the asking message's console id — the
+   * per-turn half of `liveSteps` above, which is the per-thread strip.
+   *
+   * Both exist because a frame only knows which query it belongs to when the
+   * host stamps `messageSeq` on it. One that does renders under its own
+   * message; one that does not (a relay, a dispatched card, an older host)
+   * falls back to the strip.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
   /**
    * The live receipt for a synchronous chat turn this console just sent (issue
    * #1934). When present it supersedes {@link TypingRow} — it says "Sent →
@@ -101,7 +111,7 @@ interface Props {
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
   failedApprovals?: Record<string, string>;
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecideApproval?: DecideApproval;
   /**
    * Whether this company's teammates can think (issue #1735). On either echo
    * state every company-side row below is a canned line rather than a
@@ -167,6 +177,7 @@ export function MessageTimeline({
   typing,
   queued,
   liveSteps,
+  liveStepsByMessage,
   receipt,
   agentNames,
   onOpenThread,
@@ -384,6 +395,11 @@ export function MessageTimeline({
               {item.entry.dayLabel && <DayDivider label={item.entry.dayLabel} />}
               <MessageRow
                 entry={item.entry}
+                // The turn this message asked for, while it runs. Keyed by the
+                // message's own id, so two questions in one channel each get
+                // their own timeline instead of sharing the foot-of-channel
+                // strip (and clearing each other's rows).
+                liveSteps={liveStepsByMessage?.[item.entry.message.id]}
                 threadOpen={item.entry.message.id === openThreadId}
                 onOpenThread={onOpenThread}
                 onReact={onReact}

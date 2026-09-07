@@ -148,6 +148,7 @@ mod test {
             contents_hidden: false,
             batch: None,
             group_key: None,
+            blocker_step_kind: None,
         }
     }
 

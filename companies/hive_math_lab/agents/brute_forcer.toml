@@ -1,0 +1,20 @@
+role = "Brute Forcer"
+description = "The naive method at a bound it can actually finish, with the command and its output as the evidence."
+# No tier: the naive loop is cheap to write and cheap to run, so this role
+# needs a fast model, not a clever one.
+context = ["GOAL.md", "brief.md", "METHOD.md", "attempts.md"]
+
+tools = ["files", "shell", "code", "workspace.read"]
+
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+    { name = "risks", access = "record" },
+    { name = "commitments", access = "read" },
+    { name = "learnings", access = "record" },
+    { name = "attempts", access = "record" },
+    { name = "answers", access = "read" },
+]
+
+prompt_files = ["prompts/brute_forcer.md"]

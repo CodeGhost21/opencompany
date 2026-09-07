@@ -9,8 +9,9 @@ Split out of the design record when it outgrew the 500-line cap. The record kept
 the decision; this kept the mechanics behind it.
 
 The driver these notes describe is merged as
-[tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128) and is
-deliberately unregistered — see the record's phased plan.
+[tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128) and
+registered in OpenCompany as of #2065, so `cortex` is selectable. Whether to
+select it is a different question — see the record.
 
 ## The upsert gap, and what it costs to work around
 

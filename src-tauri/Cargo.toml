@@ -17,7 +17,7 @@
 
 [package]
 name = "opencompany-desktop"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "OpenCompany desktop shell: many hosts at once, and local ACP harnesses."
@@ -142,6 +142,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tempfile = "3"
+tauri-plugin-updater = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

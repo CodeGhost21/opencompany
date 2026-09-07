@@ -152,7 +152,6 @@ async function finishNoSignIn() {
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in (none preselected)
-  await next(); // -> advanced
   await next(); // -> review
   await settle();
   await click("setup-finish");
@@ -167,7 +166,6 @@ async function finishUnmailable() {
   await next(); // -> sign-in
   await next(); // -> account
   await fill("setup-field-email", "ada@example.com");
-  await next(); // -> advanced
   await next(); // -> review
   await settle();
   await click("setup-finish");

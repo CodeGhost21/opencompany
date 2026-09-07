@@ -1010,6 +1010,18 @@ pub struct GroupChat {
     /// [`agent_scoped_grants`](crate::runtime::builder::agent_scoped_grants).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether this desk answers as a **room** rather than through one
+    /// responder, and how far it may go doing so (`[[group_chat]].hive`).
+    ///
+    /// Every key is optional and every default is derived from the desk's own
+    /// membership, so an omitted section is not a no-op the way `tools` is: a
+    /// desk that grew to two members starts deliberating, which is the point.
+    /// A desk that should keep answering through its lead says
+    /// `hive = { enabled = false }`, and a desk of one is unaffected either way
+    /// — there is nobody to deliberate with. See
+    /// [`crate::hivemind`] and `docs/spec/runtime/hivemind.md`.
+    #[serde(default)]
+    pub hive: crate::hivemind::HiveConfig,
 }
 
 /// A `[[connection]]` entry — an integration to prioritize wiring. This is

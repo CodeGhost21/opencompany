@@ -108,6 +108,12 @@ function makeClient(rows: WorkflowSummary[] = ROWS) {
     del: async (path: string) => {
       const id = path.match(/\/workflows\/([^/?]+)/)?.[1];
       if (id) deletes.push(decodeURIComponent(id));
+      // CodeRabbit review (PR #2053): `deleteWorkflow` now resolves to
+      // `{ stoppedRuns }` (the host's own post-delete sweep count) rather
+      // than `void` — `remove()` destructures it, so a mock answering
+      // nothing throws before the toast this file's own delete tests read.
+      // Nothing in this file's deletes involves a run in flight.
+      return { stoppedRuns: 0 };
     },
     // Issue #1845: the week-1 nudge banner polls this on mount; an empty
     // feed keeps it a no-op for every test in this file, which is not about

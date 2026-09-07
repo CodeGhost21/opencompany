@@ -5,7 +5,7 @@
 //! Two features already exist and, before this, never met:
 //!
 //! - Part 1 (#926) taught the chat path to say "I paused" —
-//!   `ITERATION_CAP_PAUSE_NOTICE`, proven end to end in
+//!   `iteration_cap_pause_notice`, proven end to end in
 //!   [`cap_turn_test`](crate::harness::cap_turn_test).
 //! - #244 taught the **task-dispatch** path (`run_task`) to scan the agent's
 //!   sandbox for files it wrote and never published, and to ask about them in

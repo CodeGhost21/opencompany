@@ -257,6 +257,20 @@ pub struct WorkflowBlockedNode {
     /// see #1145).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub stranded: usize,
+    /// How many of this node's [`approval_ids`](Self::approval_ids) are parked
+    /// **blockers** — questions the agent raised — rather than gated tool calls.
+    ///
+    /// The two ride the same list but promise different things: approving a
+    /// gated call continues the run on its own, while a blocker is answered
+    /// with one of four verdicts and only two of them run the step again. A row
+    /// carrying only a count of approvals cannot tell the operator which
+    /// sentence is true of it, so the notice said the gated one for both.
+    ///
+    /// Additive with a serde default, skipped when zero, so a run journaled
+    /// before this field existed reads back as an all-gated node — which is what
+    /// it was, since a blocker could not be answered from a workflow row then.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blockers: usize,
 }
 
 /// `skip_serializing_if` predicate for a count that is almost always zero.

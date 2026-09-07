@@ -26,7 +26,7 @@ import {
   type ApprovalSummary,
   type AttachmentDto,
   type CognitionState,
-  type GrantScope,
+  type DecideApproval,
   type OperatorChannelDto,
   type TeamMemberDto,
   type TurnStep,
@@ -41,6 +41,7 @@ import {
   isGeneralChannel,
   makeMessage,
   reconcileIds,
+  replyVoice,
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
@@ -246,6 +247,14 @@ interface Props {
    */
   liveStepsByThread?: Record<string, TurnStep[]>;
   /**
+   * Live rows per query, keyed by the asking message's id (see
+   * `MessageTimeline`). Passed straight through — unlike `liveStepsByThread`,
+   * nothing here has to resolve a key for it: the message id is the key, so it
+   * needs neither `activeThreadId` nor the desk map, and cannot be affected by
+   * their load order.
+   */
+  liveStepsByMessage?: Record<string, TurnStep[]>;
+  /**
    * The live receipt for a synchronous chat turn in flight, keyed by **host
    * thread id** (issue #1934) — resolved to this channel's thread the same way
    * `liveStepsByThread` is. Present between the operator's send and the reply
@@ -340,7 +349,7 @@ interface Props {
    * witnessed verdict survives this view unmounting — the operator can walk to
    * Approvals and back mid-turn.
    */
-  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecideApproval?: DecideApproval;
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;
@@ -412,6 +421,7 @@ export function ChatView({
   scopeRef,
   openTurns,
   liveStepsByThread,
+  liveStepsByMessage,
   receiptByThread,
   agentNames,
   unread,
@@ -1766,7 +1776,9 @@ export function ChatView({
       const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
-            makeMessage("company", r.text, {
+            // Same rule as the live path and `fromHistory`: a host-authored
+            // response renders as a centred row, not an agent bubble.
+            makeMessage(replyVoice(r.channel), r.text, {
               channel: r.channel,
               parentId,
               steps: r.steps,
@@ -2212,6 +2224,10 @@ export function ChatView({
 
   const parent = openThreadId ? messages.find((m) => m.id === openThreadId) : undefined;
   const threadReplies = parent ? repliesInThread(parent, messages) : [];
+  // Asked of `buildTimeline`'s own rule rather than re-derived, for the reason
+  // the mention map above gives: the panel's count and the channel's chip must
+  // not drift about what is already on screen. See `ThreadPanel`'s prop docs.
+  const threadInlineReplyIds = parent ? inlineReplyIds(messages) : undefined;
   // Every review surface this thread hangs off, newest first — the thread
   // root itself when opened directly on the pill/relay, or one of its
   // replies when the card that produced them was sent inside an
@@ -2303,6 +2319,11 @@ export function ChatView({
               typing={sending || !!openTurn}
               queued={!!openTurn?.queued}
               liveSteps={openThreadId ? undefined : liveSteps}
+              // NOT excluded when a thread is open: these rows render inside
+              // their own message rather than as one strip for the channel, so
+              // there is no ambiguity about which turn they describe — which is
+              // the whole reason `liveSteps` above is withheld.
+              liveStepsByMessage={liveStepsByMessage}
               // Thread-panel receipts are out of v1 (issue #1934): excluded here
               // the same way `liveSteps` is when a thread is open.
               receipt={openThreadId ? undefined : receipt}
@@ -2568,6 +2589,11 @@ export function ChatView({
               members={members}
               parent={parent}
               replies={threadReplies}
+              inlineReplyIds={threadInlineReplyIds}
+              // A query typed into this panel renders only here — parented
+              // messages never reach the channel timeline — so the panel needs
+              // the per-query rows too, or its turns show nothing at all.
+              liveStepsByMessage={liveStepsByMessage}
               sending={sending}
               mentionables={mentionables}
               channelMemberIds={inChannel?.map((m) => m.id)}
