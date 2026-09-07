@@ -316,6 +316,18 @@ class World:
         for sku in CATALOGUE:
             w.warehouse[sku] = w.rng.randint(40, 200)
 
+        # Two lines whose wholesale cost moved before this company started
+        # paying attention. Shelf prices are still the catalogue ones, so the
+        # margin on both is already wrong on day one.
+        #
+        # Seeded rather than left to the news feed: a cost move surfaces on
+        # roughly one day in ten, and the commercial desk's opening card asks it
+        # to find the prices that are already wrong. A card whose answer is
+        # "none yet, come back in a fortnight" teaches the desk that the
+        # question is not worth asking.
+        w.cost_index["SANDWICH-1"] = 1.24
+        w.cost_index["ENERGY-250"] = 1.17
+
         return w
 
     # -- the clock --------------------------------------------------------
@@ -337,6 +349,7 @@ class World:
             triggers.extend(self._draw_incidents())
             triggers.extend(self._age_incidents())
             triggers.extend(self._draw_news())
+            triggers.extend(self._recover(triggers))
             triggers.extend(self._contract_watch())
         return triggers
 
@@ -395,12 +408,12 @@ class World:
                     ))
                     m.cash_cents += sold * slot.price
                 if lost > 0:
-                    client = self.clients[m.client_id]
-                    client.satisfaction = max(
-                        0.0, client.satisfaction - STOCKOUT_SATISFACTION_HIT
-                    )
                     starved.append((slot.sku, lost, lost * slot.price))
             if starved:
+                client = self.clients[m.client_id]
+                client.satisfaction = max(
+                    0.0, client.satisfaction - STOCKOUT_SATISFACTION_HIT
+                )
                 lost_cents = sum(c for _, _, c in starved)
                 lines = ", ".join(f"{sku} ({units} units)" for sku, units, _ in starved)
                 out.append({
@@ -599,6 +612,44 @@ class World:
             "headline": item.headline, "detail": item.detail, "tags": item.tags,
         })
         return out
+
+    def _recover(self, today: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Sites that had a clean day earn a little goodwill back.
+
+        Clean means: no machine at that site turned demand away, and the site is
+        carrying no incident that has been open past `INCIDENT_STALE_DAYS`.
+        Both conditions matter — full shelves in front of a chiller that has
+        been broken for a week is not a good day for the host, and a site that
+        recovered on shelf stock alone would let a desk ignore its faults.
+
+        Emits no trigger. Nothing is owed to anybody when things go right, and a
+        daily "still fine" message for five sites would bury the four triggers
+        that actually need a decision.
+        """
+        hurt = {
+            t.get("client_id")
+            for t in today
+            if t["kind"] in ("stockout", "incident_stale")
+        }
+        # `_draw_incidents` tags complaints with a client too; a complaint today
+        # is not a day to recover from either.
+        hurt |= {t.get("client_id") for t in today if t["kind"] == "complaint"}
+        stale_sites = {
+            self.machines[i.machine_id].client_id
+            for i in self.incidents
+            if i.open
+            and self.day - i.day >= INCIDENT_STALE_DAYS
+            and i.machine_id in self.machines
+        }
+        for c in self.clients.values():
+            if c.id in hurt or c.id in stale_sites:
+                continue
+            if c.satisfaction >= SATISFACTION_RECOVERY_CEILING:
+                continue
+            c.satisfaction = min(
+                SATISFACTION_RECOVERY_CEILING, c.satisfaction + SATISFACTION_RECOVERY
+            )
+        return []
 
     def _contract_watch(self) -> list[dict[str, Any]]:
         """A renewal is only actionable while there is still time to act."""
