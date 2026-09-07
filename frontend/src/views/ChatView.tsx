@@ -467,6 +467,30 @@ export function ChatView({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
+  /**
+   * How many times Room has been entered — the mount this view no longer has
+   * (Codex P2 review on #2130).
+   *
+   * Every read below was keyed on `[client, company]` alone, and that was
+   * sufficient while navigating away unmounted the view: coming back was a
+   * mount, and a mount re-read everything. It is not sufficient now. Add a
+   * teammate on Company, delete a desk on the org chart, and the pinned rail
+   * would go on showing the roster and channels it loaded once — until a reload
+   * or a company switch, and in plain sight, because the rail is on screen the
+   * whole time.
+   *
+   * A counter incremented on ENTRY, rather than `routeOpen` in each dependency
+   * list, for two reasons. `routeOpen` moves in both directions, so leaving Room
+   * would spend a second round of reads on a section the operator has just left.
+   * And gating the reads on `routeOpen` instead would leave the rail empty on a
+   * console loaded straight onto `#/company`, which is the one thing this whole
+   * change exists to prevent — the reads still run on mount, wherever that is.
+   */
+  const [roomVisits, setRoomVisits] = useState(0);
+  useEffect(() => {
+    if (routeOpen) setRoomVisits((n) => n + 1);
+  }, [routeOpen]);
+
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
   /**
@@ -703,7 +727,7 @@ export function ChatView({
     } finally {
       setLoadingTeam(false);
     }
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * Hiding the budget controls from a non-admin is **courtesy, not
@@ -749,7 +773,7 @@ export function ChatView({
       // Attribution falls back to "an admin"; not worth a toast.
       setPeople([]);
     }
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   useEffect(() => {
     setLoadingTeam(true);
@@ -870,7 +894,7 @@ export function ChatView({
         error instanceof Error ? error.message : "Couldn't load this company's channels.",
       );
     }
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   useEffect(() => {
     void loadDesks();
@@ -914,7 +938,7 @@ export function ChatView({
         console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto);
       }
     });
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * Re-entering Chat with no channel in the hash returns the operator to the
@@ -1137,7 +1161,7 @@ export function ChatView({
     return () => {
       directoryEpoch.current += 1;
     };
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * The directory with this channel's teammates marked, so they rank first.

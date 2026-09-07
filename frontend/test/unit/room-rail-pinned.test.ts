@@ -164,6 +164,42 @@ describe("ChatView, mounted off its own route", () => {
     expect(rail).toContain("currentPage = true,");
   });
 
+  it("re-reads the roster, desks and directory on every entry to Room", () => {
+    // Codex P2 on this PR. Every one of these was keyed on `[client, company]`
+    // alone, which was sufficient while navigating away unmounted the view:
+    // coming back was a mount, and a mount re-read everything. Add a teammate on
+    // Company or delete a desk on the org chart now, and the pinned rail would
+    // go on showing what it loaded once — in plain sight, because the rail is on
+    // screen the whole time.
+    expect(chatView).toContain("const [roomVisits, setRoomVisits] = useState(0);");
+    expect(chatView).toContain("if (routeOpen) setRoomVisits((n) => n + 1);");
+    // The roster, the viewer's people, the desks, the Operator channel and the
+    // mention directory: everything the rail and the composer draw. Five, and
+    // deliberately not `reloadDirectory`'s own `useCallback` — that is a handle
+    // other code calls after it changes something, not a read on a schedule, and
+    // re-keying it would only churn its identity.
+    expect(chatView.match(/\}, \[client, company, roomVisits\]\);/g) ?? []).toHaveLength(5);
+    expect(chatView).toContain("const reloadDirectory = useCallback");
+
+    // On ENTRY, not on `routeOpen` itself: that moves in both directions, so
+    // leaving Room would spend a second round of reads on a section just left.
+    // And not as a *gate* on the reads either — that would leave the rail empty
+    // on a console loaded straight onto `#/company`, which is the one thing this
+    // change exists to prevent.
+    expect(chatView).not.toContain("}, [client, company, routeOpen]);");
+  });
+
+  it("seeds the pinned rail's highlight from the channel Room will actually open", () => {
+    // Codex P2 on this PR. A console loaded straight onto `#/company` has never
+    // had `view === "chat"`, so a bare `null` left the rail highlighting the
+    // first desk while clicking Room ran chat's own bare-route restoration and
+    // landed somewhere else. A highlight has to name the destination it offers.
+    const shell = read("components/app-shell.tsx");
+    expect(shell).toContain("useState<string | null>(() => readLastChannel(scope))");
+    // The same value chat restores from, read the same scoped way.
+    expect(chatView).toContain("readLastChannel(scope)");
+  });
+
   it("is mounted by the shell unconditionally, with routeOpen as the only gate", () => {
     const shell = read("components/app-shell.tsx");
     // The regression this replaces: `{view === "chat" && <ChatView …/>}`, which

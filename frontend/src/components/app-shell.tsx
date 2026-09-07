@@ -134,6 +134,7 @@ import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
+import { readLastChannel } from "@/lib/last-channel";
 import { ChatView } from "@/views/ChatView";
 import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
 import {
@@ -661,8 +662,16 @@ export function AppShell({
    * belongs to another section: the rail keeps naming the channel Room will
    * return to. State rather than a ref, because the rail has to re-render when
    * it changes.
+   *
+   * Seeded from `readLastChannel`, not from nothing (Codex P2 review on #2130).
+   * A console loaded straight onto `#/company` has never had `view === "chat"`,
+   * so with a bare `null` the rail highlighted the first desk — while clicking
+   * **Room** ran chat's own bare-route restoration and landed on the remembered
+   * channel instead. A highlight has to name the destination it is offering,
+   * and this is the same value chat restores from, read the same scoped way, so
+   * the two cannot disagree.
    */
-  const [chatSub, setChatSub] = useState<string | null>(null);
+  const [chatSub, setChatSub] = useState<string | null>(() => readLastChannel(scope));
   // Which thread panel is open in that channel, or `null` for none (#1890 B).
   //
   // A third condition on "is this completion's marker actually on screen",
