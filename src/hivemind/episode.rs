@@ -297,6 +297,13 @@ impl<'a> EpisodeDriver<'a> {
                 &log,
                 &SessionQuery {
                     conversation: conversation.clone(),
+                    // The *true medium*, deliberately unnarrowed. `step` folds
+                    // this, and the room's counting has to be single-valued:
+                    // a per-reader fold would make `quorum::standings` return
+                    // a well-formed wrong answer with no error path — a quorum
+                    // one member can see and another cannot. `project_for`
+                    // below is the only thing that narrows, per speaker.
+                    viewer: Viewer::Operator,
                     before: None,
                     window: SESSION_WINDOW,
                 },
@@ -332,7 +339,20 @@ impl<'a> EpisodeDriver<'a> {
             // Folded fresh each turn from the same journal the transcript came
             // from, so a pin laid down *during* the episode is on the board for
             // the next speaker rather than the next episode.
-            let pins = match read_pinboard(&log, &conversation, PIN_LIMIT, None).await {
+            let pins = match read_pinboard(
+                &log,
+                &conversation,
+                // The board is rendered into *this speaker's* prompt, so it is
+                // read as this speaker: a pin over an aside it is not in must
+                // not quote content to it, and one over an aside it *is* in
+                // must still reach it.
+                &Viewer::Agent {
+                    id: turn.agent_id.clone(),
+                },
+                PIN_LIMIT,
+                None,
+            )
+            .await {
                 Ok(pins) => pins,
                 Err(error) => {
                     tracing::warn!(
