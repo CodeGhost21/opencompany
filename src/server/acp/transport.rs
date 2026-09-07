@@ -395,8 +395,7 @@ fn prompt_result(session_id: &str, report: crate::runtime::CycleReport) -> Value
         })
         .collect::<Vec<_>>();
     for approval_id in &report.parked {
-        updates.push(super::approvals::parked_notification(
-            session_id,
+        updates.push(super::approvals::parked_update(
             approval_id.as_ref(),
             "OpenCompany parked an effect from this turn, awaiting your approval",
         ));

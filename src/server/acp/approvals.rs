@@ -36,36 +36,43 @@
 
 use serde_json::{Value, json};
 
-/// A session-level notification telling a client an effect was parked.
+/// The bare `SessionUpdate` for a parked effect.
+///
+/// Split from the notification envelope the same way [`super::map`] splits
+/// [`from_turn_stream`](super::map::from_turn_stream) from
+/// [`notification`](super::map::notification): a `session/prompt` **result**
+/// carries update objects in its `updates` array, while a pushed
+/// `session/update` carries one inside a JSON-RPC envelope. Offering only the
+/// envelope made the result path embed a whole notification as an array
+/// element, so a client switching on `sessionUpdate` — which every sibling
+/// element answers — found nothing on that one.
 ///
 /// Carries the approval id, because that is what the client resolves against
-/// over REST. Sent as `_meta` on a `session/update` rather than as a new
-/// protocol method: a conforming client that has never heard of OpenCompany
-/// ignores it, which is exactly what `_meta` is for.
-pub fn parked_notification(session_id: &str, approval_id: &str, summary: &str) -> Value {
+/// over REST. Sent as `_meta` rather than as a new protocol method: a
+/// conforming client that has never heard of OpenCompany ignores it, which is
+/// exactly what `_meta` is for.
+pub fn parked_update(approval_id: &str, summary: &str) -> Value {
     json!({
-        "jsonrpc": "2.0",
-        "method": "session/update",
-        "params": {
-            "sessionId": session_id,
-            "update": {
-                // No ACP variant means "a human must decide something". The
-                // closest honest carrier is a session-info update whose `_meta`
-                // says what actually happened.
-                "sessionUpdate": "session_info_update",
-                "_meta": {
-                    "opencompany/approval": {
-                        "id": approval_id,
-                        "summary": summary,
-                        // Where to resolve it. Told rather than assumed: a
-                        // third-party ACP client has no reason to know this
-                        // host's REST shape.
-                        "resolve": "POST /api/v1/companies/{company}/approvals/{id}",
-                    }
-                },
-            },
+        // No ACP variant means "a human must decide something". The closest
+        // honest carrier is a session-info update whose `_meta` says what
+        // actually happened.
+        "sessionUpdate": "session_info_update",
+        "_meta": {
+            "opencompany/approval": {
+                "id": approval_id,
+                "summary": summary,
+                // Where to resolve it. Told rather than assumed: a third-party
+                // ACP client has no reason to know this host's REST shape.
+                "resolve": "POST /api/v1/companies/{company}/approvals/{id}",
+            }
         },
     })
+}
+
+/// [`parked_update`] wrapped in the `session/update` notification envelope, for
+/// a transport that pushes frames mid-turn rather than returning them.
+pub fn parked_notification(session_id: &str, approval_id: &str, summary: &str) -> Value {
+    super::map::notification(session_id, parked_update(approval_id, summary))
 }
 
 #[cfg(test)]
