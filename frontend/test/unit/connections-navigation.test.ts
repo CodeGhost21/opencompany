@@ -68,8 +68,10 @@ describe("the Connections section", () => {
     for (const page of CONNECTION_PAGES) {
       expect(page.label, page.id).toBeTruthy();
       expect(page.hint, page.id).toBeTruthy();
-      // A hint is what the rail shows under the label; repeating the label
-      // there tells an operator nothing they cannot already see.
+      // The hint is the row's `title` and, below `lg`, the line naming the
+      // active chip — it stopped being a second line under the label with
+      // issue #2131. Repeating the label in it tells an operator nothing they
+      // cannot already see, wherever it is shown.
       expect(page.hint, page.id).not.toBe(page.label);
     }
   });
@@ -83,18 +85,20 @@ describe("the Connections section", () => {
     expect(read("views/OAuthView.tsx")).not.toContain('title="OAuth"');
   });
 
-  it("draws its sub-navigation in the sidebar rather than a rail in the page", () => {
-    // This section shipped with a `w-60` rail inside the content area, modelled
-    // on Finance's. Sub-navigation lives in the sidebar now, under the
-    // section's own row, so all four sections use one pattern — and the
-    // content pane keeps the 240px the rail was charging it.
+  it("draws no rail of its own, whichever surface the sub-navigation is on", () => {
+    // This section shipped with a `w-60` rail of its own, modelled on Finance's,
+    // and gave it up for rows in the sidebar. Sub-navigation is a content rail
+    // again since #2130 — but the SHARED one, `components/section-rail.tsx`,
+    // built from the same `NAV_SECTIONS` table every section reads. This file
+    // stays dispatch-only through both moves, which is the property worth
+    // pinning: one rail implementation, not one per section.
     const section = read("views/connections/ConnectionsSection.tsx");
     expect(section).not.toMatch(/<nav[\s>]/);
     expect(section).not.toContain("w-60");
 
-    // Where it went, asserted from the rendered sidebar rather than from source
-    // text: the rows are what an operator clicks, and a `toContain` over a nav
-    // table is satisfied by a commented-out row that renders nothing (#1311).
+    // Where it went, asserted from the nav table rather than from source text: a
+    // `toContain` over a nav table is satisfied by a commented-out row that
+    // renders nothing (#1311).
     const connections = NAV_SECTIONS.find((s) => s.view === "connections")!;
     expect(connections.children?.map((child) => [child.label, child.sub])).toEqual([
       ["Apps", "apps"],

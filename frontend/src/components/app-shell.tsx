@@ -29,6 +29,7 @@ import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
 import { WindowTitleBar } from "@/components/window-title-bar";
 import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
+import { SectionContentRail } from "@/components/section-rail";
 import { SidebarNavigation } from "@/components/sidebar-navigation";
 import { RoomRailSlotProvider } from "@/components/room-rail";
 import { SetupController } from "@/setup/SetupController";
@@ -133,6 +134,7 @@ import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
+import { readLastChannel } from "@/lib/last-channel";
 import { ChatView } from "@/views/ChatView";
 import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
 import {
@@ -645,6 +647,31 @@ export function AppShell({
   // after a walk to Approvals — that must keep using the last channel even
   // while the rail is what's on screen (#1768 codex review).
   const chatPaneVisibleRef = useRef(true);
+  /**
+   * The chat segment, remembered across a trip to another section (#2130).
+   *
+   * `ChatView` is mounted on every route now, and `sub` is whatever the CURRENT
+   * view's second segment is — `mcp` on `#/connections/mcp`, `goals` on
+   * `#/ledgers/goals`. Handing that straight to chat would have it resolve
+   * `mcp` as a channel id and raise the unknown-channel notice for a segment
+   * that was never addressed to it. Handing it nothing instead would drop the
+   * pinned rail's highlight back to the first desk the moment an operator
+   * stepped into Company.
+   *
+   * So the shell keeps the last chat segment and replays it while the address
+   * belongs to another section: the rail keeps naming the channel Room will
+   * return to. State rather than a ref, because the rail has to re-render when
+   * it changes.
+   *
+   * Seeded from `readLastChannel`, not from nothing (Codex P2 review on #2130).
+   * A console loaded straight onto `#/company` has never had `view === "chat"`,
+   * so with a bare `null` the rail highlighted the first desk — while clicking
+   * **Room** ran chat's own bare-route restoration and landed on the remembered
+   * channel instead. A highlight has to name the destination it is offering,
+   * and this is the same value chat restores from, read the same scoped way, so
+   * the two cannot disagree.
+   */
+  const [chatSub, setChatSub] = useState<string | null>(() => readLastChannel(scope));
   // Which thread panel is open in that channel, or `null` for none (#1890 B).
   //
   // A third condition on "is this completion's marker actually on screen",
@@ -656,6 +683,9 @@ export function AppShell({
   // nowhere: the exact "suppressed a toast for a marker the operator cannot
   // see" defect #1768's review established the rule against.
   const openThreadRootRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (view === "chat") setChatSub(sub);
+  }, [view, sub]);
   const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
     chatPaneVisibleRef.current = visible;
   }, []);
@@ -3432,7 +3462,7 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} sub={sub} onNavigate={setView} />
+          <SidebarNavigation view={view} onNavigate={setView} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on
@@ -3507,6 +3537,13 @@ export function AppShell({
             it. */}
         <AgentProfileProvider client={client} company={company}>
         <ContentSurface>
+          {/* A section's sub-navigation is the first column of its content
+              (issue #2130) — Company's five pages, Connections' two — driven by
+              the same `NAV_SECTIONS` table the sidebar's four rows come from.
+              Sections with no children (Room, Flows) and addresses filed under
+              none (Settings, Overview, Approvals) render bare, exactly as they
+              did. See `components/section-rail.tsx`. */}
+          <SectionContentRail view={view} sub={sub} onNavigate={setView}>
           {/* `#/overview` is the company graph again — the page #1321 swapped
               out for the operator landing view. The graph keeps the
               `#/company/graph` alias that issue gave it, so every link minted
@@ -3552,11 +3589,34 @@ export function AppShell({
               onRunSetup={() => setSetupForced(true)}
             />
           )}
-          {view === "chat" && (
-            <ChatView
+          {/* Mounted on EVERY route, not only on `#/chat` (issue #2130).
+
+              The sidebar's channel rail is portalled out of this view
+              (`components/room-rail.tsx`), and it is pinned in the sidebar on
+              every section now — so the view that feeds it has to outlive the
+              route that used to own it. `routeOpen` is how it knows the
+              difference: false, and it renders the rail and nothing else.
+
+              What that costs, said plainly: ~2,400 lines of chat model stay
+              mounted while the operator is on Company or Flows. The data was
+              always resident — this shell owns `transcripts`, the mention feed
+              and the unread map precisely *because* `ChatView` used to unmount
+              — so what is newly kept is the view's own state and its
+              desks/roster reads, not the polling. The return is a channel list
+              that is never a round trip away, and a trip back to Room that
+              refetches nothing.
+
+              The alternative, lifting the rail model up into this shell, was
+              rejected when the rail shipped and is worse now: it would put an
+              effect in `ChatView` writing state up here and re-render the whole
+              console on every unread tick from every section, rather than only
+              from Room. */}
+          <ChatView
               client={client}
               company={company}
-              sub={sub}
+              // The chat segment, not the current view's — see `chatSub`.
+              sub={view === "chat" ? sub : chatSub}
+              routeOpen={view === "chat"}
               presence={presence.peers}
               companyPeople={companyPeople}
               resolveTypingNames={resolveTypingNames}
@@ -3597,7 +3657,6 @@ export function AppShell({
               budgetProximity={budgetProximity}
               onDismissBudgetProximity={() => setBudgetProximity(null)}
             />
-          )}
           {view === "inbox" && <InboxView client={client} company={company} />}
           {/* All that is left of the Tasks page: the card detail. `sub` is a
               real id by the time this renders — `REWRITE_RETIRED` sent every
@@ -3890,12 +3949,10 @@ export function AppShell({
                 />
               }
             >
-              <FinanceSection
-                client={client}
-                company={company}
-                sub={sub}
-                onNavigate={(page) => navigate("finances", page)}
-              />
+              {/* Dispatch only: its three pages are nested rows on Company's
+                  section rail now, not a second `w-60` rail inside this pane
+                  (issue #2130, and #1383 for what two rails cost). */}
+              <FinanceSection client={client} company={company} sub={sub} />
             </Suspense>
           )}
           {view === "connections" && (
@@ -3913,6 +3970,7 @@ export function AppShell({
           )}
           {view === "feedback" && <FeedbackView client={client} company={company} />}
           {view === "not-found" && <UnknownRouteView address={sub} />}
+          </SectionContentRail>
         </ContentSurface>
         </AgentProfileProvider>
 
