@@ -1087,10 +1087,10 @@ function AddMemberDialog({
    * the dialog without going through the wrapper that resets — so Escape and
    * the overlay cleared the form and Cancel did not. Invisible until the dialog
    * had a second shape: one hand-over to the full form, cancelled rather than
-   * escaped, left `roleUnderivable` true and retired the reduced dialog for the
-   * rest of the page's life, still carrying the abandoned attempt's text. The
-   * `reset` below promises "the hand-over lasts for one open"; only this makes
-   * that true.
+   * escaped, left the hand-over state (`designRefused`) set and so retired the
+   * reduced dialog for the rest of the page's life, still carrying the
+   * abandoned attempt's text. The `reset` below promises "the hand-over lasts
+   * for one open"; only this makes that true.
    */
   function close() {
     onOpenChange(false);

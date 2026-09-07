@@ -154,11 +154,11 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
    * the dialog without going through the wrapper that resets — so Escape and
    * the overlay cleared the form and Cancel did not. That is invisible until
    * the dialog has a second shape: one hand-over to the full form, cancelled
-   * rather than escaped, left `roleUnderivable` true and retired the reduced
-   * dialog for the rest of the page's life, still carrying the name and the
-   * sentence from the abandoned attempt. Verified in a browser: Cancel then
-   * reopen showed six fields and the old text; Escape then reopen showed two
-   * empty ones. The module's own promise is "the hand-over lasts for one open",
+   * rather than escaped, left the hand-over state (`designRefused`) set and so
+   * retired the reduced dialog for the rest of the page's life, still carrying
+   * the name and the sentence from the abandoned attempt. Verified in a
+   * browser: Cancel then reopen showed six fields and the old text; Escape
+   * then reopen showed two empty ones. The module's own promise is "the hand-over lasts for one open",
    * and only this makes it true.
    */
   function close() {
