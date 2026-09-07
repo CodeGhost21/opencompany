@@ -3167,7 +3167,18 @@ export function WorkflowsView({
           the canvas is the first surface these can be read on — and they are
           the answer to "why does this graph not say quite what I asked for?".
           Not destructive: nothing is wrong, something was decided for you. */}
-      {detailOpen && createdNotes && (
+      {/* Keyed on BOTH axes at render time, not only swept by the effect below.
+          The sweep runs after paint, so between a company or selection change
+          and that effect there is one committed frame in which these notes are
+          on screen over a workflow they are not about. The guard was removed on
+          the reasoning that mutation testing could not kill it — but `act()`
+          flushes effects synchronously, so the test harness cannot produce the
+          frame the guard exists for, which is a statement about the harness and
+          not about the render. */}
+      {detailOpen &&
+        createdNotes &&
+        createdNotes.workflowId === selectedId &&
+        createdNotes.company === company && (
         <div className="px-4 pt-3">
           <Alert data-testid="workflow-created-notes">
             <AlertDescription className="flex flex-wrap items-start justify-between gap-2">
