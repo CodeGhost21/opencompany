@@ -9,8 +9,10 @@ triggers into the desk that owns them and waiting for the room to answer.
 
 What it is for is the thing a unit test cannot show: whether real models seated
 on three desks, given a fleet that is genuinely too big for the van, actually
-**talk to each other**. The run reports every cross-desk referral it saw, which
-is the mechanism this bundle exists to exercise.
+**talk to each other**. The run counts both seams this bundle exists to
+exercise — cross-desk referrals, and the private asides the ops desk may open —
+and prints the text of every referral, because a run in which the desks never
+speak to each other looks exactly like a healthy one from the margin alone.
 
 Stdlib only, so it runs wherever ``python3`` does. Talks to a running
 ``opencompany serve`` (default ``http://127.0.0.1:8080``) whose auth mode is
