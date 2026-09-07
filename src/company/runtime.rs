@@ -9569,6 +9569,100 @@ mod tests {
     ///
     /// A referral is decided from a COMMITTED reply, so a restart, a
     /// redelivered frame or a retry decides the identical referral again.
+    /// A runtime whose one agent is allowed to refer to the `design` desk, so a
+    /// forward reaches the width bound instead of stopping at authorization.
+    #[cfg(all(feature = "openhuman", feature = "hivemind"))]
+    async fn runtime_that_may_refer() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir)
+    {
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-refer-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::types::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            delegates_to = ["design"]
+
+            [[agent]]
+            id = "designer"
+            role = "Designer"
+
+            [[group_chat]]
+            id = "design"
+            name = "Design"
+            members = ["designer"]
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let rt = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect("runtime");
+        (rt, home_dir)
+    }
+
+    /// **The width bound: how many desks one pass may ask.**
+    ///
+    /// `max_hops` bounds how DEEP a chain runs and says nothing about how WIDE
+    /// it is — the library leaves that to the host, because only a host knows
+    /// what a question costs it. Here it is a full model turn on another desk.
+    ///
+    /// Pinned with a cap of 1 so the second forward is the one that trips it,
+    /// and with distinct triggers so the idempotency marker cannot be what
+    /// refuses it.
+    #[cfg(all(feature = "openhuman", feature = "hivemind"))]
+    #[tokio::test]
+    async fn a_second_crossing_question_is_refused_once_the_width_is_spent() {
+        use tinyhivemind::dispatch::{EnqueueOutcome, EnqueueRefusal};
+        use tinyhivemind::referral::ReferralQueue;
+
+        let (rt, _home) = runtime_that_may_refer().await;
+        let rt = Arc::new(rt);
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1);
+
+        let forward = |trigger: u64| tinyhivemind::referral::Referral {
+            key: tinyhivemind::dispatch::DispatchKey {
+                trigger_sequence: trigger,
+            },
+            kind: tinyhivemind::referral::ReferralKind::Forward,
+            source_id: "ceo".to_string(),
+            target_id: "designer".to_string(),
+            content: "who owns the login screen?".to_string(),
+            from: tinyhivemind::dispatch::DispatchConversation {
+                desk_id: "engineering".to_string(),
+                thread_root: None,
+            },
+            to: tinyhivemind::dispatch::DispatchConversation {
+                desk_id: "design".to_string(),
+                thread_root: None,
+            },
+            origin: None,
+            child_hop: 1,
+        };
+
+        assert_eq!(
+            queue.enqueue_once(forward(101)).await.expect("decides"),
+            EnqueueOutcome::Enqueued,
+            "the first question is within the cap"
+        );
+        assert_eq!(
+            queue.enqueue_once(forward(202)).await.expect("decides"),
+            EnqueueOutcome::Refused {
+                reason: EnqueueRefusal::FeatureDisabled
+            },
+            "a different trigger, so this is the WIDTH bound refusing it, not the marker"
+        );
+    }
+
     /// Without the durable marker the target desk is asked twice — two turns,
     /// two answers, twice the spend, one question. `Already` is the whole
     /// point of the port, and this is the test that would catch losing it.
@@ -9581,7 +9675,9 @@ mod tests {
         let (rt, _home) = runtime_with_events().await;
         let rt = Arc::new(rt);
         let gate = Arc::new(tokio::sync::Mutex::new(()));
-        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate);
+        // A cap high enough not to be what this test measures: the second
+        // enqueue must be refused as `Already`, by the marker, not by width.
+        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8);
 
         let referral = tinyhivemind::referral::Referral {
             key: tinyhivemind::dispatch::DispatchKey {

@@ -1165,6 +1165,21 @@ pub struct JournalReferralQueue {
     runtime: std::sync::Arc<crate::company::runtime::CompanyRuntime>,
     /// Serialises check-then-write. One referral decision at a time.
     gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// How many crossing questions this pass may ask in total — the WIDTH
+    /// bound, which the library deliberately leaves to the host because only a
+    /// host knows what a question costs it. Here it costs a full model turn on
+    /// another desk.
+    ///
+    /// `max_hops` bounds how DEEP one chain runs and says nothing about how
+    /// many chains a single report may start. One committed reply can only ever
+    /// name one target — the library takes the first candidate mention — but a
+    /// turn that produced several replies gets several chances, and nothing
+    /// counted them.
+    peer_cap: u32,
+    /// Crossing forwards already spent under this queue. Returns are exempt:
+    /// a return spends no turn of its own, and refusing one would strand an
+    /// answer that has already been paid for.
+    asked: std::sync::Arc<tokio::sync::Mutex<u32>>,
 }
 
 impl std::fmt::Debug for JournalReferralQueue {
@@ -1180,8 +1195,14 @@ impl JournalReferralQueue {
     pub fn new(
         runtime: std::sync::Arc<crate::company::runtime::CompanyRuntime>,
         gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+        peer_cap: u32,
     ) -> Self {
-        Self { runtime, gate }
+        Self {
+            runtime,
+            gate,
+            peer_cap,
+            asked: std::sync::Arc::new(tokio::sync::Mutex::new(0)),
+        }
     }
 
     /// Has this exact trigger already created its child turn?
@@ -1320,6 +1341,32 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                     reason: EnqueueRefusal::Unauthorized,
                 });
             }
+
+            // 3. The WIDTH bound, counted only for forwards that will actually
+            //    run.
+            //
+            //    `max_hops` bounds how DEEP one chain goes and says nothing
+            //    about how many chains a report may start; one reply names one
+            //    target, but a turn that produced several replies gets several
+            //    chances and nothing counted them.
+            //
+            //    A return is exempt: it spends no turn of its own, and refusing
+            //    one strands an answer another desk has already produced.
+            //
+            //    Counted AFTER authorization, not before. The budget exists to
+            //    bound what a company spends on other desks' turns, and a
+            //    refused forward spends nothing — charging it would let an
+            //    unauthorized mention exhaust the allowance for the authorized
+            //    question that follows it.
+            if matches!(referral.kind, tinyhivemind::referral::ReferralKind::Forward) {
+                let mut asked = self.asked.lock().await;
+                if *asked >= self.peer_cap {
+                    return Ok(EnqueueOutcome::Refused {
+                        reason: EnqueueRefusal::FeatureDisabled,
+                    });
+                }
+                *asked = asked.saturating_add(1);
+            }
             let Ok(Some(record)) = self.runtime.store().load(self.runtime.id()).await else {
                 return Ok(EnqueueOutcome::Refused {
                     reason: EnqueueRefusal::TargetUnavailable,
@@ -1333,7 +1380,7 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                 });
             }
 
-            // 3. The marker, durably, BEFORE the turn — see the type's doc for
+            // 4. The marker, durably, BEFORE the turn — see the type's doc for
             //    which way this window fails.
             self.runtime
                 .events()
@@ -1360,7 +1407,7 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                 .await
                 .map_err(|err| Box::new(err) as tinyhivemind::responder::BoxError)?;
 
-            // 4. The child turn, on the TARGET's conversation.
+            // 5. The child turn, on the TARGET's conversation.
             self.runtime.clone().spawn_referred_turn(
                 referral.to.desk_id.clone(),
                 returned_answer(&record, &referral),
@@ -1497,6 +1544,28 @@ fn returned_answer(record: &CompanyRecord, referral: &tinyhivemind::referral::Re
          {ending}",
         answer = referral.content,
     )
+}
+
+/// The `[[group_chat]].hive.referral` block for one desk, or the default —
+/// which refers nothing.
+///
+/// A desk the manifest does not declare (an overlay desk, a DM, the built-in
+/// General channel) has no block to read and therefore does not refer. That is
+/// the same conservative direction the block's own default takes: referral is
+/// opt-in per desk, because crossing costs a full model turn on somebody else's
+/// desk and only pays where desks have blind spots of their own.
+#[must_use]
+pub(crate) fn referral_config(
+    record: &CompanyRecord,
+    desk_id: &str,
+) -> crate::hivemind::ReferralConfig {
+    record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|chat| chat.id == desk_id)
+        .map(|chat| chat.hive.referral.clone())
+        .unwrap_or_default()
 }
 
 /// A desk's operator-facing name, or its id when it has none to show.

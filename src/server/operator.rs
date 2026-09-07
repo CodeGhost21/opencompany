@@ -3525,7 +3525,7 @@ pub(crate) async fn refer_committed_replies(
     // advances bounds nothing.
     hop: u32,
 ) {
-    use tinyhivemind::referral::{ReferralPolicy, ReferralReach, dispatch_referral};
+    use tinyhivemind::referral::dispatch_referral;
 
     let Ok(Some(record)) = runtime.store().load(company).await else {
         return;
@@ -3536,6 +3536,32 @@ pub(crate) async fn refer_committed_replies(
     let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
     let desks = crate::runtime::hivemind::desk_snapshots(&record);
     let gate = runtime.referral_gate();
+
+    // **The desk's own `[[group_chat]].hive.referral` block, not a constant.**
+    //
+    // Referral is opt-in per desk and off by default: crossing costs a full
+    // model turn on somebody else's desk, and tinyhivemind's own benchmark
+    // measured it changing no answer and costing twice the turns on desks that
+    // are individually unbiased. A company that says nothing therefore behaves
+    // exactly as it did before this existed, which is the direction a mechanism
+    // that spends other people's turns should fail in.
+    //
+    // This replaces a hardcoded `enabled: true` with `max_hops` fixed in the
+    // source — a policy no operator could see, let alone change.
+    let config = crate::runtime::hivemind::referral_config(&record, desk);
+    let policy = config.policy();
+    if !policy.enabled {
+        return;
+    }
+
+    // ONE queue for the whole report, which is what makes `peer_cap` mean
+    // anything: the cap counts crossing questions across every reply this turn
+    // produced, and a queue rebuilt per reply would start each count at zero.
+    let queue = crate::runtime::hivemind::JournalReferralQueue::new(
+        runtime.clone(),
+        gate.clone(),
+        config.peer_cap(),
+    );
 
     for response in &report.responses {
         let (Some(agent), Some(id)) = (response.agent.as_deref(), response.message_id.as_deref())
@@ -3568,24 +3594,7 @@ pub(crate) async fn refer_committed_replies(
             hop,
             origin: origin.clone(),
         };
-        let queue =
-            crate::runtime::hivemind::JournalReferralQueue::new(runtime.clone(), gate.clone());
-        match dispatch_referral(
-            &queue,
-            ReferralPolicy {
-                enabled: true,
-                // One constant, shared with the frame that tells the asker how
-                // much of the chain is left — see `REFERRAL_MAX_HOPS`.
-                max_hops: crate::runtime::hivemind::REFERRAL_MAX_HOPS,
-                reach: ReferralReach::Desks,
-                returns: true,
-            },
-            &input,
-            &roster,
-            &desks.set(),
-        )
-        .await
-        {
+        match dispatch_referral(&queue, policy, &input, &roster, &desks.set()).await {
             Ok(outcome) => tracing::info!(
                 company = %company,
                 desk = %desk,
