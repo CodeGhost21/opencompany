@@ -1,9 +1,9 @@
-# Drafting a mandate or a persona
+# Drafting a mandate, a persona, or a whole teammate
 
-The two read-only routes behind the teammate copilot (issue #1776), split out of
-[`api-write-plane.md`](api-write-plane.md) to keep that file under the
-repository's 500-line ceiling. Everything here is part of the console write
-plane; neither route writes.
+The three read-only routes behind the teammate copilot (issues #1776, #1989),
+split out of [`api-write-plane.md`](api-write-plane.md) to keep that file under
+the repository's 500-line ceiling. Everything here is part of the console write
+plane; **none of these routes writes.**
 
 `POST …/team/{agentId}/draft` runs one turn of a conversation about one of two
 fields — `description` (the mandate on the roster card) or `instructions` (the
@@ -38,6 +38,50 @@ question over one malformed old message would be the worse failure.
 is taken — the response is text, and it becomes a teammate's persona only if the
 operator takes it and then saves through `PATCH …/team/{agentId}` like any edit
 they typed themselves.
+
+## `POST …/team/design` — a whole teammate, at creation only
+
+The reduced Add-teammate dialog (issue #1989) collects a **name and one
+sentence**. This route turns that sentence into the three fields a teammate is
+made of — `role`, `description` and `instructions` — in one model call, and the
+console then creates the teammate through `POST …/team`.
+
+The body is `{name?, description}`; a blank `description` is a `400`, because it
+is the entire input and designing from nothing is a model inventing a job rather
+than reading one. The answer is `{role?, description?, instructions?, source,
+reason?}`, with the same `source` / `reason` contract the draft routes use: all
+four refusals (`no_model`, `model_unreachable`, `unreadable`,
+`budget_exhausted`) are a `200`, because none is a failure of the request.
+
+**Three fields or none.** A design missing any of them is refused rather than
+salvaged, and a `role` too long to be a job title is refused rather than
+truncated. A teammate holding a real mandate and a fragment for a role is what
+the console used to produce by splitting the operator's sentence and cutting it
+at sixty characters — and on screen it looks finished, which is what makes it
+worth refusing outright.
+
+### Why a role may be designed here when `DraftableField` excludes one
+
+`POST …/team/{agentId}/draft` refuses anything but `description` and
+`instructions`, and must keep refusing. Its reason — a role is what delegation
+grounds on, so a drafted one would change who the company routes work to — is a
+statement about **editing a teammate that exists**: work is already addressed to
+it, and a model re-pointing that without the operator choosing to is the harm.
+
+At **creation** there is nothing to re-route. The teammate does not exist, no
+work is addressed to it, and no orchestrator has seen it. So the property the
+exclusion protects is not in play, and the alternative was not a safe blank:
+`role` is required by every write path and `persona_prompt` interpolates it
+unguarded.
+
+The separation is **structural, not a flag**: this route takes no agent id at
+all, so there is no request shape that reaches the design pass carrying an
+existing teammate's id. There is no `POST …/team/{agentId}/design`.
+
+The grounding is the same closed set every draft gets — the company, what it
+makes, the name, the operator's sentence, and siblings' ids and roles so the new
+teammate's job is not one the company already has. The operator's sentence is
+framed to the model as data, never as instructions to it.
 
 That is the whole reason a model is allowed near these two fields. First-run
 setup deliberately keeps the design pass **out** of a teammate's standing
