@@ -284,7 +284,7 @@ blind_round = true
 # figures off the `vending` MCP on almost every turn, so a citation that
 # reaches a fact is cheap there in a way it is not here: this desk's whole job
 # is to weigh a signal nobody has measured yet.
-repetition_cap = 1
+repetition_cap = 2
 
 [group_chat.hive.moves]
 market_scout = ["evidence", "propose", "question", "pin", "defer"]
