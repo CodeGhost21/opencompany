@@ -724,7 +724,7 @@ fn message(sequence: u64, author: &str, content: &str) -> tinyhivemind_hive::Ses
         },
         content: content.to_owned(),
         audience: tinyhivemind_hive::aside::Audience::Desk,
-        elided: false,
+        elided: None,
     }
 }
 
