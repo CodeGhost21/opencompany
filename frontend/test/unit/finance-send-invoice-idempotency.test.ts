@@ -88,12 +88,19 @@ async function fill(testid: string, value: string): Promise<void> {
   });
 }
 
+/**
+ * A real `.click()` rather than forcing `.checked` + a synthetic `change`
+ * event: a click is what actually toggles a checkbox's property natively in
+ * the DOM and is what React's controlled-input machinery expects to observe,
+ * so it is the only way here that reliably reaches the component's `onChange`
+ * (and therefore its `forceNew` state) rather than just repainting the input.
+ */
 async function toggleForceNew(checked: boolean): Promise<void> {
   const box = at("invoice-force-new") as HTMLInputElement | null;
   if (!box) throw new Error("no invoice-force-new checkbox");
+  if (box.checked === checked) return;
   await act(async () => {
-    box.checked = checked;
-    box.dispatchEvent(new Event("change", { bubbles: true }));
+    box.click();
   });
 }
 
