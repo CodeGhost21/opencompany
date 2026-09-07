@@ -490,7 +490,7 @@ fn the_close_tells_a_local_question_from_a_crossing_one() {
         last_seq: None,
         report_seq: None,
         violations: Vec::new(),
-        failures: Vec::new(),
+        failed_turns: 0,
         referrals: ReferralLedger {
             asked,
             over_cap: 0,
