@@ -350,7 +350,12 @@ impl SessionRegistry {
 
     /// Every session on a connection `owner` holds, for `session/list`.
     /// `None` when the connection is unknown or belongs to someone else.
-    pub fn list(&self, connection: &str, owner: &str) -> Option<Vec<Arc<AcpSession>>> {
+    pub fn list(
+        &self,
+        connection: &str,
+        owner: &str,
+        now_millis: u64,
+    ) -> Option<Vec<Arc<AcpSession>>> {
         let by_connection = self
             .by_connection
             .lock()
@@ -362,6 +367,7 @@ impl SessionRegistry {
         Some(
             conn.sessions
                 .values()
+                .filter(|entry| !Self::expired(entry, now_millis))
                 .map(|entry| Arc::clone(&entry.session))
                 .collect(),
         )
@@ -558,7 +564,7 @@ mod test {
             registry.get("conn-b", "alice", "s1", 0).is_none(),
             "no cross-connection reads"
         );
-        assert_eq!(registry.list("conn-a", "alice").unwrap().len(), 1);
+        assert_eq!(registry.list("conn-a", "alice", 0).unwrap().len(), 1);
     }
 
     #[test]
@@ -576,12 +582,12 @@ mod test {
             .unwrap_err();
         assert_eq!(refusal, OpenSessionRefusal::NotOwned);
         assert_eq!(
-            registry.list("conn-a", "alice").unwrap().len(),
+            registry.list("conn-a", "alice", 0).unwrap().len(),
             1,
             "the attempted takeover left alice's session set untouched"
         );
         assert!(
-            registry.list("conn-a", "mallory").is_none(),
+            registry.list("conn-a", "mallory", 0).is_none(),
             "mallory never owned the connection, so it stays invisible to her too"
         );
     }
@@ -594,7 +600,7 @@ mod test {
             .unwrap();
 
         assert!(registry.get("conn-a", "mallory", "s1", 0).is_none());
-        assert!(registry.list("conn-a", "mallory").is_none());
+        assert!(registry.list("conn-a", "mallory", 0).is_none());
         assert!(!registry.remove("conn-a", "mallory", "s1"));
         assert!(
             registry
@@ -618,7 +624,7 @@ mod test {
             .unwrap_err();
         assert_eq!(refusal, OpenSessionRefusal::PerConnectionCap);
         assert_eq!(
-            registry.list("conn-a", "alice").unwrap().len(),
+            registry.list("conn-a", "alice", 0).unwrap().len(),
             MAX_SESSIONS_PER_CONNECTION
         );
     }
@@ -750,7 +756,7 @@ mod test {
             "a peek past the TTL must refuse, not hand back a session to authorize and touch"
         );
         // And it evicted the stale entry rather than merely refusing this call.
-        assert!(registry.list("conn-a", "alice").is_none());
+        assert!(registry.list("conn-a", "alice", 0).is_none());
     }
 
     #[test]
@@ -764,6 +770,27 @@ mod test {
                 .get("conn-a", "alice", "s1", SESSION_TTL_MILLIS + 1)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn list_does_not_advertise_a_session_already_past_its_ttl() {
+        // `session/list` must not tell a caller a session is there when
+        // `peek` and `get` already refuse it as expired, landing in the same
+        // gap between two hourly sweeper ticks — otherwise a client is told a
+        // session is resumable and then has `session/prompt` immediately
+        // report it unknown (codex review).
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        registry
+            .open("conn-a", "alice", session("s2", "acme"), SESSION_TTL_MILLIS)
+            .unwrap();
+        let listed = registry
+            .list("conn-a", "alice", SESSION_TTL_MILLIS + 1)
+            .expect("the connection itself is not expired, only one session on it");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "s2");
     }
 
     #[test]
@@ -862,7 +889,7 @@ mod test {
                 "session s{i} was stranded"
             );
         }
-        assert!(registry.list("conn-a", "alice").is_none());
+        assert!(registry.list("conn-a", "alice", 0).is_none());
     }
 
     #[test]
@@ -880,7 +907,7 @@ mod test {
         assert!(registry.remove("conn-a", "alice", "s1"));
         assert!(registry.get("conn-a", "alice", "s1", 0).is_none());
         assert!(registry.get("conn-a", "alice", "s2", 0).is_some());
-        assert_eq!(registry.list("conn-a", "alice").unwrap().len(), 1);
+        assert_eq!(registry.list("conn-a", "alice", 0).unwrap().len(), 1);
     }
 
     #[test]
@@ -922,7 +949,7 @@ mod test {
             .unwrap();
         assert!(!registry.remove("conn-a", "alice", "ghost"));
         assert!(!registry.remove("conn-b", "alice", "s1"));
-        assert_eq!(registry.list("conn-a", "alice").unwrap().len(), 1);
+        assert_eq!(registry.list("conn-a", "alice", 0).unwrap().len(), 1);
     }
 
     #[test]

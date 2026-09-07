@@ -220,7 +220,11 @@ fn list_sessions(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Val
     // this caller opened, checked by `SessionRegistry::list`.
     let sessions = state
         .acp_sessions()
-        .list(connection(params)?, &owner(auth))
+        .list(
+            connection(params)?,
+            &owner(auth),
+            crate::ports::now_millis(),
+        )
         .ok_or_else(|| "unknown ACP connection".to_string())?
         .into_iter()
         .filter(|s| authorize_address(state, auth, &s.company).is_none())
