@@ -541,6 +541,7 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
         &adapter,
         &SessionQuery {
             conversation: conversation(),
+            viewer: tinyhivemind_hive::aside::Viewer::Operator,
             before: None,
             window: SESSION_WINDOW,
         },
@@ -722,6 +723,8 @@ fn message(sequence: u64, author: &str, content: &str) -> tinyhivemind_hive::Ses
             label: author.to_owned(),
         },
         content: content.to_owned(),
+        audience: tinyhivemind_hive::aside::Audience::Desk,
+        elided: false,
     }
 }
 

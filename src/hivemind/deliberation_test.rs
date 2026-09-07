@@ -418,6 +418,8 @@ fn message(sequence: u64, agent: &str, content: &str) -> tinyhivemind_hive::Sess
             label: agent.to_owned(),
         },
         content: content.to_owned(),
+        audience: tinyhivemind_hive::aside::Audience::Desk,
+        elided: false,
     }
 }
 
