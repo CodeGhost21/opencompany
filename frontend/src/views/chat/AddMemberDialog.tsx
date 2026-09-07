@@ -156,21 +156,24 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
   const [designsProfiles, setDesignsProfiles] = useState<boolean | null>(null);
 
   /**
-   * Everything the dialog holds belongs to one company. Dropped when the scope
-   * changes under it.
+   * Everything the dialog holds belongs to one company. Dropped if the scope
+   * ever changes under it.
    *
-   * The console can switch hosts with this dialog mounted, and its state does
-   * not follow: `cognition` and `designsProfiles` are the previous company's
-   * answers, and they decide which of the two forms is on screen. So a company
-   * that could not design would keep showing the full form until the new read
-   * landed, and the flip to the reduced one would take whatever had been typed
-   * into it with it — the carry runs the other way, and could not sensibly run
-   * this way in any case.
+   * **A belt, not the fix.** `AppShell` is keyed `${connectionId}:${company}`
+   * (`ConnectionConsole.tsx`), so today a host or company switch remounts this
+   * whole subtree and there is no stale state to clear — this effect fires once
+   * on mount and does nothing. It is here because what it guards is not
+   * obvious from inside this file: `cognition` and `designsProfiles` are one
+   * company's answers and they *decide which form is on screen*, so a scope
+   * change that ever reconciled instead of remounting would leave the previous
+   * company's capability driving the surface, and the flip when the new read
+   * landed would take whatever had been typed with it.
    *
-   * Cleared rather than carried, deliberately. A half-written teammate is
-   * addressed to the company it was written for; carrying it across a host
-   * switch would offer to create it somewhere the operator did not describe it,
-   * which is a worse answer than an empty box.
+   * Cleared rather than carried, which is the opposite of what the
+   * cognition-settling flip does and deliberately so. There, the company is the
+   * same and the surface merely resolved late. A half-written teammate is
+   * addressed to the company it was written for, and carrying it across a
+   * switch would offer to create it somewhere the operator never described it.
    */
   useEffect(() => {
     setCognition(null);
