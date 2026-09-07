@@ -147,22 +147,24 @@ appended, because an audience is fixed at append time: widening one afterwards
 could never be redelivered (a sharing watermark advances past filtered rows
 unconditionally) and would invalidate every citation naming it.
 
-Every rung below means "this line is an ordinary desk row", which is the safe
-direction — a line the room can read is never a leak, and the member has still
-said what it meant to say. A refusal is logged, never raised: none of these is a
-reason to abandon an episode.
+Every rung below means **the private row is dropped**. The turn's own
+desk-visible line is unaffected and still reaches the room — the member has
+already said its piece — and a refusal is logged, never raised: none of these is
+a reason to abandon an episode. Dropping rather than publishing is the point:
+falling back to the desk would put a second desk-visible contribution on one
+turn.
 
 | Condition | Behaviour |
 | --- | --- |
-| The line does not start with `!aside` | Desk row |
-| `aside = { enabled = false }` (the default) | Desk row — `Disabled` |
-| The author is not an active member of this desk | Desk row — `AuthorNotOnDesk` |
-| The line names no agent — `@#desk`, `@everyone`, or nobody | Desk row — `NoAudience` |
-| It names only its own author | Desk row — `SelfOnly` |
-| It names more peers than `max_members` | Desk row — `AudienceTooLarge` |
-| A named peer is not an active member of this desk | Desk row — `TargetNotOnDesk` |
-| This pair has spent `max_messages` | Desk row — `BudgetSpent` |
-| `must_surface`, and this pair's last aside never surfaced | Desk row — `UnsettledAside` |
+| The reply carries no `!aside` line | No private row to write |
+| `aside = { enabled = false }` (the default) | Dropped — `Disabled` |
+| The author is not an active member of this desk | Dropped — `AuthorNotOnDesk` |
+| The line names no agent — `@#desk`, `@everyone`, or nobody | Dropped — `NoAudience` |
+| It names only its own author | Dropped — `SelfOnly` |
+| It names more peers than `max_members` | Dropped — `AudienceTooLarge` |
+| A named peer is not an active member of this desk | Dropped — `TargetNotOnDesk` |
+| This pair has spent `max_messages` | Dropped — `BudgetSpent` |
+| `must_surface`, and this pair's last aside never surfaced | Dropped — `UnsettledAside` |
 | Anything else | **Aside**, addressed to the named peers |
 
 A first addressed id that cannot be resolved **stops** the decision rather than
