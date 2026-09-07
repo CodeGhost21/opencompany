@@ -19,8 +19,9 @@
 
 use std::sync::Arc;
 
+use tinyhivemind_hive::aside::Audience;
 use tinyhivemind_hive::{
-    Audience, LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
+    LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
 };
 
 use super::scope::EpisodeScope;
