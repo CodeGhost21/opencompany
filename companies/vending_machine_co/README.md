@@ -134,10 +134,13 @@ The operational truth lives in the MCP server; duplicating it here would produce
 two records that disagree by the end of the week. These four hold what the
 server cannot:
 
-- **`decisions`** — the *reasoning*. A transcript scrolls out of a
+- **`episodes`** — the *reasoning*. A transcript scrolls out of a
   thirty-message window and nobody re-reads one to learn why the van skipped
   Vulcan for a fortnight. The `not_doing` field is the most useful and the most
-  likely to be left empty.
+  likely to be left empty. (Named `episodes` and not `decisions` because
+  `decisions` is a built-in ledger the runtime ships and a declared slug may not
+  shadow one — and the two are different records anyway: the built-in holds the
+  company's standing calls, this holds what one deliberation concluded.)
 - **`clients`** — what each host was *promised*, and by whom. A promise nobody
   wrote down is one this company will break by accident.
 - **`incidents`** — the *pattern*. One jam is an event; VM-301 jamming four
