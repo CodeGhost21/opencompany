@@ -364,14 +364,23 @@ enum SkillCharge<'a> {
 /// A card advertising nothing above zero charges for nothing, so every id on it
 /// is free — including one it does not list. Refusing there would take A2A away
 /// from companies that never opted into pricing.
+///
+/// Manifest validation rejects a duplicate skill id outright, so
+/// `payment_requirements` should never carry two entries for the same
+/// `skill`. If one somehow reaches this card anyway (an older store predating
+/// that check), a priced entry always outranks a free or unparsable one for
+/// the same id — the reverse would let a duplicate free entry waive a price
+/// the company does charge for that skill.
 fn classify_skill<'a>(card: &'a AgentCard, skill: &str) -> SkillCharge<'a> {
-    match card
-        .payment_requirements
-        .iter()
-        .find(|pay| pay.skill_id == skill)
-    {
-        Some(pay) if priced_above_zero(pay) => SkillCharge::Priced(pay),
-        Some(_) => SkillCharge::Free,
+    let matching = || {
+        card.payment_requirements
+            .iter()
+            .filter(|pay| pay.skill_id == skill)
+    };
+
+    match matching().find(|pay| priced_above_zero(pay)) {
+        Some(pay) => SkillCharge::Priced(pay),
+        None if matching().next().is_some() => SkillCharge::Free,
         None if card.payment_requirements.iter().any(priced_above_zero) => SkillCharge::Unknown,
         None => SkillCharge::Free,
     }
@@ -912,6 +921,26 @@ mod test {
         assert!(matches!(
             classify_skill(&AgentCard::default(), "seo.ghost"),
             SkillCharge::Free
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_id_with_a_priced_entry_is_still_charged() {
+        // Manifest validation now rejects this shape outright, but the lookup
+        // itself must stay safe by construction: given both a free and a
+        // priced entry under the same id, in either order, the priced one
+        // must win. Letting the free entry win would waive a price the
+        // company does charge for that skill.
+        let free_first = card_pricing(&[("seo.audit", "0.00"), ("seo.audit", "25.00")]);
+        assert!(matches!(
+            classify_skill(&free_first, "seo.audit"),
+            SkillCharge::Priced(_)
+        ));
+
+        let priced_first = card_pricing(&[("seo.audit", "25.00"), ("seo.audit", "0.00")]);
+        assert!(matches!(
+            classify_skill(&priced_first, "seo.audit"),
+            SkillCharge::Priced(_)
         ));
     }
 
