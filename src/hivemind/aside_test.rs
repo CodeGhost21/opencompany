@@ -58,18 +58,26 @@ async fn run(manifest: &str, script: &[(&str, &str)]) -> (Arc<MemoryLog>, Episod
     (log, outcome)
 }
 
-/// The audience journaled on the first row whose text starts with `!aside`.
-fn aside_audience(log: &MemoryLog) -> Option<Vec<String>> {
-    aside_audiences(log).into_iter().next()
-}
-
-/// Every `!aside` row's audience, in journal order. An empty entry is a line
-/// that asked for an aside and was refused into the open.
+/// Every private row's audience, in journal order.
+///
+/// Keyed on the **audience** rather than on the text: since ADR 0011 an aside
+/// is a second row riding alongside a turn, and a refused one is dropped
+/// entirely, so "which rows are private" is a question about what was stored
+/// and not about what somebody wrote.
 fn aside_audiences(log: &MemoryLog) -> Vec<Vec<String>> {
     log.addressed_replies("eng")
         .into_iter()
-        .filter(|(_, text, _)| text.starts_with("!aside"))
+        .filter(|(_, _, audience)| !audience.is_empty())
         .map(|(_, _, audience)| audience)
+        .collect()
+}
+
+/// Every desk-visible row's text, in journal order.
+fn desk_lines(log: &MemoryLog) -> Vec<String> {
+    log.addressed_replies("eng")
+        .into_iter()
+        .filter(|(_, _, audience)| audience.is_empty())
+        .map(|(_, text, _)| text)
         .collect()
 }
 
@@ -78,7 +86,10 @@ async fn an_authorized_aside_is_journaled_to_its_addressee_only() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!aside @scout is the checkout metric yours?"),
+            (
+                "planner",
+                "!propose #stage Stage the rollout.\n!aside @scout is the checkout metric yours?",
+            ),
             ("scout", "!propose #ship Ship it all at once."),
             ("critic", "!propose #stage Stage it."),
         ],
@@ -86,20 +97,66 @@ async fn an_authorized_aside_is_journaled_to_its_addressee_only() {
     .await;
 
     assert_eq!(
-        aside_audience(&log).as_deref(),
-        Some(["scout".to_owned()].as_slice()),
+        aside_audiences(&log),
+        vec![vec!["scout".to_owned()]],
         "the addressee, and not the author, is what the row carries",
     );
 }
 
+/// **An aside rides alongside the turn that authored it** (ADR 0011).
+///
+/// One authorized turn produces the member's ordinary desk-visible
+/// contribution *and* the private row — two rows, one turn. Under the old rule
+/// the aside *was* the turn, and a live six-day run of
+/// `companies/vending_machine_co` used the move zero times: asking a peer meant
+/// not depositing, not objecting and not refuting, while the rest of the room
+/// went on accumulating support for the option the member had stepped away to
+/// ask about.
+#[tokio::test]
+async fn an_aside_costs_no_turn_and_the_desk_still_gets_the_move() {
+    let (log, outcome) = run(
+        &aside_manifest(),
+        &[
+            (
+                "planner",
+                "!propose #stage Stage the rollout.\n!aside @scout is the checkout metric yours?",
+            ),
+            ("scout", "!propose #ship Ship it all at once."),
+            ("critic", "!propose #stage Stage it."),
+        ],
+    )
+    .await;
+
+    // The room got the proposal, not a member that went quiet to ask a question.
+    assert!(
+        desk_lines(&log)
+            .iter()
+            .any(|line| line.starts_with("!propose #stage Stage the rollout.")),
+        "{:?}",
+        desk_lines(&log),
+    );
+    assert_eq!(aside_audiences(&log).len(), 1, "and the private row rode with it");
+    // Turns are counted, rows are not: the aside must not have been charged.
+    assert!(outcome.turns >= 1);
+    let rows = log.addressed_replies("eng").len();
+    assert!(
+        rows > outcome.turns as usize,
+        "an aside adds a row without adding a turn: {rows} rows, {} turns",
+        outcome.turns,
+    );
+}
+
 /// Every other row on the desk stays desk-visible. An aside must not be
-/// contagious: the mechanism is one line at a time, not a mode the desk enters.
+/// contagious: the mechanism is one row at a time, not a mode the desk enters.
 #[tokio::test]
 async fn only_the_aside_row_is_narrowed() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!aside @scout is the checkout metric yours?"),
+            (
+                "planner",
+                "!propose #stage Stage it.\n!aside @scout is the checkout metric yours?",
+            ),
             ("scout", "!propose #ship Ship it all at once."),
             ("critic", "!propose #stage Stage it."),
         ],
@@ -127,85 +184,87 @@ async fn only_the_aside_row_is_narrowed() {
 #[tokio::test]
 async fn a_support_written_inside_an_aside_carries_nothing() {
     let script: &[(&str, &str)] = &[
-        (
-            "planner",
-            "!propose #stage Stage the rollout behind a flag.",
-        ),
+        ("planner", "!propose #stage Stage the rollout behind a flag."),
         (
             "critic",
             "!evidence #stage ^3 The last full rollout broke checkout.",
         ),
-        ("scout", "!aside @planner !support #stage ^4 I am with you."),
+        // The scout's desk line says nothing that counts; its support is
+        // private, and privacy is exactly what makes it worth nothing.
+        (
+            "scout",
+            "!question does anybody hold this?\n!aside @planner !support #stage ^4 I am with you.",
+        ),
         ("critic", "!question does anybody else hold this?"),
     ];
     let (private, private_outcome) = run(&aside_manifest(), script).await;
-    assert!(
-        aside_audience(&private).is_some(),
+    assert_eq!(
+        aside_audiences(&private).len(),
+        1,
         "the fixture only means anything if the aside was authorized",
     );
     assert!(
         !matches!(private_outcome.ending, EpisodeEnding::Converged { .. }),
         "a private support carried the room: {private_outcome:?}",
     );
-
-    // The identical script on a desk that never enabled asides. The same line
-    // is an ordinary desk row there, its `!support` counts, and the difference
-    // between the two runs is attributable to the audience and to nothing else.
-    let (public, _) = run(&no_aside_manifest(), script).await;
-    assert_eq!(
-        aside_audience(&public),
-        Some(Vec::new()),
-        "with asides off the same line is journaled desk-visible",
-    );
 }
 
-/// A line naming a peer who is not on this desk authorizes nothing, and the
-/// line still lands where the room can read it. Failing open to *private*
-/// would be the one direction that leaks.
+/// A line naming a peer who is not on this desk authorizes nothing, and the row
+/// is **dropped** rather than published to the desk.
+///
+/// Publishing it would put a second desk-visible contribution on one turn,
+/// which is the one thing a turn may not produce — and the member has already
+/// said its piece in its ordinary line.
 #[tokio::test]
-async fn an_aside_naming_a_stranger_stays_desk_visible() {
+async fn an_aside_naming_a_stranger_is_dropped() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!aside @auditor can you check this?"),
+            (
+                "planner",
+                "!propose #stage Stage it.\n!aside @auditor can you check this?",
+            ),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
     )
     .await;
 
-    assert_eq!(
-        aside_audience(&log),
-        Some(Vec::new()),
-        "`auditor` is on no desk here, so the audience resolved to nobody",
+    assert!(
+        aside_audiences(&log).is_empty(),
+        "`auditor` is on no desk here, so nothing should have been made private",
+    );
+    assert!(
+        !desk_lines(&log).iter().any(|line| line.contains("@auditor")),
+        "a refused aside is dropped, not published: {:?}",
+        desk_lines(&log),
+    );
+    assert!(
+        desk_lines(&log).iter().any(|line| line.starts_with("!propose #stage Stage it.")),
+        "the turn's own contribution still reaches the room",
     );
 }
 
-/// `must_surface` is the bound that actually binds first.
-///
-/// With it on — the default — a pair that has not paid its last aside back to
-/// the room cannot open another, and `max_messages` is never reached. The
-/// refusal is *into the open*: the member has still said what it meant to say,
-/// and a line the room can read is never a leak.
+/// `must_surface` is the bound that binds first: a pair that has not paid its
+/// last aside back to the room cannot open another, and the refused row is
+/// dropped.
 #[tokio::test]
 async fn a_pair_that_owes_the_room_a_settlement_cannot_open_another_aside() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!aside @scout first question"),
-            ("planner", "!aside @scout second, still owing"),
+            ("planner", "!propose #stage Stage it.\n!aside @scout first question"),
+            ("planner", "!support #stage ^3 Still staging.\n!aside @scout second, still owing"),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
     )
     .await;
 
-    let asides = aside_audiences(&log);
-    assert!(asides.len() >= 2, "the script wrote two: {asides:?}");
-    assert!(!asides[0].is_empty(), "the first opens the aside");
-    assert!(
-        asides[1].is_empty(),
-        "the pair owed a settlement, so the second belongs to the room: {asides:?}",
+    assert_eq!(
+        aside_audiences(&log).len(),
+        1,
+        "the first opens the aside; the second is owed a settlement and is dropped",
     );
 }
 
@@ -216,28 +275,25 @@ async fn a_settlement_lets_the_pair_open_another_aside() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!aside @scout first question"),
+            ("planner", "!propose #stage Stage it.\n!aside @scout first question"),
             ("planner", "!surface scout confirms the metric is theirs"),
-            ("planner", "!aside @scout second question"),
+            ("planner", "!support #stage ^3 Confirmed.\n!aside @scout second question"),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
     )
     .await;
 
-    let asides = aside_audiences(&log);
-    assert!(asides.len() >= 2, "the script wrote two: {asides:?}");
-    assert!(!asides[0].is_empty(), "the first opens the aside");
-    assert!(
-        !asides[1].is_empty(),
-        "the surface settled it, so the second is authorized again: {asides:?}",
+    assert_eq!(
+        aside_audiences(&log).len(),
+        2,
+        "the surface settled the first, so the second is authorized again",
     );
 }
 
-/// With `must_surface` off, `max_messages` is what stops a pair. Two rows —
-/// a question and an answer — and the third is desk-visible.
+/// With `must_surface` off, `max_messages` is what stops a pair.
 #[tokio::test]
-async fn a_pair_that_spends_max_messages_is_pushed_back_into_the_open() {
+async fn a_pair_that_spends_max_messages_is_dropped() {
     let manifest = "[company]\nname = \"Acme\"\n\
          [[agent]]\nid = \"planner\"\nrole = \"Planner\"\n\
          [[agent]]\nid = \"scout\"\nrole = \"Scout\"\n\
@@ -250,22 +306,19 @@ async fn a_pair_that_spends_max_messages_is_pushed_back_into_the_open() {
     let (log, _) = run(
         manifest,
         &[
-            ("planner", "!aside @scout first question"),
-            ("planner", "!aside @scout second, the last within budget"),
-            ("planner", "!aside @scout third, over budget"),
+            ("planner", "!propose #stage Stage it.\n!aside @scout first"),
+            ("planner", "!support #stage ^3 Yes.\n!aside @scout second, last within budget"),
+            ("planner", "!support #stage ^3 Still yes.\n!aside @scout third, over budget"),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
     )
     .await;
 
-    let asides = aside_audiences(&log);
-    assert!(asides.len() >= 3, "the script wrote three: {asides:?}");
-    assert!(!asides[0].is_empty(), "the first is within budget");
-    assert!(!asides[1].is_empty(), "the second is within budget");
-    assert!(
-        asides[2].is_empty(),
-        "the third spent the pair's budget and belongs to the room: {asides:?}",
+    assert_eq!(
+        aside_audiences(&log).len(),
+        2,
+        "two are within budget and the third is dropped",
     );
 }
 
