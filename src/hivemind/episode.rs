@@ -18,8 +18,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tinyhivemind_hive::{
     Conversation, EpisodeState, HiveStep, SESSION_WINDOW, Sequence, SessionQuery,
-    aside::Viewer,
+    aside::{AsideDecision, AsideInput, Viewer},
+    dispatch::DispatchConversation,
     desk::{Desk, DeskSet, ResponderMode},
+    mention::{MentionAuthor, MentionTarget},
     pins::{PIN_LIMIT, read_pinboard},
     project_for,
     roster::{Roster, RosterMember},
@@ -462,7 +464,7 @@ impl<'a> EpisodeDriver<'a> {
             // has a name, and every one of them means "this line is an ordinary
             // desk row" — which is the safe direction: a line the room can read
             // is never a leak, and the member has said what it meant to say.
-            let audience = self.aside_audience(&turn.agent_id, &line, &transcript, &roster_of);
+            let audience = self.aside_audience(&turn.agent_id, &line, &transcript, &members, &desks, &retired);
             let seq = self
                 .events
                 .append(
@@ -850,6 +852,108 @@ impl<'a> EpisodeDriver<'a> {
     ///
     /// Best-effort: the decision itself is already durable in the turns above
     /// it, and losing the room's own summary of a conversation the transcript
+    /// The audience to stamp on this turn's row: the addressees of an
+    /// authorized aside, or empty for an ordinary desk-visible line.
+    ///
+    /// Every path that is not an authorized aside returns empty, and that is
+    /// the safe direction: a line the room can read is never a leak, and the
+    /// member has still said what it meant to say. A refusal is therefore
+    /// logged rather than raised — the library gives every rung a name, and
+    /// none of them is a reason to abandon an episode.
+    ///
+    /// The budget and the settlement debt are **folded from the transcript**
+    /// rather than tracked across iterations, for the same reason the episode
+    /// re-reads its transcript every turn: what the fold counts is exactly what
+    /// a person reading the desk would see, so the two can never disagree.
+    fn aside_audience(
+        &self,
+        agent_id: &str,
+        line: &str,
+        transcript: &[tinyhivemind_hive::SessionMessage],
+        members: &[RosterMember],
+        desks: &[Desk],
+        retired: &[String],
+    ) -> Vec<String> {
+        if !super::aside::opens_aside(line) {
+            return Vec::new();
+        }
+        let policy = self.desk.config.aside.policy();
+        let roster = Roster::new(members, &[], retired);
+        let desk_set = DeskSet::new(desks, &[], &[], &[], retired);
+
+        let author = MentionAuthor::Agent {
+            id: agent_id.to_owned(),
+        };
+        let mentions = tinyhivemind_hive::mention::resolve(line, None, &author, &roster, &desk_set);
+
+        // The party this line *would* open, needed before the decision because
+        // the budget and the settlement debt are per party. A `@#desk` or an
+        // `@everyone` addresses nobody privately — the library refuses those
+        // too, and this agrees with it rather than inventing a second rule.
+        let addressed: Vec<String> = mentions
+            .iter()
+            .filter(|mention| !mention.quiet)
+            .filter_map(|mention| match &mention.target {
+                MentionTarget::Agent { id } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut party: Vec<String> = addressed.clone();
+        party.push(agent_id.to_owned());
+        party.sort();
+        party.dedup();
+        let (spent, unsettled) = super::aside::spent_and_unsettled(transcript, &party);
+
+        let input = AsideInput {
+            conversation: DispatchConversation {
+                desk_id: self.desk.id.clone(),
+                thread_root: self.thread_root.map(|seq| seq.value()),
+            },
+            author_id: agent_id.to_owned(),
+            mentions,
+            spent,
+            unsettled,
+        };
+
+        match tinyhivemind_hive::aside::aside(policy, &input, &roster, &desk_set) {
+            Ok(AsideDecision::One { audience }) => {
+                let members = audience.members().to_vec();
+                tracing::debug!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    agent = %agent_id,
+                    audience = ?members,
+                    "[hive] an aside was authorized"
+                );
+                members
+            }
+            Ok(AsideDecision::None { reason }) => {
+                tracing::debug!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    agent = %agent_id,
+                    reason = ?reason,
+                    "[hive] no aside was authorized; the line stays desk-visible"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                // A malformed snapshot is this host's bug, not the room's, and
+                // it must not cost the episode: the line is journaled where
+                // everyone can read it, which is what would have happened
+                // before asides existed.
+                tracing::warn!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    agent = %agent_id,
+                    error = %error,
+                    "[hive] the aside gate could not decide; the line stays desk-visible"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     /// still holds is not worth discarding the episode over.
     ///
     /// [`HIVE_REPORT_AUTHOR`]: super::HIVE_REPORT_AUTHOR
