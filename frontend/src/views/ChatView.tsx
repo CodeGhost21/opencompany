@@ -1395,6 +1395,26 @@ export function ChatView({
    */
   const threadResolvedFor = useRef<string | null>(null);
 
+  /**
+   * The nonce of the `?thread=` already acted on, so one link opens one thread
+   * once (Codex P2 review on #2130).
+   *
+   * Consuming is a `replaceState`, which fires no `hashchange` — so the query
+   * state keeps naming the thread it just opened until the address next moves.
+   * `useHashView.navigate` writes `window.location.hash` and calls `setRoute`
+   * **synchronously**, and `hashchange` arrives a task later: so picking another
+   * channel re-runs this effect for the new `channel.id` while the query still
+   * says `h41`. Without this ref that reopened h41 on the channel the operator
+   * had just switched to, and the correcting pass could not undo it — by then
+   * `threadResolvedFor` held the new channel, so `arrived` was false and the
+   * stale panel stayed, suppressing that channel's live steps and receipt.
+   *
+   * A ref rather than clearing the state: clearing is a second render for a
+   * fact that is not rendered. And a nonce rather than a boolean, because the
+   * same thread id can legitimately arrive twice.
+   */
+  const consumedThreadNonce = useRef<number | null>(null);
+
   // An open thread only makes sense while its parent is on screen; arriving at
   // a channel closes whatever was open rather than leaving a panel pointing at
   // nothing. `?thread=<id>` on the hash opens straight into that thread
@@ -1426,7 +1446,8 @@ export function ChatView({
     if (!routeOpen || !channel?.id) return;
     const arrived = threadResolvedFor.current !== channel.id;
     threadResolvedFor.current = channel.id;
-    if (threadQuery.value !== null) {
+    if (threadQuery.value !== null && consumedThreadNonce.current !== threadQuery.nonce) {
+      consumedThreadNonce.current = threadQuery.nonce;
       setOpenThreadId(threadQuery.value);
       const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
       const params = new URLSearchParams(query);

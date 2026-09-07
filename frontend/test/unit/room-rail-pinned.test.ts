@@ -91,6 +91,18 @@ describe("ChatView, mounted off its own route", () => {
     // one already held and React would bail out of the re-render. Found in a
     // browser, where the third of three `?thread=` links did nothing.
     expect(chatView).toContain("nonce: prev.nonce + 1");
+    // And one link opens one thread ONCE. Consuming fires no `hashchange`, so
+    // the query keeps naming the thread it just opened — and
+    // `useHashView.navigate` sets the hash and calls `setRoute` synchronously
+    // while that event is still pending. So picking another channel re-ran this
+    // effect for the new channel with the old query and reopened the thread
+    // there, on a channel with no such parent, suppressing its live steps and
+    // receipt. The correcting pass could not undo it: `threadResolvedFor`
+    // already held the new channel, so `arrived` was false (Codex P2).
+    expect(chatView).toContain(
+      "threadQuery.value !== null && consumedThreadNonce.current !== threadQuery.nonce",
+    );
+    expect(chatView).toContain("consumedThreadNonce.current = threadQuery.nonce;");
     // Consuming is a `replaceState`, which fires no `hashchange` — so the value
     // stays put and the effect cannot loop on its own write. A hash change that
     // names no thread is somebody else's query moving, and only an ARRIVAL
