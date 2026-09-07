@@ -1,37 +1,44 @@
 # The board a fresh install opens on.
 #
-# Three cards, one per desk, each of which is answerable on day one from the
-# seeded world with no operator input. They exist so the first thing anybody
-# sees is three desks deliberating rather than an empty console.
+# Three cards, one per desk, each answerable on day one from the seeded world
+# with no operator input. They exist so the first thing anybody sees is three
+# desks deliberating rather than an empty console, and each is assigned to a
+# desk rather than to a teammate — a card assigned to a desk of two or more is
+# what opens an episode (`docs/spec/runtime/hivemind.md`).
 
 [[task]]
+id = "plan-the-first-van-run"
 title = "Plan the first van run"
-column = "todo"
-chat = "ops"
-description = """
+priority = "high"
+assignee = "ops"
+note = """
 The fleet has not been visited. Read fleet status, check the warehouse against \
 it, and decide which machines get visited today and what goes on each shelf. \
-Say explicitly what you are choosing not to do and what it costs in lost \
-revenue.\
+Done is a committed route with, explicitly, what you chose not to do and what \
+that costs in lost revenue — recorded as a `decisions` row.\
 """
 
 [[task]]
+id = "find-the-prices-already-wrong"
 title = "Find the prices that are already wrong"
-column = "todo"
-chat = "commercial"
-description = """
+priority = "high"
+assignee = "commercial"
+note = """
 Supplier costs have moved since these shelf prices were set. Compare the \
 current supplier cost against the catalogue cost, find the lines where margin \
-has been squeezed, and decide which prices to change and at which machines. \
-Check for an operational fault before proposing a cut.\
+has been squeezed, and decide which prices to change at which machines. Check \
+`incident_list` for an operational fault before proposing any cut. Done is a \
+`decisions` row naming each price change and the sell-through it rests on.\
 """
 
 [[task]]
+id = "stand-down-the-signals-that-do-not-matter"
 title = "Stand down the signals that do not matter"
-column = "todo"
-chat = "intel"
-description = """
-Read the news feed. Most of it should change nothing — say which, and why. For \
-anything that should change a plan, name the desk that owns the decision and \
-the day acting on it stops being possible.\
+priority = "medium"
+assignee = "intel"
+note = """
+Read the news feed. Most of it should change nothing — say which, and why, as \
+`signals` rows closed `stood_down`. For anything that should change a plan, \
+name the desk that owns the decision and the day acting on it stops being \
+possible.\
 """
