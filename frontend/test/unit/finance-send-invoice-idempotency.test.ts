@@ -392,6 +392,30 @@ describe("SendInvoiceDialog idempotency key", () => {
     expect(secondKey).toBe(firstKey);
   });
 
+  it("reuses the same forced nonce across a close/reopen retry after a failed forced send", async () => {
+    sendInvoice.mockRejectedValueOnce(new Error("timeout"));
+    sendInvoice.mockResolvedValueOnce(invoiceReply());
+
+    renderReopenableHarness();
+    await settle();
+    await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    await toggleForceNew(true);
+    await clickSend();
+    const firstKey = lastSentKey();
+
+    // Ambiguous failure, then the operator closes and reopens before
+    // retrying — same invoice, same forced attempt, not a fresh one.
+    await closeViaCancel();
+    await reopen();
+
+    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(true);
+
+    await clickSend();
+    const secondKey = lastSentKey();
+
+    expect(secondKey).toBe(firstKey);
+  });
+
   it("two separate deliberate resends of the same invoice do not collide with each other", async () => {
     sendInvoice.mockResolvedValue(invoiceReply());
     act(() => {

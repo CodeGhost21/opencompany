@@ -84,9 +84,11 @@ function parseDueDays(raw: string): number | null | undefined {
  * `replayed_earlier_invoice` is the only way to tell — and the toast says
  * "already sent" rather than "sent" when it is set. `invoice-force-new`
  * mints a nonce into the hash for the rare deliberate duplicate — once, when
- * the box is checked, not per send, so a retry of the same forced send
- * (another ambiguous timeout) reuses it instead of minting a second real
- * invoice.
+ * the box is checked, not per send, and it survives a retry of that same
+ * forced send, close-reopen included, until it succeeds or the operator
+ * unchecks the box to start a separate deliberate resend. Otherwise a second
+ * ambiguous timeout on the forced path would mint a second real invoice —
+ * the exact failure this dialog exists to prevent.
  *
  * # Naming the money
  *
@@ -111,16 +113,19 @@ export function SendInvoiceDialog({
   const [busy, setBusy] = useState(false);
   const [forceNew, setForceNew] = useState(false);
   const [forceNewNonce, setForceNewNonce] = useState<string>();
+  const [forceNewAttempted, setForceNewAttempted] = useState(false);
 
-  // Reset on every open, so the operator has to re-assert "this is a
-  // deliberate duplicate" each time rather than it silently staying on from a
-  // previous send.
+  // Reset on open — but only when the last checked box never reached an
+  // attempted send. An attempted-and-unresolved forced send (ambiguous
+  // failure) must survive a close/reopen of the same invoice so a retry
+  // reuses its nonce instead of raising a second real one; only a box that
+  // was checked and abandoned (cancelled, never sent) resets.
   useEffect(() => {
-    if (open) {
+    if (open && !forceNewAttempted) {
       setForceNew(false);
       setForceNewNonce(undefined);
     }
-  }, [open]);
+  }, [open, forceNewAttempted]);
 
   const minor = toMinorUnits(amount, currency);
   const live = looksLive(site);
@@ -135,6 +140,7 @@ export function SendInvoiceDialog({
   async function onSubmit() {
     if (minor === null || minor <= 0 || due === null) return;
     setBusy(true);
+    if (forceNew) setForceNewAttempted(true);
     try {
       const idempotencyKey = deriveInvoiceIdempotencyKey(
         {
@@ -169,6 +175,7 @@ export function SendInvoiceDialog({
       setDueDays("");
       setForceNew(false);
       setForceNewNonce(undefined);
+      setForceNewAttempted(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not raise the invoice.");
     } finally {
@@ -277,6 +284,7 @@ export function SendInvoiceDialog({
                 const checked = e.target.checked;
                 setForceNew(checked);
                 setForceNewNonce(checked ? crypto.randomUUID() : undefined);
+                setForceNewAttempted(false);
               }}
             />
             <span>
