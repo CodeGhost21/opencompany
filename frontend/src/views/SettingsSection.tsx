@@ -83,8 +83,10 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
               // second line used to say (issue #2131). The hint was rendered
               // under every label here, and at `w-60` most of them wrapped:
               // "Approvals, connection, lifecycle, domain, mail" is three
-              // lines, "What your teammates actually did" is two, and ten rows
-              // of that is a wall rather than a list you can scan. The labels
+              // lines, "What your teammates actually did" is two, and eight
+              // rows of that is a wall rather than a list you can scan. The
+              // count is `SETTINGS_PAGES.length`, so read it there rather than
+              // trusting this sentence after the next page lands. The labels
               // are the navigation; the hint is a gloss, and a gloss that
               // triples the height of the thing it explains has stopped
               // helping.
@@ -128,8 +130,8 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
             desktop rail. This row is a different surface with a different
             problem: the chips carry the label alone, so the `title` is the only
             gloss a chip has, and the line under them describes the *active*
-            page rather than repeating itself under all ten. Neither is a
-            second line per row, which is the thing that was removed. */}
+            page rather than repeating itself under every one of them. Neither
+            is a second line per row, which is the thing that was removed. */}
         <div className="relative z-30 border-b lg:hidden">
           <div className="flex gap-1 overflow-x-auto p-2">
             {SETTINGS_PAGES.map((item) => (
