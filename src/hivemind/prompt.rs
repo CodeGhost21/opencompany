@@ -762,6 +762,51 @@ pub fn marker_line(text: &str) -> String {
         .to_owned()
 }
 
+/// Split one turn's reply into its desk-visible line and the aside riding on it.
+///
+/// An aside **costs no turn** ([ADR 0011]): one authorized turn produces the
+/// member's ordinary desk-visible contribution *and*, optionally, one aside row.
+/// So a reply may legitimately carry two markers, and this is what separates
+/// them — the deliberation marker the room counts, and at most one `!aside`.
+///
+/// Before this, a reply's `!aside` line was simply lost: [`marker_line`] takes
+/// the *first* marker, so a member that proposed and then asked a peer had its
+/// aside discarded, and a member that only asked had its whole turn become the
+/// aside. Under one-message-one-turn the latter was right; under ADR 0011 it is
+/// not, because the turn still owes the room its ordinary contribution.
+///
+/// **At most one** aside is taken, which is the spec's own bound: a room of *n*
+/// members writes at most *n* aside rows per round, and each cost its author a
+/// turn it had already won, so no arrangement of asides can outrun the room.
+///
+/// A reply that is *only* an aside yields the desk line [`marker_line`] would
+/// give the rest of the text — in practice `(no answer)`. That is honest rather
+/// than lossy: the member did spend its turn without saying anything to the
+/// room, and the transcript should show that it did.
+///
+/// [ADR 0011]: https://github.com/tinyhumansai/tinyhivemind/blob/main/docs/adr/0011-an-aside-rides-alongside-a-turn.md
+#[must_use]
+pub fn split_reply(text: &str) -> (String, Option<String>) {
+    let text = plain(text);
+    let aside = text
+        .lines()
+        .map(str::trim)
+        .find(|line| super::aside::opens_aside(line))
+        .map(str::to_owned);
+    if aside.is_none() {
+        return (marker_line(&text), None);
+    }
+    // The desk line is read from the reply with its aside removed, so an aside
+    // written *before* the move does not become the line the room counts.
+    let rest = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !super::aside::opens_aside(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (marker_line(&rest), aside)
+}
+
 /// Strip ANSI escape sequences from a turn's reply.
 fn plain(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
