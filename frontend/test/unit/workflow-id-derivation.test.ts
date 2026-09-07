@@ -42,7 +42,7 @@ function savedGraph(): WorkflowGraph {
 
 const validationRequests: { path: string; graph: WorkflowGraph }[] = [];
 
-/** A host that answers every read the dialog makes on open. */
+/** A host that answers the dialog's reads and its debounced validation. */
 function stubClient(): OpenCompanyClient {
   return {
     scopeFor: () => "/api/companies/acme",
@@ -55,6 +55,15 @@ function stubClient(): OpenCompanyClient {
     get: async (path: string) => {
       if (path.endsWith("/inference")) return { cognition: "echo" };
       return path.endsWith("/wired-channels") ? { channels: [] } : [];
+    },
+    // A valid edit schedules this request even when a test only edits the
+    // name. Answer it while mounted, however long the worker takes to finish.
+    post: async (path: string, graph: WorkflowGraph) => {
+      if (path !== "/api/companies/acme/workflows/validate") {
+        throw new Error(`Unexpected workflow write: ${path}`);
+      }
+      validationRequests.push({ path, graph });
+      return { valid: true };
     },
   } as unknown as OpenCompanyClient;
 }
