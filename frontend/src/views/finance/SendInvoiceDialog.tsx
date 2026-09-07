@@ -83,7 +83,10 @@ function parseDueDays(raw: string): number | null | undefined {
  * key and the reply is byte-identical to a fresh one, so
  * `replayed_earlier_invoice` is the only way to tell — and the toast says
  * "already sent" rather than "sent" when it is set. `invoice-force-new`
- * mints a fresh nonce into the hash for the rare deliberate duplicate.
+ * mints a nonce into the hash for the rare deliberate duplicate — once, when
+ * the box is checked, not per send, so a retry of the same forced send
+ * (another ambiguous timeout) reuses it instead of minting a second real
+ * invoice.
  *
  * # Naming the money
  *
@@ -107,12 +110,16 @@ export function SendInvoiceDialog({
   const [dueDays, setDueDays] = useState("");
   const [busy, setBusy] = useState(false);
   const [forceNew, setForceNew] = useState(false);
+  const [forceNewNonce, setForceNewNonce] = useState<string>();
 
   // Reset on every open, so the operator has to re-assert "this is a
   // deliberate duplicate" each time rather than it silently staying on from a
   // previous send.
   useEffect(() => {
-    if (open) setForceNew(false);
+    if (open) {
+      setForceNew(false);
+      setForceNewNonce(undefined);
+    }
   }, [open]);
 
   const minor = toMinorUnits(amount, currency);
@@ -136,7 +143,7 @@ export function SendInvoiceDialog({
           dueDays: due,
           lineItems: [{ description, amountInMinorUnits: minor }],
         },
-        forceNew ? crypto.randomUUID() : undefined,
+        forceNew ? forceNewNonce : undefined,
       );
       const invoice = await sendInvoice(client, company, {
         customer_email: email.trim(),
@@ -161,6 +168,7 @@ export function SendInvoiceDialog({
       setAmount("");
       setDueDays("");
       setForceNew(false);
+      setForceNewNonce(undefined);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not raise the invoice.");
     } finally {
@@ -265,7 +273,11 @@ export function SendInvoiceDialog({
               className="mt-0.5"
               data-testid="invoice-force-new"
               checked={forceNew}
-              onChange={(e) => setForceNew(e.target.checked)}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setForceNew(checked);
+                setForceNewNonce(checked ? crypto.randomUUID() : undefined);
+              }}
             />
             <span>
               This is a deliberate duplicate — send it as a new invoice, not a retry of an earlier
