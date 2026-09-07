@@ -604,9 +604,9 @@ fn the_close_reads_as_english_for_every_combination_of_referral_facts() {
 /// Operations desk desk did not answer the question."
 #[test]
 fn a_referral_note_names_a_desk_once() {
-    use crate::hivemind::referral::{answered_note, unanswered_note};
+    use crate::hivemind::referral::{returned_note, unanswered_note};
 
-    let named = answered_note("account_manager", "Commercial desk", "no idea");
+    let named = returned_note("account_manager", "Commercial desk", "no idea");
     assert!(named.contains("on the Commercial desk answered"), "{named}");
     assert!(!named.contains("desk desk"), "{named}");
 
