@@ -1218,6 +1218,82 @@ async fn a_purge_racing_the_required_field_check_cannot_recreate_a_row_missing_i
     }
 }
 
+/// `close`'s own existence check is subject to the same race: read before the
+/// lock and appended after it, a purge landing in the gap could remove the
+/// row the check saw and let the append that followed recreate it — closed,
+/// carrying none of the fields the deleted row held, on a ledger that
+/// declares no field required.
+///
+/// Same [`PausingStore`] technique, now pausing `close`'s existence read.
+/// Under the fix that read runs inside the same locked section as the
+/// append, so the purge cannot land until `close` has already finished with
+/// the row it actually saw.
+#[tokio::test]
+async fn a_purge_racing_close_cannot_reopen_the_deleted_row() {
+    let (runtime, _home) = runtime().await;
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let store: Arc<dyn LedgerStore> = Arc::new(PausingStore {
+        inner: runtime.ledgers().clone(),
+        armed: armed.clone(),
+        paused: paused.clone(),
+        resume: resume.clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(&ctx, &spec, &agent(), "h1", fields(&[("risk", "a leak")]))
+        .await
+        .expect("recorded");
+
+    armed.store(true, Ordering::SeqCst);
+
+    let close_ctx = ctx.clone();
+    let close_spec = spec.clone();
+    let closer = tokio::spawn(async move {
+        close(&close_ctx, &close_spec, &agent(), "h1", "closed", "handled").await
+    });
+
+    paused.notified().await;
+
+    let purge_ctx = ctx.clone();
+    let purge_spec = spec.clone();
+    let purger =
+        tokio::spawn(async move { delete_entry(&purge_ctx, &purge_spec, &person(), "h1").await });
+
+    // Under the fix the purge blocks on the same lock `close` is holding;
+    // this just gives it the chance to run first when it is not blocked,
+    // which is the whole bug.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    resume.notify_one();
+
+    let close_result = tokio::time::timeout(std::time::Duration::from_secs(5), closer)
+        .await
+        .expect("close did not finish")
+        .expect("close task panicked");
+    let purge_result = tokio::time::timeout(std::time::Duration::from_secs(5), purger)
+        .await
+        .expect("purge did not finish")
+        .expect("purge task panicked");
+    purge_result.expect("purge does not error");
+
+    if let Ok(entry) = close_result {
+        assert!(
+            !entry.get("risk").trim().is_empty(),
+            "closed a ghost row missing the fields the deleted row held: {entry:?}"
+        );
+    }
+
+    let after = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert!(
+        after.entries.is_empty(),
+        "a deleted row was reopened: {:?}",
+        after
+    );
+}
+
 /// The briefing is what a turn carries: every ledger named, every open row
 /// identified, and the call that fetches the rest on each one.
 #[tokio::test]
