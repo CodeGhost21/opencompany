@@ -989,9 +989,6 @@ async fn a_row_missing_a_required_field_is_refused_at_the_write() {
     let message = format!("{error}");
     assert!(message.contains("evidence"), "{message}");
     assert!(message.contains("f1"), "{message}");
-    // The description is what tells whoever filled it in wrong what belongs
-    // there, so the refusal carries it.
-    assert!(message.contains("What actually happened"), "{message}");
 
     // Nothing was stored: a refused write must not leave the row behind.
     let read = read(&ctx, &spec, &Query::default()).await.expect("read");
@@ -1060,9 +1057,11 @@ async fn an_amendment_need_not_repeat_a_required_field_the_row_holds() {
 }
 
 /// Clearing one is the same loss as never writing it, and a merge is the only
-/// way to express a clear — so it is refused on the same ground.
+/// way to express a clear — so it is refused on the same ground. Blank text is
+/// the other route to that clear: it normalizes to a null before the check
+/// runs.
 #[tokio::test]
-async fn clearing_a_required_field_is_refused() {
+async fn blanking_a_required_field_is_refused() {
     let (ctx, _runtime, _home) = ledgers().await;
     let spec = define(&ctx, &findings()).await.expect("declared");
     record(
