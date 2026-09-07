@@ -348,9 +348,39 @@ opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existin
 waits on a real per-instance figure from Cortex.
 
 **Phase 3 — migration.** `opencompany memory migrate --to cortex` over the
-Portability family. The existing runbook in `memory-engine.md` applies unchanged;
-its per-tenant-credential caution is satisfied by the instance-per-tenant
-topology. Hosted-target enumeration cost still applies.
+Portability family. The generic procedure in
+[`memory-engine.md`](memory-engine.md#switching-engines--the-operator-runbook)
+holds; four things are specific to Cortex and one of them is a blocker.
+
+**The target engine has to exist, and for an existing company it does not.**
+`ensure_cortex` runs inside `provision`, and `ensure_running` calls `provision`
+only when the workload's StatefulSet is *absent*. Parking scales to zero and
+keeps it. So a company created before Cortex was switched on never gets an
+engine, no matter how many times it wakes — and migration has a prerequisite
+with no path behind it. Closing that is the first task of this phase, not a
+detail of it: either provisioning learns to add an engine to a running tenant,
+or the operator re-provisions deliberately.
+
+**The driver id is `cortex`, not `cortexdb`.** They are two adapters for the
+same service and both are accepted targets; the manager injects `cortex`, so
+that is what a migration onto a provisioned engine names. `cortexdb` sends
+`X-Cortex-Actor` and this one does not.
+
+**This does not use CortexDB's own export.** Migration reads through the
+driver's Portability family — `namespace_summaries` then paged `get` — so it
+moves host entries. `POST /v1/export` is a different, engine-native dump of
+events plus derived records, and is what the backup path uses. Do not reach for
+one expecting the other.
+
+**Budget for the write cost.** Each record is an append plus a wait for
+read-after-write visibility, and the adapter waits on both the scope listing and
+ranked recall because they become ready seconds apart. That is per record, so a
+migration's runtime is set by record count rather than bytes. Pause the company
+first, as the generic runbook says, and expect the copy to dominate the outage.
+
+The runbook's per-tenant-credential caution is satisfied by construction here:
+instance-per-tenant means the source credential can only see one company's
+records.
 
 **Phase 4 — revisit the derived layers.** Previously gated on upstream defects
 being fixed; per the [Correction](#correction-2026-09-04) it is now gated on
