@@ -62,6 +62,22 @@ describe("ChatView, mounted off its own route", () => {
     expect(chatView).toContain("{routeOpen && (");
   });
 
+  it("re-reads `?thread=` when Room is entered, and rewrites no other section's hash", () => {
+    // Codex P2 on this PR. A task card's "Opened from chat" link goes
+    // `#/tasks/<id>` → `#/chat/<channel>?thread=<id>`, and this view can
+    // already be sitting on that very channel — the shell replays the last chat
+    // segment while the address belongs to another section. Only `routeOpen`
+    // and the query change, so an effect keyed on `channel?.id` alone never
+    // fired: the thread did not open and the query was never consumed.
+    //
+    // It is a guard as well as a dependency, and the guard matters on its own:
+    // the effect calls `replaceState` on whatever hash it finds, and off Room
+    // that hash belongs to Company or Flows.
+    const effect = chatView.slice(chatView.indexOf('const threadId = params.get("thread")') - 900);
+    expect(effect).toContain("if (!routeOpen || !channel?.id) return;");
+    expect(effect.slice(0, effect.indexOf("}, [") + 40)).toContain("[routeOpen, channel?.id]");
+  });
+
   it("keeps both sidebar-triggered dialogs outside that gate", () => {
     // Everything after the gate closes is what stays mounted off Room. Both
     // dialogs have to be in it: their triggers are the rail's "+" and its "New

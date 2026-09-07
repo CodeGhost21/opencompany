@@ -1349,8 +1349,23 @@ export function ChatView({
   // `?thread=<id>` on the hash opens straight into that thread instead, and
   // is consumed (stripped via `replaceState`) so it does not reopen on a
   // later switch back to this channel.
+  //
+  // `routeOpen` is both a guard and a dependency, and it has to be both since
+  // #2130 (Codex P2 review on that PR).
+  //
+  // As a **dependency**, because arriving on Room no longer remounts this view.
+  // A task card's "Opened from chat" link goes `#/tasks/<id>` →
+  // `#/chat/<channel>?thread=<id>`, and this view can already be sitting on that
+  // very channel — the shell replays the last chat segment while the address
+  // belongs to another section. Only `routeOpen` and the query then change, so
+  // keyed on `channel?.id` alone this never fired: the thread did not open and
+  // the query was never consumed, so it lay in wait for a later switch.
+  //
+  // As a **guard**, because a view mounted off its own route must not rewrite
+  // another section's address. This calls `replaceState` on whatever hash it
+  // finds, and the hash it finds off Room belongs to Company or Flows.
   useEffect(() => {
-    if (!channel?.id) return;
+    if (!routeOpen || !channel?.id) return;
     const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
     const params = new URLSearchParams(query);
     const threadId = params.get("thread");
@@ -1360,7 +1375,7 @@ export function ChatView({
       const qs = params.toString();
       window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
     }
-  }, [channel?.id]);
+  }, [routeOpen, channel?.id]);
 
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
