@@ -40,6 +40,12 @@ export interface SectionRailRow {
    * This row's own sub-pages, rendered indented beneath it while it is the open
    * row. Finance is the only one today — see `SectionContentRail` for why they
    * nest here rather than getting a second rail of their own.
+   *
+   * **One level, deliberately.** A nested row draws no children of its own: the
+   * indent is the only thing expressing depth, and a second indent inside a
+   * 240px column stops reading as hierarchy and starts reading as ragged. A
+   * third level of navigation is a sign the section wants splitting, not a
+   * deeper rail.
    */
   children?: SectionRailRow[];
 }
@@ -78,9 +84,15 @@ export function SectionRail({
   rows: SectionRailRow[];
   children: ReactNode;
 }) {
-  // Flattened for the chip row: below `lg` there is no indentation to express
-  // depth with, and a nested page that only appeared after its parent had been
-  // chosen would be a page an operator cannot reach in one move.
+  // The chip row is the rail flattened, and it follows the rail exactly: a
+  // row's sub-pages join it while that row is the open one, and not before.
+  //
+  // Showing every nested page unconditionally was the alternative and is worse
+  // here specifically. A chip row has no indentation to express depth with, so
+  // Overview, Invoicing and Wallet would sit beside Brain as peers of it —
+  // eight equal chips in a horizontal scroller, three of which are only
+  // meaningful under a fourth. Following the rail costs one extra tap and keeps
+  // the two surfaces saying the same thing.
   const chips = rows.flatMap((row) => [row, ...(row.active ? (row.children ?? []) : [])]);
   const open = chips.find((row) => row.active);
 
