@@ -145,7 +145,7 @@ export function UsageView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Usage"
-        width="6xl"
+        width="full"
         description={
           <>
             What your company is burning — tokens and OAuth calls.
@@ -168,7 +168,7 @@ export function UsageView({ client, company }: Props) {
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {usageFailed ? (
           <Alert data-testid="usage-load-error">
             <TriangleAlert className="size-4" />

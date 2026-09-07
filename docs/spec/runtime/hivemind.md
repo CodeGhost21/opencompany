@@ -27,11 +27,29 @@ budget and by nothing else — the same bound a single-responder desk has at 1.
 
 What a room buys over one responder is not parallelism. It is:
 
-- **Independence.** The opening round is *blind*: a member forms its own
-  position before it can read its peers'. A shared transcript destroys
-  independence — the third speaker has already read the first two — and this is
-  the cheapest available repair, costing a projection flag rather than any
-  concurrency.
+- **Independence.** The opening round is *blind*: a member forms its own view
+  before it can read its peers'. A shared transcript destroys independence —
+  the third speaker has already read the first two — and this is the cheapest
+  available repair, costing a projection flag rather than any concurrency.
+
+  **What a blind member is asked for is a deposit, not a position**, and that
+  distinction is load-bearing rather than stylistic. The prompt used to say
+  "form your own first". On any question where members hold correlated priors
+  and one member holds the decisive fact — which is what a desk of specialists
+  *is*, since the fleet technician holds machine facts nobody else does — that
+  instruction is fatal: every member opens by advocating what its own reading
+  favours, a proposal counts as its own author's support, and the option the
+  shared prior favours reaches quorum **inside the blind round**, before the
+  informed member has said anything. The room is not converging; it is
+  amplifying a shared error and calling the result agreement.
+
+  Measured on the deliberation benchmark over 2000 seeded rooms
+  (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`): asking for a
+  deposit instead takes a hidden-profile room from **16.2% to 66.6%** correct,
+  and costs 3.7 points (78.8% → 75.1%) where every member's reading is equally
+  good. Raising `quorum` was tried first and does not work — at unanimity the
+  room simply stops deciding (31% of episodes reach one, accuracy 10.1%). The
+  bar is not the problem; what the bar counts is.
 - **A reason to stop.** The episode ends on a quorum it can name, not when one
   agent decides it is finished.
 
@@ -245,6 +263,13 @@ the conversation they were folded from.
 | a failed turn | the desk id | `hive-report` | `@<id>'s turn did not finish: …` |
 | the close | the desk id | `hive-report` | how the episode ended, plus any failed turns, demotions and questions asked elsewhere |
 
+A desk that opted in to [private asides](hivemind-asides.md) writes the same
+row with a narrower **audience** — the turn's own row, carrying the peers it
+was addressed to, so a non-member's projection elides its content and keeps
+everything else. That is one additive field on `AgentReply`, not a row shape
+and not a second store; a desk that never enables asides writes exactly what
+it wrote before. Off by default.
+
 A desk that opted in to [cross-desk referral](hivemind-referral.md) adds two
 more row shapes — the far desk's own turn, on the far desk, and its answer
 carried home under `hive-referral`. Both are off by default.
@@ -362,6 +387,7 @@ is already durable in the turns above it. So is a memory note.
 | `src/hivemind/prompt.rs` | `EpisodePrompt`, `marker_line` |
 | `src/hivemind/episode.rs` | `EpisodeDriver`, `HiveTurnRunner` |
 | `src/hivemind/referral.rs` | `ReferralConfig`, `HiveFederation`, `HiveReferralRunner`, `EpisodeReferrals` — see [`hivemind-referral.md`](hivemind-referral.md) |
+| `src/hivemind/aside.rs` | `AsideConfig`, the `!aside` / `!surface` grammar, the per-pair budget fold — see [`hivemind-asides.md`](hivemind-asides.md) |
 | `src/harness/built_in/brain.rs` | the routing hook, `HiveDeskRunner`, and `HiveDeskMemory` (the `ContextStore` implementation) |
 
 ## Testing
@@ -408,5 +434,6 @@ left for a reader to assume:
   there.
 
 See also [`hivemind-deliberation.md`](hivemind-deliberation.md),
-[`hivemind-referral.md`](hivemind-referral.md) and
+[`hivemind-referral.md`](hivemind-referral.md),
+[`hivemind-asides.md`](hivemind-asides.md) and
 [`docs/modules/hivemind/README.md`](../../modules/hivemind/README.md).

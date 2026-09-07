@@ -18,6 +18,9 @@ Supporting docs:
   - [ports-effects.md](ports-effects.md) — `ToolProvider`, `AgentEconomy`,
     `ApprovalGate`
   - [ports-console.md](ports-console.md) — the WS3 console-surface stores
+    - [ports-console-workspace.md](ports-console-workspace.md) — `WorkspaceStore`,
+      the Obsidian-style note tree, its binary half, folder claims, and the
+      system workspace roots
   - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
     trace, and who writes it
   - [journal.md](journal.md) — `JournalStore`: the runtime journal's durable
@@ -34,6 +37,9 @@ Supporting docs:
     applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
+  - [memory-engine-cortex.md](memory-engine-cortex.md) — the hosted-Cortex
+    design record for #1936, with its measurements split into
+    [memory-engine-cortex-evidence.md](memory-engine-cortex-evidence.md)
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
     and two processes wanting the same directory
   - [offline.md](offline.md) — running with no network at all: the documented

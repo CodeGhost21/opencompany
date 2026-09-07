@@ -1,0 +1,13 @@
+role = "Demand Analyst"
+description = "Decide which observed signals should change a plan, name the desk it lands on, and say what would have to be true for the inference to hold."
+tier = "reasoning"
+context = ["GOAL.md", "brief.md"]
+
+tools = ["workspace.read", "docs", "mcp:vending"]
+
+ledgers = [
+    { name = "signals", access = "record" },
+    { name = "episodes", access = "record" },
+]
+
+prompt_files = ["prompts/demand_analyst.md"]

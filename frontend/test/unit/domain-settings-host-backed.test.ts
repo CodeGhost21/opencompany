@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createElement } from "react";
+import { act, createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -49,7 +49,12 @@ vi.mock("sonner", () => {
   return { toast };
 });
 
-const { DomainSettings } = await import("@/components/domain-settings");
+// The two cards directly, not `DomainSettings`. Both are gated as coming soon
+// (issue #2131) and the section renders static previews instead — but the
+// guarantees below are about the cards themselves and have to keep holding for
+// the release that switches them back on, so they are exercised at the level
+// they belong to. `settings-coming-soon.test.ts` covers the gate.
+const { DomainCard, SmtpCard } = await import("@/components/domain-settings");
 
 /** Distinctive enough that a substring search over the store is meaningful. */
 const SECRET = "pw-77c1e2-do-not-persist";
@@ -117,7 +122,12 @@ let root: Root;
 
 async function show(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(DomainSettings, { client, company: "acme" }));
+    root.render(
+      createElement(Fragment, null, [
+        createElement(DomainCard, { key: "domain", client, company: "acme" }),
+        createElement(SmtpCard, { key: "smtp", client, company: "acme" }),
+      ]),
+    );
   });
 }
 

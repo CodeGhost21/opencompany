@@ -180,7 +180,7 @@ export function SkillsView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Skills"
-        width="5xl"
+        width="full"
         description={
           <>
             Playbooks your teammates read. Enable, install from the registry, or add your own.
@@ -194,7 +194,7 @@ export function SkillsView({ client, company }: Props) {
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6">
         {/* Issue #569: what install / enable actually buy. A desk agent can list,
             describe and read a skill and can never run one — deliberate, and
             pinned by `dispatched_belt_excludes_every_deferred_family` — but this

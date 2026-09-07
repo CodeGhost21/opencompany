@@ -18,7 +18,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tinyhivemind_hive::{
     Conversation, EpisodeState, HiveStep, SESSION_WINDOW, Sequence, SessionQuery,
+    aside::{AsideDecision, AsideInput, Viewer},
     desk::{Desk, DeskSet, ResponderMode},
+    dispatch::DispatchConversation,
+    mention::{MentionAuthor, MentionTarget},
     pins::{PIN_LIMIT, read_pinboard},
     project_for,
     roster::{Roster, RosterMember},
@@ -29,7 +32,7 @@ use super::evidential;
 use super::log::EventLogSessionLog;
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT};
 use super::moves::{self, MoveViolation};
-use super::prompt::{EpisodePrompt, marker_line};
+use super::prompt::{EpisodePrompt, split_reply};
 use super::referral::{EpisodeReferrals, HiveFederation, HiveReferralRunner, ReferralLedger};
 use super::scope::EpisodeScope;
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
@@ -103,6 +106,24 @@ impl std::fmt::Debug for EpisodeDriver<'_> {
             .field("thread_root", &self.thread_root)
             .finish_non_exhaustive()
     }
+}
+
+/// What one turn writes back besides the line it is journaled under.
+///
+/// Bundled rather than passed as two `&mut` parameters because the turn path
+/// threads them through three functions (`line_from` → `grounded_and_regraded`
+/// → `grounded`), and the retries mean each of those has to be able to replace
+/// the aside as well as append a violation.
+///
+/// The two have different lifetimes on purpose: `violations` accumulates over
+/// the whole episode and is reported in the outcome, while `aside` belongs to
+/// one turn and is cleared before each.
+#[derive(Default)]
+struct TurnScratch {
+    /// Lines a member deposited that its seat was not entitled to make.
+    violations: Vec<MoveViolation>,
+    /// The private row this turn's reply carried, if any.
+    aside: Option<String>,
 }
 
 impl<'a> EpisodeDriver<'a> {
@@ -234,7 +255,7 @@ impl<'a> EpisodeDriver<'a> {
         let mut turns = 0_u32;
         let mut first_seq: Option<EventSeq> = None;
         let mut last_seq: Option<EventSeq> = None;
-        let mut violations: Vec<MoveViolation> = Vec::new();
+        let mut scratch = TurnScratch::default();
         // Every line this episode journaled, in order, so the closing note is
         // written from what the room actually deposited rather than from a
         // second read of the journal that could disagree with it.
@@ -297,6 +318,13 @@ impl<'a> EpisodeDriver<'a> {
                 &log,
                 &SessionQuery {
                     conversation: conversation.clone(),
+                    // The *true medium*, deliberately unnarrowed. `step` folds
+                    // this, and the room's counting has to be single-valued:
+                    // a per-reader fold would make `quorum::standings` return
+                    // a well-formed wrong answer with no error path — a quorum
+                    // one member can see and another cannot. `project_for`
+                    // below is the only thing that narrows, per speaker.
+                    viewer: Viewer::Operator,
                     before: None,
                     window: SESSION_WINDOW,
                 },
@@ -332,7 +360,21 @@ impl<'a> EpisodeDriver<'a> {
             // Folded fresh each turn from the same journal the transcript came
             // from, so a pin laid down *during* the episode is on the board for
             // the next speaker rather than the next episode.
-            let pins = match read_pinboard(&log, &conversation, PIN_LIMIT, None).await {
+            let pins = match read_pinboard(
+                &log,
+                &conversation,
+                // The board is rendered into *this speaker's* prompt, so it is
+                // read as this speaker: a pin over an aside it is not in must
+                // not quote content to it, and one over an aside it *is* in
+                // must still reach it.
+                &Viewer::Agent {
+                    id: turn.agent_id.clone(),
+                },
+                PIN_LIMIT,
+                None,
+            )
+            .await
+            {
                 Ok(pins) => pins,
                 Err(error) => {
                     tracing::warn!(
@@ -372,8 +414,11 @@ impl<'a> EpisodeDriver<'a> {
                 .with_trigger(Sequence(trigger.value()))
                 .render(&turn, &visible);
 
+            // Cleared per turn: the aside belongs to the reply that produced
+            // this turn's line, never to the one before it.
+            scratch.aside = None;
             let line = match self
-                .line_from(&turn.agent_id, &prompt, &visible, &mut violations)
+                .line_from(&turn.agent_id, &prompt, &visible, &mut scratch)
                 .await
             {
                 Ok(line) => {
@@ -406,6 +451,11 @@ impl<'a> EpisodeDriver<'a> {
                                 chat_id: self.desk.id.clone(),
                                 agent_id: super::HIVE_REPORT_AUTHOR.to_string(),
                                 text: failure_note(&turn.agent_id, &error),
+                                // The room's own report is never private: a
+                                // reader who could not see that a turn failed
+                                // would be reading a transcript with a hole in
+                                // it that nothing accounts for.
+                                audience: Vec::new(),
                                 steps: Vec::new(),
                                 task_id: None,
                                 parent: self.thread_root,
@@ -436,6 +486,10 @@ impl<'a> EpisodeDriver<'a> {
                         chat_id: self.desk.id.clone(),
                         agent_id: turn.agent_id.clone(),
                         text: line.clone(),
+                        // The turn's own contribution is always the room's. An
+                        // aside is a *second* row riding alongside it, appended
+                        // below.
+                        audience: Vec::new(),
                         // The episode's own turns carry no step timeline: the
                         // room is reading one line per turn, and a tool trace
                         // belongs to the turn's own bubble, which this path
@@ -455,6 +509,61 @@ impl<'a> EpisodeDriver<'a> {
             scope.record(seq);
             first_seq.get_or_insert(seq);
             last_seq = Some(seq);
+            // The aside rides alongside the turn that authored it and is not
+            // charged as one (ADR 0011): one authorized turn produces the
+            // member's ordinary contribution *and*, optionally, one private
+            // row. `EpisodeState::spent` counts turns rather than rows, and
+            // `step` drops a non-desk row before it reaches any trace or
+            // standing, so this adds nothing the episode can vote.
+            //
+            // Under the old rule an aside *was* the turn, and a live six-day
+            // run of `companies/vending_machine_co` used the move zero times:
+            // asking a peer meant not depositing, not objecting and not
+            // refuting, while the rest of the room went on accumulating support
+            // for the option the member had stepped away to ask about.
+            //
+            // A refused audience is **dropped, not published**. Falling back to
+            // the desk would put a second desk-visible contribution on one
+            // turn, which is the one thing a turn may not produce — and the
+            // member has already said its piece in the row above.
+            if let Some(aside_line) = scratch.aside.take() {
+                let audience = self.aside_audience(
+                    &turn.agent_id,
+                    &aside_line,
+                    &transcript,
+                    &members,
+                    &desks,
+                    &retired,
+                );
+                if audience.is_empty() {
+                    tracing::debug!(
+                        company = %self.company,
+                        desk = %self.desk.id,
+                        agent = %turn.agent_id,
+                        "[hive] an aside was not authorized; the row was dropped"
+                    );
+                } else {
+                    let aside_seq = self
+                        .events
+                        .append(
+                            &self.company,
+                            CompanyEvent::AgentReply {
+                                chat_id: self.desk.id.clone(),
+                                agent_id: turn.agent_id.clone(),
+                                text: aside_line,
+                                audience,
+                                steps: Vec::new(),
+                                task_id: None,
+                                parent: self.thread_root,
+                                mentions: Vec::new(),
+                                mention_depth: 0,
+                            },
+                        )
+                        .await?;
+                    scope.record(aside_seq);
+                    last_seq = Some(aside_seq);
+                }
+            }
             // Considered *after* the line is durable and *before* the next
             // speaker is chosen, which is the whole of the timing. The wiki
             // measures this as the single largest effect in the mechanism: a
@@ -516,7 +625,7 @@ impl<'a> EpisodeDriver<'a> {
             first_seq,
             last_seq,
             report_seq: None,
-            violations,
+            violations: scratch.violations,
             failed_turns,
             referrals: referral_ledger,
         };
@@ -556,21 +665,27 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         agent_id: &str,
         prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
-        violations: &mut Vec<MoveViolation>,
+        visible: &[tinyhivemind_hive::SessionMessage],
+        scratch: &mut TurnScratch,
     ) -> Result<String> {
         let allowed = self.desk.config.moves_for(agent_id);
-        let line = marker_line(&self.runner.speak(agent_id, prompt).await?);
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, prompt).await?);
+        scratch.aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
+                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, scratch)
                 .await;
         };
         let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
-        let line = marker_line(&self.runner.speak(agent_id, &corrected).await?);
+        // The retry's aside replaces the first attempt's: the corrected reply is
+        // the turn that actually happened, and carrying a private line over from
+        // a reply the room never saw would publish something its author did not
+        // write on the turn it was written for.
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
+        scratch.aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
+                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, scratch)
                 .await;
         };
         tracing::info!(
@@ -580,7 +695,7 @@ impl<'a> EpisodeDriver<'a> {
             attempted = %kind,
             "[hive] a member used a move its seat does not have, twice; the line was demoted"
         );
-        violations.push(MoveViolation {
+        scratch.violations.push(MoveViolation {
             agent_id: agent_id.to_owned(),
             attempted: kind.to_owned(),
         });
@@ -607,12 +722,14 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         agent_id: &str,
         prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
+        visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
         allowed: &[&'static str],
-        violations: &mut Vec<MoveViolation>,
+        scratch: &mut TurnScratch,
     ) -> Result<String> {
-        let line = self.grounded(agent_id, prompt, visible, line).await?;
+        let line = self
+            .grounded(agent_id, prompt, visible, line, scratch)
+            .await?;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return Ok(line);
         };
@@ -624,7 +741,7 @@ impl<'a> EpisodeDriver<'a> {
             "[hive] a member's evidential retry used a move its seat does not have; \
              the line was demoted"
         );
-        violations.push(MoveViolation {
+        scratch.violations.push(MoveViolation {
             agent_id: agent_id.to_owned(),
             attempted: kind.to_owned(),
         });
@@ -649,8 +766,9 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         agent_id: &str,
         prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
+        visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
+        scratch: &mut TurnScratch,
     ) -> Result<String> {
         if self.desk.config.require_evidential != Some(true)
             || !evidential::support_misses_evidence(&line, agent_id, visible)
@@ -666,7 +784,11 @@ impl<'a> EpisodeDriver<'a> {
             "[hive] a support reached no evidence; the member was asked once more"
         );
         let corrected = format!("{prompt}\n\n{}", evidential::correction(&available));
-        Ok(marker_line(&self.runner.speak(agent_id, &corrected).await?))
+        // Same rule as the move correction: the retry is the turn that
+        // happened, so its aside replaces whatever the first attempt carried.
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
+        scratch.aside = rode;
+        Ok(line)
     }
 
     /// What the desk remembers about the operator's task, best-effort.
@@ -814,6 +936,107 @@ impl<'a> EpisodeDriver<'a> {
     ///
     /// Best-effort: the decision itself is already durable in the turns above
     /// it, and losing the room's own summary of a conversation the transcript
+    /// The audience to stamp on this turn's row: the addressees of an
+    /// authorized aside, or empty for an ordinary desk-visible line.
+    ///
+    /// Every path that is not an authorized aside returns empty, and that is
+    /// the safe direction: a line the room can read is never a leak, and the
+    /// member has still said what it meant to say. A refusal is therefore
+    /// logged rather than raised — the library gives every rung a name, and
+    /// none of them is a reason to abandon an episode.
+    ///
+    /// The budget and the settlement debt are **folded from the transcript**
+    /// rather than tracked across iterations, for the same reason the episode
+    /// re-reads its transcript every turn: what the fold counts is exactly what
+    /// a person reading the desk would see, so the two can never disagree.
+    fn aside_audience(
+        &self,
+        agent_id: &str,
+        line: &str,
+        transcript: &[tinyhivemind_hive::SessionMessage],
+        members: &[RosterMember],
+        desks: &[Desk],
+        retired: &[String],
+    ) -> Vec<String> {
+        if !super::aside::opens_aside(line) {
+            return Vec::new();
+        }
+        let policy = self.desk.config.aside.policy();
+        let roster = Roster::new(members, &[], retired);
+        let desk_set = DeskSet::new(desks, &[], &[], &[], retired);
+
+        let author = MentionAuthor::Agent {
+            id: agent_id.to_owned(),
+        };
+        let mentions = tinyhivemind_hive::mention::resolve(line, None, &author, &roster, &desk_set);
+
+        // The party this line *would* open, needed before the decision because
+        // the budget and the settlement debt are per party. A `@#desk` or an
+        // `@everyone` addresses nobody privately — the library refuses those
+        // too, and this agrees with it rather than inventing a second rule.
+        let mut party: Vec<String> = mentions
+            .iter()
+            .filter(|mention| !mention.quiet)
+            .filter_map(|mention| match &mention.target {
+                MentionTarget::Agent { id } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        party.push(agent_id.to_owned());
+        party.sort();
+        party.dedup();
+        let (spent, unsettled) = super::aside::spent_and_unsettled(transcript, &party);
+
+        let input = AsideInput {
+            conversation: DispatchConversation {
+                desk_id: self.desk.id.clone(),
+                thread_root: self.thread_root.map(|seq| seq.value()),
+            },
+            author_id: agent_id.to_owned(),
+            mentions,
+            spent,
+            unsettled,
+        };
+
+        match tinyhivemind_hive::aside::aside(policy, &input, &roster, &desk_set) {
+            Ok(AsideDecision::One { audience }) => {
+                let members = audience.members().to_vec();
+                tracing::debug!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    agent = %agent_id,
+                    audience = ?members,
+                    "[hive] an aside was authorized"
+                );
+                members
+            }
+            Ok(AsideDecision::None { reason }) => {
+                tracing::debug!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    agent = %agent_id,
+                    reason = ?reason,
+                    "[hive] no aside was authorized; the private row is dropped"
+                );
+                Vec::new()
+            }
+            Err(error) => {
+                // A malformed snapshot is this host's bug, not the room's,
+                // and it must not cost the episode. The private row is dropped
+                // rather than published: the turn's own contribution is already
+                // journaled where everyone can read it.
+                tracing::warn!(
+                    company = %self.company,
+                    desk = %self.desk.id,
+                    agent = %agent_id,
+                    error = %error,
+                    "[hive] the aside gate could not decide; the private row is dropped"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     /// still holds is not worth discarding the episode over.
     ///
     /// [`HIVE_REPORT_AUTHOR`]: super::HIVE_REPORT_AUTHOR
@@ -826,6 +1049,8 @@ impl<'a> EpisodeDriver<'a> {
                     chat_id: self.desk.id.clone(),
                     agent_id: super::HIVE_REPORT_AUTHOR.to_string(),
                     text: outcome.summary(),
+                    // Always desk-visible, for the reason above.
+                    audience: Vec::new(),
                     steps: Vec::new(),
                     task_id: None,
                     parent: self.thread_root,

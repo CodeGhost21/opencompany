@@ -6,6 +6,8 @@ import { clearSearch, getSearch, saveSearch, type SearchStatus } from "@/api/sea
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
+import { cn } from "@/lib/utils";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
@@ -203,7 +205,7 @@ export function SearchView({ client, company }: Props) {
   const header = (
     <PageHeader
       title="Search"
-      width="5xl"
+      width="full"
       description={
         <>
           Where your teammates look things up. Every teammate that can search
@@ -218,7 +220,7 @@ export function SearchView({ client, company }: Props) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
-        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+        <div className="w-full px-4 py-6">
           <Alert variant="destructive" data-testid="search-load-error">
             <TriangleAlert className="size-4" />
             <AlertDescription>Could not load search settings: {loadError}</AlertDescription>
@@ -248,7 +250,7 @@ export function SearchView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="search-view">
       {header}
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {!status.inBuild ? (
           <Alert data-testid="search-not-in-build">
@@ -295,7 +297,7 @@ export function SearchView({ client, company }: Props) {
               ) : null}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
               <div className="space-y-2">
                 <Label htmlFor="search-provider">Provider</Label>
                 <Select

@@ -291,6 +291,7 @@ mod test {
             seq: EventSeq::new(seq),
             company: CompanyId::new("acme"),
             event: CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 chat_id: chat.to_string(),
                 agent_id: "ceo".to_string(),
                 text: text.to_string(),

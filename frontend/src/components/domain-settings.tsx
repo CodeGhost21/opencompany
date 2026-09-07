@@ -87,17 +87,215 @@ function isUnwired(err: unknown): boolean {
  * Write-only three ways, exactly as in `HostingView`: the host has no field to
  * return it, nothing persists it to browser storage, and a successful save
  * clears the input. See `src/api/smtp.ts` and `src/lib/domain.ts`.
+ *
+ * # Both cards are gated as coming soon (#2131)
+ *
+ * Neither feature is ready, so `DomainSettings` renders `ComingSoon` previews
+ * and mounts neither card. `DomainCard` and `SmtpCard` below are exported and
+ * otherwise unchanged: their host-backed guarantees are still covered by
+ * `test/unit/domain-settings-host-backed.test.ts`, which renders them
+ * directly, so switching the feature on is putting them back into the two
+ * slots below rather than rebuilding them out of the git history.
  */
-export function DomainSettings({ client, company }: Props) {
+export function DomainSettings(_props: Props) {
   return (
     <>
-      <DomainCard client={client} company={company} />
-      <SmtpCard client={client} company={company} />
+      <ComingSoon
+        testid="domain-card"
+        icon={Globe}
+        title="Custom domain"
+        description="Sending and receiving on your own domain is on the way. It is not switched on yet, so there is nothing to configure here."
+      >
+        <DomainPreview />
+      </ComingSoon>
+      <ComingSoon
+        testid="smtp-card"
+        icon={Mail}
+        title="Email (SMTP)"
+        description="Pointing this company at your own outbound mail server is on the way. It is not switched on yet, so there is nothing to configure here."
+      >
+        <SmtpPreview />
+      </ComingSoon>
     </>
   );
 }
 
-function DomainCard({ client, company }: Props) {
+/**
+ * A card that shows the shape of a surface without letting anyone use it.
+ *
+ * # Why the controls are absent rather than disabled
+ *
+ * The brief for #2131 is that these two are *genuinely* inert — not reachable
+ * by mouse, not in the tab order, and with nothing that can be submitted.
+ * `disabled` and `inert` deliver the first two and neither delivers the third:
+ * an inert `<button>` still runs its handler when something calls `.click()` on
+ * it, and a disabled `<input>` is still an input whose value a script or an
+ * autofill can set. The SMTP card's fields include a password and a Save that
+ * puts it in the host's secret store, which is exactly the pair that must not
+ * be one `querySelector` away from firing.
+ *
+ * So the gate is that `children` is a static picture: `div`s carrying the real
+ * field labels, with no `input`, `button`, `select` or handler anywhere in it.
+ * There is no control to enable, no state to fill and no request to send —
+ * these cards do not even read the host any more. The blur is decoration over
+ * a surface that was already empty rather than the thing standing between an
+ * operator and a save. `settings-coming-soon.test.ts` pins that property.
+ *
+ * `inert` is set anyway, imperatively — React 18's types predate the boolean
+ * prop, which is why `Overview.tsx` sets it the same way — so the guarantee
+ * survives someone later dropping a real control into a preview. `aria-hidden`
+ * goes with it: the header and the description carry the whole meaning for a
+ * screen reader, which is why they say "not switched on yet" in words instead
+ * of leaving it to a blur nobody can hear.
+ */
+function ComingSoon({
+  testid,
+  icon: Icon,
+  title,
+  description,
+  children,
+}: {
+  testid: string;
+  icon: typeof Globe;
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card data-testid={testid}>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+          <Icon className="size-4" /> {title}
+          <Badge variant="secondary" className="font-normal" data-testid={`${testid}-coming-soon`}>
+            Coming soon
+          </Badge>
+        </CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div
+          data-testid={`${testid}-preview`}
+          aria-hidden="true"
+          ref={(el) => el?.setAttribute("inert", "")}
+          className="pointer-events-none max-w-4xl select-none opacity-60 blur-xs"
+        >
+          {children}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** One labelled bar standing in for a field. Not a control — see `ComingSoon`. */
+function PreviewField({ label, className }: { label: string; className?: string }) {
+  return (
+    <div className={cn("grid gap-2", className)}>
+      <span className="text-sm font-medium">{label}</span>
+      <div className="h-9 rounded-md border bg-muted/40" />
+    </div>
+  );
+}
+
+/** Stands in for a button, so the blurred card keeps the rhythm of the real one. */
+function PreviewButton({ label, className }: { label: string; className?: string }) {
+  return (
+    <div
+      className={cn(
+        "flex h-9 items-center justify-center rounded-md border bg-muted px-4 text-sm font-medium",
+        className,
+      )}
+    >
+      {label}
+    </div>
+  );
+}
+
+/**
+ * The shape of {@link DomainCard} with nothing in it that works.
+ *
+ * It mirrors the real card's three parts — the domain entry row, the "Add
+ * these DNS records" heading, and the TXT/CNAME table — because a preview that
+ * does not resemble what is coming tells the operator nothing about what
+ * switching it on would get them. The record values are bare bars rather than
+ * plausible-looking hostnames: an invented `_oc-verify.example.com` sitting
+ * under a blur is the kind of thing someone squints at and copies into their
+ * DNS.
+ *
+ * Every node here is a `div` or a `span`. See {@link ComingSoon} for why that
+ * is the gate rather than `disabled`.
+ */
+function DomainPreview() {
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="h-9 flex-1 rounded-md border bg-muted/40" />
+        <PreviewButton label="Add domain" className="shrink-0" />
+      </div>
+      <div className="space-y-2">
+        <p className="text-sm font-medium">Add these DNS records</p>
+        <div className="rounded-lg border">
+          <div className="flex gap-6 border-b bg-muted/50 px-3 py-2 text-xs font-medium">
+            <span className="w-16">Type</span>
+            <span className="w-40">Name</span>
+            <span className="w-40">Value</span>
+          </div>
+          {["TXT", "CNAME"].map((type) => (
+            <div key={type} className="flex items-center gap-6 px-3 py-2 text-xs">
+              <span className="w-16 font-mono">{type}</span>
+              <div className="h-3 w-40 rounded bg-muted" />
+              <div className="h-3 w-40 rounded bg-muted" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The shape of {@link SmtpCard} with nothing in it that works.
+ *
+ * The six field labels are the real ones in the real order, so an operator can
+ * tell at a glance whether they will have what the form is going to ask for.
+ * The "Password" row is a {@link PreviewField} like the other five — a
+ * labelled bar, not an `<input type="password">` — which is the whole point of
+ * {@link ComingSoon}: there is no field here for a password manager to fill,
+ * and no Save to put what it filled into the host's secret store.
+ */
+function SmtpPreview() {
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <PreviewField label="SMTP host" />
+        <div className="grid grid-cols-2 gap-3">
+          <PreviewField label="Port" />
+          <PreviewField label="Security" />
+        </div>
+        <PreviewField label="Username" />
+        <PreviewField label="Password" />
+        <PreviewField label="From name" />
+        <PreviewField label="From email" />
+      </div>
+      <div className="flex gap-2">
+        <PreviewButton label="Save" />
+        <PreviewButton label="Test connection" />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The real custom-domain card: add a domain, read back the DNS records the
+ * host wants, and ask it to verify them.
+ *
+ * Not mounted anywhere while #2131's gate stands — {@link DomainSettings}
+ * renders {@link DomainPreview} in its place. It is exported rather than
+ * deleted so that switching the feature on is putting one element back, and so
+ * that `test/unit/domain-settings-host-backed.test.ts` can go on rendering it
+ * directly and pinning the guarantee that matters here: every field is read
+ * from and written to the host, and none of it is cached in the browser.
+ */
+export function DomainCard({ client, company }: Props) {
   const [status, setStatus] = useState<DomainStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -391,7 +589,17 @@ function CopyCell({ value }: { value: string }) {
   );
 }
 
-function SmtpCard({ client, company }: Props) {
+/**
+ * The real outbound-mail card: point the company at an SMTP server, save the
+ * credentials into the host's secret store, and send a test message.
+ *
+ * Not mounted anywhere while #2131's gate stands — {@link DomainSettings}
+ * renders {@link SmtpPreview} in its place. Exported for the same two reasons
+ * as {@link DomainCard}, and one more that is specific to it: the password is
+ * write-only three ways, and `test/unit/domain-settings-host-backed.test.ts`
+ * is what holds that property while nothing renders the card.
+ */
+export function SmtpCard({ client, company }: Props) {
   const [status, setStatus] = useState<SmtpStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);

@@ -777,6 +777,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -794,6 +795,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .append(
             runtime.id(),
             crate::ports::types::CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -844,6 +846,7 @@ async fn chat_history_clamps_an_oversized_page_request() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -923,6 +926,7 @@ async fn chat_history_projects_the_card_a_reply_opened() {
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -980,6 +984,7 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: None,
@@ -997,6 +1002,7 @@ async fn chat_history_projects_threads_and_reactions() {
         .append(
             runtime.id(),
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 parent: Some(root),

@@ -36,6 +36,21 @@ interface BridgeConfig {
    * and it is a real window on a cold start, when the host is still binding.
    */
   discoveryDelayMs?: number;
+  /**
+   * What `oc_local_instances` answers, for a case that needs a **roster-capable**
+   * shell.
+   *
+   * Omitted — the default, and what every case here wanted before the roster
+   * existed — leaves the command unimplemented, which `localInstances()` reads
+   * as `null`: "a shell predating the roster". That is a real shape several
+   * cases below depend on, so it stays the default rather than becoming a silent
+   * upgrade for the whole file.
+   *
+   * A current desktop does answer it, and `canStartHere` is exactly
+   * `embedded.roster`, so the one case about being offered a start has to opt in
+   * or it asserts against a shell too old to offer one.
+   */
+  instances?: { id: string; label: string; dataDir: string; running: boolean }[];
 }
 
 /** One `oc_connect` the console made, as the test reads them back. */
@@ -120,6 +135,14 @@ async function asDesktop(page: Page, config: BridgeConfig) {
             case "oc_disconnect": {
               hosts.delete(args.connectionId as string);
               return undefined;
+            }
+            case "oc_local_instances": {
+              // `undefined` is what an unimplemented command answers, and
+              // `localInstances()` turns anything that is not an array into
+              // `null` on purpose. Returning `[]` instead would claim a
+              // roster-capable shell that runs nothing, which is a different
+              // state with a different screen.
+              return cfg.instances;
             }
             case "oc_embedded": {
               if (cfg.discoveryDelayMs) {
@@ -422,7 +445,18 @@ test("a desktop whose host did not start offers to start it, not a choice of whe
 }) => {
   // No embedded host, no remembered hosts: the state that used to render an
   // empty pane once the same-origin connection stopped filling it.
-  await asDesktop(page, { embedded: null });
+  //
+  // Roster-capable, which is what makes the start *offerable*: `canStartHere` is
+  // `embedded.roster`, so a shell that cannot answer `oc_local_instances` gets
+  // the honest "this version cannot start it for you" line instead. One stopped
+  // instance is the state a desktop is in when its host did not come up, and it
+  // is what `runHere` would target.
+  await asDesktop(page, {
+    embedded: null,
+    instances: [
+      { id: "primary", label: "OpenCompany", dataDir: "/tmp/e2e-desktop", running: false },
+    ],
+  });
   await page.goto("/");
 
   await expect(page.getByTestId("no-connection")).toBeVisible({ timeout: 30_000 });
