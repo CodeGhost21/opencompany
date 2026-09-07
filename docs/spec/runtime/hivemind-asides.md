@@ -78,6 +78,48 @@ and a `!surface` line is an ordinary desk row with no special handling.
 This is the rule cross-desk referral already accepts at a channel boundary,
 applied inside one desk.
 
+## An aside costs no turn
+
+**One authorized turn produces two rows**: the member's ordinary desk-visible
+contribution, and — optionally — one private row riding alongside it. The aside
+is not a turn, does not become one, and is not charged as one
+([ADR 0011](https://github.com/tinyhumansai/tinyhivemind/blob/main/docs/adr/0011-an-aside-rides-alongside-a-turn.md)).
+
+It did cost a turn at first, and that was measured and it was expensive:
+upstream's benchmark found a room whose members may open one pairwise check
+decides **15.4 points worse** on a hidden profile, and the control that writes
+the identical words and *throws the answer away* loses more still — so the
+transfer was never what cost anything. Under one-message-one-turn, a member
+asking a peer is a member not depositing, not objecting and not refuting, while
+the rest of the room goes on accumulating support for the option it stepped away
+to ask about. The room reaches quorum on the decoy while its members are away
+asking about it.
+
+This host confirmed the same thing from the other side: a live six-day run of
+`companies/vending_machine_co` with asides enabled used the marker **zero
+times**, while the same seats repeatedly wrote `!question @peer` — the move that
+was already in their list and did not cost them their contribution.
+
+Three bounds keep it sound, and `EpisodeDriver::run` implements each:
+
+- **At most one aside row per turn.** `split_reply` takes the first `!aside`
+  line and no more, so a room of *n* members writes at most *n* private rows per
+  round, each of which cost its author a turn it had already won.
+- **An aside starts no turn.** The row is journaled and nothing is dispatched
+  from it; the peer answers on its own next turn, which the attention market was
+  going to give it anyway.
+- **A refused audience is dropped, not published.** Falling back to the desk
+  would put a second desk-visible contribution on one turn, which is the one
+  thing a turn may not produce — and the member has already said its piece in
+  the row above.
+
+It is not free of a *sequence*: the private row still takes the next journal
+sequence, so later desk rows land at a higher raw sequence than they would have.
+`step`, `standings` and `spent` are all invariant under that, but
+`salience::standing` scores recency from raw distance, so a busy aside round
+shifts the floor-holder choice slightly. That is a known limitation upstream,
+not something this host can close.
+
 ## The grammar
 
 Two markers, taught **only when the desk enabled asides** — a grammar is a fixed
@@ -86,12 +128,17 @@ may make spends that budget for nothing.
 
 | Marker | Means |
 | --- | --- |
-| `!aside @peer …` | opens a private line to that peer |
-| `!surface …` | reports back to the room what the aside produced |
+| `!aside @peer …` | a private line to that peer, on a **second line** under the member's move |
+| `!surface …` | an ordinary desk move reporting back what the aside produced |
 
 Neither is a deliberation move. Neither appears in `MOVE_KINDS`, neither is
 gated by `hive.moves`, and neither deposits a trace — so they are taught after
-the move list rather than inside it.
+the move list rather than inside it. `split_reply`
+(`src/hivemind/prompt.rs`) is what separates the two: the marker line the room
+counts, and the one `!aside` riding under it. A reply that is *only* an aside
+still owes the room its turn, so its desk line falls through to `(no answer)` —
+honest rather than lossy, because the member did spend a turn without saying
+anything to the room.
 
 ## When a line becomes an aside
 
