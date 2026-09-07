@@ -118,7 +118,7 @@ removes the middle option:
 |---|---|---|
 | One shared instance, one bootstrap credential | Namespace-only — the **weak** tier | Yes |
 | **One instance per tenant**, own key and own data dir | Credential *and* storage isolation | **Yes** |
-| Shared instance, real per-tenant credentials | Strong | **No** — the reachable minter does not confine a token to its scope (finding 2) |
+| Shared instance, real per-tenant credentials | Strong | **No** — the production issuer and the policy-narrowing API are both unavailable in this build (finding 2) |
 
 `memory-engine.md` is unambiguous about why the weak tier is not acceptable as a
 default: with a hosted engine "the namespace string is the only thing separating
@@ -362,12 +362,13 @@ offer something the incumbent drivers do not.
 
 - Does CortexDB agree with our reading of clause 2? Worth confirming in writing
   when we contact them, though the text is not ambiguous.
-- Is the v1 minter's `scope` advisory rather than enforcing, or is the gap in
-  finding 2 a defect? And what should a self-hosted multi-tenant deployment use
-  instead — is `cortex-auth-ref` published, or is an external OIDC provider
-  expected, against what contract? This decides whether a *shared* instance can
-  ever reach the strong tier; instance-per-tenant reaches it without the minter.
-  Adoption was decided by the derived-layer finding, which is now withdrawn.
+- What should a self-hosted multi-tenant deployment bind actors with? The
+  cross-scope behaviour in finding 2 is *granted* by the deployment tier, so the
+  open question is not whether it is a defect but how to narrow it: is
+  `cortex-auth-ref` published, or is an external OIDC provider expected, against
+  what contract, and will `PUT /v1/policy/{tier}` leave experimental? This
+  decides whether a *shared* instance can ever reach the strong tier;
+  instance-per-tenant reaches it without any of them.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —

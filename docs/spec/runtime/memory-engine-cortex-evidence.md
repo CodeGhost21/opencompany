@@ -14,7 +14,8 @@ it is worth separating the two because conflating them points a driver plan at
 the wrong thing.
 
 Measured on the deployment, with the LLM lanes believed configured and the
-server reporting healthy — see [Correction](#correction-2026-09-04) for why that
+server reporting healthy — see [Correction](memory-engine-cortex.md#correction-2026-09-04)
+for why that
 belief was wrong:
 
 | Cortex layer | Endpoint | Contents |
