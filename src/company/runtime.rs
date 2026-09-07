@@ -1985,8 +1985,59 @@ impl CompanyRuntime {
     /// one of the cycle entry points below; this exists so the chat route can
     /// run the same check one step earlier.
     pub(crate) fn ensure_accepting(&self) -> Result<()> {
+        // The emergency stop is checked first because the two refusals mean
+        // opposite things to a caller: `Quiescing` is a `503` that says retry in
+        // a moment, and retrying is exactly wrong here.
+        self.ensure_not_emergency_stopped()?;
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
+        }
+        Ok(())
+    }
+
+    /// Refuses work while the emergency stop is engaged.
+    ///
+    /// The effect gate
+    /// ([`evaluate`](crate::ports::approvals::ApprovalGate::evaluate) /
+    /// [`park`](crate::ports::approvals::ApprovalGate::park)) refuses the
+    /// *effects* a turn asks for; this refuses the turn. Both are needed — a
+    /// company whose effects are denied but whose turns keep running still
+    /// executes tools and still bills inference, while reporting itself stopped.
+    ///
+    /// Enforced at the three doorways work enters through, each the sole
+    /// entrance of its family:
+    ///
+    /// * [`ensure_accepting`](Self::ensure_accepting) — every ingress asking for
+    ///   a cycle (chat, ACP, the scheduler, a rebuild, an approval resolution).
+    /// * [`spawn_follow_up`](Self::spawn_follow_up) — every resume a settled or
+    ///   expired verdict owes: a brain continuation, a released blocker, a
+    ///   workflow replay, a blocked node.
+    /// * [`reconcile_stranded_blocked_nodes`](Self::reconcile_stranded_blocked_nodes) —
+    ///   the boot-time resume, which reaches a dispatch through neither of the
+    ///   other two.
+    ///
+    /// # Semantics
+    ///
+    /// This halts the **admission** of work, not work already executing. A turn
+    /// running when the switch is pulled is not killed: it holds live model
+    /// context and half-written state, and the effect gate above already denies
+    /// the consequential actions it can still ask for, which is the containment
+    /// that matters. What it cannot do is start anything new.
+    ///
+    /// A parked approval is likewise frozen rather than resolved: while stopped
+    /// the queue takes no new parks, no verdicts and no extensions, so its cards
+    /// run down the deadline they already had to the default-deny the TTL
+    /// already promised.
+    ///
+    /// Nothing on the release path consults this — [`emergency_resume`](Self::emergency_resume)
+    /// and [`status`](Self::status) are reachable while stopped — because a
+    /// company that cannot resume is a worse failure than one that cannot stop.
+    pub(crate) fn ensure_not_emergency_stopped(&self) -> Result<()> {
+        if self.approval_gate.is_emergency() {
+            return Err(OpenCompanyError::EmergencyStop(format!(
+                "{} is stopped and will run no work until an operator releases it",
+                self.id.as_ref()
+            )));
         }
         Ok(())
     }
@@ -2546,6 +2597,12 @@ impl CompanyRuntime {
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
+            // Below this line every branch dispatches real work — a blocker
+            // resume, a workflow replay, a brain continuation — so the emergency
+            // stop is enforced once here rather than on each of them. The two
+            // arms above return a synthetic report and start nothing, which is
+            // why they sit on the other side of it.
+            rt.ensure_not_emergency_stopped()?;
             // Issue #1863: a resolved blocker re-enters the stopped step rather
             // than redispatching a grant or running a brain continuation. The
             // answer was armed on the grant set's blocker side-channel by
@@ -3751,6 +3808,18 @@ impl CompanyRuntime {
     /// function retire that case the same way the live path does, rather than
     /// only ever dispatching.
     pub(crate) async fn reconcile_stranded_blocked_nodes(&self) {
+        // A company that boots stopped resumes nothing. `RuntimeBuilder` seeds
+        // the switch from the event log before it calls this, so the replayed
+        // state is already in place; the stashes stay armed and this runs again
+        // on the boot after the release.
+        if self.ensure_not_emergency_stopped().is_err() {
+            tracing::info!(
+                company = %self.id,
+                "[approval] the emergency stop is engaged; leaving stranded blocked nodes \
+                 armed instead of resuming them at boot"
+            );
+            return;
+        }
         let still_parked: std::collections::HashSet<String> =
             self.journal.parked_turns().into_iter().collect();
         // Issue #1825: a turn already durably marked dispatched has already
@@ -7005,9 +7074,13 @@ impl CompanyRuntime {
             .set_emergency(emergency_from_load(stopped));
     }
 
-    /// Engages the emergency stop: every new effect outside
-    /// [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other) is denied
+    /// Engages the emergency stop: the company admits no further work, and
+    /// every new effect outside
+    /// [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other) is denied,
     /// until an operator releases it.
+    ///
+    /// The halt is [`ensure_not_emergency_stopped`](Self::ensure_not_emergency_stopped),
+    /// which has the in-flight semantics and the list of doorways it guards.
     ///
     /// **Order is load-bearing: the flag flips before the event is appended.**
     /// Stopping is the safe direction, so enforcement must not wait on I/O that
@@ -13490,6 +13563,363 @@ to = "draft"
                 remaining.is_empty(),
                 "the reconciler must prune the checkpoint lineage an unapproved stranded stash \
                  names, not only release the stash: {remaining:?}"
+            );
+        }
+    }
+
+    /// What an engaged emergency stop has to actually stop.
+    ///
+    /// Every assertion here is on a **mechanism** — the turn that did not run,
+    /// the tool body that never executed, the inference sample that was never
+    /// written — never on `is_emergency_paused()` reading `true`. The flag can
+    /// read `true` on a company that is still taking turns and still spending,
+    /// so asserting it proves nothing about the halt.
+    mod emergency_stop {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::super::{CompanyEvent, CompanyRuntime};
+        use crate::ports::Brain;
+        use crate::ports::brain::CycleHost;
+        use crate::ports::types::{
+            Actor, ActorKind, CycleRequest, CycleResult, OutboundMessage, TokenUsage,
+        };
+
+        /// A brain that does the three things a stopped company must not do:
+        /// take a turn, run a tool, and bill for the inference.
+        ///
+        /// The "tool" is a recorded line rather than a real dispatcher because
+        /// the assertion is that the turn body never ran at all — a real tool
+        /// would be reached through the same `run_cycle` that is not called.
+        #[derive(Default)]
+        struct WorkingBrain {
+            turns: AtomicUsize,
+            tool_log: Mutex<Vec<String>>,
+        }
+
+        impl WorkingBrain {
+            fn turns(&self) -> usize {
+                self.turns.load(Ordering::SeqCst)
+            }
+
+            fn tool_calls(&self) -> Vec<String> {
+                self.tool_log.lock().expect("tool log poisoned").clone()
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Brain for WorkingBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                self.turns.fetch_add(1, Ordering::SeqCst);
+                self.tool_log
+                    .lock()
+                    .expect("tool log poisoned")
+                    .push(format!("notify_slack({})", req.cycle_id));
+                Ok(CycleResult {
+                    channel_responses: vec![OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: Some("ceo".into()),
+                        text: "a full turn ran".into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                        mentions: Vec::new(),
+                    }],
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage {
+                        input: 4_000,
+                        output: 500,
+                        cached_input: 0,
+                        cost_usd: 0.12,
+                    },
+                })
+            }
+        }
+
+        fn manifest() -> crate::company::CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [policy]\nmode = \"full\"\n",
+            )
+            .expect("manifest")
+        }
+
+        fn operator() -> Actor {
+            Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            }
+        }
+
+        fn ask() -> CompanyEvent {
+            CompanyEvent::OperatorMessage {
+                text: "ship the release".into(),
+                by: Some(operator()),
+                chat: None,
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            }
+        }
+
+        /// A settled verdict, the receipt `spawn_follow_up` turns into a
+        /// continuation turn.
+        fn settled(approval: &str) -> super::super::ResolveReceipt {
+            use crate::ports::types::{ApprovalId, Verdict};
+            super::super::ResolveReceipt::Settled(Box::new(CompanyEvent::ApprovalResolved {
+                approval_id: ApprovalId::new(approval),
+                verdict: Verdict::Approve,
+                by: operator(),
+            }))
+        }
+
+        async fn working_company() -> (Arc<CompanyRuntime>, Arc<WorkingBrain>, tempfile::TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-emergency-")
+                .tempdir()
+                .expect("tempdir");
+            let brain = Arc::new(WorkingBrain::default());
+            let rt = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_brain(brain.clone())
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            (rt, brain, home)
+        }
+
+        /// How many inference samples the meter holds — the bill.
+        async fn billed(rt: &CompanyRuntime) -> usize {
+            rt.usage()
+                .query(rt.id(), 0)
+                .await
+                .expect("usage query")
+                .len()
+        }
+
+        /// **The defect.** With the stop engaged, a new turn must not run, the
+        /// tool it would have called must not execute, and no inference may be
+        /// billed.
+        ///
+        /// The first cycle is deliberately run *before* the stop, so a fixture
+        /// that silently never works cannot pass this by doing nothing.
+        #[tokio::test]
+        async fn a_stopped_company_runs_no_turn_calls_no_tool_and_bills_nothing() {
+            let (rt, brain, _home) = working_company().await;
+
+            rt.run_cycle(vec![ask()]).await.expect("a running company");
+            assert_eq!(brain.turns(), 1, "the fixture must really run a turn");
+            assert_eq!(brain.tool_calls().len(), 1);
+            assert_eq!(billed(&rt).await, 1, "the fixture must really bill");
+
+            assert!(
+                rt.emergency_pause(operator(), Some("stop everything".into()))
+                    .await
+                    .expect("pause"),
+                "this call engaged the stop"
+            );
+
+            let refused = rt.run_cycle(vec![ask()]).await;
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "a stopped company must refuse a new cycle, got {refused:?}"
+            );
+            assert_eq!(
+                brain.turns(),
+                1,
+                "no turn may run while the emergency stop is engaged"
+            );
+            assert_eq!(
+                brain.tool_calls().len(),
+                1,
+                "no tool may execute while the emergency stop is engaged"
+            );
+            assert_eq!(
+                billed(&rt).await,
+                1,
+                "no inference may be billed while the emergency stop is engaged"
+            );
+        }
+
+        /// The journaled entry point is the one the chat route uses, so it owes
+        /// the same refusal — otherwise the switch is bypassed by whichever
+        /// ingress happens to append first.
+        #[tokio::test]
+        async fn a_stopped_company_refuses_a_journaled_cycle_too() {
+            let (rt, brain, _home) = working_company().await;
+            rt.emergency_pause(operator(), None).await.expect("pause");
+
+            let seq = rt.events().append(rt.id(), ask()).await.expect("append");
+            let refused = rt.run_journaled_cycle(vec![(seq, ask())], None).await;
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "the journaled entry point must refuse too, got {refused:?}"
+            );
+            assert_eq!(brain.turns(), 0);
+            assert_eq!(billed(&rt).await, 0);
+        }
+
+        /// The continuation funnel: every follow-up turn — an operator's
+        /// verdict, a TTL expiry, a released blocker, a workflow replay —
+        /// reaches its dispatch through `spawn_follow_up`. A stop that guarded
+        /// only the ingress would leave that whole family running, and the TTL
+        /// sweep reaches it without passing an ingress at all.
+        #[tokio::test]
+        async fn a_stopped_company_runs_no_continuation_turn() {
+            let (rt, brain, _home) = working_company().await;
+            rt.emergency_pause(operator(), None).await.expect("pause");
+
+            let refused = rt
+                .spawn_follow_up(settled("appr-continuation"))
+                .await
+                .expect("the follow-up task joins");
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "a follow-up turn must be refused while stopped, got {refused:?}"
+            );
+            assert_eq!(
+                brain.turns(),
+                0,
+                "a continuation must not run a turn while the stop is engaged"
+            );
+            assert_eq!(billed(&rt).await, 0);
+        }
+
+        /// Releasing restores **all** of it. A company that cannot resume is a
+        /// worse bug than one that cannot stop.
+        #[tokio::test]
+        async fn releasing_the_stop_restores_turns_tools_and_billing() {
+            let (rt, brain, _home) = working_company().await;
+            rt.emergency_pause(operator(), None).await.expect("pause");
+            assert!(rt.run_cycle(vec![ask()]).await.is_err());
+
+            assert!(
+                rt.emergency_resume(operator(), Some("all clear".into()))
+                    .await
+                    .expect("resume"),
+                "this call released the stop"
+            );
+
+            rt.run_cycle(vec![ask()]).await.expect("a released company");
+            assert_eq!(brain.turns(), 1, "the turn runs again after the release");
+            assert_eq!(brain.tool_calls().len(), 1, "tools execute again");
+            assert_eq!(billed(&rt).await, 1, "inference is billed again");
+
+            rt.spawn_follow_up(settled("appr-released"))
+                .await
+                .expect("the follow-up task joins")
+                .expect("a released company");
+            assert_eq!(
+                brain.turns(),
+                2,
+                "continuations run again after the release"
+            );
+        }
+
+        /// The stop survives a restart as **enforcement**, not only as a flag.
+        ///
+        /// `emergency_paused: true` on a rebooted company that still runs turns
+        /// is the exact shape of the defect, so the reboot is asserted by
+        /// dispatching a cycle into it.
+        #[tokio::test]
+        async fn the_stop_survives_a_restart_and_the_rebooted_company_still_refuses_work() {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-emergency-reboot-")
+                .tempdir()
+                .expect("tempdir");
+
+            let first = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_brain(Arc::new(WorkingBrain::default()))
+                .build()
+                .await
+                .expect("runtime");
+            first
+                .emergency_pause(operator(), None)
+                .await
+                .expect("pause");
+            drop(first);
+
+            let brain = Arc::new(WorkingBrain::default());
+            let rebooted =
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_brain(brain.clone())
+                    .build()
+                    .await
+                    .expect("runtime");
+            assert!(rebooted.is_emergency_paused(), "the stop replayed");
+
+            let refused = rebooted.run_cycle(vec![ask()]).await;
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "a rebooted stopped company must still refuse work, got {refused:?}"
+            );
+            assert_eq!(brain.turns(), 0);
+            assert_eq!(billed(&rebooted).await, 0);
+
+            // And the release still works on the rebooted runtime.
+            rebooted
+                .emergency_resume(operator(), None)
+                .await
+                .expect("resume");
+            rebooted.run_cycle(vec![ask()]).await.expect("released");
+            assert_eq!(brain.turns(), 1);
+        }
+
+        /// The native-effect path is untouched: an engaged stop still denies a
+        /// side-effecting effect and still refuses to park one, exactly as
+        /// before, and releasing restores both.
+        #[tokio::test]
+        async fn native_effect_denial_is_unchanged_by_the_admission_gate() {
+            use crate::ports::approvals::ApprovalGate;
+            use crate::ports::types::{Effect, EffectGroup, PolicyDecision};
+
+            let (rt, _brain, _home) = working_company().await;
+            let effect = Effect {
+                kind: "filing.submit".into(),
+                group: EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("ceo".into()),
+                run_id: None,
+            };
+
+            rt.emergency_pause(operator(), None).await.expect("pause");
+            assert_eq!(
+                rt.approval_gate
+                    .evaluate(rt.id(), &effect)
+                    .await
+                    .expect("evaluate"),
+                PolicyDecision::Deny,
+                "the gate still denies a side-effecting effect while stopped"
+            );
+            assert!(
+                matches!(
+                    rt.approval_gate.park(rt.id(), effect.clone()).await,
+                    Err(crate::OpenCompanyError::EmergencyStop(_))
+                ),
+                "the gate still refuses to park one while stopped"
+            );
+
+            rt.emergency_resume(operator(), None).await.expect("resume");
+            assert_eq!(
+                rt.approval_gate
+                    .evaluate(rt.id(), &effect)
+                    .await
+                    .expect("evaluate"),
+                PolicyDecision::Allow,
+                "releasing restores the company's own `full` policy"
             );
         }
     }

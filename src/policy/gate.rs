@@ -248,6 +248,12 @@ impl ManifestApprovalGate {
     }
 
     /// Whether the emergency stop is currently engaged.
+    ///
+    /// This flag is the switch's single source of truth, but this gate is not
+    /// its only enforcer: denying effects leaves the turns that ask for them
+    /// running. The halt on work itself is
+    /// [`CompanyRuntime::ensure_not_emergency_stopped`](crate::runtime::CompanyRuntime::ensure_not_emergency_stopped),
+    /// which reads this same flag.
     pub fn is_emergency(&self) -> bool {
         self.emergency.load(Ordering::SeqCst)
     }
@@ -749,10 +755,12 @@ impl ApprovalGate for ManifestApprovalGate {
         //    releasing it. Denial returns to the brain as a refusal it replans
         //    around, which is what "park all new work" has to mean.
         //
-        //    `EffectGroup::Other` is exempt so chat survives — the operator has
-        //    to be able to ask the company what it was doing. The gate does not
-        //    police which tools `Other` covers, so "chat survives" is an
-        //    observation, not a promise about every non-conversational effect.
+        //    `EffectGroup::Other` is exempt at this layer only. It used to be
+        //    the carve-out that kept chat alive under a stop; since the runtime
+        //    admits no cycle at all while stopped
+        //    ([`CompanyRuntime::ensure_not_emergency_stopped`]), nothing reaches
+        //    this gate to take the exemption during one. It remains so that
+        //    releasing restores evaluation to exactly its pre-stop shape.
         if self.is_emergency() && effect.group != EffectGroup::Other {
             return Ok(PolicyDecision::Deny);
         }
