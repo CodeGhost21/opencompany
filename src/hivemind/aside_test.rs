@@ -58,12 +58,19 @@ async fn run(manifest: &str, script: &[(&str, &str)]) -> (Arc<MemoryLog>, Episod
     (log, outcome)
 }
 
-/// The audience journaled on the row whose text starts with `!aside`.
+/// The audience journaled on the first row whose text starts with `!aside`.
 fn aside_audience(log: &MemoryLog) -> Option<Vec<String>> {
+    aside_audiences(log).into_iter().next()
+}
+
+/// Every `!aside` row's audience, in journal order. An empty entry is a line
+/// that asked for an aside and was refused into the open.
+fn aside_audiences(log: &MemoryLog) -> Vec<Vec<String>> {
     log.addressed_replies("eng")
         .into_iter()
-        .find(|(_, text, _)| text.starts_with("!aside"))
+        .filter(|(_, text, _)| text.starts_with("!aside"))
         .map(|(_, _, audience)| audience)
+        .collect()
 }
 
 #[tokio::test]
@@ -168,28 +175,85 @@ async fn an_aside_naming_a_stranger_stays_desk_visible() {
     );
 }
 
-/// `max_messages` defaults to two. A third `!aside` between the same pair is
-/// refused, and refused *into the open* rather than dropped — the member has
-/// still said what it meant to say.
+/// `must_surface` is the bound that actually binds first.
+///
+/// With it on — the default — a pair that has not paid its last aside back to
+/// the room cannot open another, and `max_messages` is never reached. The
+/// refusal is *into the open*: the member has still said what it meant to say,
+/// and a line the room can read is never a leak.
 #[tokio::test]
-async fn a_pair_that_spends_its_budget_is_pushed_back_into_the_open() {
+async fn a_pair_that_owes_the_room_a_settlement_cannot_open_another_aside() {
     let (log, _) = run(
         &aside_manifest(),
         &[
             ("planner", "!aside @scout first question"),
-            ("scout", "!aside @planner first answer"),
-            ("planner", "!aside @scout third, over budget"),
+            ("planner", "!aside @scout second, still owing"),
+            ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
     )
     .await;
 
-    let asides: Vec<Vec<String>> = log
-        .addressed_replies("eng")
-        .into_iter()
-        .filter(|(_, text, _)| text.starts_with("!aside"))
-        .map(|(_, _, audience)| audience)
-        .collect();
+    let asides = aside_audiences(&log);
+    assert!(asides.len() >= 2, "the script wrote two: {asides:?}");
+    assert!(!asides[0].is_empty(), "the first opens the aside");
+    assert!(
+        asides[1].is_empty(),
+        "the pair owed a settlement, so the second belongs to the room: {asides:?}",
+    );
+}
+
+/// And a `!surface` discharges the debt, so the pair may open another. This is
+/// the half that makes `must_surface` a protocol rather than a one-shot limit.
+#[tokio::test]
+async fn a_settlement_lets_the_pair_open_another_aside() {
+    let (log, _) = run(
+        &aside_manifest(),
+        &[
+            ("planner", "!aside @scout first question"),
+            ("planner", "!surface scout confirms the metric is theirs"),
+            ("planner", "!aside @scout second question"),
+            ("scout", "!propose #ship Ship it."),
+            ("critic", "!propose #stage Stage it."),
+        ],
+    )
+    .await;
+
+    let asides = aside_audiences(&log);
+    assert!(asides.len() >= 2, "the script wrote two: {asides:?}");
+    assert!(!asides[0].is_empty(), "the first opens the aside");
+    assert!(
+        !asides[1].is_empty(),
+        "the surface settled it, so the second is authorized again: {asides:?}",
+    );
+}
+
+/// With `must_surface` off, `max_messages` is what stops a pair. Two rows —
+/// a question and an answer — and the third is desk-visible.
+#[tokio::test]
+async fn a_pair_that_spends_max_messages_is_pushed_back_into_the_open() {
+    let manifest = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"planner\"\nrole = \"Planner\"\n\
+         [[agent]]\nid = \"scout\"\nrole = \"Scout\"\n\
+         [[agent]]\nid = \"critic\"\nrole = \"Critic\"\n\
+         [[group_chat]]\nid = \"eng\"\nname = \"Engineering\"\n\
+         description = \"Ship the rollout\"\n\
+         members = [\"planner\", \"scout\", \"critic\"]\n\
+         hive = { enabled = true, aside = { enabled = true, max_messages = 2, must_surface = false } }\n";
+
+    let (log, _) = run(
+        manifest,
+        &[
+            ("planner", "!aside @scout first question"),
+            ("planner", "!aside @scout second, the last within budget"),
+            ("planner", "!aside @scout third, over budget"),
+            ("scout", "!propose #ship Ship it."),
+            ("critic", "!propose #stage Stage it."),
+        ],
+    )
+    .await;
+
+    let asides = aside_audiences(&log);
     assert!(asides.len() >= 3, "the script wrote three: {asides:?}");
     assert!(!asides[0].is_empty(), "the first is within budget");
     assert!(!asides[1].is_empty(), "the second is within budget");
