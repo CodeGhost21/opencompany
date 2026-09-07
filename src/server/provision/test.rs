@@ -853,7 +853,8 @@ async fn emergency_pause_shows_in_status_and_resume_clears_it() {
     let body = json_body(paused).await;
     assert_eq!(body["emergency_paused"], true);
     assert_eq!(body["changed"], true);
-    // Orthogonal to lifecycle: the company is still running, so chat still works.
+    // Not orthogonal to lifecycle any more: the stop halts admission, so an
+    // ingress that would run a turn is refused while it is engaged.
     assert_eq!(body["lifecycle"], "running");
 
     let ok = app
@@ -865,7 +866,10 @@ async fn emergency_pause_shows_in_status_and_resume_clears_it() {
         ))
         .await
         .unwrap();
-    assert_eq!(ok.status(), StatusCode::OK);
+    // A chat turn calls the model and bills for it, so a stopped company cannot
+    // serve one and still be stopped. 409: the operator chose this state and it
+    // clears when they release it, so it is neither a fault nor a retry.
+    assert_eq!(ok.status(), StatusCode::CONFLICT);
 
     // Release requires the company id, not the fixed phrase.
     let resumed = app
