@@ -1,28 +1,43 @@
 // The Add-teammate dialog's two shapes, and the derivations the reduced one
 // needs (issue #1989).
 //
-// ## Why this is not the workflow dialog's module with the nouns changed
+// ## Where the whole-teammate draft route came from
 //
 // `WorkflowCreateDialog`'s one box works because the host has a
 // draft-the-whole-thing route: `draftWorkflowFromDescription` turns a sentence
 // into a named, id'd, fully-wired graph before anything is created, so the
 // dialog can ask for one thing and still write a complete record.
 //
-// **There is no such route for a teammate.** The two that exist —
-// `draftAgentField` (`/team/<id>/draft`) and `draftNewAgentField`
-// (`/team/draft`) — draft ONE field, and only `description` or `instructions`:
-// `DraftableField` in `api/agent-copilot.ts` names those two and nothing else.
-// `name` and `role` are excluded on purpose, and the reason is in
-// `AgentFields.tsx`: "drafting a `name` or a `role` is deliberately not on the
-// table — a role is what delegation grounds on, so a drafted one would change
-// who the company routes work to."
+// There was no such route for a teammate, and the first version of this module
+// treated that as fixed. The two that existed — `draftAgentField`
+// (`/team/<id>/draft`) and `draftNewAgentField` (`/team/draft`) — draft ONE
+// field, and only `description` or `instructions`; `DraftableField` excludes
+// `name` and `role` on purpose, and `AgentFields.tsx` gives the reason: "a role
+// is what delegation grounds on, so a drafted one would change who the company
+// routes work to."
 //
-// So the copilot structurally cannot fill this dialog in before the write. What
-// it CAN do is fill the teammate in afterwards, on the detail page, where
-// `AgentDetailView` already wires both fields to it. That is why the reduced
-// dialog creates first and lands the operator on `#/team/<id>?edit` — the
-// redirect is not a courtesy at the end of the flow, it is the half of the flow
-// that does the drafting.
+// **Read that reason against the case it is refusing.** It is about *editing a
+// teammate that exists*: work is already routed to it, and a model re-pointing
+// that without the operator choosing to is the harm. At creation there is
+// nothing to re-route — the teammate does not exist, nothing is addressed to
+// it, no orchestrator has seen it. So the exclusion protects a property that
+// the create path does not have, and inheriting it here bought nothing and cost
+// everything: with no route to ask, this module cut the operator's sentence at
+// sixty characters and stored the front half as a permanent job title.
+//
+// So the route exists now, creation-only: `POST {scope}/team/design`
+// (`designTeammate`) takes a name and a sentence and answers with a role, a
+// mandate and a persona, in one pass, before anything is written.
+// `/team/<id>/draft` still refuses anything but the two prose fields, and takes
+// an agent id — which is exactly why the new one takes none.
+//
+// The redirect to `#/team/<id>?edit` stays, and it is worth being precise about
+// what it now does. It is **not** where the drafting happens — that claim was
+// made here before and it was false: landing on that page enabled a copilot
+// button and nothing else, so a teammate sat with an empty persona until the
+// operator noticed and prompted it. The drafting happens on Create. The
+// redirect is what puts the three designed fields in front of the operator, in
+// editable boxes, so a role a model wrote is read before it can matter.
 //
 // ## What the reduced dialog therefore asks for
 //
@@ -35,13 +50,32 @@
 // send. The workflow module can afford that because it is the fallback for one
 // rare path ("Create it anyway"); here it would be the only path.
 //
-// The role is not split out of the sentence either, for the same reason at a
-// smaller scale — a clause is not reliably the job. It is the operator's
-// sentence entire, or it is nothing and the full form asks for one; role cannot
-// simply be left blank, because both the teammate's prompts are written from it
-// and the detail page's copilot refuses to draft without one. See
-// {@link roleFromDescription}.
+// ## Where the role, the mandate and the persona come from
+//
+// From the model, in one pass, before the write — `POST {scope}/team/design`
+// (`designTeammate`). Not from a split of the sentence. This module used to
+// carry a `roleFromDescription` that took the first clause and cut it at sixty
+// characters with an ellipsis, and every one of its failures was a **stored**
+// record: "Runs wholesale outreach to boutique retailers and keeps the…" as a
+// permanent job title, "Every Monday" for a sentence that opened with a
+// frequency, a 60-character cut for any language whose punctuation the class
+// did not name. A split cannot tell a job from an adverbial and no tuning makes
+// it able to.
+//
+// The host's design route is creation-only and takes no agent id, which is what
+// keeps `DraftableField`'s exclusion of `role` intact where it means something:
+// that rule protects an *existing* teammate's delegation grounding from being
+// re-pointed by a model, and a teammate that does not exist has none. See
+// `designTeammate` in `api/agent-copilot.ts` and `design_teammate` on the host.
+//
+// When the pass cannot run — no model, provider down, unreadable answer, token
+// ceiling reached — nothing is written and the operator gets the full form
+// carrying what they typed, with the host's own reason. That is the same answer
+// an `echo` company gets, and it is the only honest one: there is nothing to
+// derive a job title from but the sentence, and cutting the sentence up is what
+// this replaced.
 
+import type { TeammateDesign } from "@/api/agent-copilot";
 import type { CognitionPath } from "@/api/inference";
 
 /**
@@ -92,25 +126,27 @@ export type AddTeammateSurface = "describe" | "form";
  * `record.mint_agent_id(&body.name)` (`src/ports/types.rs`), which sweeps
  * `<slug>_2`, `<slug>_3` … until it finds a free one, so two teammates named
  * the same thing both create. The only hand-over this dialog needs is
- * `roleUnderivable`.
+ * `designRefused`.
  */
 export function addTeammateSurface(args: {
   /** The company's cognition path; `null` while unread or on a host without the route. */
   cognition: CognitionPath | null;
   /**
-   * Whether a Create was already attempted and the sentence yielded no role.
+   * Whether a Create was already attempted and the design pass could not
+   * produce a teammate.
    *
-   * The one dead end the reduced dialog can reach. {@link roleFromDescription}
-   * answers `""` twice: for a description with no letter or digit in it
-   * ("🎉🎉"), and for one too long to be a role at all. A blank role must
-   * never be written — see that function for the four things it breaks — and a
-   * truncated one must never be stored, so both refusals arrive here. The
-   * operator is handed the full form carrying what they did type, rather than a
-   * Create button that cannot work or a job title assembled by machine out of
-   * half their sentence. The reduced dialog never dead-ends, which is the same
-   * promise `WorkflowCreateDialog` makes with its `writeRefused` input.
+   * The one dead end the reduced dialog can reach, and the reduced dialog never
+   * dead-ends — the same promise `WorkflowCreateDialog` makes with its
+   * `writeRefused` input. All four host refusals arrive here (`no_model`,
+   * `model_unreachable`, `unreadable`, `budget_exhausted`), because the
+   * operator's move is the same for all four even though the *reason* they are
+   * shown differs: take the full form, which is carrying what they typed, and
+   * write the fields themselves.
+   *
+   * Nothing is written on this path. A teammate is created only from a design
+   * the host returned whole.
    */
-  roleUnderivable: boolean;
+  designRefused: boolean;
 }): AddTeammateSurface {
   // Issue #753: `echo` is the offline brain, and the reduced dialog is a
   // handoff — it collects a name and a sentence and sends the operator to
@@ -131,110 +167,8 @@ export function addTeammateSurface(args: {
   // form" is not a decision to inherit. #1988's dialog had a whole-thing draft
   // route behind it; this one does not. The reason above is this dialog's own.
   if (args.cognition === "echo") return "form";
-  if (args.roleUnderivable) return "form";
+  if (args.designRefused) return "form";
   return "describe";
-}
-
-/**
- * The longest sentence that can stand in as a role.
- *
- * A bound rather than a truncation point — see {@link roleFromDescription}.
- * Sized against what a role is actually read as rather than picked round: the
- * two consumers are `persona_prompt`'s "You are {name}, the {role} at
- * {company}." and the orchestrator's `id — role` Team block, both of which
- * carry one clause comfortably and neither of which carries a paragraph. Every
- * role shipped in `companies/` and `globals/` today is under 25 characters;
- * 120 leaves a whole descriptive sentence ("Runs wholesale outreach to boutique
- * retailers and keeps the stockist pipeline warm", 82) inside the bound, and
- * puts a two-sentence answer outside it, which is the line worth drawing: one
- * sentence about a job is a verbose role, two is a description.
- */
-const ROLE_CAP = 120;
-
-/**
- * A role from the sentence the operator typed.
- *
- * ## Why the reduced dialog derives a role at all rather than sending none
- *
- * Blank would be the easy answer and it is the wrong one, in four places that
- * all read `role` and none of which the operator would be told about:
- *
- * 1. **The system prompt interpolates it unguarded.** `persona_prompt`
- *    (`src/company/prompt.rs`) formats `"You are {name}, the {role} at
- *    {company}."` — the neighbouring `description` and `instructions` blocks are
- *    blank-guarded and the role is not, so a blank one ships the teammate a
- *    prompt reading "You are Dana, the  at Acme."
- * 2. **Delegation reads it.** The orchestrator's Team block
- *    (`src/harness/built_in/orchestrator.rs`) and the auto-responder's
- *    channel-member block (`src/harness/built_in/selector.rs`) both render
- *    `id — role`. Routing still grounds on the id, so nothing errors; the model
- *    simply has no job description to choose anyone on.
- * 3. **The detail page's copilot disables itself on a blank role**
- *    (`disabled={saving || cognition === "echo" || !draft.role.trim()}` in
- *    `AgentDetailView.tsx`), and its Save is dead while a required field is
- *    empty. That is precisely the page this dialog hands off to: the operator
- *    would land beside the copilot and find it switched off, over a form that
- *    cannot be saved until they type the field this dialog stopped asking for.
- * 4. **The host will not catch it.** `POST /team` is the one write path that
- *    does not validate the field — `PATCH …/team/{id}`, the orchestrator's
- *    `add_agent` tool, `company.toml` and `agents/<id>.toml` all refuse a blank
- *    role, and the setup roster proposal drops the agent. Nothing in the
- *    repository produces a stored empty role today, so one would be a first.
- *
- * ## The whole sentence, or nothing — and never a piece of one
- *
- * This used to take the first clause (`description.split(/[.;\n,!?]/, 1)[0]`)
- * and truncate it at 60 characters with a literal `…`. Both halves of that were
- * wrong, and wrong in the one way that matters here: the result is **stored**,
- * as the teammate's permanent job title, read back on every roster card, in the
- * persona line and in the delegation Team block. All four failures below were
- * reproduced against a live host, creating the teammate and reading the record
- * back over `GET …/team/<id>`:
- *
- * - **Truncation minted a job title out of half a sentence.** "Runs wholesale
- *   outreach to boutique retailers and keeps the stockist pipeline warm." has
- *   no clause break — extremely ordinary phrasing — so it was stored as
- *   `"Runs wholesale outreach to boutique retailers and keeps the…"`, ellipsis
- *   and all, and shipped into the persona as "You are Sable, the Runs wholesale
- *   outreach to boutique retailers and keeps the… at Wick & Wax Co."
- * - **The first clause is often not the job.** "Every Monday, reconciles the ad
- *   spend against the invoices." stored the role `"Every Monday"`. A leading
- *   adverbial is where an English sentence puts *when*, not *what*, and no
- *   split can tell the two apart.
- * - **`split(…, 1)` takes the first element, not the first non-empty one**, so
- *   a description opening with a delimiter ("\n\nHello", "... ", "— ") derived
- *   `""` from a sentence that plainly had a job in it.
- * - **CJK never split at all**: `，。、；！？` are absent from that character
- *   class, so a Chinese or Japanese description became a 60-character cut.
- *
- * So: no splitting, and no truncation. A role is either the operator's sentence
- * *entire* — their own words, unedited, which is the line the copilot is
- * deliberately kept on the other side of — or it is nothing, and nothing means
- * the caller hands over the full form and asks. A truncated role is worse than
- * no role, because no role is a question the operator gets to answer and a
- * truncated one is a permanent record they were never shown.
- *
- * The one liberty taken is a trailing sentence terminator: a role is a phrase,
- * so "Runs paid acquisition and reports on ROAS." stores without its full stop.
- *
- * Returns `""` when the description cannot serve as a role — no letter or digit
- * in it ("🎉🎉"), or longer than {@link ROLE_CAP}. The caller must treat that as
- * "no role derived" and ask for one; it must never write a blank role, which is
- * cases 1–4 above.
- */
-export function roleFromDescription(description: string): string {
-  const collapsed = description.replace(/\s+/g, " ").trim();
-  // A role is a phrase; the sentence it came from was punctuated as a sentence.
-  // Full-width terminators too, so a Chinese or Japanese description is read as
-  // carefully as an English one — the class that is NOT here is `\p{P}` whole,
-  // which would eat the closing bracket off "Runs ads (paid)".
-  const phrase = collapsed.replace(/[.,;:!?…。，、；：！？]+$/u, "").trimEnd();
-  // Nothing a person could read as a job. Emoji, punctuation and whitespace all
-  // land here, which is what the hand-over exists for.
-  if (!/[\p{L}\p{N}]/u.test(phrase)) return "";
-  // Too long to BE a role. Deliberately not truncated: see above.
-  if (phrase.length > ROLE_CAP) return "";
-  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
 /** What the reduced dialog collects, before it is turned into a create. */
@@ -243,21 +177,63 @@ export interface DescribedTeammate {
   description: string;
 }
 
+/** What the reduced dialog's Create writes, once the host has designed it. */
+export interface DesignedTeammateFields {
+  name: string;
+  role: string;
+  description: string;
+  instructions: string;
+}
+
 /**
- * The teammate a described one amounts to, or `null` when the description
- * yields no role.
+ * Why the reduced dialog's Create cannot run yet, or `null` when it can.
  *
- * Its own function so the "what actually gets written" question has a single
- * tested answer, rather than being assembled inline in two dialogs that would
- * then drift. `null` is the hand-over signal: show the full form instead of a
- * Create that would write a role-less teammate.
+ * Here rather than inline in each dialog because both of them ask it and their
+ * two copies had already begun to differ in wording. Nothing about it is
+ * clever; what matters is that there is one answer.
  */
-export function describedTeammateFields(
+export function describeBlocked(described: DescribedTeammate): string | null {
+  if (!described.name.trim()) return "A name is required.";
+  if (!described.description.trim()) return "Say what they should do.";
+  return null;
+}
+
+/**
+ * What `POST {scope}/team` is sent, given what the operator typed and what the
+ * host designed — or `null` when the design cannot be written.
+ *
+ * ## Why the name is the operator's and the other three are the model's
+ *
+ * The name is the one thing no pass can produce: it is how the teammate is
+ * addressed, on every roster card and beside every message it sends, and a
+ * model asked for one either invents a person or restates the job. The operator
+ * types it, and it is sent exactly as typed.
+ *
+ * Role, mandate and persona are the model's, together, from the one sentence.
+ * They are not stitched from three separate answers: a persona written against
+ * a role that was drafted in a different call can disagree with it, and
+ * reconciling that is precisely the work the reduced dialog exists to save.
+ *
+ * ## Why this can still answer `null`
+ *
+ * A design that refused carries no fields, and a design missing any one of the
+ * three is not a partial success to salvage — a teammate with a real mandate
+ * and a fragment for a role is what this whole change removes, and it looks
+ * finished on screen. All-or-nothing here, hand-over in the dialog.
+ */
+export function designedTeammateFields(
   described: DescribedTeammate,
-): { name: string; role: string; description: string } | null {
+  design: TeammateDesign,
+): DesignedTeammateFields | null {
   const name = described.name.trim();
-  const description = described.description.trim();
-  const role = roleFromDescription(description);
-  if (!name || !description || !role) return null;
-  return { name, role, description };
+  const role = design.role?.trim() ?? "";
+  const description = design.description?.trim() ?? "";
+  const instructions = design.instructions?.trim() ?? "";
+  if (!name || !role || !description || !instructions) return null;
+  // A designed record must never carry the failure the split produced. The host
+  // refuses to truncate a role and this asserts it a second time, because the
+  // console is where the operator would meet it and this is the last place that
+  // can decline to write one.
+  if (role.includes("…")) return null;
+  return { name, role, description, instructions };
 }

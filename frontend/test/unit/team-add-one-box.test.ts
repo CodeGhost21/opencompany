@@ -50,6 +50,7 @@ const api = vi.hoisted(() => ({
   listPeople: vi.fn(),
   setInboxEnabled: vi.fn(),
   getInferenceStatus: vi.fn(),
+  designTeammate: vi.fn(),
 }));
 
 vi.mock("@/api/tasks", () => ({ listTasks: api.listTasks }));
@@ -60,6 +61,12 @@ vi.mock("@/lib/board-columns", () => ({
 vi.mock("@/api/auth", () => ({ me: api.fetchMe, listPeople: api.listPeople }));
 vi.mock("@/api/inbox", () => ({ setInboxEnabled: api.setInboxEnabled }));
 vi.mock("@/api/inference", () => ({ getInferenceStatus: api.getInferenceStatus }));
+// Only the design call is stubbed; `refusalNotice` and `draftNewAgentField` stay
+// real, so the hand-over notice these tests read is the operator's own sentence.
+vi.mock("@/api/agent-copilot", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/agent-copilot")>()),
+  designTeammate: api.designTeammate,
+}));
 
 const { TeamView } = await import("@/views/TeamView");
 
@@ -96,6 +103,12 @@ beforeEach(() => {
   api.fetchMe.mockResolvedValue({ id: "u1", role: "admin" });
   api.listPeople.mockResolvedValue([]);
   api.getInferenceStatus.mockResolvedValue({ cognition: "harness" });
+  api.designTeammate.mockResolvedValue({
+    source: "model",
+    role: "Growth Marketer",
+    description: "Owns paid acquisition and the weekly ROAS report.",
+    instructions: "Report ROAS every Monday. Never raise a budget without sign-off.",
+  });
 });
 
 afterEach(async () => {
@@ -198,7 +211,7 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
     ).toBeUndefined();
   });
 
-  it("creates from the box, deriving a role, and lands on the teammate's edit form", async () => {
+  it("writes the teammate the host designed, and lands on its edit form", async () => {
     await mount();
     await openDialog();
 
@@ -206,36 +219,45 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
     type("team-describe-box", "Runs paid acquisition, and reports on ROAS weekly.");
     await pressCreate();
 
+    // The sentence reached the host whole. Nothing on this side split it.
+    expect(api.designTeammate.mock.calls[0][2]).toEqual({
+      name: "Nova",
+      description: "Runs paid acquisition, and reports on ROAS weekly.",
+    });
+
     expect(added).toHaveLength(1);
     expect(added[0].name).toBe("Nova");
-    // The operator's whole sentence, unedited and un-truncated. Never blank: a
-    // blank role breaks the teammate's own system prompt and switches off the
-    // copilot on the page this create is about to open. And never a piece of
-    // one — the clause split that used to run here answered "Runs paid
-    // acquisition" and dropped the rest of the job on the floor. See
-    // `roleFromDescription`.
-    expect(added[0].role).toBe("Runs paid acquisition, and reports on ROAS weekly");
-    expect(added[0].description).toBe("Runs paid acquisition, and reports on ROAS weekly.");
-    // Not collected here — the copilot drafts it on the detail page, grounded
-    // in a teammate the host has actually stored.
-    expect(added[0].instructions).toBeUndefined();
+    // A job title. The clause split that used to run here answered "Runs paid
+    // acquisition" for this sentence, dropped the rest of the job on the floor,
+    // and stored the fragment as the teammate's permanent role.
+    expect(added[0].role).toBe("Growth Marketer");
+    expect(added[0].description).toBe("Owns paid acquisition and the weekly ROAS report.");
+    // And a persona at birth, rather than an empty field and a promise. This is
+    // the assertion that would have caught the state the operator found: a
+    // teammate holding one sentence three times over and no instructions.
+    expect(added[0].instructions).toBe(
+      "Report ROAS every Monday. Never raise a budget without sign-off.",
+    );
+    expect(added[0].instructions).not.toBe(added[0].description);
 
-    // The redirect is the other half of the flow, not a flourish at the end of
-    // it: `edit` is what puts the copilot on screen when the operator arrives.
+    // The redirect is what puts the three designed fields in front of the
+    // operator, editable, so a role a model wrote is read before it matters.
     expect(opened).toEqual([["nova", { edit: true }]]);
   });
 
-  it("hands over the full form when the description yields no role", async () => {
+  it("hands over the full form when the host cannot design the teammate", async () => {
+    api.designTeammate.mockResolvedValue({ source: "unavailable", reason: "no_model" });
     await mount();
     await openDialog();
 
     type("team-describe-name", "Nova");
-    type("team-describe-box", "...");
+    type("team-describe-box", "Runs paid acquisition.");
     await pressCreate();
 
-    // Nothing was written. A teammate with a blank role would be a first in
-    // this codebase — every other write path refuses one — and `POST /team` is
-    // the one route that would have accepted it.
+    // Nothing was written. A teammate is created only from a design that came
+    // back whole — never from a fragment of the operator's own sentence, and
+    // never with a blank role, which every other write path in the repository
+    // refuses and which `POST /team` now refuses too.
     expect(added).toHaveLength(0);
     expect(opened).toHaveLength(0);
 
@@ -248,7 +270,7 @@ describe("the reduced Add-teammate dialog (issue #1989)", () => {
     ).toBe("Nova");
     expect(
       document.querySelector<HTMLTextAreaElement>('[data-testid="agent-field-description"]')!.value,
-    ).toBe("...");
+    ).toBe("Runs paid acquisition.");
     expect(document.querySelector('[data-testid="team-add-handover"]')).not.toBeNull();
   });
 
@@ -280,10 +302,11 @@ describe("closing the Add-teammate dialog (issue #1989)", () => {
   // cleared everything. That asymmetry is what these two tests pin.
 
   async function handOver() {
+    api.designTeammate.mockResolvedValue({ source: "unavailable", reason: "no_model" });
     await mount();
     await openDialog();
     type("team-describe-name", "Nova");
-    type("team-describe-box", "...");
+    type("team-describe-box", "Runs paid acquisition.");
     await pressCreate();
     expect(document.querySelector(roleField), "the hand-over must have happened").not.toBeNull();
   }

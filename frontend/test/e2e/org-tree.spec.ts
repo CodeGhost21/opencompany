@@ -110,11 +110,23 @@ let desks: Desk[] = [];
  */
 let cognition = "echo";
 
+/**
+ * Whether the design pass answers with a teammate (issue #1989).
+ *
+ * `false` is the refusal path: the reduced dialog writes nothing and hands the
+ * operator the full form carrying what they typed. Its own switch rather than a
+ * cognition value, because the two failures are different — a company with no
+ * model never shows the reduced dialog at all, while a company whose provider
+ * is down shows it and then cannot finish.
+ */
+let designAvailable = true;
+
 function reset() {
   writes = [];
   roster = [...ROSTER];
   teamWriteAvailable = true;
   cognition = "echo";
+  designAvailable = true;
   deskAddAvailable = true;
   desksReadFailsAfterCreate = false;
   desksReadable = true;
@@ -262,6 +274,23 @@ async function mockApi(page: Page) {
       return json(desks);
     }
 
+    // POST .../team/design — the pass that turns the reduced dialog's one
+    // sentence into a role, a mandate and a persona before anything is written
+    // (issue #1989). Answered here rather than by the catch-all because the
+    // catch-all's `[]` has no `source`, which reads as a refusal and would send
+    // every reduced-dialog test to the full form.
+    if (path.endsWith("/team/design") && method === "POST") {
+      const body = request.postDataJSON() as { name?: string; description?: string };
+      writes.push({ method, path, body });
+      if (!designAvailable)
+        return json({ source: "unavailable", reason: "model_unreachable" });
+      return json({
+        source: "model",
+        role: "Wholesale Account Manager",
+        description: "Owns the stockist pipeline and the terms behind it.",
+        instructions: "Check terms against the price list before quoting.",
+      });
+    }
     if (path.endsWith("/team") && method === "POST") {
       if (!teamWriteAvailable) return json({ error: "not supported" }, 404);
       const body = request.postDataJSON() as {
@@ -611,10 +640,11 @@ test("#1989 the reduced dialog derives a role and lands on the teammate's page",
   page,
 }) => {
   // The redesign, on the surface three of its four entry points share. The
-  // sentence below is the one that made the derivation worth fixing: no comma
-  // and no semicolon, which is ordinary English and which the clause split this
+  // sentence below is the one that made this worth fixing: no comma and no
+  // semicolon, which is ordinary English, and which the clause split this
   // replaced turned into "Runs wholesale outreach to boutique retailers and
-  // keeps the…" — ellipsis included, stored as the teammate's job title.
+  // keeps the…" — ellipsis included, stored as the teammate's job title. What
+  // goes on the wire now is the sentence itself, and what comes back is a job.
   cognition = "harness";
   const sentence =
     "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.";
@@ -638,18 +668,33 @@ test("#1989 the reduced dialog derives a role and lands on the teammate's page",
   // on the read-only profile instead and the reduction is fields taken away.
   await expect(page).toHaveURL(/#\/team\/new-5\?edit/, { timeout: 30_000 });
 
+  // The sentence reached the design pass whole — not split, not cut, not
+  // pre-chewed on the console side.
+  const designed = writes.find(
+    (write) => write.method === "POST" && write.path.endsWith("/team/design"),
+  );
+  expect(designed, "the host designs the teammate before anything is written").toBeTruthy();
+  expect(designed!.body).toEqual({ name: "Sable", description: sentence });
+
   const created = writes.find(
     (write) => write.method === "POST" && write.path.endsWith("/team"),
   );
   expect(created, "the teammate is written before the operator is taken away").toBeTruthy();
-  // The operator's whole sentence, un-truncated and with no ellipsis in it. The
-  // role is what `persona_prompt` interpolates and what the orchestrator's Team
-  // block renders, so a piece of a sentence here is a piece of a sentence in
-  // every prompt this teammate is ever built with.
-  expect((created!.body as { role: string }).role).toBe(
-    "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm",
-  );
-  expect((created!.body as { description: string }).description).toBe(sentence);
+  const body = created!.body as {
+    role: string;
+    description: string;
+    instructions: string;
+  };
+  // A job title, and the three fields properly apart. The role is what
+  // `persona_prompt` interpolates and what the orchestrator's Team block
+  // renders, so a piece of a sentence here is a piece of a sentence in every
+  // prompt this teammate is ever built with.
+  expect(body.role).toBe("Wholesale Account Manager");
+  expect(body.role).not.toContain("…");
+  expect(body.description).toBe("Owns the stockist pipeline and the terms behind it.");
+  // Born with a persona, rather than with an empty one and a promise.
+  expect(body.instructions).toBe("Check terms against the price list before quoting.");
+  expect(body.instructions).not.toBe(body.description);
 
   // And the desk placement happened first: the operator is told what half-landed
   // on the chart they are leaving, and only then taken off it.
@@ -659,6 +704,36 @@ test("#1989 the reduced dialog derives a role and lands on the teammate's page",
         write.method === "POST" && write.path.endsWith("/desks/growth/members"),
     ),
   ).toBe(true);
+});
+
+test("#1989 a design the host cannot produce writes nothing and hands over the form", async ({
+  page,
+}) => {
+  // The other half of the reduced dialog's contract, and the half that has to
+  // hold for the redesign to be safe at all: when the pass cannot run, nothing
+  // is written. The previous version wrote a teammate regardless, because it
+  // derived the role itself by cutting the sentence — so there was no failure
+  // path, only a worse success.
+  cognition = "harness";
+  designAvailable = false;
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "Add teammate" }).first().click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByTestId("team-describe-name").fill("Sable");
+  await dialog.getByTestId("team-describe-box").fill("Runs wholesale outreach.");
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
+
+  // The full form, carrying what was typed, with the host's own reason.
+  await expect(dialog.getByLabel("Role")).toBeVisible();
+  await expect(dialog.getByTestId("chat-add-handover")).toContainText("didn't answer in time");
+  await expect(dialog.getByLabel("Name")).toHaveValue("Sable");
+  // And nothing was created.
+  expect(
+    writes.some((write) => write.method === "POST" && write.path.endsWith("/team")),
+  ).toBe(false);
+  await expect(page).toHaveURL(/#\/company/);
 });
 
 test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {

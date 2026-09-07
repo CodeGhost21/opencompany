@@ -184,12 +184,14 @@ test("desk membership is on the agent, and an agent is reachable by link", async
 
 test("an agent defined in the console can be read back and edited", async ({ page }) => {
   const role = "Spec Runner";
-  // The reduced dialog collects ONE sentence and derives the role from it, so
-  // on that surface the role and the description are necessarily the same
-  // string. Seeding both with it on the full form too is what lets the rest of
-  // this test be a single walk rather than two — everything below asserts on
-  // the same record whichever dialog wrote it.
-  const seeded = role;
+  // What the record holds before the edit. On the full form it is what this
+  // spec types; on the reduced dialog it is what the host's design pass wrote,
+  // which no spec can predict — so it is read off the form the create lands on
+  // rather than asserted, and what IS asserted there is the property that
+  // matters: three separate, non-empty fields and a role that is a job title
+  // rather than a slice of the sentence.
+  let seededRole = role;
+  let seededDescription = "Original instructions.";
 
   // The `try` opens BEFORE the teammate is created, not after. The POST lands
   // as soon as the dialog is submitted, so a failure in the assertion that
@@ -208,28 +210,52 @@ test("an agent defined in the console can be read back and edited", async ({ pag
       // the inbox are not on this dialog at all.
       await expect(dialog.getByTestId("agent-field-role")).toHaveCount(0);
       await dialog.getByTestId("team-describe-name").fill("Detail Spec");
-      await dialog.getByTestId("team-describe-box").fill(seeded);
+      await dialog
+        .getByTestId("team-describe-box")
+        .fill("Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.");
       await dialog.getByRole("button", { name: "Add teammate" }).click();
-      // The redirect is the other half of the reduced dialog rather than a
-      // flourish after it: `?edit` is what puts the copilot on screen, and the
-      // fields this dialog stopped asking for are the ones it drafts.
-      await expect(page).toHaveURL(/#\/team\/[^?]+\?edit/, { timeout: 30_000 });
+      // The design pass is a model call, so this is the slow step of the walk.
+      await expect(page).toHaveURL(/#\/team\/[^?]+\?edit/, { timeout: 60_000 });
+
+      // What the host designed, read off the form the create opened — which is
+      // the point of the redirect: a role a model wrote is in front of the
+      // operator, editable, before it can matter.
+      seededRole = await page.getByTestId("agent-field-role").inputValue();
+      seededDescription = await page.getByTestId("agent-field-description").inputValue();
+      const instructions = await page.getByTestId("agent-field-instructions").inputValue();
+
+      // The teeth on the whole redesign, and every one of these was false
+      // before the design pass existed: the role was the first sixty characters
+      // of the sentence with an ellipsis on the end, the description was the
+      // raw sentence, and the instructions were empty.
+      expect(seededRole, "a designed role is a job title").not.toContain("…");
+      expect(seededRole.trim().length).toBeGreaterThan(0);
+      expect(seededRole.length, "a job title, not a sentence").toBeLessThanOrEqual(60);
+      expect(seededDescription.trim().length).toBeGreaterThan(0);
+      expect(instructions.trim().length, "born with a persona, not a promise").toBeGreaterThan(0);
+      expect(instructions.trim(), "three fields, not one repeated").not.toBe(
+        seededDescription.trim(),
+      );
+      expect(seededRole.trim()).not.toBe(seededDescription.trim());
+
       // Back to the roster, so the walk below is the same walk on both hosts.
       await goToTeam(page);
     } else {
       await expect(dialog.getByTestId("agent-field-role")).toBeVisible();
       await dialog.getByTestId("agent-field-name").fill("Detail Spec");
       await dialog.getByTestId("agent-field-role").fill(role);
-      await dialog.getByTestId("agent-field-description").fill(seeded);
+      await dialog.getByTestId("agent-field-description").fill(seededDescription);
       await dialog.getByRole("button", { name: "Add teammate" }).click();
     }
-    await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
+    // By name, not by role: on the reduced dialog the role is the host's and
+    // this spec does not know it until it has read it back.
+    await expect(card(page, "Detail Spec")).toBeVisible({ timeout: 30_000 });
 
     // Open it. This is the half that was impossible: the roster was write-once
     // per member, so iterating on an agent meant deleting it and starting over.
-    await card(page, role).getByTestId("team-card-open").click();
+    await card(page, "Detail Spec").getByTestId("team-card-open").click();
     await expect(page.getByTestId("agent-source")).toHaveText("Added here");
-    await expect(page.getByTestId("agent-description")).toContainText(seeded);
+    await expect(page.getByTestId("agent-description")).toContainText(seededDescription);
 
     // A console-defined agent holds the company's standard grant, so it reads
     // back with the whole allow-list rather than an empty tool list.

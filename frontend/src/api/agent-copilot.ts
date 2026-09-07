@@ -245,3 +245,57 @@ export function draftNewAgentField(
     instructions: teammate.instructions?.trim() || undefined,
   });
 }
+
+/**
+ * A whole teammate, as one design pass wrote it (issue #1989).
+ *
+ * Three fields or none: `source` is `"unavailable"` when the pass could not
+ * run, and `reason` says which of the four. A partial design is not a shape the
+ * host can return — a teammate with a real mandate and a fragment for a role is
+ * exactly what this replaced, and it looks finished.
+ */
+export interface TeammateDesign {
+  /** The job title. Absent on a refusal. */
+  role?: string;
+  /** The mandate — one line on what this teammate owns. Absent on a refusal. */
+  description?: string;
+  /** The standing instructions. Absent on a refusal. */
+  instructions?: string;
+  /** `"model"` when a model designed it, `"unavailable"` when none could. */
+  source: "model" | "unavailable";
+  /** Why there is none. Present only when `source` is `"unavailable"`. */
+  reason?: DraftRefusal;
+}
+
+/**
+ * Ask the host to design a whole teammate — role, mandate and persona — from
+ * the name and the sentence the reduced Add-teammate dialog collected.
+ *
+ * ## Why this is not `draftNewAgentField` with `field: "role"`
+ *
+ * {@link DraftableField} excludes `role` and keeps excluding it. Its reason is
+ * that a role is what delegation grounds on, so a drafted one would change who
+ * the company routes work to — a statement about *editing a teammate that
+ * exists*. This route takes no agent id at all, so there is no teammate whose
+ * routing it could change; it is the creation case, where the alternative to a
+ * designed role was the console cutting the operator's sentence at sixty
+ * characters and storing the front half as a job title.
+ *
+ * It is also one call rather than three. The three fields are not independent —
+ * a persona written against a separately-drafted role can disagree with it —
+ * and the operator is watching a spinner while this runs.
+ *
+ * Never throws for a *design* reason: all four refusals come back as a `200`
+ * carrying `source: "unavailable"`, because none of them is a failure of the
+ * request. A rejection here is a genuine transport, auth or not-found failure.
+ */
+export function designTeammate(
+  client: OpenCompanyClient,
+  company: string | null,
+  teammate: { name?: string; description: string },
+): Promise<TeammateDesign> {
+  return client.post<TeammateDesign>(`${client.scopeFor(company)}/team/design`, {
+    name: teammate.name?.trim() || undefined,
+    description: teammate.description.trim(),
+  });
+}

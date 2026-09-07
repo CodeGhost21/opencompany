@@ -24,8 +24,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { NewMemberFields } from "@/views/chat/AddMemberDialog";
 
-const api = vi.hoisted(() => ({ getInferenceStatus: vi.fn() }));
+const api = vi.hoisted(() => ({ getInferenceStatus: vi.fn(), designTeammate: vi.fn() }));
 vi.mock("@/api/inference", () => ({ getInferenceStatus: api.getInferenceStatus }));
+// Only `designTeammate` is stubbed; `refusalNotice` is the real one, so the
+// notice these tests assert on is the sentence an operator actually reads.
+vi.mock("@/api/agent-copilot", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/agent-copilot")>()),
+  designTeammate: api.designTeammate,
+}));
 
 const { AddMemberDialog } = await import("@/views/chat/AddMemberDialog");
 
@@ -48,6 +54,12 @@ beforeEach(() => {
   open = false;
   vi.clearAllMocks();
   api.getInferenceStatus.mockResolvedValue({ cognition: "harness" });
+  api.designTeammate.mockResolvedValue({
+    source: "model",
+    role: "Wholesale Account Manager",
+    description: "Owns the stockist pipeline and the terms behind it.",
+    instructions: "Check terms against the price list before quoting.",
+  });
 });
 
 afterEach(async () => {
@@ -127,40 +139,71 @@ const box = '[data-testid="team-describe-box"]';
 const roleField = "#member-role";
 
 describe("chat's reduced Add-teammate dialog (issue #1989)", () => {
-  it("renders one box, and creates with the sentence as the role", async () => {
+  it("renders one box, and writes the teammate the host designed", async () => {
     await openDialog();
 
     expect(document.querySelector(box), "the description box must be on screen").not.toBeNull();
-    expect(document.querySelector(roleField), "Role is derived, not asked for").toBeNull();
+    expect(document.querySelector(roleField), "Role is designed, not asked for").toBeNull();
 
-    type("team-describe-name", "Nova");
+    type("team-describe-name", "Sable");
     type("team-describe-box", "Runs wholesale outreach and keeps the stockist pipeline warm.");
     await pressCreate();
 
+    // The sentence went to the host whole, with the name for grounding. It was
+    // NOT split, cut or otherwise pre-chewed on this side — that is the defect
+    // the design pass replaced.
+    expect(api.designTeammate).toHaveBeenCalledTimes(1);
+    expect(api.designTeammate.mock.calls[0][2]).toEqual({
+      name: "Sable",
+      description: "Runs wholesale outreach and keeps the stockist pipeline warm.",
+    });
+
     expect(added).toHaveLength(1);
-    // Whole, un-truncated, and no ellipsis: this description has no clause
-    // break, which is the case the old first-clause-then-cut derivation turned
-    // into "Runs wholesale outreach and keeps the…" and stored as a job title.
-    expect(added[0].role).toBe("Runs wholesale outreach and keeps the stockist pipeline warm");
+    // A job title, not a sentence with its end sliced off. This description has
+    // no clause break, which is the case the old derivation turned into
+    // "Runs wholesale outreach and keeps the…" and stored as a role.
+    expect(added[0].role).toBe("Wholesale Account Manager");
+    expect(added[0].description).toBe("Owns the stockist pipeline and the terms behind it.");
+    // Born with a persona rather than with an empty one and a promise that
+    // somebody will write it later.
+    expect(added[0].instructions).toBe("Check terms against the price list before quoting.");
     expect(added[0].landOnProfile).toBe(true);
   });
 
-  it("hands over the full form rather than truncating a long description", async () => {
+  it("hands over the full form, saying why, when the host cannot design", async () => {
+    api.designTeammate.mockResolvedValue({ source: "unavailable", reason: "model_unreachable" });
     await openDialog();
 
     type("team-describe-name", "Sable");
-    type(
-      "team-describe-box",
-      "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline " +
-        "warm. Reports on reorder rates every month, by account.",
-    );
+    type("team-describe-box", "Runs wholesale outreach to boutique retailers.");
     await pressCreate();
 
-    // Nothing written. The operator is asked for a role rather than given one
-    // cut out of the middle of their own sentence.
+    // Nothing written. A teammate is created only from a design that came back
+    // whole — never from a fragment of the operator's own sentence.
     expect(added).toHaveLength(0);
     expect(document.querySelector(roleField), "the full form must be on screen").not.toBeNull();
-    expect(document.querySelector('[data-testid="chat-add-handover"]')).not.toBeNull();
+    const notice = document.querySelector('[data-testid="chat-add-handover"]');
+    expect(notice).not.toBeNull();
+    // The host's own reason, not a sentence of ours: "try again" is the move
+    // here, and it is the wrong move for three of the other four refusals.
+    expect(notice!.textContent).toContain("didn't answer in time");
+  });
+
+  it("refuses to write a part-designed teammate", async () => {
+    // A role and a mandate with no persona is not a partial success to salvage.
+    api.designTeammate.mockResolvedValue({
+      source: "model",
+      role: "Wholesale Account Manager",
+      description: "Owns the stockist pipeline.",
+    });
+    await openDialog();
+
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach to boutique retailers.");
+    await pressCreate();
+
+    expect(added).toHaveLength(0);
+    expect(document.querySelector(roleField)).not.toBeNull();
   });
 
   it("Cancel clears the hand-over and what was typed", async () => {
@@ -170,6 +213,7 @@ describe("chat's reduced Add-teammate dialog (issue #1989)", () => {
     // cancelled rather than escaped retired the reduced dialog for the rest of
     // the page's life.
     await openDialog();
+    api.designTeammate.mockResolvedValue({ source: "unavailable", reason: "no_model" });
     type("team-describe-name", "Nova");
     type("team-describe-box", "...");
     await pressCreate();

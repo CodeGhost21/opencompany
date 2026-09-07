@@ -2132,7 +2132,16 @@ export function ChatView({
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
-        { name: fields.name, role: fields.role, description: fields.description || undefined },
+        {
+          name: fields.name,
+          role: fields.role,
+          description: fields.description || undefined,
+          // Issue #1989: the reduced dialog arrives with a persona the host
+          // designed alongside the role and the mandate, so the teammate is
+          // born complete. Omitted by the full form, which collects none — an
+          // absent key leaves the blueprint's own wording in force.
+          instructions: fields.instructions?.trim() || undefined,
+        },
         company,
       );
     } catch (error) {

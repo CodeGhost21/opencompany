@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mail } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -16,13 +16,26 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { addTeammateSurface, describedTeammateFields } from "@/lib/team-add-surface";
+import { designTeammate, refusalNotice, type DraftRefusal } from "@/api/agent-copilot";
+import {
+  addTeammateSurface,
+  describeBlocked as blockedReason,
+  designedTeammateFields,
+} from "@/lib/team-add-surface";
 import { DescribeTeammate } from "@/views/team/DescribeTeammate";
 
 export interface NewMemberFields {
   name: string;
   role: string;
   description: string;
+  /**
+   * The standing instructions this teammate is born with (issue #1989).
+   *
+   * Set only by the reduced dialog, from the host's design pass. The full form
+   * does not collect one, and a teammate created without it keeps the behaviour
+   * it always had: no persona override, the blueprint's own wording in force.
+   */
+  instructions?: string;
   inbox?: boolean;
   /**
    * Land on the new teammate's detail page with its edit form open, rather than
@@ -56,11 +69,10 @@ interface Props {
  *
  * Two shapes since issue #1989, told apart by `addTeammateSurface`:
  *
- * - **Reduced** — a name and one box. Create writes the teammate and lands the
- *   operator on its detail page with the edit form open, where the copilot
- *   drafts the description and the persona. The role is derived from the
- *   sentence rather than asked for; see `roleFromDescription` for why it cannot
- *   simply be left blank.
+ * - **Reduced** — a name and one box. Create asks the host to design the
+ *   teammate from that sentence — role, mandate and persona in one pass — then
+ *   writes it and lands the operator on its detail page with all three in
+ *   editable boxes. Nothing is written if the design does not come back whole.
  * - **Full** — this dialog's original Name / Role / What they do / inbox form,
  *   byte for byte, for a company whose copilot cannot draft. Hidden, never
  *   deleted: a company on the offline brain would otherwise be locked out of
@@ -74,10 +86,22 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
   /** Everything the reduced dialog collects. */
   const [described, setDescribed] = useState({ name: "", description: "" });
   /**
-   * Whether a Create found no role in that sentence, which retires the reduced
-   * dialog for this open rather than writing a role-less teammate.
+   * Whether a Create asked the host to design this teammate and got nothing
+   * back, which retires the reduced dialog for this open rather than writing a
+   * teammate the model could not finish.
    */
-  const [roleUnderivable, setRoleUnderivable] = useState(false);
+  const [designRefused, setDesignRefused] = useState<DraftRefusal | "unknown" | null>(null);
+  /** A design pass is in flight; the box is held and the button says so. */
+  const [designing, setDesigning] = useState(false);
+  /**
+   * Which design request the operator is still waiting for.
+   *
+   * Bumped by every close and every reset, so an answer for a dialog that has
+   * been shut — or reopened onto a different teammate — is dropped rather than
+   * creating one nobody asked for. The window is real: a design is a model call
+   * and takes seconds.
+   */
+  const attempt = useRef(0);
   /**
    * The cognition path this company booted onto, read while the dialog is open.
    * `null` until the check settles and on a host without the route, which the
@@ -102,13 +126,10 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     };
   }, [open, client, company]);
 
-  const describing = addTeammateSurface({ cognition, roleUnderivable }) === "describe";
+  const describing =
+    addTeammateSurface({ cognition, designRefused: designRefused !== null }) === "describe";
   /** Why the reduced dialog's Create is dead, or `null` when it is not. */
-  const describeBlocked = !described.name.trim()
-    ? "A name is required."
-    : !described.description.trim()
-      ? "Say what they should do."
-      : null;
+  const describeBlocked = blockedReason(described);
 
   function reset() {
     setName("");
@@ -117,8 +138,12 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     setInbox(false);
     setDescribed({ name: "", description: "" });
     // The hand-over lasts for one open: the next add starts reduced again,
-    // because the sentence that could not be read is gone with it.
-    setRoleUnderivable(false);
+    // because the sentence the host could not design from is gone with it.
+    setDesignRefused(null);
+    setDesigning(false);
+    // Abandons any design still in flight, so its answer cannot create a
+    // teammate into a dialog that has been reset under it.
+    attempt.current += 1;
   }
 
   /**
@@ -141,17 +166,40 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     reset();
   }
 
-  function submit() {
+  /**
+   * Hands the operator the full form, carrying what they typed, because the
+   * host could not design this teammate.
+   *
+   * The reduced dialog never dead-ends. Nothing has been written at this point
+   * and nothing will be: a teammate is created only from a design the host
+   * returned whole.
+   */
+  function handOver(reason: DraftRefusal | "unknown") {
+    setName(described.name.trim());
+    setDescription(described.description.trim());
+    setDesignRefused(reason);
+    setDesigning(false);
+  }
+
+  async function submit() {
     if (describing) {
-      const fields = describedTeammateFields(described);
+      if (blockedReason(described)) return;
+      const mine = attempt.current;
+      setDesigning(true);
+      let design;
+      try {
+        design = await designTeammate(client, company, described);
+      } catch {
+        // A transport, auth or not-found failure — not one of the four design
+        // refusals, which arrive as a 200. Treated the same way by the dialog
+        // because the operator's move is the same: take the form.
+        if (attempt.current === mine) handOver("unknown");
+        return;
+      }
+      if (attempt.current !== mine) return;
+      const fields = designedTeammateFields(described, design);
       if (!fields) {
-        // The sentence cannot serve as a role — no letters in it, or too long
-        // to be a job title. Hand over the full form carrying what WAS typed,
-        // rather than writing a teammate whose blank role breaks its own system
-        // prompt, or a truncated one nobody was ever shown.
-        setName(described.name.trim());
-        setDescription(described.description.trim());
-        setRoleUnderivable(true);
+        handOver(design.reason ?? "unknown");
         return;
       }
       onAdd({ ...fields, landOnProfile: true });
@@ -185,6 +233,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
             idPrefix="member-chat"
             name={described.name}
             description={described.description}
+            disabled={designing}
             onNameChange={(next) => setDescribed((d) => ({ ...d, name: next }))}
             onDescriptionChange={(next) =>
               setDescribed((d) => ({ ...d, description: next }))
@@ -195,10 +244,13 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
             {/* Said only when the full form arrived by hand-over, so the
                 operator knows why the dialog changed under them. Never shown on
                 the no-model path, where this form is simply what the dialog is. */}
-            {roleUnderivable && (
+            {designRefused && (
               <p className="text-2xs text-muted-foreground" data-testid="chat-add-handover">
-                We couldn&apos;t read a short role out of that description, so here are
-                all the fields.
+                {/* The host's own reason, not a sentence of ours: "set up a
+                    model", "try again", "say more" and "wait for the period to
+                    reset" are four different next moves, and one line covering
+                    all four could only be too vague to act on. */}
+                {refusalNotice(designRefused === "unknown" ? undefined : designRefused)}
               </p>
             )}
             <div className="grid gap-2">
@@ -247,14 +299,21 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               {describeBlocked}
             </p>
           )}
-          <Button variant="ghost" onClick={close}>
+          <Button variant="ghost" onClick={close} disabled={designing}>
             Cancel
           </Button>
           <Button
-            onClick={submit}
-            disabled={describing ? Boolean(describeBlocked) : !name.trim() || !role.trim()}
+            onClick={() => void submit()}
+            disabled={
+              describing
+                ? Boolean(describeBlocked) || designing
+                : !name.trim() || !role.trim()
+            }
           >
-            Add teammate
+            {/* Says what is happening, because it takes seconds: the host is
+                running a model over the sentence to write the role, the mandate
+                and the persona before anything is created. */}
+            {designing ? "Designing…" : "Add teammate"}
           </Button>
         </DialogFooter>
       </DialogContent>

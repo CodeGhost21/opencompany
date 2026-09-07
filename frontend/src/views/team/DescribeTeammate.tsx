@@ -21,21 +21,20 @@ import { Textarea } from "@/components/ui/textarea";
  * model in this path to name anybody; the only alternative is splitting the
  * sentence, and a teammate's name is not a phrase. "Runs paid acquisition"
  * would then be the name on every roster card, in every member list, and beside
- * every message that teammate sends. The role is not split out either — it is
- * this box's sentence entire or it is nothing, and nothing hands the operator
- * the full form to type one. See `roleFromDescription` for why a piece of a
- * sentence is worse than no sentence at all.
+ * every message that teammate sends. The role is not split out of the sentence
+ * either — it is designed from it, by the model, in the same pass as the
+ * mandate and the persona. See `team-add-surface.ts` for why a split cannot do
+ * that job at all.
  *
  * ## Why there is no copilot control in here
  *
- * There is nothing for it to draft yet. `draftNewAgentField` drafts
- * `description` or `instructions` for a teammate that does not exist, but this
- * box IS the description, in the operator's own words, and the instructions are
- * the field the handoff exists to fill. Create lands on `#/team/<id>?edit`,
- * where `AgentDetailView` wires both fields to the copilot against a teammate
- * the host has actually stored — which is a better grounding than anything this
- * dialog could send, and is the reason the redirect is load-bearing rather than
- * a nicety.
+ * Because the copilot is not a control on this dialog — it is what Create does.
+ * `POST {scope}/team/design` turns this box into a role, a mandate and a
+ * persona in one pass, and the teammate is written from that; there is no field
+ * for an operator to ask about separately, because there is only one box and it
+ * is theirs. The redirect afterwards lands them on all three fields, editable,
+ * so a designed role is read before it can matter — which is the whole reason
+ * the redirect is load-bearing rather than a nicety.
  */
 export function DescribeTeammate({
   idPrefix,
@@ -80,13 +79,17 @@ export function DescribeTeammate({
           placeholder="e.g. Runs paid acquisition and reports on ROAS every week."
           data-testid="team-describe-box"
         />
-        {/* Says where the rest of the teammate comes from, because the fields
-            this dialog used to ask for have not gone away — they are on the
-            page Create lands on, with the copilot beside them. Without this the
-            reduction reads as fields being taken away. */}
+        {/* Says what actually happens next, because the fields this dialog
+            stopped asking for have not gone away — the copilot writes them from
+            this sentence before the teammate is created, and the operator lands
+            on them. An earlier wording promised a copilot that "can draft their
+            instructions" on the page they land on, which was true only in the
+            sense that a button was enabled: nothing drafted until they noticed
+            it and prompted it themselves, and until they did, the teammate held
+            no persona at all. */}
         <p className="text-2xs text-muted-foreground" data-testid="team-describe-hint">
-          You&apos;ll land on their profile, where the copilot can draft their
-          instructions and you can set a budget or an inbox.
+          The copilot writes their role, what they do and their instructions from
+          this, then opens their profile so you can change any of it.
         </p>
       </div>
     </div>
