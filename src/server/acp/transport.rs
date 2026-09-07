@@ -107,7 +107,14 @@ fn owner(auth: &GqlAuth) -> String {
         // the key, or a collision would let a second company's user share a
         // connection binding with the first's.
         GqlAuth::User(user) => format!("user:{}:{}", user.company, user.user_id),
-        GqlAuth::Platform(claims) => format!("platform:{}", claims.tenant),
+        // Canonicalized for the same reason `authorize_address` compares
+        // tenants in this form: `tenant:acme` and `acme` name the same
+        // tenant, and a raw-string key would treat a token whose issuer
+        // format changed (or was rotated to the other form) as a stranger to
+        // its own still-open connection.
+        GqlAuth::Platform(claims) => {
+            format!("platform:{}", crate::app::canonical_tenant(&claims.tenant))
+        }
     }
 }
 
@@ -455,6 +462,7 @@ mod test {
     use crate::ports::users::{UserRecord, UserRole, UserStatus};
     use crate::ports::{Brain, CompanyStore, CycleHost};
     use crate::server::graphql::auth::UserPrincipal;
+    use crate::server::platform_auth::PlatformClaims;
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, ports::types::CompanyRecord};
 
@@ -547,6 +555,24 @@ mod test {
             credential: crate::ports::SessionKind::Browser,
         });
         assert_ne!(owner(&same_id_in_acme), owner(&same_id_in_globex));
+    }
+
+    #[test]
+    fn owner_canonicalizes_the_platform_tenant() {
+        // `authorize_address` compares tenants in canonical_tenant form, so a
+        // raw-string owner key would treat `tenant:acme` and `acme` as two
+        // different owners even though they name the same tenant.
+        let prefixed = GqlAuth::Platform(PlatformClaims {
+            tenant: "tenant:acme".to_string(),
+            scopes: Default::default(),
+            companies: None,
+        });
+        let bare = GqlAuth::Platform(PlatformClaims {
+            tenant: "acme".to_string(),
+            scopes: Default::default(),
+            companies: None,
+        });
+        assert_eq!(owner(&prefixed), owner(&bare));
     }
 
     /// A brain that answers a cycle with nothing, so the ACP `prompt` turn
