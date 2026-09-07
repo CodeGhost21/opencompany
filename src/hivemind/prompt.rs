@@ -91,6 +91,26 @@ add, reply !defer #topic naming who should act next, or !question. Prose \
 without a marker counts for nothing and costs the room a turn. Write nothing \
 before or after the single marker line.";
 
+/// The two markers a desk that enabled private asides adds, and the rules they
+/// are read under.
+///
+/// Rendered **only when the desk enabled asides**, because a grammar is a fixed
+/// cost paid in every agent's system text on every turn, and teaching a move
+/// nobody may make spends that budget for nothing.
+///
+/// The fourth sentence is the one an agent can act on rather than a disclaimer:
+/// a reader that meets an elided row needs to know it may ask, not merely that
+/// it cannot read.
+const ASIDE_RULES: &str = "\
+This desk also allows a private line. !aside @peer <what you need from them> \
+reaches only that peer; !surface <what the room needs to know> reports back to \
+everyone. An aside carries information and never support: a !support written \
+privately moves nothing towards a decision, for you or for anybody. To make an \
+aside count, spend a desk-visible turn saying so with !surface. Some rows in \
+the transcript show only that an aside happened, with its author and who was \
+in it — you cannot read those, and if one matters, ask its author here on the \
+desk.";
+
 /// The extra sentence a room under `require_evidential` is given.
 ///
 /// Rendered only when the desk actually requires it, because on a desk that
@@ -351,6 +371,14 @@ impl<'a> EpisodePrompt<'a> {
         if assigned {
             tail.push('\n');
             tail.push_str(ASSIGNED_MOVES_RULE);
+        }
+        // Last, and only when the desk opted in. `!aside` and `!surface` are
+        // not deliberation markers — neither appears in `MOVE_KINDS`, neither
+        // is gated by `hive.moves`, and neither deposits a trace — so they are
+        // taught after the move list rather than inside it.
+        if self.desk.config.aside.enabled() {
+            tail.push('\n');
+            tail.push_str(ASIDE_RULES);
         }
         format!("{head}\n{}\n{tail}", lines.join("\n"))
     }
