@@ -721,9 +721,26 @@ export function ChatView({
     }
   }
 
+  /**
+   * Which roster read this is, so only the newest may write — the same guard
+   * `loadDesks`, `viewerRun` and `directoryEpoch` each keep, and the one this
+   * read was missing (Codex P2 review on #2130).
+   *
+   * Two of these could not overlap while the read happened once per mount. They
+   * can now: a console that loads off Room and is taken *into* Room before the
+   * first `listTeam` settles starts a second one beside it. And the failure path
+   * is the dangerous half — it writes unconditionally, so a slow older rejection
+   * landing after a newer success replaces a real roster with `[]` and
+   * `fromHost: false`. Direct messages vanish and "New channel" goes with them,
+   * until some later entry to Room happens to fix it.
+   */
+  const rosterRead = useRef(0);
   const boot = useCallback(async () => {
+    const ticket = ++rosterRead.current;
+    const isCurrent = () => ticket === rosterRead.current;
     try {
       const roster = await client.listTeam(company);
+      if (!isCurrent()) return;
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
@@ -737,11 +754,15 @@ export function ChatView({
       }
     } catch {
       // The roster read failed, so we do not know who works here. Still nobody:
-      // guessing a team is what this change exists to stop.
+      // guessing a team is what this change exists to stop. Guarded in both
+      // directions — a stale rejection overwriting a fresh success is the same
+      // bug with the sign flipped, which is the rule the cognition read already
+      // states.
+      if (!isCurrent()) return;
       setMembers([]);
       setFromHost(false);
     } finally {
-      setLoadingTeam(false);
+      if (isCurrent()) setLoadingTeam(false);
     }
   }, [client, company, roomVisits]);
 

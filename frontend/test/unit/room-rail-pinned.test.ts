@@ -197,6 +197,21 @@ describe("ChatView, mounted off its own route", () => {
     // on a console loaded straight onto `#/company`, which is the one thing this
     // change exists to prevent.
     expect(chatView).not.toContain("}, [client, company, routeOpen]);");
+
+    // Re-keying makes two of these overlap for the first time, so the roster
+    // read needed the run token its neighbours already had (Codex P2). A console
+    // that loads off Room and is taken into Room before the first `listTeam`
+    // settles starts a second one beside it — and the failure path wrote
+    // unconditionally, so a slow older rejection landing after a newer success
+    // replaced a real roster with `[]`/`fromHost: false`: Direct messages gone
+    // and "New channel" with them, until some later entry happened to fix it.
+    expect(chatView).toContain("const ticket = ++rosterRead.current;");
+    // Guarded in both directions — a stale rejection overwriting a fresh success
+    // is the same bug with the sign flipped.
+    const boot = chatView.slice(chatView.indexOf("const boot = useCallback"));
+    const bootBody = boot.slice(0, boot.indexOf("}, [client, company, roomVisits]);"));
+    expect(bootBody.match(/if \(!isCurrent\(\)\) return;/g) ?? []).toHaveLength(2);
+    expect(bootBody).toContain("if (isCurrent()) setLoadingTeam(false);");
   });
 
   it("seeds the pinned rail's highlight from the channel Room will actually open", () => {
