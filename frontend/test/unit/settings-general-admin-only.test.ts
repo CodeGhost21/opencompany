@@ -1,14 +1,29 @@
 // @vitest-environment jsdom
 
-import { act, createElement } from "react";
+import { act, createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
-import { DomainSettings } from "@/components/domain-settings";
+import { DomainCard, SmtpCard } from "@/components/domain-settings";
 import { PolicySettings } from "@/components/policy-settings";
 import { useCanManage, useCanManagePolicy } from "@/hooks/use-can-manage";
+
+/**
+ * `DomainCard`/`SmtpCard` directly, not `DomainSettings` — both are gated as
+ * coming soon (issue #2131) and `DomainSettings` renders static previews in
+ * their place. The role-gating this file pins still has to hold for the
+ * release that switches the two cards back on, so it is exercised at the
+ * level it belongs to, the same way `domain-settings-host-backed.test.ts`
+ * does. `settings-coming-soon.test.ts` covers the gate itself.
+ */
+function DomainAndSmtp({ client, company, canManage }: { client: OpenCompanyClient; company: string; canManage: boolean }) {
+  return createElement(Fragment, null, [
+    createElement(DomainCard, { key: "domain", client, company, canManage }),
+    createElement(SmtpCard, { key: "smtp", client, company, canManage }),
+  ]);
+}
 
 /**
  * The two admin-only cards on Settings → General, by role.
@@ -111,7 +126,7 @@ function SettingsGeneralSlice({ client }: { client: OpenCompanyClient }) {
     "div",
     null,
     createElement(PolicySettings, { client, company: "acme", canManage: canManagePolicy }),
-    createElement(DomainSettings, { client, company: "acme", canManage }),
+    createElement(DomainAndSmtp, { client, company: "acme", canManage }),
   );
 }
 
@@ -179,7 +194,7 @@ describe("Settings → General → Approvals, by role", () => {
 describe("Settings → General → Domain and SMTP, by role", () => {
   it("offers a member no domain write and no SMTP credential field", async () => {
     await show(
-      createElement(DomainSettings, {
+      createElement(DomainAndSmtp, {
         client: clientAs("member"),
         company: "acme",
         canManage: false,
@@ -203,7 +218,7 @@ describe("Settings → General → Domain and SMTP, by role", () => {
 
   it("falls back to the plain summary for a member when nothing is configured", async () => {
     await show(
-      createElement(DomainSettings, {
+      createElement(DomainAndSmtp, {
         client: clientAs("member", { smtp: SMTP_UNCONFIGURED }),
         company: "acme",
         canManage: false,
@@ -216,7 +231,7 @@ describe("Settings → General → Domain and SMTP, by role", () => {
 
   it("tells a member why both cards are read-only", async () => {
     await show(
-      createElement(DomainSettings, {
+      createElement(DomainAndSmtp, {
         client: clientAs("member"),
         company: "acme",
         canManage: false,
@@ -232,7 +247,7 @@ describe("Settings → General → Domain and SMTP, by role", () => {
     // for a domain only an admin could have set and changes nothing a member
     // could not already read. Withholding it would over-correct.
     await show(
-      createElement(DomainSettings, {
+      createElement(DomainAndSmtp, {
         client: clientAs("member"),
         company: "acme",
         canManage: false,
@@ -244,7 +259,7 @@ describe("Settings → General → Domain and SMTP, by role", () => {
 
   it("offers an admin both forms and no notice", async () => {
     await show(
-      createElement(DomainSettings, {
+      createElement(DomainAndSmtp, {
         client: clientAs("admin"),
         company: "acme",
         canManage: true,
