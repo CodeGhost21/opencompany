@@ -57,6 +57,21 @@ function clientAs(role: "admin" | "member"): OpenCompanyClient {
   } as unknown as OpenCompanyClient;
 }
 
+/** A client whose `/auth/me` never settles, so a test can prove a reset
+ *  happened before the new scope's role is known, rather than because it
+ *  happened to arrive quickly. */
+function clientWithHungAuth(): OpenCompanyClient {
+  return {
+    scopeFor: () => "/api/v1/companies/beta",
+    get: (path: string) => {
+      if (path.endsWith("/auth/me")) return new Promise(() => {});
+      if (path.endsWith("/skills/registry")) return Promise.resolve([]);
+      if (path.endsWith("/skills")) return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    },
+  } as unknown as OpenCompanyClient;
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -143,5 +158,29 @@ describe("SkillsView authority", () => {
     });
 
     expect(buttons().some((t) => /\bInstall\b/.test(t))).toBe(true);
+  });
+
+  it("closes the write surface the instant the scope changes, before the new role is known", async () => {
+    await show(clientAs("admin"));
+
+    await act(async () => {
+      const addSkill = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("Add skill"),
+      ) as HTMLElement;
+      addSkill.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    // Radix portals dialog content onto `document.body`, not into `container`.
+    expect(document.body.textContent).toContain("Add a skill");
+
+    // The new scope's `/auth/me` never answers, so anything visible after this
+    // render can only be explained by the reset the scope-change effect runs
+    // up front — not by a fresh admin result arriving quickly.
+    await act(async () => {
+      root.render(createElement(SkillsView, { client: clientWithHungAuth(), company: "beta" }));
+    });
+
+    expect(document.body.textContent).not.toContain("Add a skill");
+    expect(at("skills-admin-only")?.textContent).toContain("Only an admin");
+    expect(buttons().some((t) => t.includes("Add skill"))).toBe(false);
   });
 });

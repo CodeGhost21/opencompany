@@ -101,6 +101,12 @@ export function SkillsView({ client, company }: Props) {
 
   useEffect(() => {
     let live = true;
+    // Closed the instant the scope changes, not just once the new role
+    // resolves: otherwise the previous scope's admin result — and any dialog
+    // it left open — would keep live write controls pointed at the new
+    // company until this request settles.
+    setCanManage(false);
+    setAddOpen(false);
     void (async () => {
       let admin = false;
       try {
