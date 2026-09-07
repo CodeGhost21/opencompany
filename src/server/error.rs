@@ -87,9 +87,12 @@ impl ApiError {
             // A file that parses but fails validation is a semantically bad
             // payload the caller can correct — 422.
             OpenCompanyError::DataInvalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            OpenCompanyError::LifecycleConflict(_) | OpenCompanyError::Conflict(_) => {
-                StatusCode::CONFLICT
-            }
+            // The emergency stop is a durable state an operator chose, not a
+            // server fault, and not something to retry — it clears when a human
+            // releases it. Same shape as a lifecycle conflict.
+            OpenCompanyError::LifecycleConflict(_)
+            | OpenCompanyError::Conflict(_)
+            | OpenCompanyError::EmergencyStop(_) => StatusCode::CONFLICT,
             // A runtime swap is in progress and clears itself within a turn, so
             // this is a retry-me, not a refusal (issue #290).
             OpenCompanyError::Quiescing(_) => StatusCode::SERVICE_UNAVAILABLE,
