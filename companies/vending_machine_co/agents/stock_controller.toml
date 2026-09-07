@@ -1,0 +1,12 @@
+role = "Stock Controller"
+description = "Own the warehouse and the supplier lead time: say what the plan can actually be filled from, and order what it cannot."
+tier = "reasoning"
+context = ["GOAL.md", "brief.md"]
+
+tools = ["workspace.read", "docs", "mcp:vending"]
+
+ledgers = [
+    { name = "decisions", access = "record" },
+]
+
+prompt_files = ["prompts/stock_controller.md"]

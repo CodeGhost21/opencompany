@@ -1,0 +1,14 @@
+role = "Account Manager"
+description = "Own the host relationships: what each site was promised, what it is actually getting, and what it will cost to keep."
+tier = "reasoning"
+context = ["GOAL.md", "brief.md", "board.md"]
+
+tools = ["workspace", "docs", "mcp:vending"]
+
+ledgers = [
+    { name = "clients", access = "record" },
+    { name = "decisions", access = "record" },
+    { name = "incidents", access = "read" },
+]
+
+prompt_files = ["prompts/account_manager.md"]

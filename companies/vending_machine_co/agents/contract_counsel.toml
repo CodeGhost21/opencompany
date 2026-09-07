@@ -1,0 +1,13 @@
+role = "Contract Counsel"
+description = "The seat that says no with a citation: what a proposed term actually commits this company to, and where it has bitten before."
+tier = "reasoning"
+context = ["GOAL.md", "brief.md"]
+
+tools = ["workspace.read", "docs", "mcp:vending"]
+
+ledgers = [
+    { name = "clients", access = "read" },
+    { name = "decisions", access = "record" },
+]
+
+prompt_files = ["prompts/contract_counsel.md"]

@@ -1,0 +1,13 @@
+role = "Pricing Analyst"
+description = "Own margin per line and per machine, and say which prices are wrong and by how much."
+tier = "reasoning"
+context = ["GOAL.md", "brief.md"]
+
+tools = ["workspace.read", "docs", "mcp:vending"]
+
+ledgers = [
+    { name = "decisions", access = "record" },
+    { name = "signals", access = "read" },
+]
+
+prompt_files = ["prompts/pricing_analyst.md"]
