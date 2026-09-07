@@ -73,9 +73,29 @@ describe("ChatView, mounted off its own route", () => {
     // It is a guard as well as a dependency, and the guard matters on its own:
     // the effect calls `replaceState` on whatever hash it finds, and off Room
     // that hash belongs to Company or Flows.
-    const effect = chatView.slice(chatView.indexOf('const threadId = params.get("thread")') - 900);
+    const effect = chatView.slice(chatView.indexOf("const arrived = threadResolvedFor.current") - 400);
     expect(effect).toContain("if (!routeOpen || !channel?.id) return;");
-    expect(effect.slice(0, effect.indexOf("}, [") + 40)).toContain("[routeOpen, channel?.id]");
+    expect(effect.slice(0, effect.indexOf("}, [") + 60)).toContain(
+      "[routeOpen, channel?.id, threadQuery]",
+    );
+
+    // And the query is reactive, which is what makes a SAME-channel link work:
+    // `#/chat/general` → `#/chat/general?thread=h41` moves neither `sub` nor
+    // `channel.id`, so an effect keyed on those alone never fires (CodeRabbit
+    // review on #2130). `useHashView` parses only the path segments; this keeps
+    // the subscription `useHashFlag` already uses for `?new`.
+    expect(chatView).toContain('new URLSearchParams(query).get("thread")');
+    expect(chatView).toContain('window.addEventListener("hashchange", apply)');
+    // Carried with a nonce, so opening the SAME thread twice still fires: the
+    // first open consumes the query, so the second link's parsed value is the
+    // one already held and React would bail out of the re-render. Found in a
+    // browser, where the third of three `?thread=` links did nothing.
+    expect(chatView).toContain("nonce: prev.nonce + 1");
+    // Consuming is a `replaceState`, which fires no `hashchange` — so the value
+    // stays put and the effect cannot loop on its own write. A hash change that
+    // names no thread is somebody else's query moving, and only an ARRIVAL
+    // closes an open panel.
+    expect(effect).toContain("if (arrived) setOpenThreadId(null);");
   });
 
   it("keeps both sidebar-triggered dialogs outside that gate", () => {

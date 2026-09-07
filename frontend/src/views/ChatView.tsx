@@ -1344,11 +1344,62 @@ export function ChatView({
     // re-runs with the new scope's notices.
   }, [budgetPauseMessageIdByAgent]);
 
-  // An open thread only makes sense while its parent is on screen; switching
-  // channels closes it rather than leaving a panel pointing at nothing.
-  // `?thread=<id>` on the hash opens straight into that thread instead, and
-  // is consumed (stripped via `replaceState`) so it does not reopen on a
-  // later switch back to this channel.
+  /**
+   * The `?thread=<id>` the address names right now, tracked reactively.
+   *
+   * `useHashView` deliberately parses only the path segments, so
+   * `#/chat/general` → `#/chat/general?thread=h41` changes neither `sub` nor
+   * `channel.id` and re-renders nothing an effect keyed on those would see. A
+   * subscription of its own is the answer, and it is the one `useHashFlag`
+   * already uses for `?new` — same event, same reason.
+   *
+   * `hashchange` is enough on its own. Every navigation in this console reaches
+   * the address through `window.location.hash = …` (`useHashView`'s `navigate`,
+   * `useHashFlag`'s setter) or through Back/Forward, and all of those fire it.
+   * The one write that does not is `replaceState`, which is exactly how the
+   * query below is *consumed* — so consuming leaves this value where it is and
+   * the effect cannot loop on its own write.
+   *
+   * Carried with a **nonce**, not as a bare string, and that is not decoration:
+   * consuming `?thread=h41` strips it from the address, so opening h41 a second
+   * time is a real hash change whose parsed value is the one already held.
+   * React would bail out of the re-render and the panel would not reopen —
+   * verified in a browser, where the third of three `?thread=` links was the
+   * one that did nothing. The nonce makes every hash change distinct; what
+   * stops the effect acting on the ones that are not about threads is
+   * `threadResolvedFor` below.
+   */
+  const [threadQuery, setThreadQuery] = useState<{ value: string | null; nonce: number }>({
+    value: null,
+    nonce: 0,
+  });
+  useEffect(() => {
+    const read = () => {
+      const [, query = ""] = window.location.hash.split("?");
+      return new URLSearchParams(query).get("thread");
+    };
+    const apply = () => setThreadQuery((prev) => ({ value: read(), nonce: prev.nonce + 1 }));
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, []);
+
+  /**
+   * Which channel the thread panel was last resolved for, so "you arrived here"
+   * can be told apart from "the address changed while you were already here".
+   *
+   * Only an arrival closes an open thread. A hash change that names no thread is
+   * some other surface's query moving — or this effect's own `replaceState`
+   * consuming the one it just opened — and neither is a reason to shut a panel
+   * the operator is reading.
+   */
+  const threadResolvedFor = useRef<string | null>(null);
+
+  // An open thread only makes sense while its parent is on screen; arriving at
+  // a channel closes whatever was open rather than leaving a panel pointing at
+  // nothing. `?thread=<id>` on the hash opens straight into that thread
+  // instead, and is consumed (stripped via `replaceState`) so it does not
+  // reopen on a later switch back to this channel.
   //
   // `routeOpen` is both a guard and a dependency, and it has to be both since
   // #2130 (Codex P2 review on that PR).
@@ -1364,18 +1415,28 @@ export function ChatView({
   // As a **guard**, because a view mounted off its own route must not rewrite
   // another section's address. This calls `replaceState` on whatever hash it
   // finds, and the hash it finds off Room belongs to Company or Flows.
+  //
+  // `threadQuery` is the third dependency, and it is what makes a same-channel
+  // link work: `#/chat/general` → `#/chat/general?thread=h41` moves nothing else
+  // (CodeRabbit review on #2130). That gap predates the rail work — the effect
+  // was keyed on `channel?.id` alone before it — and is closed here rather than
+  // carried, because pinning the rail made the same-channel case the *common*
+  // one: this view now sits on a channel far more often than it used to.
   useEffect(() => {
     if (!routeOpen || !channel?.id) return;
-    const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
-    const params = new URLSearchParams(query);
-    const threadId = params.get("thread");
-    setOpenThreadId(threadId);
-    if (threadId !== null) {
+    const arrived = threadResolvedFor.current !== channel.id;
+    threadResolvedFor.current = channel.id;
+    if (threadQuery.value !== null) {
+      setOpenThreadId(threadQuery.value);
+      const [path, query = ""] = window.location.hash.replace(/^#/, "").split("?");
+      const params = new URLSearchParams(query);
       params.delete("thread");
       const qs = params.toString();
       window.history.replaceState(null, "", `#${path}${qs ? `?${qs}` : ""}`);
+      return;
     }
-  }, [routeOpen, channel?.id]);
+    if (arrived) setOpenThreadId(null);
+  }, [routeOpen, channel?.id, threadQuery]);
 
   // Whoever owns the unread counts needs to know what is actually being looked
   // at. Re-runs as the open channel's transcript grows, not only on a switch:
@@ -1443,6 +1504,12 @@ export function ChatView({
     if (routeOpen) return;
     setAddOpen(false);
     setBudgetFor(null);
+    // And the thread panel, which used to close because leaving Room unmounted
+    // the whole view. Clearing the marker with it makes the next arrival an
+    // arrival, so Room opens on the channel rather than on a panel the operator
+    // left behind two sections ago.
+    setOpenThreadId(null);
+    threadResolvedFor.current = null;
   }, [routeOpen]);
 
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
