@@ -345,20 +345,49 @@ pub fn build_agent(
             deps.store.clone(),
         )));
     }
+    // Installed-MCP-registry surface (`mcp_registry_list_tools` /
+    // `mcp_registry_tool_call`) — distinct from the per-server `mcp:<name>`
+    // bridge below, and reaching further: `mcp_registry_tool_call` invokes an
+    // arbitrary tool on ANY server the company has installed and connected,
+    // addressed at call time by a bare `server_id` argument, with none of the
+    // bridge's per-server grant scoping. Two hard gates before either tool is
+    // wired, following the `composio`/`media`/`search` precedent above:
+    //
+    //  1. an **EXPLICIT** `mcp_registry` grant
+    //     (`grants_mcp_registry_explicit`) — the catch-all `*` does NOT confer
+    //     it, for the same reason it does not confer `composio`: this reaches
+    //     third-party servers and can mutate them, so a broadly-permissioned
+    //     company must still opt in by name.
+    //  2. a configured registry store (`deps.mcp_home`) — the store an install
+    //     writes through. Granted-but-unconfigured wires nothing and warns
+    //     (fail-closed), matching every other explicit namespace in this file.
+    //
+    // `mcp_registry_list_tools` (read-only schema discovery over the same
+    // registry) rides the SAME grant as the mutating call tool rather than a
+    // narrower one of its own — see `grants_mcp_registry_explicit`'s doc
+    // comment for why: every other third-party-reaching family already bundles
+    // its read-only discovery tools under the one grant that covers the
+    // mutating ones, and OpenHuman's own tool description frames the two as a
+    // single discover-then-call workflow.
     #[cfg(feature = "mcp")]
-    {
-        // These read the installed-server registry, so installs and lifecycle
-        // changes are visible without rebuilding agents. They take the config
-        // that selects the store now rather than reading a process global —
-        // hand them this company's own, the one REST writes through.
-        if let Some(mcp_home) = deps.mcp_home.clone() {
-            let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
-            tools.push(Box::new(
-                oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
-            ));
-            tools.push(Box::new(
-                oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
-            ));
+    if crate::company::grants_mcp_registry_explicit(grants) {
+        match deps.mcp_home.clone() {
+            Some(mcp_home) => {
+                let config =
+                    std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
+                tools.push(Box::new(
+                    oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
+                ));
+                tools.push(Box::new(
+                    oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
+                ));
+            }
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `mcp_registry` but no MCP registry home is \
+                 configured; mcp_registry tools NOT wired (fail-closed)"
+            ),
         }
     }
 
@@ -2724,24 +2753,14 @@ mod tests {
     /// curated exec subset (shell / code / web) plus the intrinsic memory + file
     /// tools; it contains NO delegation tool and NO deferred family, and — the
     /// #238 addition — no `web_search`, because a bare `*` does not confer the
-    /// `search` grant.
-    ///
-    /// **Feature-aware (issue #297).** The belt genuinely differs by feature
-    /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
-    /// unconditionally in `build_agent`, so a flat literal was *wrong* under
-    /// `--features openhuman,mcp` — the combination a full local build
-    /// and the shipped tenant image both use, and which no CI lane ran. The pin
-    /// was therefore failing unseen on `main`. Extending the array
-    /// unconditionally would only move the failure onto plain
-    /// `--features openhuman`, which CI *does* run, so the fix has to branch.
-    /// Composing the expectation from the same `cfg` the wiring uses keeps the
-    /// two from drifting again.
+    /// `search` grant. Nor does it contain `mcp_registry_list_tools` /
+    /// `mcp_registry_tool_call`, for the identical reason: those two ride the
+    /// explicit `mcp_registry` grant, never the wildcard — see the
+    /// `mcp_registry_tools_are_wired_only_by_explicit_grant` test below for the
+    /// belt a company that names that grant actually receives.
     #[test]
     fn dispatched_desk_agent_tool_belt_is_pinned() {
         let names = built_tool_names(&["*"], false);
-        // `mut` is only used by the `mcp` arm below; without the feature the
-        // literal is already the whole expectation.
-        #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
         let mut expected = vec![
             "apply_patch",
             "csv_export",
@@ -2776,18 +2795,125 @@ mod tests {
         // belt now — including a company with no skills source of its own.
         expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
         expected.sort();
-        // Mirrors the `#[cfg(feature = "mcp")]` push in `build_agent`. These two
-        // are intrinsic (unmapped by `namespace_of`), so no grant gates them:
-        // the feature plus a configured `HarnessDeps::mcp_home` is the whole
-        // condition. The home is what selects the company's own registry store,
-        // and a tool built without it would read a different one.
-        #[cfg(feature = "mcp")]
-        {
-            expected.push("mcp_registry_list_tools");
-            expected.push("mcp_registry_tool_call");
-            expected.sort();
-        }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    /// The three gate states of the `mcp_registry` surface, mirroring
+    /// [`web_search_is_wired_only_by_explicit_grant_and_credential`].
+    ///
+    /// The load-bearing row is the first: a broad `*` grant does **not** wire
+    /// either `mcp_registry_list_tools` or `mcp_registry_tool_call`, even with
+    /// a configured registry home (`pin_deps` always sets one). Before this
+    /// gate existed, both tools were pushed unconditionally whenever
+    /// `deps.mcp_home` was set — this row is the regression check for that.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_registry_tools_are_wired_only_by_explicit_grant() {
+        const REGISTRY_TOOLS: [&str; 2] = ["mcp_registry_list_tools", "mcp_registry_tool_call"];
+
+        // No grant at all → absent.
+        let ungranted = built_tool_names(&[], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                !ungranted.contains(&tool.to_string()),
+                "no grant must mean no `{tool}`: {ungranted:?}"
+            );
+        }
+
+        // `*` (with a configured home) → still absent. The wildcard never
+        // confers a third-party-reaching, mutating surface.
+        let wildcard = built_tool_names(&["*"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                !wildcard.contains(&tool.to_string()),
+                "a bare `*` must NOT confer `{tool}`: {wildcard:?}"
+            );
+        }
+
+        // An unrelated grant → absent.
+        let unrelated = built_tool_names(&["web.*"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                !unrelated.contains(&tool.to_string()),
+                "an unrelated grant must not confer `{tool}`: {unrelated:?}"
+            );
+        }
+
+        // Explicit `mcp_registry` grant, with a configured home → BOTH tools,
+        // together — list is never conferred without call, or vice versa.
+        let granted = built_tool_names(&["mcp_registry"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                granted.contains(&tool.to_string()),
+                "an explicit `mcp_registry` grant must wire `{tool}`: {granted:?}"
+            );
+        }
+
+        // The sub-grant form works the same way `search.web` / `composio.gmail`
+        // do.
+        let sub_granted = built_tool_names(&["mcp_registry.notion"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                sub_granted.contains(&tool.to_string()),
+                "`mcp_registry.notion` must wire `{tool}`: {sub_granted:?}"
+            );
+        }
+    }
+
+    /// Explicit `mcp_registry` grant, NO configured registry home → absent,
+    /// fail-closed — matching every other explicit namespace's
+    /// granted-but-uncredentialed shape (`media`, `composio`, `chargebee`,
+    /// `paypal`, `hosting`, `search`).
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_registry_tools_fail_closed_with_no_registry_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.mcp_home = None;
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            tools: None,
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+            model: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = vec!["mcp_registry".to_string()];
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        let names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        assert!(
+            !names.contains(&"mcp_registry_list_tools".to_string()),
+            "granted-but-unconfigured must not wire `mcp_registry_list_tools`: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mcp_registry_tool_call".to_string()),
+            "granted-but-unconfigured must not wire `mcp_registry_tool_call`: {names:?}"
+        );
     }
 
     #[test]
