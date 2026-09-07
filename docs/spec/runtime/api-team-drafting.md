@@ -48,7 +48,15 @@ console then creates the teammate through `POST …/team`.
 
 The body is `{name?, description}`; a blank `description` is a `400`, because it
 is the entire input and designing from nothing is a model inventing a job rather
-than reading one. The answer is `{role?, description?, instructions?, source,
+than reading one. It is bounded by `MAX_DESIGN_BRIEF` (2000 characters, the
+prompt-weight bound every other operator free text going into a copilot prompt
+obeys) — **not** by `MAX_DESCRIPTION`, which is 200 and is a roster-card
+*layout* bound. Applying the card bound to the brief cut the operator's sentence
+at 200 with an `…` on the end before the model read it, and nothing said so: the
+console's box had no limit, and the stored description is the model's rather
+than the operator's, so a requirement written past character 200 left no trace.
+The console now holds the same number on the box itself, so the limit is met
+while typing. The answer is `{role?, description?, instructions?, source,
 reason?}`, with the same `source` / `reason` contract the draft routes use: all
 four refusals (`no_model`, `model_unreachable`, `unreadable`,
 `budget_exhausted`) are a `200`, because none is a failure of the request.

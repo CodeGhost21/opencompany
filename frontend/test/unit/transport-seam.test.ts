@@ -34,6 +34,9 @@ import { ApiError } from "@/api/types";
 
 /** Records what it was asked for and answers with whatever the test staged. */
 class StubTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly seen: TransportRequest[] = [];
   readonly subscribed: string[] = [];
   handlers: StreamHandlers | null = null;

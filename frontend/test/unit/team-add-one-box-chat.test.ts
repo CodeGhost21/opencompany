@@ -47,7 +47,14 @@ let addLands: boolean | Promise<boolean>;
 let openChanges: boolean[];
 let open: boolean;
 
-const client = { scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}` };
+/** What the client reports for `cancelsInFlightRequests`; `false` is the desktop app. */
+let cancelsInFlight = true;
+const client = {
+  scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+  get cancelsInFlightRequests() {
+    return cancelsInFlight;
+  },
+};
 
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -56,6 +63,7 @@ beforeEach(() => {
   root = createRoot(container);
   added = [];
   addLands = true;
+  cancelsInFlight = true;
   openChanges = [];
   open = false;
   vi.clearAllMocks();
@@ -403,5 +411,55 @@ describe("chat's dialog: a host that says it cannot design a teammate", () => {
     expect(document.querySelector(roleField)).not.toBeNull();
     expect(document.querySelector('[data-testid="chat-add-handover"]')).toBeNull();
     expect(api.designTeammate).not.toHaveBeenCalled();
+  });
+});
+
+describe("chat's dialog: holding open while leaving would not stop anything", () => {
+  function hangingDesign(): { signals: AbortSignal[] } {
+    const signals: AbortSignal[] = [];
+    api.designTeammate.mockImplementation(
+      (_c: unknown, _co: unknown, _t: unknown, signal?: AbortSignal) =>
+        new Promise((_res, rej) => {
+          if (signal) {
+            signals.push(signal);
+            signal.addEventListener("abort", () => rej(new DOMException("", "AbortError")));
+          }
+        }),
+    );
+    return { signals };
+  }
+
+  it("holds itself open during a design on a transport that cannot cancel", async () => {
+    // The desktop app: `ProxyTransport` cannot abort an in-flight Tauri
+    // `invoke`, so the pass is metered whatever the operator does. A Cancel
+    // there spends the tokens and discards the answer.
+    cancelsInFlight = false;
+    hangingDesign();
+    await openDialog();
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach.");
+    await pressCreate();
+
+    expect((byText("button", "Cancel") as HTMLButtonElement).disabled).toBe(true);
+    expect(byText("button", "Close"), "the header icon is gone, not dead").toBeUndefined();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+    expect(document.querySelector(box), "Escape is refused too").not.toBeNull();
+  });
+
+  it("still offers the way out where the transport can cancel", async () => {
+    cancelsInFlight = true;
+    const { signals } = hangingDesign();
+    await openDialog();
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach.");
+    await pressCreate();
+
+    expect((byText("button", "Cancel") as HTMLButtonElement).disabled).toBe(false);
+    await pressCancel();
+    expect(signals[0].aborted).toBe(true);
   });
 });

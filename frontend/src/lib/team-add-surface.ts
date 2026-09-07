@@ -201,6 +201,24 @@ export function addTeammateSurface(args: {
   return "describe";
 }
 
+/**
+ * The longest sentence the reduced dialog will take, matching the host's
+ * `MAX_DESIGN_BRIEF`.
+ *
+ * Held on the box itself so the operator meets the limit while typing rather
+ * than in a record that quietly lost the end of what they wrote. The host used
+ * to cut the brief at `MAX_DESCRIPTION` — 200 characters, a *roster card
+ * layout* bound — before the model read it, and nothing on this side said so:
+ * the textarea had no limit, and the stored description is the model's rather
+ * than the operator's, so a requirement written past character 200 left no
+ * trace at all.
+ *
+ * 2000 is the bound every other piece of operator free text going into a
+ * copilot prompt already obeys (`MAX_TURN_CHARS`). It is far past anything
+ * typed into a four-row box; what it stops is a paste.
+ */
+export const MAX_DESIGN_BRIEF = 2000;
+
 /** What the reduced dialog collects, before it is turned into a create. */
 export interface DescribedTeammate {
   name: string;

@@ -83,7 +83,7 @@ use crate::AppState;
 use crate::company::ACP_AGENTS;
 use crate::company::profile_draft::{
     CopilotTurn, DesignedTeammate, DraftRefusal, ProfileDraft, ProfileField, ProfileSubject,
-    Sibling, TurnRole, clamp_conversation,
+    Sibling, TurnRole, clamp_conversation, clamp_design_brief,
 };
 use crate::company::setup::clamp_description;
 use crate::error::OpenCompanyError;
@@ -1685,7 +1685,16 @@ pub(super) async fn design_teammate(
         // Empty, and this is the point of the route: the role is what the pass
         // produces, not what grounds it.
         role: String::new(),
-        description: Some(ProfileField::Description.clamp(description)),
+        // Bounded by prompt weight, NOT by the roster card. This used to be
+        // `ProfileField::Description.clamp`, which is `MAX_DESCRIPTION` — a
+        // *layout* bound, 200 characters, because a card has one line for a
+        // mandate. Applied to the operator's brief it cut their sentence at 200
+        // with an `…` on the end before the model ever read it, and nothing
+        // said so: the console's box had no limit, and the record stores the
+        // model's description rather than the operator's, so a requirement
+        // written past character 200 vanished without a trace. See
+        // `MAX_DESIGN_BRIEF`; the console holds the same number on the box.
+        description: Some(clamp_design_brief(description)),
         instructions: None,
         // Ids and roles only, the same closed grounding every draft gets, so a
         // designed teammate does not duplicate a job the company already has.

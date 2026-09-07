@@ -469,6 +469,25 @@ export class OpenCompanyClient {
   }
 
   /**
+   * Whether cancelling a request through this client actually stops the work at
+   * the host, or only stops this side waiting for it.
+   *
+   * `Transport.cancelsInFlight`, surfaced here so a view can ask without
+   * knowing which transport it is on — the same reason {@link carriesOwnSession}
+   * lives on the client. `false` on the desktop app, where an in-flight Tauri
+   * `invoke` cannot be cancelled.
+   *
+   * The one caller that must ask is the Add-teammate dialog. It lets the
+   * operator walk away from a running design pass *because* closing tears the
+   * request down and the host stops paying for it; where that is not true, the
+   * gesture would spend the tokens and throw away the answer, so the dialog
+   * holds itself open and says it is working instead.
+   */
+  get cancelsInFlightRequests(): boolean {
+    return this.transport.cancelsInFlight;
+  }
+
+  /**
    * Whether a sign-in through this client yields a session it must hold itself.
    *
    * Exposed so a caller knows to *store* what {@link postSignIn} returns. It is

@@ -1,6 +1,7 @@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { MAX_DESIGN_BRIEF } from "@/lib/team-add-surface";
 
 /**
  * The reduced Add-teammate dialog's whole content (issue #1989): a name and one
@@ -70,11 +71,18 @@ export function DescribeTeammate({
       </div>
       <div className="grid gap-2">
         <Label htmlFor={descriptionId}>What should they do?</Label>
+        {/* The same bound the host designs from (`MAX_DESIGN_BRIEF`), held
+            here so the operator meets it while typing. The host used to cut
+            this at the roster card's 200-character *layout* bound before the
+            model read it, with nothing on this side saying so and the operator's
+            own text never stored — so anything written past character 200 was
+            gone without a trace. */}
         <Textarea
           id={descriptionId}
           rows={4}
           value={description}
           disabled={disabled}
+          maxLength={MAX_DESIGN_BRIEF}
           onChange={(e) => onDescriptionChange(e.target.value)}
           placeholder="e.g. Runs paid acquisition and reports on ROAS every week."
           data-testid="team-describe-box"

@@ -1103,6 +1103,27 @@ function AddMemberDialog({
     }) === "describe";
   /** Why the reduced dialog's Create is dead, or `null` when it is not. */
   const describeBlocked = blockedReason(described);
+  /**
+   * Whether shutting the dialog right now would actually stop what it started.
+   *
+   * The rule the four exits all obey: **offer the way out only when taking it
+   * does something.** Two cases where it does not, and they fail differently:
+   *
+   * - **A write in flight.** `POST {scope}/team` is not cancellable at all.
+   *   Closing during it leaves the create running, and on success the parent
+   *   still toasts and navigates to the new teammate's page — pulling the
+   *   operator somewhere they just declined to go — while a reopen-and-submit
+   *   in the gap creates a second teammate.
+   * - **A design in flight on a transport that cannot cancel.** The desktop
+   *   app's `ProxyTransport` cannot abort an in-flight Tauri `invoke`
+   *   (`transport/types.ts`), so the pass runs to completion in the app's core
+   *   and is metered, and the abort only stops this side waiting. That is
+   *   exactly the spend the signal was added to save, dressed as a cancel.
+   *
+   * In both, the dialog holds itself open and keeps saying what it is doing.
+   * An honest wait beats a cancel that only looks like one.
+   */
+  const heldOpen = creating || (designing && !client.cancelsInFlightRequests);
 
   useEffect(() => {
     if (!open) return;
@@ -1202,6 +1223,9 @@ function AddMemberDialog({
    * for one open"; only this makes that true.
    */
   function close() {
+    // Every exit lands here — Cancel, Escape, the backdrop, the header's close
+    // icon — so the one place that can refuse them all is this one.
+    if (heldOpen) return;
     onOpenChange(false);
     reset();
   }
@@ -1288,7 +1312,10 @@ function AddMemberDialog({
         onOpenChange(o);
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      {/* The icon goes away rather than going dead while the dialog is held:
+          a control that is present and does nothing reads as a broken dialog,
+          where its absence beside "Adding…" reads as "wait". */}
+      <DialogContent className="sm:max-w-md" showCloseButton={!heldOpen}>
         <DialogHeader>
           <DialogTitle>Add teammate</DialogTitle>
           <DialogDescription>
@@ -1415,12 +1442,14 @@ function AddMemberDialog({
                   {missing.length > 1 ? "are" : "is"} required.
                 </p>
               )}
-          {/* Live during a design, not dead. It was disabled while `designing`
-              and the three other ways out of a dialog — Escape, the backdrop,
-              the header's close icon — were not, so the one control that said
-              what it would do was the one that would not do it. All four now
-              take the same exit, and that exit aborts the request. */}
-          <Button variant="ghost" onClick={close}>
+          {/* Live whenever leaving would actually stop something — which on a
+              cancellable transport includes the whole "Designing…" wait, and
+              never includes the write. It used to be disabled while `designing`
+              while Escape, the backdrop and the close icon stayed live, so the
+              one control that said what it would do was the one that would not
+              do it. All four take this exit now, and `heldOpen` is the single
+              place that decides whether the exit exists. */}
+          <Button variant="ghost" onClick={close} disabled={heldOpen}>
             Cancel
           </Button>
           <Button

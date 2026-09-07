@@ -82,13 +82,25 @@ let added: Array<Record<string, unknown>>;
  * suite at the end sets it to the transient case the dialog must survive.
  */
 let addThrows: unknown | null;
+/**
+ * What the client reports for `cancelsInFlightRequests`. `false` is the desktop
+ * app, where an in-flight Tauri `invoke` cannot be cancelled — see the held-open
+ * suite at the end.
+ */
+let cancelsInFlight: boolean;
+/** Held by `addTeamMember` before it answers, so the write can be caught mid-flight. */
+let stallAdd: Promise<void> | null;
 let opened: Array<[string | null, { edit?: boolean } | undefined]>;
 
 function fakeClient(): OpenCompanyClient {
   return {
     scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
+    get cancelsInFlightRequests() {
+      return cancelsInFlight;
+    },
     listTeam: async () => ROSTER,
     addTeamMember: async (input: Record<string, unknown>) => {
+      if (stallAdd) await stallAdd;
       added.push(input);
       if (addThrows) throw addThrows;
       return { id: "nova", name: "Nova", role: "Runs paid acquisition" } as TeamMemberDto;
@@ -103,6 +115,8 @@ beforeEach(() => {
   root = createRoot(container);
   added = [];
   addThrows = null;
+  cancelsInFlight = true;
+  stallAdd = null;
   opened = [];
   vi.clearAllMocks();
   api.listTasks.mockResolvedValue([]);
@@ -666,5 +680,113 @@ describe("a host that says it cannot design a teammate", () => {
     await mount();
     await openDialog();
     expect(document.querySelector(box)).not.toBeNull();
+  });
+});
+
+describe("holding the dialog open while leaving would not stop anything", () => {
+  // One rule behind four controls: offer the way out only when taking it does
+  // something. Two cases where it does not — and the first shipped as a
+  // *cancel* that spent the tokens anyway on the desktop app.
+
+  function hangingDesign(): { signals: AbortSignal[] } {
+    const signals: AbortSignal[] = [];
+    api.designTeammate.mockImplementation(
+      (_c: unknown, _co: unknown, _t: unknown, signal?: AbortSignal) =>
+        new Promise((_res, rej) => {
+          if (signal) {
+            signals.push(signal);
+            signal.addEventListener("abort", () => rej(new DOMException("", "AbortError")));
+          }
+        }),
+    );
+    return { signals };
+  }
+
+  async function fillAndCreate() {
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition.");
+    await pressCreate();
+  }
+
+  it("holds itself open during a design on a transport that cannot cancel", async () => {
+    // `ProxyTransport` cannot abort an in-flight Tauri `invoke`, so the pass
+    // runs to completion inside the app's core and is metered no matter what
+    // the operator does. Offering Cancel there is a gesture that spends the
+    // tokens and throws away the answer — the exact behaviour the signal was
+    // added to remove, wearing the label of the fix.
+    cancelsInFlight = false;
+    hangingDesign();
+    await fillAndCreate();
+
+    const cancel = byText("button", "Cancel") as HTMLButtonElement;
+    expect(cancel.disabled, "Cancel must be held while the design cannot be stopped").toBe(true);
+    expect(
+      byText("button", "Close"),
+      "and the header icon is gone rather than dead — a present control that does nothing reads as broken",
+    ).toBeUndefined();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+    expect(
+      document.querySelector(box),
+      "Escape must not shut it either — every exit goes through the same guard",
+    ).not.toBeNull();
+  });
+
+  it("still offers the way out during a design on a transport that can cancel", async () => {
+    cancelsInFlight = true;
+    const { signals } = hangingDesign();
+    await fillAndCreate();
+
+    const cancel = byText("button", "Cancel") as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    expect(byText("button", "Close"), "and the header icon stays").toBeDefined();
+    await act(async () => {
+      cancel.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it("holds itself open while the write is running, on any transport", async () => {
+    // `POST {scope}/team` is not cancellable at all. Closing during it left the
+    // create running: on success the parent still navigated to the new
+    // teammate's page — pulling the operator somewhere they had just declined
+    // to go — and a reopen-and-submit in the gap made a second teammate.
+    let release: () => void = () => {};
+    api.designTeammate.mockResolvedValue({
+      source: "model",
+      role: "Growth Marketer",
+      description: "Owns paid acquisition.",
+      instructions: "Report ROAS every Monday.",
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    // Hold the write open, so the dialog is caught saying "Adding…".
+    stallAdd = gate;
+
+    await fillAndCreate();
+
+    const cancel = byText("button", "Cancel") as HTMLButtonElement;
+    expect(cancel.disabled, "the write cannot be cancelled, so neither can the dialog").toBe(true);
+    expect(byText("button", "Close")).toBeUndefined();
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+    expect(document.querySelector(box), "Escape is refused too").not.toBeNull();
+
+    stallAdd = null;
+    await act(async () => {
+      release();
+      await gate;
+    });
+    await act(async () => {});
+    expect(added, "and the write it was holding for did land").toHaveLength(1);
   });
 });

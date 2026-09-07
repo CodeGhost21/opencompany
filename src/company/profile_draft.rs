@@ -171,6 +171,53 @@ pub const MAX_TURNS: usize = 16;
 /// later prompt.
 pub const MAX_TURN_CHARS: usize = 2_000;
 
+/// The longest sentence the reduced Add-teammate dialog may design from.
+///
+/// **Not [`MAX_DESCRIPTION`](crate::company::setup::MAX_DESCRIPTION), which is
+/// a layout bound.** That constant exists because a roster card has one line
+/// for a mandate, and applying it to the operator's *input* cut their brief at
+/// 200 characters — with `clamp_description`'s own `…` on the end — before the
+/// model ever read it. Nothing said so: the console's box has no counter, the
+/// original text is never stored (the record carries the model's description,
+/// not the operator's), and so a requirement written past character 200 simply
+/// did not reach the role, the mandate or the persona, and left no trace that
+/// it had been dropped.
+///
+/// What bounds this is prompt weight, so it is [`MAX_TURN_CHARS`] — the bound
+/// every other piece of operator free text going into a copilot prompt already
+/// obeys. The console holds the same number on the box itself, so the operator
+/// meets the limit while typing rather than in a record that quietly lost the
+/// end of their sentence.
+pub const MAX_DESIGN_BRIEF: usize = MAX_TURN_CHARS;
+
+/// The relationship the bug was, asserted where a later edit has to meet it.
+///
+/// A build failure rather than a test failure on purpose: the two constants are
+/// easy to confuse, the wrong one was chosen once already, and choosing it
+/// again would not break anything visible — it would quietly eat the end of
+/// every brief longer than a roster card's line.
+const _: () = assert!(
+    MAX_DESIGN_BRIEF > crate::company::setup::MAX_DESCRIPTION,
+    "a design brief cut to the card bound loses whatever the operator wrote past it"
+);
+
+/// Brings a design brief inside [`MAX_DESIGN_BRIEF`], collapsing whitespace.
+///
+/// A last resort, and one nothing should reach: the console holds the same
+/// bound on the box itself, so an operator meets it while typing. This is here
+/// so a caller that is not our console cannot push the grounding out of the
+/// design prompt — the same belt every other free-text-into-a-prompt input
+/// wears (`clamp_conversation`).
+///
+/// No ellipsis is appended, unlike `clamp_description`. That mark means "there
+/// was more, and a reader can go and see it"; here there is nowhere to go, and
+/// a brief ending in `…` reads to the model as an unfinished sentence — which,
+/// given the role rule above, is the last thing to teach it to write.
+pub fn clamp_design_brief(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(MAX_DESIGN_BRIEF).collect::<String>()
+}
+
 /// Brings a conversation inside the bounds the prompt obeys: the last
 /// [`MAX_TURNS`], each clamped to [`MAX_TURN_CHARS`], blank turns dropped.
 ///
@@ -835,6 +882,42 @@ mod tests {
         assert!(design.description.chars().count() <= MAX_DESCRIPTION + 1);
         assert!(design.description.ends_with('…'));
         assert!(!design.instructions.is_empty());
+    }
+
+    /// A brief long enough to be cut keeps everything a card would have lost.
+    ///
+    /// The concrete regression: an operator writing two paragraphs into the one
+    /// box had everything past character 200 dropped before the model read it,
+    /// with `clamp_description`'s `…` stitched on the end. Nothing recorded it —
+    /// the stored description is the model's, not theirs.
+    #[test]
+    fn a_design_brief_keeps_what_the_card_bound_would_have_cut() {
+        let brief = format!(
+            "Runs wholesale outreach to boutique retailers. {}. And they must never quote a \
+             price below the trade list without asking Finance first.",
+            "x".repeat(MAX_DESCRIPTION)
+        );
+        assert!(brief.chars().count() > MAX_DESCRIPTION);
+        let kept = clamp_design_brief(&brief);
+        assert_eq!(kept, brief, "nothing inside the bound is cut");
+        assert!(
+            kept.ends_with("asking Finance first."),
+            "the requirement written past the card bound has to survive: {kept}"
+        );
+        assert!(
+            !kept.ends_with('…'),
+            "and no ellipsis is added — a brief ending in one reads to the model \
+             as an unfinished sentence"
+        );
+    }
+
+    /// Past the prompt bound it is still cut, so a paste cannot push the
+    /// grounding out of the design prompt.
+    #[test]
+    fn a_design_brief_is_still_bounded_by_prompt_weight() {
+        let huge = "word ".repeat(MAX_DESIGN_BRIEF);
+        assert_eq!(clamp_design_brief(&huge).chars().count(), MAX_DESIGN_BRIEF);
+        assert_eq!(clamp_design_brief("  two   spaces  "), "two spaces");
     }
 
     /// `clamp_role` is the belt to `from_parts`' braces: the type cannot hold an

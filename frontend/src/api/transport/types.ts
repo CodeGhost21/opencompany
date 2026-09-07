@@ -79,6 +79,29 @@ export interface StreamHandlers {
 
 export interface Transport {
   /**
+   * Whether aborting a request through {@link TransportRequest.signal} actually
+   * stops the work at the other end, rather than only stopping the caller
+   * waiting for it.
+   *
+   * `true` on `BrowserTransport`: `fetch` drops the socket, the host sees the
+   * disconnect, and an axum handler's future is dropped with it. `false` on
+   * `ProxyTransport`: an in-flight Tauri `invoke` cannot be cancelled, so the
+   * request runs to completion inside the app's Rust core no matter what the
+   * caller does.
+   *
+   * Exposed because for most callers the difference is invisible — the promise
+   * rejects either way — but for one it is the whole point. `POST
+   * {scope}/team/design` runs a model for up to ninety seconds and is metered
+   * against the company's plan, so the Add-teammate dialog lets the operator
+   * walk away from it *because* closing tears it down. On a transport where it
+   * does not, the same gesture spends the tokens and discards the answer, which
+   * is the behaviour the abort was added to remove. The dialog reads this and
+   * holds itself open instead: an honest wait beats a cancel that only looks
+   * like one.
+   */
+  readonly cancelsInFlight: boolean;
+
+  /**
    * Performs one request.
    *
    * Rejects **only** when the host could not be reached at all. Every HTTP
