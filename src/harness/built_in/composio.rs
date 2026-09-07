@@ -2,6 +2,23 @@
 //! GitHub surface OpenHuman exposes through its backend-proxied Composio routes,
 //! bridged into a company agent's toolbelt behind the opt-in `composio` grant.
 //!
+//! ## Two routes: managed, and the company's own account
+//!
+//! Everything below describes the **managed** route, which is the default and
+//! the one that needs no configuration. A company that holds its own Composio
+//! account can instead store a Composio API key and have every call go straight
+//! to `backend.composio.dev` — no proxy, no platform identity, no platform bill.
+//! That route is [`composio_direct`](crate::harness::composio_direct); the two
+//! meet at [`LiveClient`], which is the only place in this module that knows
+//! which one answered. [`TenantComposio::mode`] is what says which is in force,
+//! and it is folded into the roster fingerprint so switching reaches the agents
+//! on their next turn.
+//!
+//! Under BYOK the tiers below do not apply at all: the company's own key is the
+//! only credential, and its absence means no tools rather than a fallback — see
+//! [`resolve_access`](crate::company::composio::resolve_access) for why
+//! borrowing the platform identity there would be the wrong kind of helpful.
+//!
 //! ## Tenant isolation (the security spine)
 //!
 //! In OpenHuman's **backend mode**, no Composio call carries an `entity_id`: the
@@ -84,8 +101,8 @@ use crate::ports::types::CompanyId;
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
 pub use crate::company::composio::{
-    COMPOSIO_BACKEND_URL_ENV, TINYHUMANS_API_URL_ENV, TOKEN_KEY, backend_url_or_default,
-    resolve_credential,
+    API_KEY_KEY, COMPOSIO_BACKEND_URL_ENV, ComposioMode, DIRECT_BASE_URL, TINYHUMANS_API_URL_ENV,
+    TOKEN_KEY, backend_url_or_default, resolve_access, resolve_credential,
 };
 
 /// A per-tenant Composio configuration: the backend URL, how the outbound bearer
@@ -105,7 +122,45 @@ pub struct TenantComposio {
     pub backend_url: String,
     /// How the outbound bearer is obtained: the company's own stored token, or
     /// this instance's platform identity. Resolved per call — see the module docs.
+    ///
+    /// Under [`ComposioMode::Byok`] this holds the company's own **Composio API
+    /// key** instead, which is presented as `x-api-key` to Composio itself
+    /// rather than as a bearer to the OpenHuman backend. One field because it is
+    /// one thing — the single secret this config authenticates with — and
+    /// [`Self::mode`] is what says which host it is presented to.
     credential: Credential,
+    /// Which host the calls go to: the OpenHuman-managed backend, or the
+    /// company's own Composio account (issue: BYOK Composio).
+    ///
+    /// Part of the config rather than re-read per call for the same reason
+    /// [`Self::toolkits`] is: it is a company decision that must reach the
+    /// agents through a roster rebuild, not a value a tool re-derives while it
+    /// runs.
+    mode: ComposioMode,
+    /// The **managed-chain** credential, kept alongside the BYOK one for a
+    /// single purpose: fetching OpenHuman's curated toolkit list.
+    ///
+    /// ## Why a BYOK company still asks OpenHuman what to offer
+    ///
+    /// Because neither list a BYOK company can reach on its own describes what
+    /// it should be shown. Composio's directory is 1501 entries — the whole
+    /// integration catalogue, most of which this harness has no curated tool
+    /// surface for — and the compiled-in shortlist is 31. OpenHuman's backend
+    /// publishes the middle answer, 123 providers, and it is the same list a
+    /// managed company is offered, which is the point: switching a company to
+    /// its own Composio account should change *who it acts as*, not what the
+    /// console lets it browse.
+    ///
+    /// This is a **non-secret list**, fetched once per
+    /// [`CATALOG_TTL`](crate::server::ops::composio_toolkits::CATALOG_TTL). No
+    /// Composio traffic is proxied through it and nothing is billed by it —
+    /// authorize and execute still go straight to the company's own account.
+    ///
+    /// [`Credential::None`] when no managed tier resolves (a standalone host
+    /// with no TinyHumans identity at all), in which case the catalog falls back
+    /// to the company's own Composio directory — see
+    /// [`LiveClient::list_toolkits`].
+    catalog: Credential,
     /// The toolkit allowlist (Gmail / Slack / GitHub, …). Empty defers to the
     /// backend's server-enforced allowlist (open mode); non-empty narrows
     /// strictly, client-side, before any network round-trip.
@@ -123,8 +178,12 @@ pub struct TenantComposio {
 }
 
 impl TenantComposio {
-    /// A config over an explicit credential — the constructor tests and callers
-    /// outside the resolver use.
+    /// A **managed** config over an explicit bearer — the constructor tests and
+    /// callers outside the resolver use.
+    ///
+    /// The bearer is presented to the OpenHuman backend. A caller holding an
+    /// answer from [`resolve_access`] wants [`Self::from_access`] instead,
+    /// which cannot lose the route.
     pub fn new(
         backend_url: impl Into<String>,
         credential: Credential,
@@ -133,8 +192,71 @@ impl TenantComposio {
         Self {
             backend_url: backend_url.into(),
             credential,
+            mode: ComposioMode::Managed,
+            catalog: Credential::None,
             toolkits,
             defaults: Default::default(),
+        }
+    }
+
+    /// The same config with the managed-chain credential attached, for the
+    /// curated toolkit list only. Meaningless under
+    /// [`ComposioMode::Managed`], where [`Self::credential`] already is it.
+    pub fn with_catalog_credential(mut self, catalog: Credential) -> Self {
+        self.catalog = catalog;
+        self
+    }
+
+    /// A config over a resolved
+    /// [`ComposioAccess`](crate::company::composio::ComposioAccess) — the
+    /// **only** way to build a BYOK config, and the only constructor a caller
+    /// that resolved a credential should use.
+    ///
+    /// ## Why this is not a `with_mode(…)` builder
+    ///
+    /// Because a builder would make the dangerous thing representable. Under
+    /// BYOK the credential is a **Composio** API key; under managed it is a
+    /// bearer the **TinyHumans backend** recognises. A call site that resolved
+    /// the first and then forgot to say so would build a managed config around
+    /// it, and [`live_call`] would send that company's `ak_…` to
+    /// `api.tinyhumans.ai` as a bearer — a credential delivered to a host that
+    /// has no business holding it, on a path where nothing would look wrong.
+    ///
+    /// Taking the pair that [`resolve_access`] returns, as one value, means the
+    /// route cannot be dropped on the floor between resolving a credential and
+    /// presenting it. [`Self::new`] stays for the callers that genuinely mean
+    /// "managed, with this bearer" — every existing one, and the tests.
+    pub fn from_access(
+        backend_url: impl Into<String>,
+        access: crate::company::composio::ComposioAccess,
+        toolkits: Vec<String>,
+    ) -> Self {
+        Self {
+            backend_url: backend_url.into(),
+            credential: access.credential,
+            mode: access.mode,
+            catalog: Credential::None,
+            toolkits,
+            defaults: Default::default(),
+        }
+    }
+
+    /// Which host this company's Composio calls go to.
+    pub fn mode(&self) -> ComposioMode {
+        self.mode
+    }
+
+    /// The non-secret endpoint the calls actually reach — Composio's own API
+    /// host under BYOK, the managed backend otherwise.
+    ///
+    /// The console reports this rather than [`Self::backend_url`] so that
+    /// switching to BYOK visibly changes where the traffic goes; a status line
+    /// still naming `api.tinyhumans.ai` after the switch would read as though
+    /// nothing had happened.
+    pub fn endpoint(&self) -> &str {
+        match self.mode {
+            ComposioMode::Byok => DIRECT_BASE_URL,
+            ComposioMode::Managed => &self.backend_url,
         }
     }
 
@@ -161,7 +283,13 @@ impl TenantComposio {
     /// Resolve a per-tenant Composio config, or `None` (fail closed) when no
     /// credential can be obtained at all.
     ///
-    /// Precedence: the company's **own Composio** token under [`TOKEN_KEY`] wins
+    /// A company in **BYOK** mode short-circuits everything below: its own
+    /// Composio API key is the credential, and if it is missing this yields
+    /// `None` rather than falling back to a managed tier. An operator who asked
+    /// to act through their own Composio account must never silently act
+    /// through the platform's.
+    ///
+    /// Managed precedence: the company's **own Composio** token under [`TOKEN_KEY`] wins
     /// — a company that pasted one keeps it even on the hosted platform. Failing
     /// that, the shared brokered-credential seam
     /// [`company_key::resolve`](crate::company::company_key::resolve) answers:
@@ -190,14 +318,11 @@ impl TenantComposio {
         api_url_env: Option<String>,
         token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
-        let credential = match crate::company::composio::resolve_credential(
-            company,
-            secrets,
-            token_source,
-        )
-        .await
-        {
-            Ok(credential) => credential,
+        // Cloned because both resolutions below want it: the access one, and the
+        // curated-catalog one under BYOK.
+        let catalog_source = token_source.clone();
+        let access = match resolve_access(company, secrets, token_source).await {
+            Ok(access) => access,
             Err(err) => {
                 tracing::warn!(
                     company = %company,
@@ -208,9 +333,10 @@ impl TenantComposio {
                 return None;
             }
         };
-        match credential {
+        let mode = access.mode;
+        match access.credential {
             Credential::None => None,
-            credential => {
+            _ => {
                 // Which account the company means, per toolkit (issue #820).
                 // Read here rather than per call so it lands in the fingerprint
                 // below: changing the pin then rebuilds the roster on the next
@@ -222,12 +348,25 @@ impl TenantComposio {
                 let defaults = crate::company::composio::load_defaults(company, secrets)
                     .await
                     .unwrap_or_default();
+                // Under BYOK, resolve the managed chain *as well* — not to act
+                // through, only to ask OpenHuman which providers to offer. A
+                // failure here is not a failure of the config: the company's own
+                // Composio key is what its agents present, and an unavailable
+                // curated list degrades the catalog, never the credential.
+                let catalog = if mode.is_byok() {
+                    crate::company::composio::resolve_credential(company, secrets, catalog_source)
+                        .await
+                        .unwrap_or(Credential::None)
+                } else {
+                    Credential::None
+                };
                 Some(
-                    Self::new(
+                    Self::from_access(
                         backend_url_or_default(backend_url_env, api_url_env),
-                        credential,
+                        access,
                         toolkits,
                     )
+                    .with_catalog_credential(catalog)
                     .with_defaults(defaults),
                 )
             }
@@ -248,6 +387,18 @@ impl TenantComposio {
     /// call rather than dialling the backend unauthenticated.
     pub async fn current_token(&self) -> crate::Result<Option<String>> {
         self.credential.current().await
+    }
+
+    /// The bearer for the **curated toolkit list**, or `None` when no managed
+    /// tier resolved.
+    ///
+    /// Only ever presented to the OpenHuman backend, and only for a non-secret
+    /// list. Never to Composio, and never in place of
+    /// [`Self::current_token`] — the two authenticate different hosts, and
+    /// confusing them is the failure [`from_access`](Self::from_access) exists
+    /// to make unrepresentable one level up.
+    pub async fn catalog_token(&self) -> crate::Result<Option<String>> {
+        self.catalog.current().await
     }
 
     /// A stable, credential-safe fingerprint of the resolved config, folded into
@@ -276,7 +427,26 @@ impl TenantComposio {
             Some(c) => {
                 1u8.hash(&mut hasher);
                 c.backend_url.hash(&mut hasher);
+                // Switching between managed and BYOK changes which Composio
+                // account the agents act through, so it has to rebuild the
+                // roster on the next turn exactly as a rotated token does — and
+                // it can happen without the credential's *bytes* changing at
+                // all, when a company clears a BYOK key it never used.
+                c.mode.hash(&mut hasher);
                 c.credential.hash_identity(&mut hasher);
+                // Under BYOK this is a *second* live credential — the
+                // managed-chain bearer `list_toolkits` fetches OpenHuman's
+                // curated catalog with, captured at resolve time and re-read
+                // per call through `catalog_token`. Missing it here means
+                // rotating the company's TinyHumans key while BYOK is active
+                // moves neither `mode` nor `credential`, so the roster keeps
+                // presenting the stale bearer: the curated fetch then fails on
+                // it and `LiveClient::list_toolkits` silently widens the
+                // provider grid to the account's own Composio directory,
+                // staying that way until some unrelated change happens to
+                // rebuild the roster. `Credential::None` under managed hashes
+                // to a fixed tag, so this is a no-op there.
+                c.catalog.hash_identity(&mut hasher);
                 c.toolkits.hash(&mut hasher);
                 // The pins are part of what the tools do, so a console change
                 // to one has to reach the agents the same cycle a token change
@@ -414,8 +584,14 @@ mod live {
 
     use oh::integrations::IntegrationClient;
     use oh::integrations::composio::ComposioClient;
+    use oh::integrations::composio::types::{
+        ComposioAuthorizeResponse, ComposioConnectionsResponse, ComposioDeleteResponse,
+        ComposioExecuteResponse, ComposioToolkitsResponse, ComposioToolsResponse,
+    };
     use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
     use openhuman_core::openhuman as oh;
+
+    use crate::harness::built_in::composio_direct::DirectComposio;
 
     /// What `composio_execute` needs to meter a call it just made: the company
     /// the sample belongs to, the agent that made it, and the meter to write to.
@@ -495,17 +671,198 @@ mod live {
     ///
     /// The scrub vector carries exactly the token that went out, so it cannot
     /// survive into agent-visible output even if the backend reflects it.
-    async fn live_call(config: &TenantComposio) -> Result<(ComposioClient, Vec<String>)> {
-        let token = config
+    async fn live_call(config: &TenantComposio) -> Result<(LiveClient, Vec<String>)> {
+        let secret = config
             .current_token()
             .await
             .map_err(|e| anyhow::anyhow!("resolving this company's Composio credential: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("no Composio credential is configured"))?;
-        let client = ComposioClient::new(Arc::new(IntegrationClient::new(
-            config.backend_url.clone(),
-            token.clone(),
-        )));
-        Ok((client, vec![token]))
+        let mut secrets = vec![secret.clone()];
+        let client = match config.mode() {
+            ComposioMode::Managed => LiveClient::Managed(ComposioClient::new(Arc::new(
+                IntegrationClient::new(config.backend_url.clone(), secret.clone()),
+            ))),
+            ComposioMode::Byok => {
+                // The curated-list client, when a managed tier resolves. Built
+                // here rather than inside `list_toolkits` so its bearer joins
+                // the scrub vector: it is a second live credential on this call,
+                // and it must no more survive into agent-visible output than the
+                // Composio key does.
+                let catalog = match config.catalog_token().await {
+                    Ok(Some(token)) => {
+                        secrets.push(token.clone());
+                        Some(ComposioClient::new(Arc::new(IntegrationClient::new(
+                            config.backend_url.clone(),
+                            token,
+                        ))))
+                    }
+                    Ok(None) => None,
+                    Err(err) => {
+                        // Degrades the catalog, never the call: the company's
+                        // own key is unaffected by this.
+                        tracing::warn!(
+                            error = %err,
+                            "[composio-byok] could not resolve the managed credential for the \
+                             curated toolkit list; falling back to this account's own catalogue"
+                        );
+                        None
+                    }
+                };
+                LiveClient::Byok {
+                    direct: DirectComposio::new(&secret),
+                    catalog,
+                }
+            }
+        };
+        Ok((client, secrets))
+    }
+
+    /// The two routes a Composio call can take, behind one surface.
+    ///
+    /// Every caller in this module speaks these six operations and none of them
+    /// branches on the route: a BYOK answer arrives in the same envelope a
+    /// managed one does, so the allowlist filtering, the scrubbing, the
+    /// rendering and the metering downstream of here are shared rather than
+    /// duplicated. The branch lives once, in the impl below, which is also the
+    /// only place that has to state what BYOK cannot do.
+    enum LiveClient {
+        /// Proxied through the OpenHuman backend — the default route.
+        Managed(ComposioClient),
+        /// Straight to the company's own Composio account.
+        Byok {
+            /// The company's own Composio account — every call but the toolkit
+            /// catalogue.
+            direct: DirectComposio,
+            /// OpenHuman's curated toolkit list, when a managed tier resolved to
+            /// fetch it with. `None` on a host with no TinyHumans identity at
+            /// all, where the company's own directory is the only list there is.
+            catalog: Option<ComposioClient>,
+        },
+    }
+
+    impl LiveClient {
+        /// The catalog of toolkits this company may connect.
+        ///
+        /// Managed: the backend's server-enforced allowlist. BYOK: whatever the
+        /// company's own Composio account lists, every entry connectable —
+        /// there is no gate between a company and its own account.
+        async fn list_toolkits(&self) -> Result<ComposioToolkitsResponse> {
+            match self {
+                Self::Managed(client) => client.list_toolkits().await,
+                // The curated list first, so a BYOK company browses the same
+                // 123 providers a managed one does. Switching a company to its
+                // own Composio account changes who it acts as; it should not
+                // also change what the console lets it look at.
+                Self::Byok {
+                    catalog: Some(catalog),
+                    direct,
+                } => match catalog.list_toolkits().await {
+                    Ok(resp) if !resp.toolkits.is_empty() || !resp.catalog.is_empty() => Ok(resp),
+                    // An empty or failed curated list is not worth failing the
+                    // catalogue over — the company's own directory is a real
+                    // answer, just a longer and less curated one.
+                    other => {
+                        if let Err(ref err) = other {
+                            tracing::warn!(
+                                error = %format!("{err:#}"),
+                                "[composio-byok] the curated toolkit list could not be read; \
+                                 falling back to this account's own catalogue"
+                            );
+                        }
+                        direct.list_toolkits().await
+                    }
+                },
+                Self::Byok {
+                    catalog: None,
+                    direct,
+                } => direct.list_toolkits().await,
+            }
+        }
+
+        /// The connected accounts this company holds.
+        async fn list_connections(&self) -> Result<ComposioConnectionsResponse> {
+            match self {
+                Self::Managed(client) => client.list_connections().await,
+                Self::Byok { direct, .. } => direct.list_connections().await,
+            }
+        }
+
+        /// The action schemas for `toolkits` (all of them when `None`).
+        async fn list_tools(
+            &self,
+            toolkits: Option<&[String]>,
+            tags: Option<&[String]>,
+        ) -> Result<ComposioToolsResponse> {
+            match self {
+                Self::Managed(client) => client.list_tools(toolkits, tags).await,
+                Self::Byok { direct, .. } => {
+                    if tags.is_some_and(|tags| !tags.is_empty()) {
+                        // Nothing in this repo passes tags today; say so rather
+                        // than silently narrowing to nothing if something starts.
+                        tracing::warn!(
+                            "[composio-byok] list_tools: tag filtering is not applied on the                              BYOK route; returning the unfiltered toolkit listing"
+                        );
+                    }
+                    direct.list_tools(toolkits.unwrap_or(&[])).await
+                }
+            }
+        }
+
+        /// Begin an OAuth handoff and return the hosted connect URL.
+        async fn authorize(
+            &self,
+            toolkit: &str,
+            extra: Option<Value>,
+        ) -> Result<ComposioAuthorizeResponse> {
+            match self {
+                Self::Managed(client) => client.authorize(toolkit, extra).await,
+                Self::Byok { direct, .. } => {
+                    if extra.is_some() {
+                        // The v3 link call takes no per-toolkit extras; a
+                        // BYOK operator configures them on the auth config in
+                        // their own Composio dashboard. Same answer OpenHuman's
+                        // direct branch gives, and it is logged rather than
+                        // failed so a toolkit that does not need them still
+                        // connects.
+                        tracing::warn!(
+                            toolkit = %toolkit,
+                            "[composio-byok] authorize: extra_params are not forwarded on the                              BYOK route — set them on the toolkit's auth config at app.composio.dev"
+                        );
+                    }
+                    direct.authorize(toolkit).await
+                }
+            }
+        }
+
+        /// Run one action, optionally as a named connected account.
+        async fn execute(
+            &self,
+            tool: &str,
+            arguments: Option<Value>,
+            connection_id: Option<&str>,
+        ) -> Result<ComposioExecuteResponse> {
+            match self {
+                // No pin — the ordinary case — is the untouched path: the
+                // vendored client's own call, with no connection id, resolved
+                // by Composio for the entity.
+                Self::Managed(client) => match connection_id {
+                    None => client.execute_tool(tool, arguments).await,
+                    Some(connection_id) => {
+                        execute_pinned(client, tool, arguments, connection_id).await
+                    }
+                },
+                Self::Byok { direct, .. } => direct.execute(tool, arguments, connection_id).await,
+            }
+        }
+
+        /// Revoke one connected account — the backend's route under managed,
+        /// Composio's own `DELETE /connected_accounts/{id}` under BYOK.
+        async fn delete_connection(&self, connection_id: &str) -> Result<ComposioDeleteResponse> {
+            match self {
+                Self::Managed(client) => client.delete_connection(connection_id).await,
+                Self::Byok { direct, .. } => direct.delete_connection(connection_id).await,
+            }
+        }
     }
 
     /// Run a Composio action **as a named connected account** (issue #820).
@@ -638,8 +995,14 @@ mod live {
 
     /// A scrubbed error result — the tenant token is stripped from any error
     /// body (mirrors [`crate::harness::mcp`]'s failure handling).
+    ///
+    /// `{err:#}` renders the whole cause chain, not just its outermost layer.
+    /// The managed client's errors are single-level so the two used to read
+    /// alike; the BYOK client wraps its calls in `.context(…)`, and with plain
+    /// `{err}` an agent was handed the bare call name — "Composio v3 /toolkits"
+    /// — with the reason it failed silently discarded one frame below.
     fn scrubbed_err(context: &str, err: &anyhow::Error, secrets: &[String]) -> ToolResult {
-        ToolResult::error(scrub(&format!("{context}: {err}"), secrets))
+        ToolResult::error(scrub(&format!("{context}: {err:#}"), secrets))
     }
 
     /// Pull a required, non-empty string argument.
@@ -676,7 +1039,7 @@ mod live {
         let (client, secrets) = live_call(config).await?;
         match client.authorize(toolkit, None).await {
             Ok(resp) => Ok(resp.connect_url),
-            Err(err) => Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+            Err(err) => Err(anyhow::anyhow!(scrub(&format!("{err:#}"), &secrets))),
         }
     }
 
@@ -697,7 +1060,7 @@ mod live {
         let (client, secrets) = live_call(config).await?;
         let resp = match client.list_connections().await {
             Ok(resp) => resp,
-            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err:#}"), &secrets))),
         };
         let mut rows: Vec<ComposioConnectionRow> = resp
             .connections
@@ -800,7 +1163,7 @@ mod live {
                 "Composio declined to delete the connection"
             ))),
             Err(err) => Err(DisconnectError::Upstream(anyhow::anyhow!(scrub(
-                &format!("{err}"),
+                &format!("{err:#}"),
                 &secrets
             )))),
         }
@@ -902,7 +1265,7 @@ mod live {
         let (client, secrets) = live_call(config).await?;
         let resp = match client.list_toolkits().await {
             Ok(resp) => resp,
-            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err:#}"), &secrets))),
         };
         let normalize = |slug: &str| slug.trim().to_ascii_lowercase();
         // A `BTreeMap` keyed on the normalized slug keeps the de-duplication and
@@ -1366,15 +1729,9 @@ mod live {
                     return Ok(ToolResult::error(format!("composio_execute failed: {err}")));
                 }
             };
-            // No pin — the ordinary case — is the untouched path: the same call
-            // this tool has always made, with no connection id, resolved by
-            // Composio for the entity.
-            let call = match pinned.as_deref() {
-                None => client.execute_tool(&tool, arguments).await,
-                Some(connection_id) => {
-                    execute_pinned(&client, &tool, arguments, connection_id).await
-                }
-            };
+            // A pin, when the company set one, is threaded through the route
+            // façade; an unpinned call is the untouched path it has always been.
+            let call = client.execute(&tool, arguments, pinned.as_deref()).await;
             match call {
                 Ok(resp) => {
                     // Metered only on success — i.e. a call that actually
@@ -2079,6 +2436,226 @@ mod tests {
             TenantComposio::fingerprint(&attested),
             TenantComposio::fingerprint(&a),
             "a tier change must move the fingerprint"
+        );
+    }
+
+    /// Switching routes is an identity change even when the credential's bytes
+    /// do not move: the same string means a different Composio account
+    /// depending on which host it is presented to, so the roster has to rebuild
+    /// or the agents keep calling the account the company just left.
+    #[test]
+    fn fingerprint_moves_when_the_route_changes() {
+        let managed = config_with(Credential::from_value("same-bytes"));
+        let byok = Some(TenantComposio::from_access(
+            "https://api.tinyhumans.ai",
+            crate::company::composio::ComposioAccess {
+                mode: ComposioMode::Byok,
+                credential: Credential::from_value("same-bytes"),
+            },
+            vec!["gmail".to_string()],
+        ));
+        assert_ne!(
+            TenantComposio::fingerprint(&managed),
+            TenantComposio::fingerprint(&byok),
+            "managed and BYOK must not fingerprint alike"
+        );
+    }
+
+    /// Under BYOK the config carries a *second* live credential — the
+    /// managed-chain bearer `list_toolkits` fetches OpenHuman's curated catalog
+    /// with. Rotating a company's TinyHumans key while BYOK is active changes
+    /// neither `mode` nor the Composio `credential`, so this bearer is the only
+    /// thing that moves; if the fingerprint did not cover it, the roster would
+    /// keep the stale one until some unrelated change happened to rebuild it,
+    /// and the curated fetch would keep failing on a bearer the operator
+    /// already rotated away from.
+    #[test]
+    fn fingerprint_moves_when_the_catalog_credential_rotates() {
+        let byok_with = |catalog: Credential| {
+            Some(
+                TenantComposio::from_access(
+                    "https://api.tinyhumans.ai",
+                    crate::company::composio::ComposioAccess {
+                        mode: ComposioMode::Byok,
+                        credential: Credential::from_value("ak_live"),
+                    },
+                    vec!["gmail".to_string()],
+                )
+                .with_catalog_credential(catalog),
+            )
+        };
+        let before = byok_with(Credential::from_value("th-company-a"));
+        let after = byok_with(Credential::from_value("th-company-b"));
+        assert_ne!(
+            TenantComposio::fingerprint(&before),
+            TenantComposio::fingerprint(&after),
+            "rotating the catalog bearer alone must still rebuild the roster"
+        );
+
+        // A managed config's `catalog` is always `Credential::None` (see
+        // `TenantComposio::new`), so this must be a genuine no-op there rather
+        // than a source of spurious rebuilds on every managed roster build.
+        let managed_a = config_with(Credential::from_value("same-bytes"));
+        let managed_b = config_with(Credential::from_value("same-bytes"));
+        assert_eq!(
+            TenantComposio::fingerprint(&managed_a),
+            TenantComposio::fingerprint(&managed_b),
+            "an always-None catalog credential must not itself vary the managed fingerprint"
+        );
+    }
+
+    /// The endpoint a config reports is the host it dials — under BYOK that is
+    /// Composio itself, whatever managed backend URL was resolved alongside it.
+    #[test]
+    fn a_byok_config_reports_composios_own_host() {
+        let managed = TenantComposio::new(
+            "https://api.tinyhumans.ai",
+            Credential::from_value("k"),
+            vec![],
+        );
+        assert_eq!(managed.endpoint(), "https://api.tinyhumans.ai");
+        assert_eq!(managed.mode(), ComposioMode::Managed);
+
+        let byok = TenantComposio::from_access(
+            "https://api.tinyhumans.ai",
+            crate::company::composio::ComposioAccess {
+                mode: ComposioMode::Byok,
+                credential: Credential::from_value("k"),
+            },
+            vec![],
+        );
+        assert_eq!(byok.endpoint(), DIRECT_BASE_URL);
+        assert_eq!(byok.mode(), ComposioMode::Byok);
+    }
+
+    /// The hazard `from_access` exists to make unrepresentable: a BYOK
+    /// credential is a **Composio** key, and pairing it with the managed route
+    /// would send it to `api.tinyhumans.ai` as a bearer. Building from the
+    /// resolved pair carries the route with the credential, so the two cannot
+    /// be separated by a caller that forgets.
+    #[test]
+    fn a_byok_credential_cannot_be_built_onto_the_managed_route() {
+        let config = TenantComposio::from_access(
+            "https://api.tinyhumans.ai",
+            crate::company::composio::ComposioAccess {
+                mode: ComposioMode::Byok,
+                credential: Credential::from_value("ak_live"),
+            },
+            vec![],
+        );
+        assert_eq!(config.mode(), ComposioMode::Byok);
+        assert_eq!(
+            config.endpoint(),
+            DIRECT_BASE_URL,
+            "the key must be presented to Composio, never to the managed backend"
+        );
+    }
+
+    /// A BYOK company still resolves the managed chain — not to act through, but
+    /// to ask OpenHuman which providers to offer. The two credentials are kept
+    /// apart: the Composio key is what calls present, the managed bearer is only
+    /// ever the curated list's.
+    #[tokio::test]
+    async fn byok_keeps_the_managed_credential_for_the_curated_catalog_only() {
+        use crate::company::company_key;
+        use crate::company::composio::store_api_key;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-catalog-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+
+        company_key::store_key(&company, &secrets, "th_company")
+            .await
+            .unwrap();
+        store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None, None)
+            .await
+            .expect("a BYOK company has a config");
+
+        assert_eq!(config.mode(), ComposioMode::Byok);
+        assert_eq!(
+            config.current_token().await.unwrap().as_deref(),
+            Some("ak_live"),
+            "calls present the company's own Composio key"
+        );
+        assert_eq!(
+            config.catalog_token().await.unwrap().as_deref(),
+            Some("th_company"),
+            "the curated list is fetched with the managed credential, not the Composio key"
+        );
+    }
+
+    /// With no managed tier at all — a standalone host carrying no TinyHumans
+    /// identity — there is no curated list to fetch, and the config says so
+    /// rather than presenting the Composio key to the OpenHuman backend.
+    #[tokio::test]
+    async fn byok_without_a_managed_tier_has_no_curated_catalog_credential() {
+        use crate::company::composio::store_api_key;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-standalone-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None, None)
+            .await
+            .expect("a BYOK company has a config");
+        assert_eq!(
+            config.current_token().await.unwrap().as_deref(),
+            Some("ak_live")
+        );
+        assert!(
+            config.catalog_token().await.unwrap().is_none(),
+            "no managed tier means no curated list — never the Composio key standing in for one"
+        );
+    }
+
+    /// The roster path honours the stored route: a company that brought its own
+    /// Composio account resolves to a BYOK config carrying that key, and one
+    /// that selected BYOK without storing a key resolves to **no tools** rather
+    /// than to the platform identity standing in for it.
+    #[tokio::test]
+    async fn resolve_follows_the_stored_route() {
+        use crate::company::composio::{BYOK_MODE, MODE_KEY, store_api_key};
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-byok-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None, None)
+            .await
+            .expect("a BYOK company has a config");
+        assert_eq!(config.mode(), ComposioMode::Byok);
+        assert_eq!(
+            config.current_token().await.unwrap().as_deref(),
+            Some("ak_live")
+        );
+
+        // BYOK selected with nothing stored: fail closed.
+        let bare = CompanyId::new("bare");
+        secrets
+            .set(&bare, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        assert!(
+            TenantComposio::resolve(&bare, &secrets, vec![], None, None, None)
+                .await
+                .is_none(),
+            "an operator who asked for their own account must never silently get the platform's"
         );
     }
 }

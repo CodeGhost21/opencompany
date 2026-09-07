@@ -18,6 +18,30 @@ import { channelForThread } from "@/views/chat/model";
  */
 
 /**
+ * A parked re-read: the desk to ask the host about, plus the identities its
+ * cleanup is filed under.
+ *
+ * The queue used to hold bare desk ids, which was the same string as everything
+ * else back when the open-turn maps were keyed per channel. Since #2042 they are
+ * keyed per thread, so a replay that carried only the desk defaulted its
+ * cleanup key to the desk and cleared whatever lived there — and on the cold
+ * load this queue exists for, that can be a live unthreaded send's own live
+ * steps and receipt, armed before its `openTurns` row landed. The replay would
+ * erase the UI of a turn that is still running (Codex review on #2044).
+ *
+ * So both identities are parked, and `turnId` with them: the guard the replay
+ * runs must exclude the turn that settled exactly as the first pass did.
+ */
+export type PendingReRead = {
+  /** The host desk — what `chat/history` is addressed by. */
+  desk: string;
+  /** The open-turn state key — what the per-turn cleanup is filed under. */
+  stateKey: string;
+  /** The turn that settled, excluded from the "is anything still open?" guard. */
+  turnId?: string;
+};
+
+/**
  * Replay every parked thread whose channel is now known.
  *
  * Iterates a **snapshot** of `pending` so the `reRead` call — which may fold and
@@ -37,13 +61,13 @@ import { channelForThread } from "@/views/chat/model";
  * just until the next drain.
  */
 export function drainReReadQueue(
-  pending: Set<string>,
+  pending: Map<string, PendingReRead>,
   channelMap: Record<string, string>,
-  reRead: (threadId: string) => void,
+  reRead: (desk: string, settledTurnId?: string, stateKey?: string) => void,
 ): void {
-  for (const threadId of [...pending]) {
-    if (!channelForThread(channelMap, threadId)) continue;
-    pending.delete(threadId);
-    reRead(threadId);
+  for (const [id, parked] of [...pending]) {
+    if (!channelForThread(channelMap, parked.desk)) continue;
+    pending.delete(id);
+    reRead(parked.desk, parked.turnId, parked.stateKey);
   }
 }

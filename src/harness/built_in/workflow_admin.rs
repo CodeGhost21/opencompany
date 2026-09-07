@@ -527,6 +527,7 @@ fn seed_draft(file: &crate::company::WorkflowFile) -> RawWorkflow {
                 // residue falsely report no postcondition policy, even
                 // though the runtime still enforces one.
                 postcondition: n.postcondition.clone(),
+                verify: n.verify.clone(),
             })
             .collect(),
         edges: file

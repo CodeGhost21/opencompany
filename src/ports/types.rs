@@ -1028,6 +1028,34 @@ pub enum CompanyEvent {
         /// moment a loop was being chased.
         #[serde(default, skip_serializing_if = "is_zero_depth")]
         mention_depth: u8,
+        /// The teammates this reply is addressed to, when that is **narrower
+        /// than the desk it was written on** — a private aside
+        /// (`docs/spec/runtime/hivemind-asides.md`).
+        ///
+        /// Empty is the ordinary case and means desk-visible: every row written
+        /// before this field existed, and every row this host writes unless a
+        /// desk opted in to asides and one was authorized. The audience is the
+        /// author **plus** these ids; the author is not repeated here.
+        ///
+        /// Privacy between agents, never a security boundary. An operator and
+        /// every person reads an aside in full; what narrows is the projection
+        /// handed to a *peer agent*, and even there the row is elided rather
+        /// than removed — its sequence, author and audience stay visible, so a
+        /// `^N` citation still resolves and a peer can see that an exchange it
+        /// may not read happened. Nothing downstream should treat this as
+        /// access control.
+        ///
+        /// Fixed at append time. Widening one later could never be redelivered
+        /// (a sharing watermark advances past filtered rows unconditionally)
+        /// and would invalidate citations besides.
+        ///
+        /// Additive on exactly the terms `task_id`, `parent` and `mentions`
+        /// above are: `#[serde(default)]` is what lets an already-persisted log
+        /// load, and `skip_serializing_if` is what keeps a desk-visible reply
+        /// serializing byte-for-byte as it did before this field existed, so no
+        /// stored record needs migrating.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audience: Vec<String>,
     },
     /// A reaction was set or cleared on one chat message (issue #364).
     ///
@@ -1753,6 +1781,9 @@ pub enum CompanyEvent {
         /// existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_by: Option<StartedBy>,
+        /// Whether this attempt continued at a node boundary or re-ran from its trigger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_semantic: Option<crate::ports::ResumeSemantic>,
     },
     /// One non-trigger node of a workflow run began executing (issue #382),
     /// reported by the engine's `RunObserver` immediately before the node's
@@ -2226,6 +2257,10 @@ pub enum WorkflowNodeStatus {
     /// failure count would hide real failures among approvals nobody has
     /// answered yet.
     Blocked,
+    /// The node intentionally stopped because advancing would be incorrect or
+    /// unnecessary. Host-reclassified from the capability error used to halt
+    /// the branch; never emitted by tinyflows and not an error.
+    Declined,
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -5835,6 +5870,7 @@ mod test {
     #[test]
     fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
         let event = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "general".to_string(),
             agent_id: "ceo".to_string(),
             text: "hi".to_string(),
@@ -6133,6 +6169,7 @@ mod test {
 
         // A tool-less reply serializes without the `steps` key.
         let tool_less = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6147,6 +6184,7 @@ mod test {
 
         // A reply with a timeline round-trips it.
         let with_steps = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6188,6 +6226,7 @@ mod test {
 
         // An untagged reply keeps the legacy wire shape exactly.
         let untagged = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6204,6 +6243,7 @@ mod test {
 
         // A dispatch-produced reply carries the key and round-trips.
         let tagged = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6442,6 +6482,7 @@ mod test {
         );
 
         let answered = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(41)),
@@ -8871,6 +8912,7 @@ mod test {
             run_id: "run-1".to_string(),
             scheduled: true,
             started_by: Some(StartedBy::Operator),
+            resume_semantic: None,
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -8889,6 +8931,7 @@ mod test {
                 run_id: "run-1".to_string(),
                 scheduled: matches!(started_by, StartedBy::Schedule),
                 started_by: Some(started_by.clone()),
+                resume_semantic: None,
             };
             assert_eq!(
                 round_trip(&event),
@@ -8932,6 +8975,7 @@ mod test {
             // test of its own so a fourth reading cannot be added without
             // someone editing this list.
             WorkflowNodeStatus::Blocked,
+            WorkflowNodeStatus::Declined,
         ] {
             let event = CompanyEvent::WorkflowNodeFinished {
                 workflow_id: "digest".to_string(),
@@ -9016,6 +9060,7 @@ mod test {
             run_id: "run-1".to_string(),
             scheduled: false,
             started_by: None,
+            resume_semantic: None,
         })
         .expect("serialize");
         assert_eq!(

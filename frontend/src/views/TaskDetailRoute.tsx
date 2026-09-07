@@ -22,7 +22,7 @@
 import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import {
   readTaskFocus,
   taskTabHref,
@@ -44,7 +44,8 @@ export function TaskDetailRoute({
   decided,
   failed,
   onDecide,
-  onOpenThread,
+  chatChannelByThread,
+  onOpenChannel,
   onLeave,
 }: {
   client: OpenCompanyClient;
@@ -60,9 +61,11 @@ export function TaskDetailRoute({
   deciding?: ReadonlyMap<string, Verdict>;
   decided?: Readonly<Record<string, DecidedApproval>>;
   failed?: Record<string, string>;
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
-  /** Opens the chat thread this card was created from (issue #246). */
-  onOpenThread?: (threadId: string) => void;
+  onDecide?: DecideApproval;
+  /** The shell's host thread → Room channel map, which places this card's origin. */
+  chatChannelByThread?: Readonly<Record<string, string>>;
+  /** Opens the Room channel this card's conversation lives on (issue #246). */
+  onOpenChannel?: (channelId: string, threadId?: string) => void;
   /** Where Back, and a deleted card, go: the board, which lives in Ledgers. */
   onLeave: () => void;
 }) {
@@ -106,7 +109,8 @@ export function TaskDetailRoute({
           [LEDGER_VIEW_PARAM]: view === "list" ? "list" : null,
         });
       }}
-      onOpenThread={onOpenThread}
+      chatChannelByThread={chatChannelByThread}
+      onOpenChannel={onOpenChannel}
       // `onSaved` used to be here, as a literal `() => {}`. It handed a saved
       // card back to the board rendered beside this screen, which held its own
       // copy of the row; there is no such sibling now — the board is the `tasks`

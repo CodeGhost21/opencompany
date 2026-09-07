@@ -154,6 +154,11 @@ export function disconnectRouteFor(
   // *for the agents*, which is the connection an operator means. The native
   // secret is inert until #396 lands, so blanking it silently would leave the
   // provider working and the tile still connected.
+  //
+  // The route this resolves to is the same under BYOK: the host revokes through
+  // Composio's own `DELETE /connected_accounts/{id}` there rather than through
+  // the backend, which is a difference in who is dialled, not in what the
+  // console can offer.
   if (live.length > 0) return { kind: "composio", accounts: live };
   if (row.via.includes("native")) return { kind: "native" };
   return null;

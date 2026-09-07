@@ -354,6 +354,37 @@ pub struct ApprovalSummary {
     /// ones, which is less information than an admin gets and still the truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<String>,
+    /// The root cause a blocker shares with its siblings (issue #1862) — a
+    /// connection id, an integration name — so the console folds every card
+    /// stalled on one broken integration into a single question, and one
+    /// verdict fans back to them all.
+    ///
+    /// Distinct from [`batch`](Self::batch): a batch is "asked in the same
+    /// turn", a group is "blocked by the same cause", and two runs that never
+    /// shared a turn can still share a broken OAuth grant. Read off the blocker
+    /// payload's own `group_key`, so a console never guesses the grouping the
+    /// classifier already recorded.
+    ///
+    /// `None` — and omitted from the wire — for an ordinary approval and for a
+    /// blocker particular to its own step. A console groups those alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_key: Option<String>,
+    /// Which kind of stopped step a parked blocker names, as the wire token
+    /// `"task"` or `"node"` — read off [`BlockerPayload::step`](crate::ports::blockers::BlockerPayload::step).
+    ///
+    /// The console needs this to word a verdict's consequence honestly:
+    /// `skip` and `cancel` do different things to a paused board card than
+    /// they do to a workflow node (a card redispatches on skip and returns to
+    /// To-do on cancel; a node produces nothing on skip and stops the run on
+    /// cancel), so a single copy fragment cannot describe both without
+    /// promising one path's behaviour on the other's card.
+    ///
+    /// `None` — and omitted from the wire — for a non-blocker approval, a
+    /// blocker with no step behind it (a bare agent question), and a host
+    /// that predates the field. All three read the same to a console: no
+    /// step-specific claim can be made, so the generic wording applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker_step_kind: Option<String>,
 }
 
 #[cfg(test)]

@@ -338,10 +338,11 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
 /// `None` when the secret store could not be read.
 ///
 /// Asks
-/// [`resolve_credential`](crate::company::composio::resolve_credential) rather
-/// than restating its precedence. The three-tier resolution — BYO
+/// [`resolve_access`](crate::company::composio::resolve_access) rather
+/// than restating its precedence. The three-tier managed resolution — BYO
 /// `composio/token`, then the company's own TinyHumans key, then this instance's
-/// platform identity — is the *same* one
+/// platform identity — and the BYOK route that bypasses all three, are the
+/// *same* answer
 /// [`TenantComposio::resolve`](crate::harness::composio::TenantComposio::resolve)
 /// gates the toolbelt on, and the whole point of #886 is that this panel had a
 /// second, one-tier copy of the question that disagreed with it. There must be
@@ -365,14 +366,14 @@ async fn composio_credential_source(
     runtime: &CompanyRuntime,
     token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
 ) -> Option<CredentialSource> {
-    match crate::company::composio::resolve_credential(
+    match crate::company::composio::resolve_access(
         runtime.id(),
         runtime.secrets().as_ref(),
         token_source,
     )
     .await
     {
-        Ok(credential) => Some(credential.source()),
+        Ok(access) => Some(access.credential.source()),
         Err(err) => {
             tracing::warn!(
                 company = %runtime.id(),

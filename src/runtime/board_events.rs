@@ -165,6 +165,7 @@ impl TaskStore for BoardAnnouncer {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::types::{EventSeq, StoredEvent};
     use futures::stream::BoxStream;
     use std::sync::Mutex;
@@ -255,14 +256,13 @@ mod test {
     fn card(id: &str, column: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
-            title: "Draft the launch note".to_string(),
+            title: TaskTitle::authored("Draft the launch note"),
             note: None,
             column: column.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: 1,
-            origin_chat_id: None,
-            origin_parent: None,
+            origin: None,
             parent_task_id: None,
             output: None,
             plan: None,
@@ -271,6 +271,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
+            origin_message_seq: None,
             bounced: None,
         }
     }

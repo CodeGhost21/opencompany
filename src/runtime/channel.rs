@@ -142,6 +142,7 @@ impl ChannelAdapter for DeskChannel {
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: self.desk_id.clone(),
                     agent_id: WORKFLOW_REPLY_AUTHOR.to_string(),
                     text: msg.text,
@@ -269,6 +270,7 @@ impl ChannelAdapter for DurableOperatorChannel {
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // The dedicated operator line, normally `OPERATOR_CHANNEL`
                     // itself — `owns("operator","operator",…)` matches it (it is
                     // NOT folded into General — see

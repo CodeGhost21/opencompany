@@ -631,6 +631,18 @@ describe("resolving a live frame's thread id against the shell's map", () => {
   it("answers null for a thread the map does not know", () => {
     expect(channelForThread(MAP, "workflows")).toBeNull();
   });
+
+  it("resolves a dm:-prefixed channel id standing in for its bare thread id", () => {
+    expect(channelForThread(MAP, "dm:eng")).toBe("dm:eng");
+  });
+
+  it("answers null for a dm:-prefixed id naming no teammate in the map", () => {
+    expect(channelForThread(MAP, "dm:ghost")).toBeNull();
+  });
+
+  it("folds a dm:-prefixed id's case, the way the host resolves the teammate it names", () => {
+    expect(channelForThread(MAP, "dm:ENG")).toBe("dm:eng");
+  });
 });
 
 /**
@@ -659,9 +671,14 @@ describe("the shell resolves every thread-to-channel lookup through channelForTh
     expect(shell).toContain("channelForThread(chatChannelByThread, threadId)");
   });
 
-  it("resolves both `chatChannelByThreadRef.current` lookups through the fold", () => {
+  it("resolves every `chatChannelByThreadRef.current` lookup through the fold", () => {
+    // The count is the assertion: a new ref lookup added as a bare index would
+    // leave this at one and pass the negative below only by not existing yet.
+    // It was two while `#/conversation` had its own view-report path; that
+    // surface is retired, and the settled-thread re-read is the one that
+    // remains.
     const matches = shell.match(/channelForThread\(chatChannelByThreadRef\.current, threadId\)/g);
-    expect(matches?.length ?? 0).toBe(2);
+    expect(matches?.length ?? 0).toBe(1);
     expect(shell).not.toContain("chatChannelByThreadRef.current[threadId]");
   });
 

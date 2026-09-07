@@ -13,7 +13,7 @@ function readSegments(): string[] {
 
 /**
  * A tiny hash router: keeps the active view in `location.hash` (e.g.
- * `#/conversation`, or `#/settings/people` for a view with sub-pages) so views
+ * `#/chat`, or `#/settings/people` for a view with sub-pages) so views
  * are linkable, survive refresh, and honor back/forward — without pulling in a
  * full router or disturbing the app's boot phases. Falls back to `fallback` for
  * unknown or empty hashes.

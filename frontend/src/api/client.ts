@@ -13,6 +13,7 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type BlockerVerdict,
   type BoardComment,
   type BoardDetail,
   type BoardItem,
@@ -34,6 +35,7 @@ import {
   type ChatHistoryMessageDto,
   type ChatPostResult,
   type ChatResponse,
+  type ChatReviewReceipt,
   type CompanyStatus,
   type ConnectionState,
   type CreateDeskInput,
@@ -61,12 +63,51 @@ import {
 
 export type LifecycleAction = "pause" | "resume" | "suspend" | "archive";
 
+/** Per-call overrides for a request's deadline and cancellation. */
+export interface RequestOptions {
+  /**
+   * A caller-owned signal — an unmount, a superseded read — that cancels the
+   * request. Its abort surfaces as an `AbortError`, distinct from a timeout, so
+   * the caller can tell "I cancelled this" from "the host went away".
+   */
+  signal?: AbortSignal;
+  /**
+   * How long to wait for the host before giving up, in milliseconds. Omit for
+   * the method default ({@link DEFAULT_REQUEST_TIMEOUT_MS} on a `GET`, none on a
+   * mutation, whose duration is the host's to decide). `null` disables the
+   * bound explicitly for a read that is expected to run long.
+   */
+  timeoutMs?: number | null;
+}
+
+/**
+ * The default deadline for a `GET`.
+ *
+ * Reads are the request the console blocks a view on, and a host that accepts
+ * the connection and then never answers used to leave that view on its skeleton
+ * forever — the browser's `fetch` produces no event for a stalled response, so
+ * no `catch` an already-written load path holds ever runs (issue #2014). This
+ * turns that silence into an ordinary rejection every view's existing error
+ * state can render. Well above any healthy read; mutations opt in per call,
+ * since a chat turn or a company provision is legitimately unbounded.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The `/spec` capability a host advertises when `blocker_verdict` reaches a
+ * blocker resume rather than being ignored. Mirrors the string pushed in
+ * `AppState::capabilities` (`src/app/types.rs`); a host that does not name it
+ * lowers every four-way answer to its two-way form.
+ */
+const BLOCKER_VERDICT_CAPABILITY = "blocker-verdict";
+
 export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
   private readonly session: string | null;
   private readonly transport: Transport;
+  private capabilityProbe: Promise<string[] | undefined> | null = null;
 
   constructor(
     config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader">,
@@ -122,21 +163,61 @@ export class OpenCompanyClient {
     path: string,
     body?: unknown,
     extraHeaders?: Record<string, string>,
+    options?: RequestOptions,
   ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
     Object.assign(headers, this.authHeaders(), extraHeaders);
 
+    const timeoutMs =
+      options?.timeoutMs !== undefined
+        ? options.timeoutMs
+        : method === "GET"
+          ? DEFAULT_REQUEST_TIMEOUT_MS
+          : null;
+    const caller = options?.signal;
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort(caller?.reason);
+    if (caller) {
+      if (caller.aborted) controller.abort(caller.reason);
+      else caller.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    let timedOut = false;
+    const timer =
+      timeoutMs === null
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutMs);
+
     let res: TransportResponse;
     try {
-      res = await this.transport.request({
-        method,
-        url: `${this.baseUrl}${path}`,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-    } catch {
+      res = await settleWithin(
+        this.transport.request({
+          method,
+          url: `${this.baseUrl}${path}`,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+        }),
+        controller.signal,
+      );
+    } catch (err) {
+      if (timedOut) {
+        throw new ApiError(
+          0,
+          "timeout",
+          `the company host at ${this.baseUrl || "this origin"} did not respond in time`,
+        );
+      }
+      // The caller tore the request down itself; let its `AbortError` through,
+      // the way `getBlob` does, so it can tell "cancelled" from "unreachable".
+      if (caller?.aborted) throw abortError(err);
       throw new ApiError(0, "network_error", `cannot reach the company host at ${this.baseUrl || "this origin"}`);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      if (caller) caller.removeEventListener("abort", onCallerAbort);
     }
 
     const text = res.text;
@@ -180,8 +261,33 @@ export class OpenCompanyClient {
   }
 
   /** A typed GET, for surfaces that live outside this class (e.g. auth). */
-  get<T>(path: string): Promise<T> {
-    return this.request<T>("GET", path);
+  get<T>(path: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", path, undefined, undefined, options);
+  }
+
+  /**
+   * What this host advertises at `/spec`, read once and shared by every
+   * caller after that.
+   *
+   * `undefined` is the meaningful answer, not an error case: a host predating
+   * the field omits it, and that must read as "assume REST only" rather than
+   * as "supports nothing". A `/spec` that cannot be reached at all answers the
+   * same way — an unreachable capability is one this client must not rely on,
+   * and the request the caller actually wanted still gets to fail on its own
+   * terms rather than being masked by a probe failure.
+   */
+  private hostCapabilities(): Promise<string[] | undefined> {
+    this.capabilityProbe ??= this.get<Record<string, unknown>>("/spec")
+      .then((spec) =>
+        Array.isArray(spec.capabilities) ? (spec.capabilities as string[]) : undefined,
+      )
+      .catch(() => undefined);
+    return this.capabilityProbe;
+  }
+
+  /** Whether this host names `capability` in its `/spec`. */
+  async supports(capability: string): Promise<boolean> {
+    return (await this.hostCapabilities())?.includes(capability) ?? false;
   }
 
   /**
@@ -868,15 +974,40 @@ export class OpenCompanyClient {
     verdict: Verdict,
     _note?: string,
     company?: string | null,
-    options: { detach?: boolean; scope?: GrantScope } = {},
+    options: {
+      detach?: boolean;
+      scope?: GrantScope;
+      /**
+       * The four-way answer to a parked blocker (#2028). It narrows `verdict`
+       * rather than replacing it — the host refuses a pair that disagrees — and
+       * `answer` is mandatory and non-blank on `amend`, refused on the rest.
+       *
+       * Negotiated before it is sent: `skip` and `amend` are the two whose
+       * lowered form asks an unaware host for a different action, so both are
+       * refused against a host that does not advertise `blocker-verdict`. See
+       * {@link refuseUnperformableBlockerVerdict}.
+       */
+      blocker?: { verdict: BlockerVerdict; answer?: string };
+    } = {},
   ): Promise<ChatResponse | ResolveReceipt> {
     const body: {
       verdict: Verdict;
       detach?: boolean;
       scope?: "once" | "tool";
       expires_in_millis?: number;
+      blocker_verdict?: BlockerVerdict;
+      blocker_answer?: string;
     } = { verdict };
     if (options.detach) body.detach = true;
+    // Sent as nothing at all when absent, for the reason `once` is: the
+    // omitted-field form is what a host predating the field understands.
+    if (options.blocker) {
+      await this.refuseUnperformableBlockerVerdict(options.blocker.verdict);
+      body.blocker_verdict = options.blocker.verdict;
+      if (options.blocker.verdict === "amend") {
+        body.blocker_answer = options.blocker.answer ?? "";
+      }
+    }
     // Issue #374. The `once` scope is sent as *nothing at all*, not as
     // `scope: "once"`: the omitted-field form is what an old host understands,
     // so a new console against an old host keeps working instead of 400ing on a
@@ -892,6 +1023,65 @@ export class OpenCompanyClient {
       body,
     );
     return isResolveReceipt(answer) ? answer : (answer as ChatResponse);
+  }
+
+  /**
+   * Refuses a blocker verdict this host would carry out as a different action.
+   *
+   * A host predating `blocker_verdict` ignores the unknown field and resolves
+   * from the lowered two-way `verdict` alone. Two of the four survive that:
+   * `retry` rides an `approve` and `cancel` rides a `deny`, and an unaware host
+   * retries and cancels exactly as asked, so both are still sent. The other two
+   * do not. `skip` rides an `approve`, so an unaware host **re-runs the step it
+   * was asked to leave out**; `amend` rides one too, so it re-runs the step
+   * **without the operator's words**. Either way the console would report the
+   * four-way result it asked for while the host performed something else.
+   *
+   * Refusing is the point: a request that never leaves is a failure the
+   * operator can see and act on, where a lowered one is a wrong action nobody
+   * is told about.
+   */
+  private async refuseUnperformableBlockerVerdict(verdict: BlockerVerdict): Promise<void> {
+    if (verdict !== "skip" && verdict !== "amend") return;
+    if (await this.supports(BLOCKER_VERDICT_CAPABILITY)) return;
+    throw new Error(
+      `This host cannot ${verdict === "skip" ? "skip a stopped step" : "answer a stopped step in words"}: ` +
+        "it is running a version that would run the step again instead. " +
+        "Retry or Cancel it here, or update the host.",
+    );
+  }
+
+  /**
+   * Settle the in-review dispatch card a chat thread is reviewing: `"approve"`
+   * finishes it, `"revise"` re-runs it with `note`. This is the board card the
+   * origin thread is reviewing — **not** the native-tool approval gate
+   * {@link resolveApproval} settles.
+   *
+   * `chatId` is the origin conversation (the channel/desk id) whose in-review
+   * card this settles; `taskId` is the specific card the operator clicked —
+   * a desk can have more than one card `in_review` at once, so the host
+   * validates the verdict against that card rather than resolving by `chatId`
+   * alone. Hosts predating the route return 404 — callers roll back their
+   * optimistic move.
+   */
+  reviewCard(
+    chatId: string,
+    taskId: string,
+    decision: "approve" | "revise",
+    note?: string,
+    company?: string | null,
+  ): Promise<ChatReviewReceipt> {
+    const body: { chatId: string; taskId: string; decision: string; note?: string } = {
+      chatId,
+      taskId,
+      decision,
+    };
+    if (note) body.note = note;
+    return this.request<ChatReviewReceipt>(
+      "POST",
+      `${this.scope(company)}/chat/review`,
+      body,
+    );
   }
 
   /**
@@ -1355,6 +1545,38 @@ function attachmentFilename(header: string | null): string | undefined {
   const match = /filename="([^"]+)"/i.exec(header);
   const name = match?.[1]?.split(/[\\/]/).pop()?.trim();
   return name && name !== "." && name !== ".." ? name : undefined;
+}
+
+/**
+ * Rejects when `signal` aborts, even if `work` never settles.
+ *
+ * A transport whose `fetch` honours the signal already rejects `work` on abort;
+ * the desktop proxy cannot cancel its in-flight IPC and never would, so the
+ * abort is raised here too. Either way the caller stops waiting the instant the
+ * deadline (or its own signal) fires, and a late transport answer is dropped.
+ */
+function settleWithin<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal.reason));
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** A real `AbortError`, reusing the signal's reason when it already is one. */
+function abortError(reason: unknown): Error {
+  if (reason instanceof Error && reason.name === "AbortError") return reason;
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
 /** How much of an unrecognised body is kept on `ApiError.detail`. */

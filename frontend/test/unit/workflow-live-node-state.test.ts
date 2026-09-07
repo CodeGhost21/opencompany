@@ -153,6 +153,16 @@ describe("statesFromRun reads the started bracket", () => {
     const { startedNodes: _dropped, ...old } = RUNNING_ROW;
     expect(statesFromRun(old)).toEqual({ collect: "ok" });
   });
+
+  it("keeps a benign halt neutral instead of painting it as an error", () => {
+    expect(
+      statesFromRun({
+        ...RUNNING_ROW,
+        running: false,
+        nodes: [{ nodeId: "collect", status: "declined", elapsedMs: 12 }],
+      }),
+    ).toEqual({ collect: "declined" });
+  });
 });
 
 // ── The seed's guard ─────────────────────────────────────────────────────────

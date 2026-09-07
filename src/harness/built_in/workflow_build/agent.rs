@@ -3,7 +3,7 @@
 //! PR-1 wired the effective-tool set; PR-2 turns the copilot into a real
 //! tool-using [`Agent`](oh::agent::Agent) built fresh per request. It reuses the
 //! roster's inference engine (`deps.provider`, an `Arc<dyn HarnessModel>` that
-//! upcasts to the tinyagents `ChatModel<()>` the builder's native-injection seam
+//! upcasts to the tinyinference `ChatModel<()>` the builder's native-injection seam
 //! takes), the same seam [`build_agent`](crate::harness::build::build_agent)
 //! uses for a company teammate — so the copilot's spend is captured as
 //! backend-charged USD on the agent's own per-turn usage, not the token-only
@@ -118,7 +118,7 @@ pub(super) fn build_copilot_agent(
     let _ = std::fs::create_dir_all(&workspace);
 
     let mut agent = AgentBuilder::default()
-        .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
+        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)

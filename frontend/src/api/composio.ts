@@ -13,7 +13,7 @@
 // toolkit allowlist). Standalone functions over the shared client (mirrors
 // `api/inference.ts`), so no change to `OpenCompanyClient` is needed.
 
-import type { OpenCompanyClient } from "./client";
+import type { OpenCompanyClient, RequestOptions } from "./client";
 
 /**
  * Where this company's Composio credential comes from.
@@ -28,6 +28,23 @@ import type { OpenCompanyClient } from "./client";
  * - `none` — no credential can be obtained, so agents get no Composio tools.
  */
 export type ComposioCredentialSource = "attested" | "company" | "static" | "none";
+
+/**
+ * Which host this company's Composio calls go to.
+ *
+ * - `managed` — proxied through the OpenHuman backend, which owns the Composio
+ *   API key, the toolkit allowlist and the billing. The default, and the route
+ *   that needs no configuration at all.
+ * - `byok` — straight to this company's **own** Composio account with the API key
+ *   its admin stored. Nothing is proxied and nothing is billed here; the
+ *   providers it can connect are whatever that Composio account permits.
+ *
+ * Orthogonal to {@link ComposioCredentialSource}, which names *whose identity* a
+ * call presents rather than *which host* it is presented to. A BYOK company
+ * reports `byok` + `static`; a company that pasted a backend token override
+ * reports `managed` + `static`.
+ */
+export type ComposioMode = "managed" | "byok";
 
 /**
  * One provider in the catalog the host offers, with the backend's own display
@@ -66,7 +83,19 @@ export interface ComposioStatus {
   granted: boolean;
   /** Which credential this company's Composio calls present — never the credential itself. */
   credentialSource: ComposioCredentialSource;
-  /** The effective Composio backend URL (non-secret). */
+  /**
+   * Which host those calls go to — OpenHuman-managed, or this company's own
+   * Composio account.
+   *
+   * Optional on the wire: a host predating BYOK answers without it, and absent
+   * must read as `managed` (the only route those hosts have) rather than as
+   * "unknown".
+   */
+  mode?: ComposioMode;
+  /**
+   * The endpoint the calls actually reach (non-secret) — the managed backend, or
+   * Composio's own API host under `byok`.
+   */
   backendUrl: string;
   /** The manifest toolkit allowlist verbatim (empty = defer to the backend allowlist). */
   toolkits: string[];
@@ -209,12 +238,41 @@ export interface ComposioConnection {
   defaultConnectionId?: string;
 }
 
-/** The company's Composio status. */
+/**
+ * The host's own budget for the upstream catalog fetch behind `GET …/composio`
+ * — `composio_toolkits::FETCH_TIMEOUT` in `src/server/ops/composio_toolkits.rs`.
+ *
+ * Declared here so {@link CATALOG_READ_TIMEOUT_MS} can be checked against it.
+ * A change on the host that is not mirrored here breaks the invariant test
+ * rather than the Apps page.
+ */
+export const SERVER_FETCH_TIMEOUT_MS = 5_000;
+
+/**
+ * How long the console waits on `GET …/composio` before giving up.
+ *
+ * Must strictly dominate {@link SERVER_FETCH_TIMEOUT_MS}: on a cold catalog the
+ * host spends up to that budget upstream and then answers with a flagged
+ * fallback, so a client deadline at or below it cancels the read at exactly the
+ * moment the host is about to explain itself, and the fallback can never be
+ * rendered. Below the client's default `GET` deadline, because this read blocks a
+ * view and wants a tighter bound than the shared default.
+ */
+export const CATALOG_READ_TIMEOUT_MS = 15_000;
+
+/**
+ * The company's Composio status.
+ *
+ * `options` reaches the client's own deadline and cancellation: this route
+ * fetches a live catalog from the platform, so a caller that blocks a view on
+ * it wants a bound of its own and a way to drop a superseded read.
+ */
 export function getComposioStatus(
   client: OpenCompanyClient,
   company: string | null,
+  options?: RequestOptions,
 ): Promise<ComposioStatus> {
-  return client.get<ComposioStatus>(`${client.scopeFor(company)}/composio`);
+  return client.get<ComposioStatus>(`${client.scopeFor(company)}/composio`, options);
 }
 
 /**
@@ -228,6 +286,33 @@ export function setComposioToken(
   token: string,
 ): Promise<ComposioMutation> {
   return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/token`, { token });
+}
+
+/**
+ * Point this company at its **own** Composio account, or give the managed route
+ * back (BYOK).
+ *
+ * A non-empty `apiKey` stores the key and switches the company to `byok`; an
+ * empty string clears it and returns it to OpenHuman-managed Composio. One call
+ * for both because the mode is a consequence of the key rather than a separate
+ * control — selecting BYOK with nothing stored would leave the company with no
+ * Composio tools and no visible reason why.
+ *
+ * WRITE-ONLY, like every other credential here: the key goes out on this call,
+ * lands in the host's secret store, and is never returned. Admin-only — a member
+ * gets a 403.
+ *
+ * **Not** interchangeable with {@link setComposioToken}. That one stores a bearer
+ * the *TinyHumans backend* recognises and leaves the route managed; this one
+ * stores a key *Composio* recognises and changes the route. They authenticate
+ * different hosts.
+ */
+export function setComposioApiKey(
+  client: OpenCompanyClient,
+  company: string | null,
+  apiKey: string,
+): Promise<ComposioMutation> {
+  return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/api-key`, { apiKey });
 }
 
 /**

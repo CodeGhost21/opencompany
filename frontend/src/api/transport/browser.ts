@@ -33,6 +33,10 @@ export class BrowserTransport implements Transport {
       // `TransportRequest.keepalive`. `undefined` for every other call, which
       // `fetch` treats as `false`.
       keepalive: req.keepalive,
+      // The request deadline the client attaches, so a host that accepts the
+      // connection and never answers cancels the socket instead of hanging
+      // this promise forever. `undefined` for a call with no bound.
+      signal: req.signal,
     });
 
     // Read the body here rather than handing the caller a live `Response`: the

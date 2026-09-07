@@ -303,6 +303,7 @@ pub async fn sweep_interrupted_runs(events: &Arc<dyn EventLog>, company: &Compan
                 // This fold groups a run's nodes with its outcome; who started
                 // it (issue #1862 prerequisite) is not part of that grouping.
                 started_by: _,
+                resume_semantic: _,
             } => {
                 open.insert(run_id, (workflow_id, scheduled));
             }
@@ -909,6 +910,7 @@ mod test {
                     run_id: run_id.to_string(),
                     scheduled,
                     started_by: None,
+                    resume_semantic: None,
                 },
             )
             .await

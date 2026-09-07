@@ -116,12 +116,9 @@ function linksFor(taskId: string, output: TaskOutput): TaskLink[] {
       hint: "Opens what this attempt actually did, step by step.",
     });
   } else {
-    // `#/conversation/<id>` is deliberately NOT used here: `conversation` is a
-    // view in the hash router but the active thread is component state, so no
-    // such address resolves today. The card is where the conversation is
-    // reachable from ("Opened from a conversation", issue #246), so this points
-    // there and says so rather than minting a link that would silently land on
-    // the wrong thread. Deep-linking the thread is its own change.
+    // The card, not the chat channel: the card's own origin row resolves the
+    // thread to a Room address and offers the jump only when one exists
+    // (issue #246), so pointing here cannot mint a link that lands nowhere.
     links.push({
       kind: "card",
       href: cardHref(taskId),

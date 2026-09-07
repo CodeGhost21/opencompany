@@ -170,6 +170,18 @@ pub(crate) struct RunSummary {
     /// event, on purpose) and for a dispatch that failed before the append.
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_event_seq: Option<u64>,
+    /// The conversation **thread** this attempt is in, within `chatId`.
+    ///
+    /// `chatId` names the channel, and a channel holds many threads since
+    /// #1890 — so it cannot say which of them a running turn belongs to. This
+    /// is the event seq of the message that started the thread, which is also
+    /// what the console addresses a thread by.
+    ///
+    /// Absent for a card dispatch and a workflow node, which belong to no
+    /// conversation, and for a row written before the field existed — both of
+    /// which read as "rooted at the channel".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_root: Option<u64>,
     /// Epoch-millis the row was minted.
     created_at_millis: u64,
     /// Epoch-millis the cycle began. Absent while `pending`.
@@ -213,6 +225,7 @@ impl From<RunRecord> for RunSummary {
             status: run.status,
             phase: run.status.phase(),
             trigger_event_seq: run.trigger_event_seq.map(|s| s.value()),
+            thread_root: run.thread_root.map(|s| s.value()),
             created_at_millis: run.created_at_millis,
             started_at_millis: run.started_at_millis,
             finished_at_millis: run.finished_at_millis,

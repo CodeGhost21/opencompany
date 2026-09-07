@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tinyagents::harness::message::Message;
-use tinyagents::harness::model::{ModelRequest, ModelResponse};
+use tinyinference::message::Message;
+use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::company::profile_draft::{
     DraftRefusal, ProfileDraft, ProfileField, ProfileSubject, Sibling, TurnRole,

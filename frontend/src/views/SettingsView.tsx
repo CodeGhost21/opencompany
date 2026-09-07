@@ -48,6 +48,7 @@ import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { lifecycleAffordances } from "@/lib/lifecycle-controls";
+import { canCreateCompanies } from "@/components/create-company-dialog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -309,7 +310,11 @@ export function LifecycleControls({
     }
   }
 
-  const platform = client.carriesPlatformBearer;
+  // Through the funnel, not the raw bearer: "Reset / Start clean" archives this
+  // company and re-provisions it through the same dialog "New company" opens, so
+  // it is company creation wearing another label and has to answer the same
+  // question the other triggers do.
+  const platform = canCreateCompanies(client);
   const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
     lifecycleAffordances(state, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
@@ -538,6 +543,31 @@ function MemoryEngineCard({
                 : "not probed"}
           </span>
         </InfoRow>
+        {/*
+          Distinct from "Not served" above, which is derived client-side from
+          what the driver *claims*. This is what the engine actually answered
+          when read at boot: a family can be advertised, pass the bind-time
+          audit, and still return nothing.
+        */}
+        <InfoRow label="Refused at probe">
+          <span className="text-sm">
+            {engine.unreachableFamilies === undefined
+              ? "not probed"
+              : engine.unreachableFamilies.length === 0
+                ? // Naming what was probed matters: portability is mandatory and
+                  // deliberately never probed, so a bare "none" would imply more
+                  // coverage than there is.
+                  "none — core and recall both answered (portability is not probed)"
+                : `${engine.unreachableFamilies.join(", ")} — reads against these will fail`}
+          </span>
+        </InfoRow>
+        {engine.slowFamilies !== undefined && engine.slowFamilies.length > 0 && (
+          <InfoRow label="Slow at probe">
+            <span className="text-sm">
+              {`${engine.slowFamilies.join(", ")} — did not answer in time; the engine may just be loaded`}
+            </span>
+          </InfoRow>
+        )}
       </CardContent>
     </Card>
   );

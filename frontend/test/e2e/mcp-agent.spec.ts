@@ -44,15 +44,14 @@ test.skip(
 test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
 /**
- * Opens the conversation view on the company thread.
+ * Opens Room on the company-wide line.
  *
- * The thread is SELECTED, not merely navigated to. A composer is present either
- * way, so a `fill` succeeds — but the reply then lands in a transcript this page
- * is not showing. Scoped to the chat list because the sidebar's company switcher
- * is also a button carrying the company name.
+ * The channel comes from the address, not a rail click: a composer is present
+ * either way, so a `fill` succeeds even when nothing is selected — and the
+ * reply then lands in a transcript this page is not showing.
  */
 async function openThread(page: Page) {
-  await page.goto("/#/conversation");
+  await page.goto("/#/chat");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 5_000 })
@@ -60,26 +59,12 @@ async function openThread(page: Page) {
     .catch(() => {
       /* already dismissed in this context */
     });
-  await page
-    .getByRole("complementary")
-    .getByRole("button", { name: /Your company/ })
-    .first()
-    .click();
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
-/**
- * A row of the open transcript carrying `text`.
- *
- * Both selectors, because the two chat surfaces draw a message differently —
- * the Conversation view wraps each in `div.group/msg`, the Chat tab in an
- * `article[data-message-id]` — and this spec should not fail merely because it
- * was pointed at the other one.
- */
+/** A row of the open transcript carrying `text`. */
 function transcriptRow(page: Page, text: string) {
-  return page
-    .locator("div.group\\/msg, article[data-message-id]")
-    .filter({ hasText: text })
-    .last();
+  return page.locator("article[data-message-id]").filter({ hasText: text }).last();
 }
 
 test("an agent calls a tool on a registered MCP server and shows the result", async ({

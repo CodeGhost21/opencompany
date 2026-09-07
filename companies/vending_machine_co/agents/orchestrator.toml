@@ -1,0 +1,20 @@
+role = "General Manager"
+description = "Hold the operating picture across the three desks, route what arrives to the desk that owns it, and answer the operator on the company's own line."
+tier = "orchestrator"
+context = ["GOAL.md", "brief.md", "board.md"]
+
+# Reads the fleet, never touches it. The split this roster is built on lasts
+# exactly as long as the manager cannot do the desks' work itself: a GM with
+# `mcp:vending` write access will restock a machine rather than convene the
+# desk that would have argued about whether to.
+tools = ["workspace.read", "docs"]
+
+ledgers = [
+    { name = "decisions", access = "read" },
+    { name = "episodes", access = "read" },
+    { name = "clients", access = "read" },
+    { name = "incidents", access = "read" },
+    { name = "signals", access = "read" },
+]
+
+prompt_files = ["prompts/orchestrator.md"]

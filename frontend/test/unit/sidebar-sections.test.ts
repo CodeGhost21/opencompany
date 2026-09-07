@@ -185,11 +185,9 @@ describe("the sidebar's section table", () => {
 describe("which section an address belongs to", () => {
   it("claims the deep-link surfaces that have no row of their own", () => {
     // A task card is a card on Work's board; a teammate is a seat on the org
-    // chart; a desk transcript is the surface Chat replaces. Each keeps its
-    // section open rather than emptying the sidebar.
+    // chart. Each keeps its section open rather than emptying the sidebar.
     expect(sectionOwning("tasks")?.label).toBe("Company");
     expect(sectionOwning("team")?.label).toBe("Company");
-    expect(sectionOwning("conversation")?.label).toBe("Room");
   });
 
   it("claims a section's children for that section", () => {
@@ -330,31 +328,6 @@ describe("the rendered sidebar", () => {
     // rather than standing furniture.
     render("company");
     expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(0);
-  });
-
-  it("draws no empty contents block on the one Room route ChatView does not render", () => {
-    // `#/conversation` is claimed by Room (`isNavigationActive`) so that opening
-    // a desk transcript does not black out the sidebar. But Room's contents are
-    // live data portalled in by `ChatView`, and `ChatView` is not mounted on
-    // that view — so the slot would be on screen with nothing in it. Seen in a
-    // browser before this test existed: a 566px blank region under the Room
-    // row, while the conversation view drew a desk rail of its own beside it —
-    // the two-rail band of issue #1383, re-created by the one section whose
-    // contents are live data rather than a fixed list.
-    render("conversation");
-
-    // The row still lights. That part is deliberate and must not regress.
-    const row = [...container.querySelectorAll("[data-sidebar='menu-button']")].find(
-      (el) => el.textContent?.trim() === "Room",
-    )!;
-    expect(row.hasAttribute("data-active")).toBe(true);
-
-    // And nothing is drawn under it. The group count is the assertion that
-    // matters: an empty `flex-1` group IS the blank region, whether or not the
-    // slot node is inside it, so asserting only on the slot would pass while
-    // the gap remained.
-    expect(container.querySelectorAll("[data-testid='room-rail-slot']")).toHaveLength(0);
-    expect(container.querySelectorAll("[data-sidebar='group']")).toHaveLength(1);
   });
 
   it("puts no heading in the sidebar, at runtime and not only in source", () => {

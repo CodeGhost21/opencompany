@@ -99,6 +99,18 @@ pub(crate) use self::upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
 // (`WORKFLOW_TOOL_CATALOG`) is what callers ground and validate against, and the
 // slug table is now only its in-module pinning cross-check.
 
+tokio::task_local! {
+    /// Set for the span of a peer consultation. A consulted orchestrator can
+    /// run a whole graph, whose nodes reach this same recover path, so the
+    /// "one peer turn" bound holds down the stack only while this is read.
+    static PEER_CONSULT_ACTIVE: ();
+}
+
+/// Whether a peer consultation is already running on this task.
+fn peer_consult_active() -> bool {
+    PEER_CONSULT_ACTIVE.try_with(|_| ()).is_ok()
+}
+
 /// The four effectful capability slots [`build_capabilities`] chooses by mode:
 /// `tool_call`, `http_request`, `state`, and the optional `agent` runner. The
 /// dry and live branches each build one of these; the read-only `resolver` and
@@ -122,6 +134,17 @@ pub struct RunContext<'a> {
     pub workflow_id: &'a str,
     /// This run's id (issue #395), the key its approvals are stamped with.
     pub run_id: &'a str,
+    /// Stable tinyflows lineage used by checkpointed node continuations.
+    pub checkpoint_thread_id: &'a str,
+    /// The graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+    /// as loaded for this run attempt (issue #1991 review, `3904397452`/
+    /// `3904304754`). Threaded to [`HarnessAgentRunner`] so
+    /// [`park_gated_calls`](HarnessAgentRunner::park_gated_calls) can stamp it
+    /// onto a blocked node's stash the same way `park_pending_gates` stamps
+    /// one onto a parked gate's effect — the fact
+    /// `spawn_blocked_node_continuation` needs to refuse a checkpoint resume
+    /// into a graph an editor changed while the block sat pending.
+    pub workflow_fingerprint: &'a str,
     /// The operator's topic for this run (issue #154), threaded to the agent
     /// capability so a node's turn carries what was actually asked.
     pub run_request: Option<String>,
@@ -153,6 +176,8 @@ pub struct RunContext<'a> {
     /// node's row `Error` and agree with the attempt, which already settles
     /// `Failed` for exactly this signal.
     pub capped: RunCappedNodes,
+    /// Where a semantic judge records an intentional no-work conclusion.
+    pub halted: RunHaltedNodes,
     /// Where an agent node records the approvals its turn parked (issue #880).
     pub approvals: RunApprovals,
     /// Files agent nodes wrote during this run, keyed by node for durable output.
@@ -219,6 +244,8 @@ pub async fn build_capabilities(
     let RunContext {
         workflow_id,
         run_id,
+        checkpoint_thread_id,
+        workflow_fingerprint,
         run_request,
         trigger_input,
         started_by,
@@ -227,6 +254,7 @@ pub async fn build_capabilities(
         board,
         blocks,
         capped,
+        halted,
         approvals,
         artifacts,
         runs,
@@ -426,6 +454,9 @@ pub async fn build_capabilities(
                 board_claim,
                 publish_refusal_claim,
             )
+            .with_halted(halted)
+            .with_checkpoint_thread_id(checkpoint_thread_id)
+            .with_workflow_fingerprint(workflow_fingerprint)
             .with_runs(runs, deep, attempts),
         );
         (Arc::new(tools), Arc::new(http), state, Some(agent))
@@ -587,6 +618,16 @@ pub struct HarnessAgentRunner {
     /// approval this node's turn parks so the Approvals page can say which
     /// workflow run is waiting on the operator.
     run_id: String,
+    checkpoint_thread_id: String,
+    /// The graph's [`content_fingerprint`](crate::company::WorkflowFile::content_fingerprint)
+    /// at the moment this run started (issue #1991 review, `3904397452`/
+    /// `3904304754`), stamped onto every blocked-node stash [`park_gated_calls`]
+    /// arms so `spawn_blocked_node_continuation` can refuse a checkpoint resume
+    /// into a graph an editor changed while the block sat pending — the same
+    /// check `graph_unchanged_since_park` already applies to the gate path.
+    /// `None` only in a build/test that never set it, which behaves exactly as
+    /// it did before this field existed.
+    workflow_fingerprint: Option<String>,
     /// What the operator asked for on this run (issue #154), when they supplied
     /// it. A node's `prompt` is authored into the graph and is the same on every
     /// run, so without this the run's topic never reaches the teammate doing the
@@ -613,6 +654,8 @@ pub struct HarnessAgentRunner {
     /// Where this node records that its turn truncated at the
     /// `max_tool_iterations` cap (issue #1865).
     capped: RunCappedNodes,
+    /// Nodes the judge concluded were benignly unnecessary.
+    halted: RunHaltedNodes,
     /// Where this node records the approvals its turn parked (issue #880).
     approvals: RunApprovals,
     /// Run-scoped files captured after each node turn, including failed turns.
@@ -837,6 +880,49 @@ impl RunCappedNodes {
     }
 }
 
+/// Node ids whose semantic judge returned a benign halt.
+#[derive(Clone, Default)]
+pub struct RunHaltedNodes {
+    inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RunHaltedNodes {
+    pub fn push(&self, node_id: String) {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .push(node_id);
+    }
+
+    pub fn contains(&self, node_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .iter()
+            .any(|id| id == node_id)
+    }
+
+    /// Drops any earlier record of `node_id`.
+    ///
+    /// Codex review on #1990: when `retry.max_attempts > 1`, tinyflows re-runs
+    /// this node's whole turn on the same [`HarnessAgentRunner`] — the same
+    /// `self.halted` an earlier attempt may have already pushed into if that
+    /// attempt's judge answered `halt_benign`. Called at the start of every
+    /// fresh attempt for a node, so a later attempt that actually succeeds is
+    /// never shadowed by a stale benign-halt marker a prior, retried attempt
+    /// left behind.
+    pub fn retract(&self, node_id: &str) {
+        self.inner
+            .lock()
+            .expect("run halted-nodes poisoned")
+            .retain(|id| id != node_id);
+    }
+
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.lock().expect("run halted-nodes poisoned"))
+    }
+}
+
 /// Which attempt each `agent` node ran as.
 ///
 /// The fourth channel in the [`RunNotices`] / [`RunBoard`] / [`RunBlocks`]
@@ -985,6 +1071,7 @@ impl HarnessAgentRunner {
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
         publish_refusal_claim: Arc<crate::harness::publish::PublishRefusalClaim>,
     ) -> Self {
+        let checkpoint_thread_id = run_id.clone();
         Self {
             runs: None,
             deep: None,
@@ -995,6 +1082,8 @@ impl HarnessAgentRunner {
             company,
             workflow_id,
             run_id,
+            checkpoint_thread_id,
+            workflow_fingerprint: None,
             run_request,
             trigger_input,
             started_by,
@@ -1002,11 +1091,22 @@ impl HarnessAgentRunner {
             board,
             blocks,
             capped,
+            halted: RunHaltedNodes::default(),
             approvals,
             artifacts,
             board_claim,
             publish_refusal_claim,
         }
+    }
+
+    pub fn with_checkpoint_thread_id(mut self, thread_id: &str) -> Self {
+        self.checkpoint_thread_id = thread_id.to_string();
+        self
+    }
+
+    pub fn with_workflow_fingerprint(mut self, fingerprint: &str) -> Self {
+        self.workflow_fingerprint = Some(fingerprint.to_string());
+        self
     }
 
     /// Settles this node's attempt row, if it opened one.
@@ -1059,6 +1159,12 @@ impl HarnessAgentRunner {
         self
     }
 
+    #[must_use]
+    pub fn with_halted(mut self, halted: RunHaltedNodes) -> Self {
+        self.halted = halted;
+        self
+    }
+
     /// Drains this run's delegation bucket after a node's turn and records what it
     /// did (issue #661 / M5).
     ///
@@ -1082,6 +1188,86 @@ impl HarnessAgentRunner {
     /// Nothing here returns a `Result`. The turn already happened and its output is
     /// valid; a store hiccup must not discard it. Same stance
     /// [`park_gated_calls`](Self::park_gated_calls) takes, arrived at the same way.
+    /// Runs the bounded recovery ladder for this node, lending it the peer rung.
+    ///
+    /// The consultation runs inside this run's own delegation and
+    /// publish-refusal scopes, and everything it stages there is discarded
+    /// before the next node's drain could execute it. Its approval requests get
+    /// a scope of their own instead: unclaimed pushes fall into the bucket the
+    /// chat cycle drains, which would put a card the consulted peer asked for
+    /// in front of the operator as if their own turn had raised it. The claim
+    /// discards that bucket on drop.
+    ///
+    /// The nested scopes must stay `Box::pin`ed: `TaskLocalFuture` holds its
+    /// inner future inline, and an agent turn inside three of them unboxed
+    /// overflows the thread's stack.
+    async fn recover_context(
+        &self,
+        question: &str,
+        agent_ref: &str,
+    ) -> crate::workflows::judge::RecoveryResult {
+        if peer_consult_active() {
+            return crate::workflows::judge::ask_around(&self.deps, &self.company, question, None)
+                .await;
+        }
+        let consult = crate::workflows::judge::PeerConsult {
+            turn: self.turn.as_ref(),
+            record: &self.record,
+            exclude_agent: agent_ref,
+        };
+        let approval_claim = self
+            .deps
+            .approval_requests
+            .claim(ApprovalScope::Run(format!("{}::consult", self.run_id)));
+        let ladder = Box::pin(async {
+            let recovered = crate::workflows::judge::ask_around(
+                &self.deps,
+                &self.company,
+                question,
+                Some(consult),
+            )
+            .await;
+            self.discard_consultation_writes();
+            recovered
+        });
+        let ladder = Box::pin(self.publish_refusal_claim.scoped(ladder));
+        let ladder = Box::pin(self.board_claim.scoped(ladder));
+        let ladder = Box::pin(approval_claim.scoped(ladder));
+        PEER_CONSULT_ACTIVE.scope((), ladder).await
+    }
+
+    /// Throws away every board write and staged publish a peer consultation
+    /// left behind: a consultation was asked a question, not given authority.
+    ///
+    /// Runs inside the run's own scopes, so the delegation drains empty this
+    /// run's bucket and no other claimant's.
+    fn discard_consultation_writes(&self) {
+        let delegations = self.deps.delegations.drain(MAX_DELEGATIONS_PER_TURN).len();
+        let refused_delegations = self
+            .deps
+            .delegations
+            .drain_refusals(MAX_DELEGATIONS_PER_TURN)
+            .len();
+        let publishes = self.deps.pending_publishes.drain().len();
+        let refused_publishes = self.deps.pending_publishes.drain_refusals().len();
+        let approvals = self.deps.approval_requests.queued();
+        let total = delegations + refused_delegations + publishes + refused_publishes + approvals;
+        if total > 0 {
+            tracing::info!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                delegations,
+                refused_delegations,
+                publishes,
+                refused_publishes,
+                approvals,
+                "workflow agent node: discarded the board writes a peer consultation staged; a \
+                 consultation carries no authority to act for this run"
+            );
+        }
+    }
+
     async fn drain_board_writes(&self) {
         let queue = &self.deps.delegations;
 
@@ -1484,9 +1670,92 @@ impl HarnessAgentRunner {
     /// failure and park the identical question. The gated-call case does not
     /// have that problem — approving there mints the grant that makes the
     /// retry succeed.
+    /// Stashes what re-entering `resolved_node_id` will need once its blocker
+    /// is answered (issue #2005): the workflow, this run's trigger input, its
+    /// attribution, and the checkpoint lineage #1864's node-level restart
+    /// resumes from.
+    ///
+    /// A blocker park cannot borrow the gated-call path's stash. That one is
+    /// armed in [`park_gated_calls`](Self::park_gated_calls) only once there is
+    /// a gated call to park — a turn that parked nothing else returns before
+    /// reaching it — and the runner's settle-time pass deliberately refuses to
+    /// arm a turn that is not already armed, so a blocker-only node reached the
+    /// resume with no run to continue. Written here, at park time and before
+    /// any card is clickable, on exactly the ordering the gated-call arm keeps.
+    ///
+    /// Keyed per (run, node) like its sibling, so a node that parked a gated
+    /// call *and* then blocked shares one stash and one dispatch marker: either
+    /// answer re-enters the node once, and the second finds the continuation
+    /// already dispatched rather than launching a duplicate. Arming is
+    /// first-write-wins, so the two cannot disagree.
+    ///
+    /// No [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)
+    /// arm accompanies it. A blocker parks with no turn key by design — see
+    /// [`park_node_blocker`](Self::park_node_blocker) — and its resume is driven
+    /// by the answer itself, not by a decision batch emptying.
+    ///
+    /// Best-effort on the durable half, matching every other park-time write
+    /// here: a failed journal append leaves the in-memory stash serving the
+    /// no-restart case, and failing the node over it would be the wrong trade.
+    async fn stash_node_blocker_resume(
+        &self,
+        parking: &crate::workflows::delivery::DeliveryParking,
+        resolved_node_id: &str,
+    ) {
+        let turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, resolved_node_id);
+        parking.blocked_nodes.arm_checkpointed(
+            &turn,
+            &self.workflow_id,
+            &self.trigger_input,
+            &self.started_by,
+            Some(&self.checkpoint_thread_id),
+            self.workflow_fingerprint.as_deref(),
+        );
+        if let Err(error) = parking
+            .journal
+            .record_blocked_node_stashed_checkpointed(
+                &turn,
+                &self.workflow_id,
+                &self.trigger_input,
+                &self.started_by,
+                Some(&self.checkpoint_thread_id),
+                self.workflow_fingerprint.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                node = resolved_node_id,
+                %error,
+                "workflow agent node: a parked blocker's continuation facts could not be \
+                 durably stashed; the in-memory stash still covers an answer without a restart"
+            );
+        }
+    }
+
     async fn park_node_blocker(&self, resolved_node_id: &str, message: &str) -> Option<String> {
         let class = crate::harness::built_in::blockers::classify_blocker_message(message)?;
-        if !class.kind.parks() {
+        self.park_node_blocker_as(
+            resolved_node_id,
+            message,
+            class.kind,
+            class.source,
+            class.needed,
+        )
+        .await
+    }
+
+    async fn park_node_blocker_as(
+        &self,
+        resolved_node_id: &str,
+        message: &str,
+        kind: crate::ports::blockers::BlockerKind,
+        source: crate::ports::blockers::BlockerSource,
+        needed: &str,
+    ) -> Option<String> {
+        if !kind.parks() {
             return None;
         }
         let parking = self
@@ -1495,8 +1764,8 @@ impl HarnessAgentRunner {
             .as_ref()
             .and_then(|delivery| delivery.parking.as_ref())?;
         let payload = crate::ports::blockers::BlockerPayload {
-            kind: class.kind,
-            source: class.source,
+            kind,
+            source,
             // The one case an approval's own task link cannot express — see
             // `BlockerPayload::step`. #1864's node-level restart needs to know
             // which node inside which run stopped, and a workflow run has no
@@ -1508,7 +1777,10 @@ impl HarnessAgentRunner {
                 node_id: resolved_node_id.to_string(),
             }),
             reason: message.to_string(),
-            needed: class.needed.to_string(),
+            needed: needed.to_string(),
+            // Nodes across runs stalled on one broken integration read as one
+            // question — populated only when the reason names a connection.
+            group_key: crate::harness::built_in::blockers::connection_group_key(message),
         };
         let effect = crate::ports::types::Effect {
             kind: payload.effect_kind(),
@@ -1520,6 +1792,13 @@ impl HarnessAgentRunner {
             agent: None,
             run_id: Some(self.run_id.clone()),
         };
+
+        let turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, resolved_node_id);
+        let already_stashed = parking.blocked_nodes.is_armed(&turn);
+        self.stash_node_blocker_resume(parking, resolved_node_id)
+            .await;
+
         match parking
             .park_and_journal(
                 &self.company,
@@ -1539,12 +1818,28 @@ impl HarnessAgentRunner {
                     run_id = %self.run_id,
                     node = resolved_node_id,
                     approval_id = %approval_id,
-                    kind = class.kind.as_str(),
+                    kind = kind.as_str(),
                     "workflow agent node: parked a blocker for the operator instead of failing"
                 );
                 Some(approval_id.to_string())
             }
             Err(err) => {
+                if !already_stashed {
+                    parking.blocked_nodes.release(&turn);
+                    if let Err(release_err) =
+                        parking.journal.record_blocked_node_released(&turn).await
+                    {
+                        tracing::warn!(
+                            company = %self.company,
+                            run_id = %self.run_id,
+                            node = resolved_node_id,
+                            error = %release_err,
+                            "workflow agent node: a blocker's stash could not be durably \
+                             retired after its park failed; a stale entry may linger until \
+                             a manual sweep"
+                        );
+                    }
+                }
                 // Loud, and then the node settles `Failed` as it did before:
                 // holding a run open on a question that reached nobody would be
                 // strictly worse than the failure it replaced.
@@ -1619,6 +1914,22 @@ impl HarnessAgentRunner {
             .into_iter()
             .partition(|r| r.effect.kind.starts_with("blocker."));
         requests = remaining;
+
+        let blocker_stash_pre_existing = !blocker_requests.is_empty()
+            && self
+                .deps
+                .delivery
+                .as_ref()
+                .and_then(|d| d.parking.as_ref())
+                .is_some_and(|parking| parking.blocked_nodes.is_armed(node_turn));
+        let mut blocker_stash_armed_this_call = false;
+        if !blocker_requests.is_empty()
+            && let Some(parking) = self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref())
+        {
+            self.stash_node_blocker_resume(parking, resolved_node_id)
+                .await;
+            blocker_stash_armed_this_call = true;
+        }
         for mut blocker_request in blocker_requests {
             // Extract the blocker payload from the effect, add the node step, and park it.
             let mut payload: crate::ports::blockers::BlockerPayload =
@@ -1729,6 +2040,28 @@ impl HarnessAgentRunner {
             // none filed no receipt at all — `summary.unparkable` stayed 0 and
             // the node read as clean. The discard bookkeeping now happens
             // first; this only has to flush what it recorded.
+            if blocker_stash_armed_this_call
+                && !blocker_stash_pre_existing
+                && summary.approval_ids.is_empty()
+                && let Some(parking) = self.deps.delivery.as_ref().and_then(|d| d.parking.as_ref())
+            {
+                parking.blocked_nodes.release(node_turn);
+                if let Err(error) = parking
+                    .journal
+                    .record_blocked_node_released(node_turn)
+                    .await
+                {
+                    tracing::warn!(
+                        company = %self.company,
+                        run_id = %self.run_id,
+                        node_turn,
+                        %error,
+                        "workflow agent node: every blocker for this node failed to park, but \
+                         retiring the stash armed for it also failed durably; a stale entry may \
+                         linger until a manual sweep"
+                    );
+                }
+            }
             self.approvals.extend(rows);
             return summary;
         }
@@ -1782,11 +2115,13 @@ impl HarnessAgentRunner {
         // of narrowing it. `arm` is first-write-wins and cheap (one HashMap
         // insert under a `Mutex`), so a redundant call from the settle pass
         // below is a harmless no-op, not a second source of truth.
-        parking.blocked_nodes.arm(
+        parking.blocked_nodes.arm_checkpointed(
             node_turn,
             &self.workflow_id,
             &self.trigger_input,
             &self.started_by,
+            Some(&self.checkpoint_thread_id),
+            self.workflow_fingerprint.as_deref(),
         );
 
         // Issue #1825 (P1, second follow-up — found by chatgpt-codex-connector):
@@ -1808,11 +2143,13 @@ impl HarnessAgentRunner {
         // over an approvals-queue write would be the wrong trade.
         if let Err(error) = parking
             .journal
-            .record_blocked_node_stashed(
+            .record_blocked_node_stashed_checkpointed(
                 node_turn,
                 &self.workflow_id,
                 &self.trigger_input,
                 &self.started_by,
+                Some(&self.checkpoint_thread_id),
+                self.workflow_fingerprint.as_deref(),
             )
             .await
         {
@@ -2062,7 +2399,7 @@ impl HarnessAgentRunner {
             );
             self.notices.push(notice);
         }
-        let message = compose_turn_message(&instruction, self.run_request.as_deref());
+        let mut message = compose_turn_message(&instruction, self.run_request.as_deref());
         // Issue #881: which node this is. `translate` writes it in the
         // first-class config layer beside `agent_ref` (config cannot shadow
         // it), because the vendored `AgentRunner` boundary carries no node
@@ -2083,8 +2420,100 @@ impl HarnessAgentRunner {
         // `park_and_journal`; the runner arms the sibling stash that carries the
         // workflow id and trigger input the release needs.
         let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
+        // Codex review on #1990: a fresh attempt at this node — whether this is
+        // the node's first attempt ever, or `retry.max_attempts > 1` re-running
+        // it after an earlier attempt's judge answered `halt_benign` — must not
+        // inherit that earlier attempt's benign-halt marker. Left in place, a
+        // later attempt that genuinely succeeds would still have its row
+        // relabeled Declined by `reclassify_halted_nodes` reading the stale
+        // entry. Re-added below only if THIS attempt halts too.
+        self.halted.retract(&lineage_node);
         let node_turn =
             crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
+
+        // ── Issue #2005: the operator's answer to this node's blocker ────────
+        //
+        // The engine-side half of the blocker family. #1863 banked the verdict
+        // and delivered it into the DM; a workflow node's re-entry rides the
+        // trigger input instead, because a paused run is settled and the only
+        // way back in is a fresh run carrying what the last one learned. The
+        // answer is read here, before an attempt row is minted or a token is
+        // spent, so a `skip` costs nothing.
+        //
+        // A malformed answer fails the node rather than degrading to "nobody
+        // answered". The degrade is the exact silent drop this family exists to
+        // close: the node would spend a turn on the identical failure, park the
+        // identical question, and the operator's decision would be gone.
+        let blocker_answer = match crate::runtime::workflow_resume::blocker_answer_for(
+            &self.trigger_input,
+            &lineage_node,
+        ) {
+            Ok(answer) => answer,
+            Err(err) => {
+                let message = format!("workflow node `{lineage_node}`: {err}");
+                tracing::error!(
+                    company = %self.company,
+                    workflow = %self.workflow_id,
+                    run_id = %self.run_id,
+                    node = %lineage_node,
+                    "workflow agent node: {message}"
+                );
+                return Err(EngineError::Capability(message));
+            }
+        };
+        if let Some(answer) = &blocker_answer {
+            use crate::ports::blockers::BlockerVerdict;
+            match answer.verdict {
+                // Waived: the node does not run at all, and the branch below it
+                // proceeds on a host-authored output. Running it would re-park
+                // the very question the operator just declined to answer.
+                BlockerVerdict::Skip => {
+                    let reply = "This step was skipped: an operator waived the blocker it \
+                                 stopped on."
+                        .to_string();
+                    tracing::info!(
+                        company = %self.company,
+                        workflow = %self.workflow_id,
+                        run_id = %self.run_id,
+                        node = %lineage_node,
+                        "workflow agent node: skipped on the operator's answer to its blocker"
+                    );
+                    return Ok((
+                        json!({ "text": reply, "agent_ref": agent_ref }),
+                        crate::harness::built_in::TurnOutcome {
+                            reply,
+                            steps: Vec::new(),
+                            hit_iteration_cap: false,
+                            abnormal_stop: None,
+                            halted_for_spend: None,
+                            budget_paused: None,
+                        },
+                    ));
+                }
+                // Corrected: the node runs again carrying the operator's words,
+                // the same shape `resume_task_card` gives an amended card — the
+                // correction has to reach the turn, or the re-run repeats the
+                // failure it was answering.
+                BlockerVerdict::Amend if !answer.answer.trim().is_empty() => {
+                    message = format!(
+                        "{message}\n\n## Answer from the operator\n{}",
+                        answer.answer.trim()
+                    );
+                }
+                // A bare amend and a retry both re-run the step as it was.
+                BlockerVerdict::Amend | BlockerVerdict::Retry => {}
+                // `blocker_answer_for` refuses this arm before it can be built,
+                // and a cancel starts no run in the first place.
+                BlockerVerdict::Cancel => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` was reached carrying a cancelled \
+                         blocker answer"
+                    );
+                    return Err(EngineError::Capability(message));
+                }
+            }
+        }
+
         // The node runs in its roster agent's sandbox, not the workflow tool
         // workspace. Snapshot it immediately before inference so the post-turn
         // drain can distinguish this node's writes from files already there.
@@ -2239,7 +2668,7 @@ impl HarnessAgentRunner {
         // button. Rewrite that one class into what is actually too big and what
         // to do about it, keeping the provider's words at the end. Every other
         // failure passes through exactly as before.
-        let outcome = match outcome {
+        let mut outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
                 let raw = e.to_string();
@@ -2263,6 +2692,7 @@ impl HarnessAgentRunner {
                         approval_ids: vec![approval_id],
                         unparkable: 0,
                         stranded: 0,
+                        blockers: 1,
                     });
                     // `Blocked`, where #881's sibling says `WaitingApproval`:
                     // both hold the node open for a person, but one is a
@@ -2317,6 +2747,7 @@ impl HarnessAgentRunner {
                 approval_ids: parked.approval_ids.clone(),
                 unparkable: parked.unparkable,
                 stranded: 0,
+                blockers: parked.blockers,
             });
             let diagnosis = blocked_diagnosis(node_id.as_deref(), agent_ref, &parked);
             // `WaitingApproval`, not `Failed`: a person still has to decide, and
@@ -2406,7 +2837,7 @@ impl HarnessAgentRunner {
         // depending on what the agent happened to reply this run, for a node
         // that never asked for structured output at all.
         let postcondition_declared = request.get("postcondition").is_some();
-        let parsed_reply = if postcondition_declared {
+        let mut parsed_reply = if postcondition_declared {
             serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null)
         } else {
             Value::Null
@@ -2431,6 +2862,193 @@ impl HarnessAgentRunner {
                 .await;
                 return Err(EngineError::Capability(message));
             }
+        }
+
+        if outcome.budget_paused.is_none()
+            && outcome.halted_for_spend.is_none()
+            && let Some(verify) = request.get("verify")
+        {
+            let criteria = verify
+                .get("criteria")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty());
+            let verdict = crate::workflows::judge::judge_sufficiency(
+                &self.deps,
+                &self.company,
+                crate::workflows::judge::JudgeInput {
+                    instruction: &message,
+                    output: &outcome.reply,
+                    criteria,
+                    execution_failed: outcome.hit_iteration_cap || outcome.budget_paused.is_some(),
+                },
+            )
+            .await;
+            match verdict {
+                crate::workflows::judge::SufficiencyVerdict::Continue => {}
+                crate::workflows::judge::SufficiencyVerdict::Retry => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` did not produce a semantically sufficient output"
+                    );
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+                crate::workflows::judge::SufficiencyVerdict::Recover => {
+                    let question = criteria.unwrap_or(&instruction);
+                    let recovered = self.recover_context(question, agent_ref).await;
+                    let recovered_and_sufficient = match &recovered.evidence {
+                        Some(evidence) => {
+                            let verified = crate::workflows::judge::augment_with_recovery(
+                                &outcome.reply,
+                                evidence,
+                            );
+                            let reverdict = crate::workflows::judge::judge_sufficiency(
+                                &self.deps,
+                                &self.company,
+                                crate::workflows::judge::JudgeInput {
+                                    instruction: &message,
+                                    output: &verified,
+                                    criteria,
+                                    execution_failed: false,
+                                },
+                            )
+                            .await;
+                            (reverdict == crate::workflows::judge::SufficiencyVerdict::Continue)
+                                .then_some(verified)
+                        }
+                        None => None,
+                    };
+                    if let Some(verified) = recovered_and_sufficient {
+                        if let Some(spec) = request.get("postcondition") {
+                            let recovered_parsed = serde_json::from_str::<Value>(verified.trim())
+                                .unwrap_or(Value::Null);
+                            let envelope = json!({
+                                "text": &verified,
+                                "agent_ref": agent_ref,
+                                "json": recovered_parsed,
+                            });
+                            if let Err(gap) = postcondition::evaluate_postcondition(spec, &envelope)
+                            {
+                                let message = format!(
+                                    "workflow node `{}` recovered a reply that still fails its postcondition: {gap}",
+                                    node_id.as_deref().unwrap_or(agent_ref)
+                                );
+                                self.settle_attempt(
+                                    run_sink.as_ref(),
+                                    crate::ports::RunStatus::Failed,
+                                    Some(message.clone()),
+                                )
+                                .await;
+                                return Err(EngineError::Capability(message));
+                            }
+                        }
+                        outcome.reply = verified;
+                    } else {
+                        let message = format!(
+                            "workflow node `{lineage_node}` needs missing information; recovery tried {}",
+                            recovered.log
+                        );
+                        if let Some(approval_id) = self
+                            .park_node_blocker_as(
+                                &lineage_node,
+                                &message,
+                                crate::ports::blockers::BlockerKind::Information,
+                                crate::ports::blockers::BlockerSource::AgentQuestion,
+                                "Provide the missing information the workflow node needs.",
+                            )
+                            .await
+                        {
+                            self.blocks.push(crate::ports::WorkflowBlockedNode {
+                                node_id: lineage_node.clone(),
+                                tools: Vec::new(),
+                                approval_ids: vec![approval_id],
+                                unparkable: 0,
+                                stranded: 0,
+                                blockers: 1,
+                            });
+                            self.settle_attempt(
+                                run_sink.as_ref(),
+                                crate::ports::RunStatus::Blocked,
+                                Some(message.clone()),
+                            )
+                            .await;
+                            return Err(EngineError::Capability(message));
+                        }
+                        self.settle_attempt(
+                            run_sink.as_ref(),
+                            crate::ports::RunStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        return Err(EngineError::Capability(message));
+                    }
+                }
+                crate::workflows::judge::SufficiencyVerdict::Escalate { gap } => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` needs {} intervention after semantic verification",
+                        gap.as_str()
+                    );
+                    if gap.parks()
+                        && let Some(approval_id) = self
+                            .park_node_blocker_as(
+                                &lineage_node,
+                                &message,
+                                gap,
+                                crate::ports::blockers::BlockerSource::AgentQuestion,
+                                "Resolve the gap identified by the workflow sufficiency judge.",
+                            )
+                            .await
+                    {
+                        self.blocks.push(crate::ports::WorkflowBlockedNode {
+                            node_id: lineage_node.clone(),
+                            tools: Vec::new(),
+                            approval_ids: vec![approval_id],
+                            unparkable: 0,
+                            stranded: 0,
+                            blockers: 1,
+                        });
+                        self.settle_attempt(
+                            run_sink.as_ref(),
+                            crate::ports::RunStatus::Blocked,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        return Err(EngineError::Capability(message));
+                    }
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+                crate::workflows::judge::SufficiencyVerdict::HaltBenign => {
+                    let message = format!(
+                        "workflow node `{lineage_node}` concluded that no further work was needed"
+                    );
+                    self.halted.push(lineage_node.clone());
+                    self.settle_attempt(
+                        run_sink.as_ref(),
+                        crate::ports::RunStatus::Declined,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    return Err(EngineError::Capability(message));
+                }
+            }
+        }
+
+        // A recovering verify pass rewrites `outcome.reply`, so the parse the
+        // emitted value merges has to describe the reply this node actually
+        // ships.
+        if postcondition_declared {
+            parsed_reply =
+                serde_json::from_str::<Value>(outcome.reply.trim()).unwrap_or(Value::Null);
         }
 
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
@@ -2489,6 +3107,12 @@ impl HarnessAgentRunner {
                     "agent paused for lack of inference budget/credits: {}",
                     pause.summary
                 )),
+            )
+        } else if let Some(halt) = &outcome.halted_for_spend {
+            self.capped.push(lineage_node.clone());
+            (
+                crate::ports::RunStatus::Failed,
+                Some(crate::harness::built_in::brain::spend_halt_notice(halt)),
             )
         } else {
             (crate::ports::RunStatus::Succeeded, None)
@@ -2627,6 +3251,10 @@ impl AgentRunner for HarnessAgentRunner {
             StopReason::LimitStop {
                 limit: "budget_exhausted".to_string(),
             }
+        } else if outcome.halted_for_spend.is_some() {
+            StopReason::LimitStop {
+                limit: "spend_halt".to_string(),
+            }
         } else {
             StopReason::Finished
         };
@@ -2760,13 +3388,12 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
             if parked.unparkable == 1 { "it" } else { "them" }
         ));
     }
-    // What deciding the cards actually does, which is not one answer
-    // (CodeRabbit review on #1905). A gated call's park carries the node's turn
-    // key, so a verdict re-runs the turn and the run goes on. A blocker's does
-    // not — it is parked `Unlinked` with no continuation, deliberately, because
-    // answering a question is not authorising a call — so deciding it resumes
-    // nothing until #1863/#1864. Promising an auto-resume for those is how an
-    // operator ends up approving a card and watching a run that never moves.
+    // Gated calls and blocker questions resume differently: a gated call's
+    // approval re-runs the turn, a blocker's verdict re-enters, waives or stops
+    // the step — the sentence below has to name only the verdicts the console
+    // can actually send for whichever shape (or mix) is waiting. Both blocker
+    // arms name them from one fragment, so neither can be reworded alone.
+    let choices = crate::ports::blockers::BLOCKER_VERDICT_CHOICES;
     let resume = if waiting == 0 {
         String::new()
     } else if parked.blockers == 0 {
@@ -2776,8 +3403,7 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     } else if parked.blockers == waiting {
         format!(
             " {} a question the agent raised, not a call waiting to be authorised: answering it \
-             is recorded against the card, but it does not restart this run — re-run the \
-             workflow once the answer is in hand.",
+             re-enters this step — {choices}.",
             if waiting == 1 {
                 "The card is"
             } else {
@@ -2785,10 +3411,11 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
             }
         )
     } else {
-        " Some of these are gated tool calls, which continue this run when approved; the rest \
-         are questions the agent raised, which are recorded but do not restart it — re-run the \
-         workflow once those are answered."
-            .to_string()
+        format!(
+            " Some of these are gated tool calls, which continue this run when approved; the \
+             rest are questions the agent raised, which re-enter the step they stopped — \
+             {choices}."
+        )
     };
     format!(
         "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
@@ -3416,6 +4043,910 @@ mod tests {
         );
     }
 
+    /// A turn double that reports truncation at the iteration cap, the same
+    /// shape as [`CappedWorkflowTurn`], for a node that also declares `verify`.
+    struct CappedVerifiedWorkflowTurn;
+
+    #[async_trait]
+    impl RunTurn for CappedVerifiedWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "partial answer, still going".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: true,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    /// Codex review on #1990 (issue #1866): a node whose turn truncated at the
+    /// iteration cap is still handed to the semantic judge when `verify` is
+    /// declared — and the judge is told `execution_failed: false` regardless,
+    /// so a judge that answers `halt_benign` for the truncated partial reply
+    /// was never caught by `enforce_anti_suppression`'s blank/failed guard.
+    /// Before the fix, a capped turn could be recorded as an intentional
+    /// benign stop instead of the truncated failure it actually is.
+    #[tokio::test]
+    async fn a_capped_turn_with_verify_is_never_recorded_as_a_benign_halt() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-capped-verify-")
+            .tempdir()
+            .expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(CappedVerifiedWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990v"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990v"));
+        let halted = RunHaltedNodes::default();
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990v".to_string(),
+            "run-1990v".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_halted(halted.clone());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "loop_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "must finish the report" }
+                }),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a truncated turn must never be accepted as semantically sufficient"
+        );
+        assert!(
+            halted.take().is_empty(),
+            "a capped/truncated turn must never be recorded as an intentional benign halt, \
+             regardless of what the judge answers"
+        );
+    }
+
+    /// Codex review on #1990 (issue #1866): `RunHaltedNodes` is shared across
+    /// every attempt `HarnessAgentRunner` makes for a run, and tinyflows
+    /// re-runs a node's whole turn when `retry.max_attempts > 1`. This drives
+    /// the exact sequence: attempt 1's judge answers `halt_benign` (pushing the
+    /// node id), attempt 2 (the retry) succeeds outright. Without retracting
+    /// the stale entry, `reclassify_halted_nodes` would relabel attempt 2's
+    /// genuinely successful row `Declined` using a marker left over from the
+    /// attempt that failed.
+    #[tokio::test]
+    async fn a_later_successful_attempt_is_not_shadowed_by_an_earlier_benign_halt() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-retry-halt-")
+            .tempdir()
+            .expect("tempdir");
+        let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990h"));
+        let halted = RunHaltedNodes::default();
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990h".to_string(),
+            "run-1990h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_halted(halted.clone());
+        let node = json!({
+            "node_id": "flaky",
+            "prompt": "go",
+            "verify": { "criteria": "must finish" }
+        });
+
+        let first = runner.run_turn("researcher", node.clone()).await;
+        assert!(
+            first.is_err(),
+            "attempt 1's halt_benign verdict must gate the node"
+        );
+        assert!(
+            halted.contains("flaky"),
+            "attempt 1 must record the benign halt while it is the node's only outcome"
+        );
+
+        let second = runner.run_turn("researcher", node).await;
+        assert!(
+            second.is_ok(),
+            "attempt 2's continue verdict must let the node through"
+        );
+        assert!(
+            !halted.contains("flaky"),
+            "attempt 2 succeeded outright; attempt 1's stale benign-halt marker must not survive \
+             to shadow it"
+        );
+    }
+
+    /// Codex review on #1990 (issue #1866): the agent's turn is composed from
+    /// the node's static instruction AND the operator's run-specific request
+    /// (`compose_turn_message`, issue #154) — but the judge was handed only the
+    /// static instruction. A reusable node's `verify.criteria` can only be
+    /// checked against what was actually asked this run; passing the judge the
+    /// pre-compose instruction meant it evaluated a different, narrower prompt
+    /// than the one the agent answered.
+    #[tokio::test]
+    async fn the_judge_sees_the_operators_run_request_not_just_the_static_instruction() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-run-request-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RecordingWorkflowTurn::new());
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990r"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990r"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990r".to_string(),
+            "run-1990r".to_string(),
+            Some("check tuesday's numbers".to_string()),
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "reusable",
+                    "prompt": "Summarize the report.",
+                    "verify": { "criteria": "must call out tuesday's numbers specifically" }
+                }),
+            )
+            .await
+            .expect("a `continue` verdict must not gate the node");
+
+        let seen = script.seen.lock().expect("seen");
+        assert_eq!(
+            seen.len(),
+            1,
+            "only the judge calls the scripted model here"
+        );
+        let sent = seen[0].to_string();
+        assert!(
+            sent.contains("check tuesday's numbers"),
+            "the judge's prompt must carry the operator's run-specific request, not just the \
+             node's static instruction: {sent}"
+        );
+        assert!(
+            sent.contains("Request for this run:"),
+            "the judge's prompt must use the same composed shape the agent's own turn ran on: {sent}"
+        );
+    }
+
+    /// A turn double that always answers with a fixed refusal reply — a node
+    /// whose agent could not complete the ask, the shape a `recover` verdict is
+    /// meant to rescue.
+    struct RefusalWorkflowTurn;
+
+    #[async_trait]
+    impl RunTurn for RefusalWorkflowTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            Ok(crate::harness::TurnOutcome {
+                reply: "I cannot draft the email without the customer's name.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    /// A [`FactStore`] that always answers `list` with one fixed fact,
+    /// regardless of the query — standing in for a real match so `ask_around`
+    /// always has evidence to offer.
+    struct OneFactStore;
+
+    #[async_trait]
+    impl crate::ports::FactStore for OneFactStore {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+            _query: Option<&str>,
+            _kind: Option<crate::ports::FactKind>,
+        ) -> crate::Result<Vec<crate::ports::FactRecord>> {
+            Ok(vec![crate::ports::FactRecord {
+                id: "f1".to_string(),
+                kind: crate::ports::FactKind::Fact,
+                title: "Company context".to_string(),
+                body: "irrelevant background, not the customer's name".to_string(),
+                source: "test".to_string(),
+                updated_at_millis: 0,
+            }])
+        }
+
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _fact: &crate::ports::FactRecord,
+        ) -> crate::Result<()> {
+            unreachable!("not exercised by this test")
+        }
+
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    /// Codex review on #1990 (issue #1866, #3903874673): found evidence is not
+    /// itself proof the gap closed. Before the fix, ANY evidence — however
+    /// unrelated — was appended to a refusal's own reply and the node settled
+    /// `Succeeded` without ever re-checking whether the augmented text now
+    /// actually answers the ask. Here the "recovered" fact is deliberately
+    /// irrelevant to the missing customer name, so a correct re-verify must
+    /// still refuse to accept the node.
+    #[tokio::test]
+    async fn recovered_evidence_that_does_not_close_the_gap_is_not_accepted() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-reverify-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(RefusalWorkflowTurn);
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990g"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990g"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990g".to_string(),
+            "run-1990g".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "irrelevant recovered evidence must not turn a refusal into a success"
+        );
+        let seen = script.seen.lock().expect("seen");
+        assert_eq!(
+            seen.len(),
+            2,
+            "the judge must be asked again about the augmented output, not just once up front"
+        );
+        let reverify_prompt = seen[1].to_string();
+        assert!(
+            reverify_prompt.contains("Recovered company context"),
+            "the second judge call must see the augmented output, not the original refusal alone: \
+             {reverify_prompt}"
+        );
+    }
+
+    /// The text a node ships after a successful recovery must be the exact
+    /// text the re-verification judge was shown. `augment_with_recovery`
+    /// bounds the reply so the evidence survives the judge's output window;
+    /// a separately composed, unbounded string would let an oversized reply
+    /// ship content the judge never read.
+    #[tokio::test]
+    async fn a_recovered_reply_ships_the_exact_text_the_judge_certified() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-certified-text-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let oversized = "R".repeat(25_000);
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: oversized.clone(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990h"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990h"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990h".to_string(),
+            "run-1990h".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (_value, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await
+            .expect("a `continue` re-verdict accepts the recovered reply");
+
+        let judged = script.seen.lock().expect("seen")[1].to_string();
+        let escaped = serde_json::to_string(&outcome.reply).expect("reply serializes");
+        assert!(
+            judged.contains(escaped.trim_matches('"')),
+            "the reply stored on the outcome must be the same text the re-verification judge \
+             read, but the judge never saw it ({} stored chars)",
+            outcome.reply.chars().count()
+        );
+        assert!(
+            outcome.reply.chars().count() < oversized.chars().count(),
+            "the fixture must be large enough that recovery augmentation has to bound it, \
+             otherwise this test cannot observe the divergence"
+        );
+    }
+
+    /// A node declaring both a postcondition and a verify criteria emits one
+    /// output with two views of it: `value["text"]` and the JSON fields
+    /// merged into `value`. Recovery rewrites the reply, so both views must
+    /// describe the rewritten reply — a merge carrying the pre-recovery parse
+    /// would let a downstream `=item.json.<field>` binding read fields that
+    /// the shipped text no longer backs.
+    #[tokio::test]
+    async fn a_recovered_reply_does_not_emit_its_pre_recovery_json_parse() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-stale-parse-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"draft\": \"no customer name yet\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990i"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990i"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990i".to_string(),
+            "run-1990i".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let (value, _outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "postcondition": { "require": "non_empty" },
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await
+            .expect("a `continue` re-verdict accepts the recovered reply");
+
+        assert!(
+            value["text"]
+                .as_str()
+                .expect("text is a string")
+                .contains("Recovered company context"),
+            "the emitted text must be the recovered reply: {}",
+            value["text"]
+        );
+        assert!(
+            value.get("draft").is_none(),
+            "the pre-recovery parse must not ship alongside a reply that no longer carries it: \
+             {value}"
+        );
+    }
+
+    /// `augment_with_recovery` always appends a `Recovered company context:`
+    /// prose block to the reply, so a reply that satisfied a declared
+    /// `field_present` postcondition before recovery (its JSON parsed and
+    /// carried the field) stops satisfying it after (the augmented text no
+    /// longer parses as JSON at all). A node must not settle `Succeeded`
+    /// carrying an output that no longer satisfies the postcondition its own
+    /// gate certified — the recovered reply is re-checked against the same
+    /// postcondition, and a node whose recovery breaks it fails instead of
+    /// silently shipping the field as absent.
+    #[tokio::test]
+    async fn a_recovered_reply_that_fails_its_postcondition_does_not_settle_succeeded() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        deps.facts = Some(Arc::new(OneFactStore));
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "{\"draft\": \"no customer name yet\"}".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990j"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990j"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990j".to_string(),
+            "run-1990j".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "postcondition": { "require": "field_present", "field": "json.draft" },
+                    "verify": { "criteria": "must include the customer's name" }
+                }),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a recovered reply that no longer satisfies its declared postcondition must not \
+             settle Succeeded"
+        );
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1990j".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        let statuses: Vec<_> = attempts.iter().map(|a| a.status).collect();
+        assert_eq!(
+            statuses,
+            vec![crate::ports::RunStatus::Failed],
+            "the recovered-but-noncompliant node must settle Failed, not Succeeded: {statuses:?}"
+        );
+    }
+
+    /// A provider that always returns the `recover` verdict, driving the
+    /// judge's recovery-then-park branch.
+    #[derive(Default)]
+    struct RecoverJudgeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyinference::model::ChatModel<()> for RecoverJudgeProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(tinyinference::model::ModelResponse::assistant(
+                "{\"verdict\":\"recover\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for RecoverJudgeProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "recover-judge".to_string()
+        }
+    }
+
+    /// tinysweeper on #1990 (#3905096415) read the recover branch as settling
+    /// `Blocked` and then having an outer handler overwrite it with `Failed`.
+    /// `run_turn` has no such handler — every settle is followed by an
+    /// immediate `return Err`, and the trailing settle is the fall-through
+    /// success path — so the parked row stays `Blocked`. Pinned here so a
+    /// future outer error handler cannot silently introduce the overwrite.
+    #[tokio::test]
+    async fn a_recovery_park_leaves_the_attempt_row_blocked() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-recover-park-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        deps.provider = Arc::new(RecoverJudgeProvider::default());
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "I cannot draft this without the customer's renewal date".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-recover"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-recover"));
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-recover".to_string(),
+            "run-recover".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft_step",
+                    "prompt": "draft the renewal email",
+                    "verify": { "criteria": "the email must name the renewal date" },
+                }),
+            )
+            .await;
+        assert!(result.is_err(), "a parked node halts its branch");
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-recover".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        let statuses: Vec<_> = attempts.iter().map(|a| a.status).collect();
+        assert_eq!(
+            statuses,
+            vec![crate::ports::RunStatus::Blocked],
+            "the parked node must be recorded Blocked, not overwritten with Failed"
+        );
+    }
+
+    /// A provider that counts every `invoke` and always escalates, so a judge
+    /// call is both detectable and destructive to the caller's diagnosis.
+    #[derive(Default)]
+    struct EscalatingJudgeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tinyinference::model::ChatModel<()> for EscalatingJudgeProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyinference::model::ModelRequest,
+        ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(tinyinference::model::ModelResponse::assistant(
+                "{\"verdict\":\"escalate\",\"gap\":\"information\"}".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for EscalatingJudgeProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "escalating-judge".to_string()
+        }
+    }
+
+    /// Codex review on #1990 (#3905537805): a turn refused by its per-agent
+    /// spend cap is rejected by the `LimitStop` path regardless, so paying for
+    /// a judge on the pause notice buys nothing — and an `escalate` verdict
+    /// returns early with a generic blocker, replacing the budget-pause
+    /// diagnosis the operator needs with "needs information intervention".
+    #[tokio::test]
+    async fn a_budget_paused_turn_skips_the_sufficiency_judge() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-budget-paused-judge-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = Arc::new(EscalatingJudgeProvider::default());
+        deps.provider = provider.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "paused — out of budget".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: Some(crate::harness::BudgetPause {
+                agent: "researcher".to_string(),
+                summary: "acme is out of inference credits".to_string(),
+            }),
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990"));
+        let publish_refusal_claim =
+            Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990"));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990".to_string(),
+            "run-1990".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let result = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "spend_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "the report must be sent" },
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a budget-paused turn must not pay for a sufficiency judge"
+        );
+        let (_, outcome) = result.expect(
+            "the budget-pause diagnosis must survive: the judge must not turn this into a \
+             generic information blocker",
+        );
+        assert!(outcome.budget_paused.is_some());
+    }
+
     /// PR #1883 review (Codex #3874941288): the sibling of
     /// `a_capped_turn_settles_failed_and_feeds_run_capped_nodes` for the OTHER
     /// signal that settles this attempt row `Failed` — `outcome.budget_paused`.
@@ -3505,6 +5036,102 @@ mod tests {
             Some(
                 "agent paused for lack of inference budget/credits: acme is out of inference credits"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spend_halted_turn_skips_the_judge_and_settles_failed() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1990-spend-halted-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let provider = Arc::new(EscalatingJudgeProvider::default());
+        deps.provider = provider.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+        let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
+            reply: "here is what I found so far".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: Some(crate::harness::SpendHalt {
+                agent: "researcher".to_string(),
+                spent_usd: 5.25,
+                cap_usd: 5.0,
+            }),
+            budget_paused: None,
+        }));
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1990-spend"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-1990-spend"),
+        );
+        let capped = RunCappedNodes::default();
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record,
+            CompanyId::new("acme"),
+            "wf-1990-spend".to_string(),
+            "run-1990-spend".to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            capped.clone(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        )
+        .with_runs(Some(runs.clone()), None, RunAttempts::default());
+
+        let (_, outcome) = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "spend_step",
+                    "prompt": "keep going",
+                    "verify": { "criteria": "the report must be sent" },
+                }),
+            )
+            .await
+            .expect("a spend-halted turn is still Ok — the reply is a real, partial checkpoint");
+
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a spend-halted turn must not pay for a sufficiency judge"
+        );
+        assert!(outcome.halted_for_spend.is_some());
+
+        assert_eq!(
+            capped.take(),
+            vec!["spend_step".to_string()],
+            "the spend-halted node's id must reach the channel the runner reconciles against"
+        );
+
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1990-spend".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1, "one attempt for one node turn");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+        assert!(
+            attempts[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("spend cap partway through")),
+            "the spend-halt diagnosis must survive to the attempt row, got {:?}",
+            attempts[0].error
         );
     }
 
@@ -4385,6 +6012,7 @@ mod tests {
                     require: "field_present".to_string(),
                     field: Some("=item.missing".to_string()),
                 }),
+                verify: None,
             }],
             edges: Vec::new(),
         };
@@ -4668,6 +6296,11 @@ mod tests {
     /// "Approving the card continues this run automatically" for both, which
     /// for a blocker is an operator approving a card and then watching a run
     /// that never moves.
+    ///
+    /// Issue #2005 moved the truthful line rather than removing the rule: a
+    /// blocker's answer now DOES re-enter the step, but not by approving — the
+    /// four verdicts differ, and one of them stops the run. The card must
+    /// describe that, not borrow the gated call's sentence.
     #[test]
     fn the_diagnosis_only_promises_a_resume_it_can_keep() {
         let gated = ParkedCalls {
@@ -4691,11 +6324,15 @@ mod tests {
         let text = blocked_diagnosis(Some("work"), "writer", &blocker);
         assert!(
             !text.contains("continues this run automatically"),
-            "a blocker resumes nothing until #1863/#1864: {text}"
+            "a blocker is not decided by approving it: {text}"
         );
         assert!(
-            text.contains("does not restart this run"),
-            "and it has to say so, not merely omit the promise: {text}"
+            text.contains("re-enters this step"),
+            "an answered blocker does re-enter the step it stopped: {text}"
+        );
+        assert!(
+            text.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "all four verdicts are reachable, so all four have to be named: {text}"
         );
 
         let mixed = ParkedCalls {
@@ -4709,9 +6346,15 @@ mod tests {
         };
         let text = blocked_diagnosis(Some("work"), "writer", &mixed);
         assert!(
-            text.contains("continue this run when approved") && text.contains("do not restart it"),
+            text.contains("continue this run when approved")
+                && text.contains("re-enter the step they stopped"),
             "a mixed node has to describe both, since neither sentence is true of all of it: \
              {text}"
+        );
+        assert!(
+            text.contains(crate::ports::blockers::BLOCKER_VERDICT_CHOICES),
+            "a mixed node's blocker cards offer the same four verdicts, worded from the same \
+             fragment as the blocker-only branch above: {text}"
         );
 
         // Nothing was parked at all — every call failed to park — so there is
@@ -4724,7 +6367,7 @@ mod tests {
         };
         let text = blocked_diagnosis(Some("work"), "writer", &none_parked);
         assert!(!text.contains("Approving the card"), "{text}");
-        assert!(!text.contains("does not restart"), "{text}");
+        assert!(!text.contains("re-enters this step"), "{text}");
     }
 
     #[tokio::test]
@@ -4917,6 +6560,64 @@ mod tests {
             );
         assert_eq!(stashed.1, "wf-1825-p1b");
         assert_eq!(stashed.2, trigger_input);
+    }
+
+    /// A node whose turn parks neither a gated call nor a blocker must never
+    /// touch the blocked-node stash at all — `park_gated_calls` runs on every
+    /// ordinary node, and most never block. The release-on-total-failure
+    /// cleanup this queues must only fire for a turn this very call armed.
+    #[tokio::test]
+    async fn park_gated_calls_leaves_an_unstashed_turn_untouched() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-2005-release-guard-")
+            .tempdir()
+            .expect("tempdir");
+        let (deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        let trigger_input = json!({ "topic": "quarterly numbers" });
+        let board_claim = Arc::new(deps.delegations.claim_board("run-2005-guard"));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run("run-2005-guard"),
+        );
+        let runner = HarnessAgentRunner::new(
+            single_turn(&deps),
+            deps,
+            crate::workflows::gated_tool_turn_test::record(),
+            CompanyId::new("acme"),
+            "reporting".to_string(),
+            "run-2005-guard".to_string(),
+            None,
+            trigger_input,
+            crate::ports::types::StartedBy::Operator,
+            RunNotices::default(),
+            RunBoard::default(),
+            RunBlocks::default(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            RunArtifacts::default(),
+            board_claim,
+            publish_refusal_claim,
+        );
+
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+
+        // Nothing was ever queued for this node's turn — no blocker, no gated
+        // call — so this call never armed a stash for it.
+        let summary = runner
+            .park_gated_calls(Some("work"), "work", &node_turn)
+            .await;
+        assert_eq!(summary.approval_ids.len(), 0);
+
+        // A turn that never touches the journal never creates the file.
+        let raw = tokio::fs::read_to_string(dir.path().join("journal.jsonl"))
+            .await
+            .unwrap_or_default();
+        assert!(
+            !raw.contains("BlockedNodeReleased"),
+            "a turn this call never stashed must not durably record a release for it: {raw}"
+        );
     }
 
     /// Issue #1825 (P2, third follow-up — found by chatgpt-codex-connector): a
@@ -5902,6 +7603,8 @@ mod tests {
             RunContext {
                 workflow_id: "wf",
                 run_id: "run:1",
+                checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -5910,6 +7613,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -5956,6 +7660,8 @@ mod tests {
             RunContext {
                 workflow_id: "wf",
                 run_id: "run:1",
+                checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -5964,6 +7670,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6127,6 +7834,8 @@ mod tests {
             RunContext {
                 workflow_id: "wf",
                 run_id: "run:1",
+                checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -6135,6 +7844,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6188,6 +7898,8 @@ mod tests {
             RunContext {
                 workflow_id: "wf",
                 run_id: "run:1",
+                checkpoint_thread_id: "run:1",
+                workflow_fingerprint: "fp:1",
                 run_request: None,
                 trigger_input: &Value::Null,
                 started_by: crate::ports::types::StartedBy::Operator,
@@ -6196,6 +7908,7 @@ mod tests {
                 board: RunBoard::default(),
                 blocks: Default::default(),
                 capped: Default::default(),
+                halted: Default::default(),
                 approvals: Default::default(),
                 artifacts: Default::default(),
                 runs: None,
@@ -6634,5 +8347,1262 @@ mod tests {
         )
         .await;
         assert!(blocks.take().is_empty());
+    }
+
+    /// Issue #2005: the engine-side trigger reader — what an answered blocker
+    /// riding the continuation's trigger input actually does to the node it
+    /// names.
+    mod node_blocker_answer {
+        use super::*;
+        use crate::ports::blockers::{BlockerKind, BlockerSource, BlockerVerdict};
+        use crate::runtime::workflow_resume::{
+            BlockerAnswer, CONTINUATION_BLOCKER_KEY, with_blocker_answer, workflow_node_turn_key,
+        };
+
+        const RUN_ID: &str = "run-2005";
+
+        /// A turn double that records the message it was handed, so an amend's
+        /// injection is provable and a skip's non-execution is too.
+        struct MessageRecordingTurn {
+            messages: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl MessageRecordingTurn {
+            fn new() -> Self {
+                Self {
+                    messages: std::sync::Mutex::new(Vec::new()),
+                }
+            }
+
+            fn messages(&self) -> Vec<String> {
+                self.messages.lock().expect("messages").clone()
+            }
+        }
+
+        #[async_trait]
+        impl RunTurn for MessageRecordingTurn {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+
+            async fn run_steered(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _control: &crate::company::steer::SteerControl,
+                _chat_id: crate::runtime::delegation::ChatTarget<'_>,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+
+            async fn run_steered_background(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _control: &crate::company::steer::SteerControl,
+                _chat: crate::runtime::delegation::ChatTarget<'_>,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+
+            async fn run_background_workflow(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                message: &str,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+                _workflow_run_id: &str,
+                _node_id: &str,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.messages
+                    .lock()
+                    .expect("messages")
+                    .push(message.to_string());
+                Ok(ok_outcome())
+            }
+        }
+
+        fn answered(node: &str, verdict: BlockerVerdict, answer: &str) -> Value {
+            with_blocker_answer(
+                json!({ "topic": "quarterly numbers" }),
+                &BlockerAnswer {
+                    node: node.to_string(),
+                    verdict,
+                    answer: answer.to_string(),
+                },
+            )
+        }
+
+        async fn runner_with(
+            dir: &std::path::Path,
+            turn: Arc<MessageRecordingTurn>,
+            trigger_input: Value,
+        ) -> HarnessAgentRunner {
+            let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir);
+            let board_claim = Arc::new(deps.delegations.claim_board(RUN_ID));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
+            HarnessAgentRunner::new(
+                turn,
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                RUN_ID.to_string(),
+                None,
+                trigger_input,
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            )
+        }
+
+        fn tmp(prefix: &str) -> tempfile::TempDir {
+            tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir()
+                .expect("tempdir")
+        }
+
+        /// A skip proceeds past the node without spending a turn on the
+        /// question the operator just waived.
+        #[tokio::test]
+        async fn a_skipped_node_does_not_run_its_turn() {
+            let dir = tmp("oc-2005-skip-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("gather", BlockerVerdict::Skip, ""),
+            )
+            .await;
+
+            let (value, outcome) = runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("a skipped node still produces an output the branch can bind");
+
+            assert!(
+                turn.messages().is_empty(),
+                "a waived node must not spend a turn: {:?}",
+                turn.messages()
+            );
+            assert!(outcome.reply.contains("skipped"), "{}", outcome.reply);
+            assert_eq!(value["agent_ref"], "researcher");
+        }
+
+        /// An amend re-runs the node carrying the operator's correction — the
+        /// workflow twin of the card path's note append.
+        #[tokio::test]
+        async fn an_amended_node_re_runs_carrying_the_operators_words() {
+            let dir = tmp("oc-2005-amend-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("gather", BlockerVerdict::Amend, "use gpt-4o-mini instead"),
+            )
+            .await;
+
+            runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("an amended node runs");
+
+            let messages = turn.messages();
+            assert_eq!(messages.len(), 1, "the node runs exactly once");
+            assert!(
+                messages[0].contains("use gpt-4o-mini instead"),
+                "the correction has to reach the turn, or the re-run repeats the failure: {}",
+                messages[0]
+            );
+        }
+
+        /// A retry runs the step again as it was — no correction to inject.
+        #[tokio::test]
+        async fn a_retried_node_runs_again_as_it_was() {
+            let dir = tmp("oc-2005-retry-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("gather", BlockerVerdict::Retry, ""),
+            )
+            .await;
+
+            runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("a retried node runs");
+
+            let messages = turn.messages();
+            assert_eq!(messages.len(), 1);
+            assert!(
+                !messages[0].contains("Answer from the operator"),
+                "a bare retry carries no words: {}",
+                messages[0]
+            );
+        }
+
+        /// One node's answer is not the graph's: every other node runs as it
+        /// always did.
+        #[tokio::test]
+        async fn an_answer_for_another_node_leaves_this_one_alone() {
+            let dir = tmp("oc-2005-other-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                answered("review", BlockerVerdict::Skip, ""),
+            )
+            .await;
+
+            runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await
+                .expect("an unanswered node runs");
+
+            assert_eq!(turn.messages().len(), 1);
+        }
+
+        /// An unreadable answer fails the node rather than degrading to
+        /// "nobody answered" — the degrade would spend a turn on the identical
+        /// failure with the operator's decision gone.
+        #[tokio::test]
+        async fn an_unreadable_answer_fails_the_node_rather_than_running_it() {
+            let dir = tmp("oc-2005-garbled-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                json!({
+                    CONTINUATION_BLOCKER_KEY: [{ "node": "gather", "verdict": "shrug" }]
+                }),
+            )
+            .await;
+
+            let outcome = runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await;
+
+            assert!(outcome.is_err(), "a garbled answer must stop the node");
+            assert!(turn.messages().is_empty(), "and must not spend a turn");
+        }
+
+        /// A cancel starts no run at all, so a node reached carrying one is a
+        /// host bug — and stops loudly rather than carrying on as if the
+        /// operator had said yes.
+        #[tokio::test]
+        async fn a_cancelled_answer_stops_the_node() {
+            let dir = tmp("oc-2005-cancel-");
+            let turn = Arc::new(MessageRecordingTurn::new());
+            let runner = runner_with(
+                dir.path(),
+                turn.clone(),
+                json!({
+                    CONTINUATION_BLOCKER_KEY: [{ "node": "gather", "verdict": "cancel" }]
+                }),
+            )
+            .await;
+
+            let outcome = runner
+                .run_turn("researcher", json!({ "node_id": "gather", "prompt": "go" }))
+                .await;
+
+            assert!(outcome.is_err());
+            assert!(turn.messages().is_empty());
+        }
+
+        /// The other half of the thread: a blocker's park has to stash what the
+        /// answer's re-entry will need. The gated-call arm cannot cover it — a
+        /// turn that parked no gated call returns before reaching that arm, and
+        /// the runner's settle-time pass refuses to arm a turn that is not
+        /// already armed — so without this the answer reaches a resume with no
+        /// run to continue.
+        #[tokio::test]
+        async fn parking_a_node_blocker_stashes_the_run_its_answer_re_enters() {
+            let dir = tmp("oc-2005-stash-");
+            let (deps, _journal) =
+                crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+            let parking = deps
+                .delivery
+                .clone()
+                .expect("delivery")
+                .parking
+                .clone()
+                .expect("parking");
+            let trigger_input = json!({ "topic": "quarterly numbers" });
+            let board_claim = Arc::new(deps.delegations.claim_board(RUN_ID));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
+            let runner = HarnessAgentRunner::new(
+                single_turn(&deps),
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                RUN_ID.to_string(),
+                None,
+                trigger_input.clone(),
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            );
+
+            let parked = runner
+                .park_node_blocker_as(
+                    "gather",
+                    "the model id `gpt-nope` was rejected",
+                    BlockerKind::Infrastructure,
+                    BlockerSource::Provider,
+                    "a model id this provider serves",
+                )
+                .await;
+            assert!(parked.is_some(), "the blocker parks");
+
+            let stashed = parking
+                .blocked_nodes
+                .peek(&workflow_node_turn_key(RUN_ID, "gather"))
+                .expect("a parked blocker must stash the run its answer re-enters");
+            assert_eq!(stashed.workflow_id, "reporting");
+            assert_eq!(stashed.input, trigger_input);
+        }
+
+        /// A resolver racing in against a live blocker park must always find
+        /// the stash already armed. This spies on the approval gate's own
+        /// `park` call and captures whether the stash is armed at that exact
+        /// point — deterministic, no wall-clock race needed, on the same
+        /// principle as
+        /// `park_and_journal_arms_the_continuation_slot_before_the_card_is_parkable`
+        /// in `workflows::delivery`.
+        #[tokio::test]
+        async fn park_node_blocker_as_arms_the_stash_before_the_card_is_parkable() {
+            use crate::ports::ApprovalGate;
+            use crate::ports::types::{Actor, ApprovalId, Effect, PolicyDecision, Verdict};
+
+            struct Spy {
+                inner: Arc<dyn ApprovalGate>,
+                blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
+                turn: String,
+                armed_at_park: std::sync::Mutex<Option<bool>>,
+            }
+
+            #[async_trait]
+            impl ApprovalGate for Spy {
+                async fn evaluate(
+                    &self,
+                    company: &CompanyId,
+                    effect: &Effect,
+                ) -> crate::Result<PolicyDecision> {
+                    self.inner.evaluate(company, effect).await
+                }
+
+                async fn park(
+                    &self,
+                    company: &CompanyId,
+                    effect: Effect,
+                ) -> crate::Result<ApprovalId> {
+                    *self.armed_at_park.lock().expect("spy lock") =
+                        Some(self.blocked_nodes.is_armed(&self.turn));
+                    self.inner.park(company, effect).await
+                }
+
+                async fn resolve(
+                    &self,
+                    id: &ApprovalId,
+                    verdict: Verdict,
+                    by: Actor,
+                ) -> crate::Result<Option<Effect>> {
+                    self.inner.resolve(id, verdict, by).await
+                }
+            }
+
+            let dir = tmp("oc-2005-race-a-");
+            let (mut deps, _journal) =
+                crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+            let parking = deps
+                .delivery
+                .clone()
+                .expect("delivery")
+                .parking
+                .clone()
+                .expect("parking");
+
+            let run_id = "run-2005-race-a".to_string();
+            let turn = workflow_node_turn_key(&run_id, "gather");
+            let spy = Arc::new(Spy {
+                inner: parking.approvals.clone(),
+                blocked_nodes: parking.blocked_nodes.clone(),
+                turn: turn.clone(),
+                armed_at_park: std::sync::Mutex::new(None),
+            });
+            let mut spied_parking = parking.clone();
+            spied_parking.approvals = spy.clone();
+            deps.delivery.as_mut().expect("delivery").parking = Some(spied_parking);
+
+            let trigger_input = json!({ "topic": "quarterly numbers" });
+            let board_claim = Arc::new(deps.delegations.claim_board(&run_id));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(&run_id));
+            let runner = HarnessAgentRunner::new(
+                single_turn(&deps),
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                run_id,
+                None,
+                trigger_input,
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            );
+
+            let parked = runner
+                .park_node_blocker_as(
+                    "gather",
+                    "the model id `gpt-nope` was rejected",
+                    BlockerKind::Infrastructure,
+                    BlockerSource::Provider,
+                    "a model id this provider serves",
+                )
+                .await;
+            assert!(parked.is_some(), "the blocker parks");
+
+            let captured = spy
+                .armed_at_park
+                .lock()
+                .expect("spy lock")
+                .expect("park was called");
+            assert!(
+                captured,
+                "the blocked-node stash must already be armed by the time the approval gate's \
+                 park() runs, before the card becomes resolvable to a concurrent operator"
+            );
+        }
+
+        /// The same proof as above, for the sibling site: a blocker card
+        /// extracted from a node's gated-call batch inside `park_gated_calls`.
+        #[tokio::test]
+        async fn park_gated_calls_blocker_extraction_arms_the_stash_before_the_first_card_is_parkable()
+         {
+            use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+            use crate::ports::ApprovalGate;
+            use crate::ports::blockers::BlockerPayload;
+            use crate::ports::types::{
+                Actor, ApprovalId, Effect, EffectGroup, PolicyDecision, Verdict,
+            };
+
+            struct Spy {
+                inner: Arc<dyn ApprovalGate>,
+                blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
+                turn: String,
+                armed_at_park: std::sync::Mutex<Option<bool>>,
+            }
+
+            #[async_trait]
+            impl ApprovalGate for Spy {
+                async fn evaluate(
+                    &self,
+                    company: &CompanyId,
+                    effect: &Effect,
+                ) -> crate::Result<PolicyDecision> {
+                    self.inner.evaluate(company, effect).await
+                }
+
+                async fn park(
+                    &self,
+                    company: &CompanyId,
+                    effect: Effect,
+                ) -> crate::Result<ApprovalId> {
+                    *self.armed_at_park.lock().expect("spy lock") =
+                        Some(self.blocked_nodes.is_armed(&self.turn));
+                    self.inner.park(company, effect).await
+                }
+
+                async fn resolve(
+                    &self,
+                    id: &ApprovalId,
+                    verdict: Verdict,
+                    by: Actor,
+                ) -> crate::Result<Option<Effect>> {
+                    self.inner.resolve(id, verdict, by).await
+                }
+            }
+
+            let dir = tmp("oc-2005-race-b-");
+            let (mut deps, _journal) =
+                crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+            let parking = deps
+                .delivery
+                .clone()
+                .expect("delivery")
+                .parking
+                .clone()
+                .expect("parking");
+
+            let run_id = "run-2005-race-b".to_string();
+            let turn = workflow_node_turn_key(&run_id, "work");
+            let spy = Arc::new(Spy {
+                inner: parking.approvals.clone(),
+                blocked_nodes: parking.blocked_nodes.clone(),
+                turn: turn.clone(),
+                armed_at_park: std::sync::Mutex::new(None),
+            });
+            let mut spied_parking = parking.clone();
+            spied_parking.approvals = spy.clone();
+            deps.delivery.as_mut().expect("delivery").parking = Some(spied_parking);
+
+            let queue = deps.approval_requests.clone();
+            let trigger_input = json!({ "topic": "quarterly numbers" });
+            let board_claim = Arc::new(deps.delegations.claim_board(&run_id));
+            let publish_refusal_claim =
+                Arc::new(deps.pending_publishes.claim_refusals_for_run(&run_id));
+            let runner = HarnessAgentRunner::new(
+                single_turn(&deps),
+                deps,
+                crate::workflows::gated_tool_turn_test::record(),
+                CompanyId::new("acme"),
+                "reporting".to_string(),
+                run_id.clone(),
+                None,
+                trigger_input,
+                crate::ports::types::StartedBy::Operator,
+                RunNotices::default(),
+                RunBoard::default(),
+                RunBlocks::default(),
+                RunCappedNodes::default(),
+                RunApprovals::default(),
+                RunArtifacts::default(),
+                board_claim,
+                publish_refusal_claim,
+            );
+
+            let payload = BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::AgentQuestion,
+                step: None,
+                reason: "which quarter should I report?".to_string(),
+                needed: "the quarter to report on".to_string(),
+                group_key: None,
+            };
+            let effect_kind = payload.effect_kind();
+            let reason = payload.reason.clone();
+            let payload_value = serde_json::to_value(&payload).expect("payload serializes");
+
+            let claim = queue.claim(ApprovalScope::Run(run_id.clone()));
+            claim
+                .scoped(async {
+                    queue.push(ApprovalRequest {
+                        tool: "escalate_to_human".to_string(),
+                        reason,
+                        effect: Effect {
+                            kind: effect_kind,
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: payload_value,
+                            agent: None,
+                            run_id: None,
+                        },
+                    });
+                })
+                .await;
+
+            claim
+                .scoped(runner.park_gated_calls(Some("work"), "work", &turn))
+                .await;
+
+            let captured = spy
+                .armed_at_park
+                .lock()
+                .expect("spy lock")
+                .expect("park was called");
+            assert!(
+                captured,
+                "a blocker card extracted from a node's gated-call batch must find the stash \
+                 already armed by the time the approval gate's park() runs"
+            );
+        }
+    }
+
+    // ── the recovery ladder's peer rung ──────────────────────────────────────
+
+    /// The fixture roster plus one teammate whose role and description match a
+    /// question about a customer's renewal, so [`pick_peer`] has somebody to
+    /// choose. The node itself runs as `researcher`, which is deliberately not
+    /// on the roster.
+    fn record_with_peer() -> CompanyRecord {
+        let mut record = crate::workflows::gated_tool_turn_test::record();
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"cfo\"\nrole = \"Chief Financial \
+             Officer\"\ndescription = \"Owns renewal contracts and customer pricing\"\n",
+        )
+        .expect("manifest parses");
+        record
+    }
+
+    /// A [`RunTurn`] whose node turn refuses for want of a fact, and whose peer
+    /// consultation answers with `peer_reply` — optionally staging board work
+    /// on the way, standing in for a consulted teammate whose tools wrote.
+    struct ConsultedPeerTurn {
+        peer_reply: &'static str,
+        consults: std::sync::atomic::AtomicUsize,
+        node_turns: std::sync::atomic::AtomicUsize,
+        stage: Option<HarnessDeps>,
+    }
+
+    impl ConsultedPeerTurn {
+        fn new(peer_reply: &'static str) -> Self {
+            Self {
+                peer_reply,
+                consults: std::sync::atomic::AtomicUsize::new(0),
+                node_turns: std::sync::atomic::AtomicUsize::new(0),
+                stage: None,
+            }
+        }
+
+        fn staging(peer_reply: &'static str, deps: HarnessDeps) -> Self {
+            Self {
+                stage: Some(deps),
+                ..Self::new(peer_reply)
+            }
+        }
+
+        fn consults(&self) -> usize {
+            self.consults.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl RunTurn for ConsultedPeerTurn {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_steered_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _chat: crate::runtime::delegation::ChatTarget<'_>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            unreachable!("workflow agent nodes route through run_background_workflow")
+        }
+
+        async fn run_background(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            self.consults
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(deps) = self.stage.as_ref() {
+                deps.delegations
+                    .push(crate::harness::orchestrator::Delegation::SpawnTask {
+                        title: "Chase the renewal paperwork".to_string(),
+                        note: None,
+                        assignee: None,
+                    });
+                deps.pending_publishes
+                    .push_refusal("consultation-note.md".to_string());
+                deps.approval_requests
+                    .push(crate::harness::policy::ApprovalRequest {
+                        tool: "send_email".to_string(),
+                        reason: "the consulted peer tried a gated tool".to_string(),
+                        effect: crate::ports::types::Effect {
+                            kind: "email.send".to_string(),
+                            group: crate::ports::types::EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: json!({ "to": "someone@example.com" }),
+                            agent: Some("cfo".to_string()),
+                            run_id: None,
+                        },
+                    });
+            }
+            Ok(crate::harness::TurnOutcome {
+                reply: self.peer_reply.to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+
+        async fn run_background_workflow(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            _workflow_run_id: &str,
+            _node_id: &str,
+        ) -> crate::Result<crate::harness::TurnOutcome> {
+            self.node_turns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::harness::TurnOutcome {
+                reply: "I cannot draft the email without the customer's renewal date.".to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            })
+        }
+    }
+
+    /// The verify node every peer-rung test below drives.
+    fn verify_node() -> Value {
+        json!({
+            "node_id": "draft",
+            "prompt": "Draft the customer email.",
+            "verify": { "criteria": "must include the customer's renewal date" }
+        })
+    }
+
+    /// Builds a runner over `turn` with the peer-bearing roster, handing back
+    /// the run-scoped collectors a test asserts on.
+    #[allow(clippy::type_complexity)]
+    fn peer_runner(
+        turn: Arc<dyn RunTurn>,
+        deps: HarnessDeps,
+        run_id: &str,
+        runs: Option<Arc<dyn crate::ports::RunStore>>,
+    ) -> (
+        HarnessAgentRunner,
+        RunBlocks,
+        RunBoard,
+        RunNotices,
+        RunArtifacts,
+    ) {
+        let board_claim = Arc::new(deps.delegations.claim_board(run_id.to_string()));
+        let publish_refusal_claim = Arc::new(
+            deps.pending_publishes
+                .claim_refusals_for_run(run_id.to_string()),
+        );
+        let blocks = RunBlocks::default();
+        let board = RunBoard::default();
+        let notices = RunNotices::default();
+        let artifacts = RunArtifacts::default();
+        let mut runner = HarnessAgentRunner::new(
+            turn,
+            deps,
+            record_with_peer(),
+            CompanyId::new("acme"),
+            format!("wf-{run_id}"),
+            run_id.to_string(),
+            None,
+            Value::Null,
+            crate::ports::types::StartedBy::Operator,
+            notices.clone(),
+            board.clone(),
+            blocks.clone(),
+            RunCappedNodes::default(),
+            RunApprovals::default(),
+            artifacts.clone(),
+            board_claim,
+            publish_refusal_claim,
+        );
+        if let Some(runs) = runs {
+            runner = runner.with_runs(Some(runs), None, RunAttempts::default());
+        }
+        (runner, blocks, board, notices, artifacts)
+    }
+
+    /// The rung's reason to exist: an information gap the fact store and the
+    /// workspace cannot close is put to one roster peer, and an answer the
+    /// re-verification judge accepts ships as the node's output carrying its
+    /// provenance.
+    #[tokio::test]
+    async fn a_peer_answer_the_judge_accepts_ships_the_recovered_context_block() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-accepted-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let turn = Arc::new(ConsultedPeerTurn::new("The renewal date is March 1st."));
+        let (runner, blocks, _board, _notices, _artifacts) =
+            peer_runner(turn.clone(), deps, "run-1866-peer-ok", None);
+
+        let (_value, outcome) = runner
+            .run_turn("researcher", verify_node())
+            .await
+            .expect("an answered consultation the judge accepts must let the node ship");
+
+        assert_eq!(turn.consults(), 1, "exactly one peer turn is spent");
+        assert!(
+            outcome
+                .reply
+                .contains("peer cfo (Chief Financial Officer): The renewal date is March 1st."),
+            "the shipped reply must carry the peer's answer and its provenance: {}",
+            outcome.reply
+        );
+        assert!(
+            outcome.reply.contains("Recovered company context:"),
+            "the shipped reply must be the augmented text: {}",
+            outcome.reply
+        );
+        let seen = script.seen.lock().expect("seen");
+        assert_eq!(seen.len(), 2, "one judge call, then one re-verification");
+        assert!(
+            seen[1].to_string().contains("peer cfo"),
+            "the re-verification judge must see the peer's answer, not the bare refusal"
+        );
+        assert!(
+            blocks.take().is_empty(),
+            "an accepted recovery blocks nobody"
+        );
+    }
+
+    /// A peer answer is not privileged: the second judge still gets to refuse
+    /// it, and when it does the operator gets an Information blocker whose
+    /// recovery log names the peer that was asked.
+    #[tokio::test]
+    async fn a_peer_answer_the_judge_rejects_parks_an_information_blocker() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-rejected-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let turn = Arc::new(ConsultedPeerTurn::new("I do not have that date either."));
+        let (runner, blocks, _board, _notices, _artifacts) = peer_runner(
+            turn.clone(),
+            deps,
+            "run-1866-peer-blocked",
+            Some(runs.clone()),
+        );
+
+        let err = runner
+            .run_turn("researcher", verify_node())
+            .await
+            .expect_err("an unclosed information gap must not advance downstream");
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("peer: cfo answered"),
+            "the operator's blocker must say the peer was asked and answered: {message}"
+        );
+        assert_eq!(turn.consults(), 1);
+        assert_eq!(
+            blocks.take().len(),
+            1,
+            "the gap is parked as one blocked node"
+        );
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run("run-1866-peer-blocked".to_string()),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            crate::ports::RunStatus::Blocked,
+            "an information gap is blocked on a person, not failed"
+        );
+    }
+
+    /// The deterministic check outranks the peer. An answer the judge accepts
+    /// still has to satisfy the node's declared postcondition, and when it does
+    /// not the attempt fails rather than shipping.
+    #[tokio::test]
+    async fn a_peer_answer_the_judge_accepts_still_fails_its_postcondition() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-postcondition-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let runs: Arc<dyn crate::ports::RunStore> =
+            Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
+        let turn = Arc::new(ConsultedPeerTurn::new("The renewal date is March 1st."));
+        let (runner, blocks, _board, _notices, _artifacts) = peer_runner(
+            turn.clone(),
+            deps,
+            "run-1866-peer-postcondition",
+            Some(runs.clone()),
+        );
+
+        let err = runner
+            .run_turn(
+                "researcher",
+                json!({
+                    "node_id": "draft",
+                    "prompt": "Draft the customer email.",
+                    "verify": { "criteria": "must include the customer's renewal date" },
+                    "postcondition": { "require": "field_present", "field": "items" }
+                }),
+            )
+            .await
+            .expect_err("a recovered reply must still clear the deterministic check");
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("items"),
+            "the halt must name what the recovered output was missing: {message}"
+        );
+        assert!(
+            blocks.take().is_empty(),
+            "a failed postcondition asks nobody for anything"
+        );
+        let attempts = runs
+            .list_runs(
+                &CompanyId::new("acme"),
+                &crate::ports::RunFilter::for_workflow_run(
+                    "run-1866-peer-postcondition".to_string(),
+                ),
+            )
+            .await
+            .expect("list attempts");
+        assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
+    }
+
+    /// A consultation was asked a question, not given authority. Whatever the
+    /// consulted peer staged on the shared board and publish queues is thrown
+    /// away, so the *next* node's drain — the path that would otherwise execute
+    /// it and attribute it to this run — finds nothing.
+    #[tokio::test]
+    async fn a_consultation_that_stages_board_work_leaves_nothing_behind() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-no-authority-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let queues = deps.clone();
+        let turn = Arc::new(ConsultedPeerTurn::staging(
+            "The renewal date is March 1st.",
+            deps.clone(),
+        ));
+        let (runner, blocks, board, notices, _artifacts) =
+            peer_runner(turn.clone(), deps, "run-1866-peer-authority", None);
+
+        runner
+            .run_turn("researcher", verify_node())
+            .await
+            .expect("the consultation answered, so the node ships");
+        assert_eq!(turn.consults(), 1);
+
+        // The node that runs next is what would execute a leaked staging: its
+        // own post-turn drain reads the same queues.
+        runner
+            .run_turn(
+                "researcher",
+                json!({ "node_id": "next", "prompt": "carry on" }),
+            )
+            .await
+            .expect("a plain node runs");
+
+        assert!(
+            board.take().is_empty(),
+            "a consultation must open no card on the run's board"
+        );
+        assert!(
+            blocks.take().is_empty(),
+            "a consultation settles nothing and blocks nobody"
+        );
+        assert!(
+            notices.take().is_empty(),
+            "no operator notice may be raised for work a consultation only staged"
+        );
+        assert_eq!(
+            queues.approval_requests.queued(),
+            0,
+            "a consultation must not leave an approval card for the operator's next chat cycle \
+             to drain as if the operator had asked for it"
+        );
+    }
+
+    /// A consulted peer may be the orchestrator, which can run a whole workflow
+    /// — whose nodes reach this same recover path. The rung must fire once down
+    /// the whole stack, not once per nested node.
+    #[tokio::test]
+    async fn a_consultation_cannot_re_enter_the_recovery_ladder() {
+        struct ReentrantPeerTurn {
+            consults: std::sync::atomic::AtomicUsize,
+            node_turns: std::sync::atomic::AtomicUsize,
+            runner: std::sync::OnceLock<Arc<HarnessAgentRunner>>,
+        }
+
+        #[async_trait]
+        impl RunTurn for ReentrantPeerTurn {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                _message: &str,
+                _chat: crate::runtime::delegation::ChatTarget<'_>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                unreachable!("nodes route through run_background_workflow")
+            }
+
+            async fn run_steered(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                _message: &str,
+                _control: &crate::company::steer::SteerControl,
+                _chat: crate::runtime::delegation::ChatTarget<'_>,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                unreachable!("nodes route through run_background_workflow")
+            }
+
+            async fn run_steered_background(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                _message: &str,
+                _control: &crate::company::steer::SteerControl,
+                _chat: crate::runtime::delegation::ChatTarget<'_>,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                unreachable!("nodes route through run_background_workflow")
+            }
+
+            async fn run_background(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                _message: &str,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.consults
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // The consulted peer runs a nested graph node, which reaches
+                // the same recover path.
+                let runner = self.runner.get().expect("runner wired").clone();
+                let _ = Box::pin(runner.run_turn("researcher", verify_node())).await;
+                Ok(crate::harness::TurnOutcome {
+                    reply: String::new(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: false,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                })
+            }
+
+            async fn run_background_workflow(
+                &self,
+                _company: &CompanyId,
+                _agent_id: &str,
+                _message: &str,
+                _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+                _workflow_run_id: &str,
+                _node_id: &str,
+            ) -> crate::Result<crate::harness::TurnOutcome> {
+                self.node_turns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(crate::harness::TurnOutcome {
+                    reply: "I cannot draft the email without the customer's renewal date."
+                        .to_string(),
+                    steps: Vec::new(),
+                    hit_iteration_cap: false,
+                    abnormal_stop: None,
+                    halted_for_spend: None,
+                    budget_paused: None,
+                })
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-reentrant-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, _script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+                crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let turn = Arc::new(ReentrantPeerTurn {
+            consults: std::sync::atomic::AtomicUsize::new(0),
+            node_turns: std::sync::atomic::AtomicUsize::new(0),
+            runner: std::sync::OnceLock::new(),
+        });
+        let (runner, _blocks, _board, _notices, _artifacts) =
+            peer_runner(turn.clone(), deps, "run-1866-peer-reentrant", None);
+        let runner = Arc::new(runner);
+        turn.runner.set(runner.clone()).ok().expect("wire runner");
+
+        let _ = runner.run_turn("researcher", verify_node()).await;
+
+        assert_eq!(
+            turn.node_turns.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the nested node did run, so the re-entrancy this guards against was reached"
+        );
+        assert_eq!(
+            turn.consults.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the peer rung must fire once down the whole stack, not once per nested node"
+        );
+    }
+
+    /// The whole gate is opt-in: a node with no `verify` spends no judge call
+    /// and asks no peer, exactly as it did before any of this existed.
+    #[tokio::test]
+    async fn a_node_with_no_verify_calls_neither_judge_nor_peer() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-optin-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(Vec::new()).await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let turn = Arc::new(ConsultedPeerTurn::new("should never be reached"));
+        let (runner, _blocks, _board, _notices, _artifacts) =
+            peer_runner(turn.clone(), deps, "run-1866-peer-optin", None);
+
+        runner
+            .run_turn("researcher", json!({ "node_id": "plain", "prompt": "go" }))
+            .await
+            .expect("an unverified node runs as it always did");
+
+        assert!(
+            script.seen.lock().expect("seen").is_empty(),
+            "no judge call for a node that declared no criteria"
+        );
+        assert_eq!(turn.consults(), 0, "and therefore no peer turn either");
+    }
+
+    /// `escalate` is a different arm from `recover` and must never touch the
+    /// ladder: an infrastructure or human gap is not something a teammate can
+    /// answer, so spending a peer turn on it would be pure cost. Held by
+    /// construction; pinned so a refactor that folded the arms together fails.
+    #[tokio::test]
+    async fn an_escalate_verdict_never_enters_the_recovery_ladder() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-1866-peer-escalate-")
+            .tempdir()
+            .expect("tempdir");
+        let (base_url, script) =
+            crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+                crate::workflows::gated_tool_turn_test::Turn::Say(
+                    "{\"verdict\":\"escalate\",\"gap\":\"infrastructure\"}",
+                ),
+            ])
+            .await;
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+        let turn = Arc::new(ConsultedPeerTurn::new("should never be reached"));
+        let (runner, _blocks, _board, _notices, _artifacts) =
+            peer_runner(turn.clone(), deps, "run-1866-peer-escalate", None);
+
+        let err = runner
+            .run_turn("researcher", verify_node())
+            .await
+            .expect_err("an escalated gap halts the node");
+        let EngineError::Capability(message) = err else {
+            panic!("expected a capability error");
+        };
+        assert!(
+            message.contains("after semantic verification"),
+            "the escalate arm's own message, not the recovery arm's: {message}"
+        );
+        assert!(
+            !message.contains("recovery tried"),
+            "an escalated gap must not report a recovery ladder it never ran: {message}"
+        );
+        assert_eq!(turn.consults(), 0, "no peer turn on the escalate arm");
+        assert_eq!(
+            script.seen.lock().expect("seen").len(),
+            1,
+            "one judge call and no re-verification"
+        );
     }
 }

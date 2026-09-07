@@ -238,6 +238,23 @@ export type OpenTurn = {
    * lock rather than working. Drives the indicator's wording.
    */
   queued: boolean;
+  /**
+   * The **desk** this turn is in — the host thread id, never the map key.
+   *
+   * The map is keyed per thread (`turnStateKey`), so its key can be a composite
+   * like `engineering#41`. Consumers that need to talk to the *host* — the
+   * settle poll re-reads a desk's history — must use this, because there is no
+   * desk called `engineering#41` and asking for one silently recovers nothing
+   * (Codex review on #2042).
+   *
+   * **Required, so the compiler proves every insertion site carries it.** It was
+   * optional for one commit, with the desk recovered from the key by stripping a
+   * trailing `#<digits>`. That parser is lossy in exactly the case it claimed to
+   * handle — a desk genuinely named `c#4` parses to `c` — and a fallback that is
+   * usually right is worse than none here, because the failure is a silent
+   * history read against a desk that does not exist (CodeRabbit on #2044).
+   */
+  chatId: string;
 };
 
 /** The per-thread rows the fold produces — the same shape as {@link OpenTurn}. */
@@ -247,8 +264,32 @@ export type OpenTurnRow = OpenTurn;
 export interface OpenRunRow {
   id: string;
   chatId?: string;
+  /** The thread within `chatId`, when the host resolved one. */
+  threadRoot?: number;
   status: string;
 }
+
+/**
+ * The key the shell's live-turn maps — open turns, live steps, receipts — are
+ * held under.
+ *
+ * The **thread**, not the channel. All three used to key on the chat id, which
+ * names only the channel; a channel has held many threads since #1890, so two
+ * concurrent turns in one channel shared a slot. The visible cost was not a
+ * mixed-up list but a silent one: unable to tell whose turn was running,
+ * `ChatView` suppressed the working indicator for the whole channel whenever
+ * any thread was open, and a turn the host was actively running showed nowhere
+ * at all.
+ *
+ * Falls back to the chat id when the host resolved no root — a card dispatch, a
+ * workflow node, or a row written before the host carried it. That is also
+ * exactly the identity the maps had before, so an un-upgraded host keeps the
+ * previous behaviour rather than losing its indicator.
+ */
+export function turnStateKey(chatId: string, threadRoot?: number): string {
+  return threadRoot === undefined ? chatId : `${chatId}#${threadRoot}`;
+}
+
 
 /**
  * Folds the open run rows into the per-thread turn lists the working indicator
@@ -280,9 +321,11 @@ export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, O
     if (!run.chatId || seen.has(run.id)) continue;
     seen.add(run.id);
     const queued = run.status === "pending";
-    const list = byThread.get(run.chatId);
-    if (list) list.push({ turnId: run.id, queued });
-    else byThread.set(run.chatId, [{ turnId: run.id, queued }]);
+    const key = turnStateKey(run.chatId, run.threadRoot);
+    const list = byThread.get(key);
+    const row = { turnId: run.id, queued, chatId: run.chatId };
+    if (list) list.push(row);
+    else byThread.set(key, [row]);
   }
   const open: Record<string, OpenTurnRow[]> = {};
   for (const [chatId, rows] of byThread) {

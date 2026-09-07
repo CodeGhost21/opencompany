@@ -508,6 +508,7 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
             repeatable: None,
             destination: n.destination.clone(),
             postcondition: None,
+            verify: None,
         });
     }
     Ok(RawWorkflow {
@@ -2706,6 +2707,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -2721,6 +2723,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "done".to_string(),
@@ -2736,6 +2739,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: vec![
@@ -3070,6 +3074,7 @@ to = "done"
                 repeatable: None,
                 destination: None,
                 postcondition: None,
+                verify: None,
             });
         }
         assert!(draft.nodes.len() > MAX_WORKFLOW_NODES);
@@ -4735,6 +4740,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "call".to_string(),
@@ -4750,6 +4756,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -5594,6 +5601,7 @@ to = "done"
             repeatable: None,
             destination: None,
             postcondition: None,
+            verify: None,
         };
         RawWorkflow {
             id: "wf".to_string(),
@@ -5735,6 +5743,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
                 RawNode {
                     id: "fetch".to_string(),
@@ -5750,6 +5759,7 @@ to = "done"
                     repeatable: None,
                     destination: None,
                     postcondition: None,
+                    verify: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -6711,6 +6721,7 @@ to = "done"
             repeatable: None,
             destination: None,
             postcondition: None,
+            verify: None,
         }
     }
 

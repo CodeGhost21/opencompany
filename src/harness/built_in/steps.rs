@@ -1416,9 +1416,41 @@ mod tests {
     /// "unreadable: No such file or directory" reads as a broken test rather
     /// than as the vendored tree having been rearranged underneath it. The
     /// needle these tests pin may well still exist; only its address changed.
+    /// **The module, not one file.** Upstream splits a large module into
+    /// `foo.rs` + `foo_part_NN.rs` as it grows, and the #5767-era pin moved both
+    /// needles below out of their parent and into a `_part_02`. The parent still
+    /// exists — it just declares the parts now — so reading it alone finds
+    /// nothing and the canary fires as though the *behaviour* changed. Reading
+    /// the siblings keeps the coupling honest across a split: what these tests
+    /// pin is the needle, not the file it lives in.
     fn vendored(relative: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-        std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        let mut all = read_vendored(&path, relative);
+        if let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) {
+            let prefix = format!("{}_part_", stem.to_string_lossy());
+            let mut parts: Vec<_> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".rs"))
+                })
+                .collect();
+            // Deterministic order, so a failure message is reproducible.
+            parts.sort();
+            for part in parts {
+                all.push('\n');
+                all.push_str(&std::fs::read_to_string(&part).unwrap_or_default());
+            }
+        }
+        all
+    }
+
+    fn read_vendored(path: &std::path::Path, relative: &str) -> String {
+        std::fs::read_to_string(path).unwrap_or_else(|err| {
             let basename = relative.rsplit('/').next().unwrap_or(relative);
             panic!(
                 "vendored source {} is unreadable: {err}\n\

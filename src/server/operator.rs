@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::blockers::BlockerVerdict;
 use crate::ports::events::EventStreamItem;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{
@@ -38,6 +39,7 @@ use crate::ports::types::{
     OutboundMessage, OverlayDesk, OverlayDeskMember, OverlayDeskOrder, ResponderMode, StoredEvent,
     TurnStep, Verdict,
 };
+use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
@@ -53,7 +55,7 @@ use crate::server::provision::{emit_cycle_webhooks, emit_feedback_webhook};
 
 /// Builds the operator route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/companies", get(list_companies))
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
@@ -126,7 +128,22 @@ pub fn router() -> Router<AppState> {
         // Standing permissions (issue #374): what the operator has opened up,
         // and how to take it back. Registered under both scope forms.
         .merge(scoped("/grants", get(list_grants)))
-        .merge(scoped("/grants/{gid}", delete(revoke_grant)))
+        .merge(scoped("/grants/{gid}", delete(revoke_grant)));
+    with_review_routes(router)
+}
+
+/// Registers the thread-scoped review verdict route — Approve finishes a
+/// settled `in_review` dispatch card, Revise re-runs it. Gated with the harness
+/// that dispatches cards in the first place; the default build has no such card
+/// to review, so the route is not mounted.
+#[cfg(feature = "openhuman")]
+fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
+    router.merge(scoped("/chat/review", post(review_card)))
+}
+
+#[cfg(not(feature = "openhuman"))]
+fn with_review_routes(router: Router<AppState>) -> Router<AppState> {
+    router
 }
 
 /// One desk (group chat) as the console renders it. Mirrors `DeskDto` in
@@ -1658,6 +1675,7 @@ fn project_event_for_viewer(
             run_id,
             scheduled,
             started_by,
+            ..
         } => {
             let mut o = envelope("workflow_run_started");
             o["workflowId"] = json!(workflow_id);
@@ -1995,6 +2013,23 @@ struct ChatResponse {
     /// exactly as it did before rather than guessing.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
+    /// Set when a thread reply was intercepted as review feedback on an
+    /// `in_review` dispatch card and re-dispatched it, rather than answered
+    /// with `responses` here (Codex #3903907771). The re-run's own reply
+    /// still arrives later on the event stream and in `chat/history` — this
+    /// only tells the console not to read an empty `responses` as "the turn
+    /// produced nothing."
+    ///
+    /// Omitted (not `false`) on every other response, so a host predating
+    /// this field is indistinguishable from one that never took this branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_feedback_applied: Option<bool>,
+    /// The same list [`ResolveReceiptDto::settled_ids`] carries, for the
+    /// non-detached resolve the Approvals page makes: a blocker answered there
+    /// settles its whole root-cause group, and the page owes those siblings the
+    /// same removal it gives the card that was clicked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settled_ids: Option<Vec<String>>,
 }
 
 /// The `detach: true` response (issue #983): the turn's id and the durable id of
@@ -2217,7 +2252,12 @@ async fn run_chat(
     let not_work = message
         .deliverable
         .is_some_and(crate::ports::types::MessageIntent::is_chat);
-    if let Some(title) = (!confined && !not_work)
+    // The lexical layer answers two questions at once, and only the first is a
+    // decision: whether this message becomes a card, and — for a host with no
+    // model wired — what to call it. The second is now a fallback. Keeping it
+    // matters: the classifier returns a *tidied* title, so discarding it would
+    // make an offline company's cards worse than before rather than no better.
+    let lexical = (!confined && !not_work)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
             crate::company::task_intent::MessageTriage::Track(title) => Some(title),
@@ -2227,12 +2267,19 @@ async fn run_chat(
         .or_else(|| {
             workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
         })
-        .filter(|title| !title.trim().is_empty())
-    {
-        // Keep the full message as the note only when the title was shortened
-        // from it, so a one-line ask doesn't duplicate itself.
-        let note =
-            (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        .filter(|title| !title.trim().is_empty());
+    if let Some(lexical) = lexical {
+        let title = crate::ports::tasks::mint_task_title(
+            message.text.trim(),
+            Some(&lexical),
+            runtime.titler(),
+        )
+        .await;
+        // The full ask, kept as the note whenever the headline is not already
+        // the whole of it — which a named title almost always is not. This is
+        // where the context, the caveats and the operator's own wording live now
+        // that the title is a name rather than an excerpt.
+        let note = (title.as_str() != message.text.trim()).then(|| message.text.clone());
         // Issue #576: the prompt box opens the card **already in Planning**, so
         // the spine epic #183 draws — prompt in, deliverable out — runs without
         // a human dragging the first step. The card is created *directly* in
@@ -2284,23 +2331,22 @@ async fn run_chat(
             priority: "medium".to_string(),
             assignee,
             updated_at_millis: crate::ports::now_millis(),
-            // Issue #982: the thread this card was opened from, so the settle
-            // marker lands back in the conversation that asked for the work
-            // rather than only on the board. This is the field #151 added for
-            // exactly that (`relay_reply` answers in the origin thread), and the
-            // console already renders a marker in a DM channel — nothing there
-            // changes. `None` for an unaddressed message, which is every card
-            // this site opened before and therefore no change for one.
-            origin_chat_id: message.chat.clone(),
-            // Issue #1890 B, reconciled with D. The thread this card was raised
-            // in — **by the same rule an answer to this message threads under**.
+            // Issue #982 + #1890 B, reconciled with D: the conversation this
+            // card was opened from, so the settle marker lands back where the
+            // work was asked for rather than only on the board. `relay_reply`
+            // answers in it, and the console already renders a marker in a DM
+            // channel — nothing there changes. `None` for an unaddressed
+            // message, which is every card this site opened before.
             //
-            // B alone read the message's own `parent`, so a card raised from a
-            // channel-level question recorded no thread. That was right while a
-            // thread was only ever something an operator opened by hand. D
-            // changed what a thread IS: an answer now parents to the message
-            // that opened the exchange, so that question is a root, and a card
-            // raised from it belongs to the thread it just started.
+            // The thread half is **the same rule by which an answer to this
+            // message threads**, which is why it is `reply_thread` and not
+            // `thread_root()`. B alone read the message's own `parent`, so a
+            // card raised from a channel-level question recorded no thread.
+            // That was right while a thread was only ever something an operator
+            // opened by hand. D changed what a thread IS: an answer now parents
+            // to the message that opened the exchange, so that question is a
+            // root, and a card raised from it belongs to the thread it just
+            // started.
             //
             // Left as `thread_root()`, the two disagreed about one message: the
             // answer landed in a thread and the card's settle marker landed
@@ -2309,8 +2355,13 @@ async fn run_chat(
             // reintroduced by D moving the ground under it.
             //
             // Found by hand-testing B and D together. Neither suite could catch
-            // it: B's has no auto-threading and D's has no cards.
-            origin_parent: reply_thread(accepted.thread_root(), accepted.message_seq),
+            // it: B's has no auto-threading and D's has no cards. Step 5 is why
+            // it cannot come back: the desk and the thread are one value now,
+            // built by one constructor, so there is no second field to forget.
+            origin: crate::ports::TaskOrigin::new(
+                message.chat.clone(),
+                reply_thread(accepted.thread_root(), accepted.message_seq),
+            ),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -2337,6 +2388,10 @@ async fn run_chat(
             // behind a chat turn, and inventing one would be a lie the board
             // then carries forever.
             origin_run_id: accepted.turn_id.clone(),
+            // The message this card was opened for. The runtime turn that
+            // follows finds the card by this and nothing else, so the headline
+            // above is free to be a name rather than an excerpt.
+            origin_message_seq: Some(accepted.message_seq),
             origin_workflow_id: None,
             bounced: None,
         };
@@ -2708,7 +2763,21 @@ async fn accept_chat_turn(
         .runs()
         .create_run(
             id,
-            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk),
+            // Which *thread* this turn is in, not just which channel. A
+            // channel holds many threads since #1890 and `chat_id` names only
+            // the channel, so without this the console cannot tell whose turn
+            // is running and suppresses the working indicator for the whole
+            // channel whenever any thread is open — hiding a turn the host is
+            // actively running.
+            //
+            // Only a threaded reply carries a root. A message sent from the
+            // channel composer is left unrooted deliberately: its turn is the
+            // channel's own, it is what the channel timeline shows, and the
+            // console has to arm its indicator optimistically at POST time —
+            // before the host has assigned this message a seq. Rooting it at
+            // its own seq would key the two legs differently and the reload
+            // leg would stop matching the arm.
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk).in_thread(parent),
         )
         .await
     {
@@ -2841,6 +2910,104 @@ async fn chat_and_emit(
         Some(raw) => Some(parse_message_id(raw)?),
         None => None,
     };
+    // A reply to a settled `in_review` dispatch card's settle pill or relay
+    // bubble is review feedback, not a fresh turn. It is appended to the card
+    // and re-runs it through the dispatch choke point; the re-run journals its
+    // own relay on settle. Only a threaded message can be review feedback, so a
+    // top-level line never reaches here.
+    #[cfg(feature = "openhuman")]
+    if let Some(parent) = parent {
+        let _serialized = runtime.task_writes.lock().await;
+        if let Some(card) = runtime.review_feedback_target(&desk, parent).await? {
+            let accepted =
+                accept_chat_turn(&runtime, id, &message, by.as_ref(), Some(parent), &desk).await?;
+            let message_id = accepted.message_seq.value().to_string();
+            let turn_id = accepted.turn_id.clone();
+            let review = runtime
+                .apply_review_feedback(&card, &message.text, by.as_ref())
+                .await
+                .map_err(ApiError);
+            settle_chat_turn(&runtime, id, turn_id.as_deref(), review.as_ref().err()).await;
+            review?;
+            return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                responses: Vec::new(),
+                message_id: Some(message_id),
+                still_awaiting: None,
+                turn_id,
+                outcome: None,
+                review_feedback_applied: Some(true),
+                settled_ids: None,
+            })));
+        }
+    }
+    // Issue #1862: a reply that answers a parked blocker settles its verdict
+    // rather than running a fresh turn. A reply parented to a blocker card
+    // resolves that card's group; free text in a DM that holds a single blocked
+    // thing resolves it; free text where several are blocked asks which. Runs
+    // after the review check above — the two anchor on different event kinds, so
+    // neither steals the other's replies — and only reaches here when the reply
+    // is a verdict for a blocker actually pending in this conversation;
+    // otherwise it falls through to the ordinary turn.
+    #[cfg(feature = "openhuman")]
+    {
+        // The guard covers the read-and-classify only, and is released before
+        // anything is settled. `apply_blocker_reply` waits on a follow-up that
+        // runs on a spawned task and takes `task_writes` for the board edit its
+        // resume makes, so holding the lock across it would wait forever on a
+        // task that is waiting for this lock. Nothing between the two needs it:
+        // `accept_chat_turn` journals the message and touches no board.
+        let plan = {
+            let _serialized = runtime.task_writes.lock().await;
+            runtime
+                .plan_blocker_reply(&desk, parent, &message.text)
+                .await?
+        };
+        match plan {
+            crate::company::runtime::BlockerReplyPlan::Resolve { ids, intent } => {
+                let accepted =
+                    accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+                let message_id = accepted.message_seq.value().to_string();
+                let turn_id = accepted.turn_id.clone();
+                let applied = runtime
+                    .apply_blocker_reply(&ids, intent, &message.text, by.as_ref())
+                    .await
+                    .map_err(ApiError);
+                settle_chat_turn(&runtime, id, turn_id.as_deref(), applied.as_ref().err()).await;
+                applied?;
+                return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                    responses: Vec::new(),
+                    message_id: Some(message_id),
+                    still_awaiting: None,
+                    turn_id,
+                    outcome: None,
+                    review_feedback_applied: Some(true),
+                    settled_ids: None,
+                })));
+            }
+            crate::company::runtime::BlockerReplyPlan::AskWhich { prompt } => {
+                let accepted =
+                    accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
+                let message_id = accepted.message_seq.value().to_string();
+                let turn_id = accepted.turn_id.clone();
+                let posted = runtime
+                    .post_blocker_prompt(&desk, &prompt)
+                    .await
+                    .map_err(ApiError);
+                settle_chat_turn(&runtime, id, turn_id.as_deref(), posted.as_ref().err()).await;
+                posted?;
+                return Ok(ChatOk::Settled(Box::new(ChatResponse {
+                    responses: Vec::new(),
+                    message_id: Some(message_id),
+                    still_awaiting: None,
+                    turn_id,
+                    outcome: None,
+                    review_feedback_applied: Some(true),
+                    settled_ids: None,
+                })));
+            }
+            crate::company::runtime::BlockerReplyPlan::NotBlocker => {}
+        }
+    }
     // The turn runs on its own task, and the replies are journaled there too
     // (issue #882). Both used to sit in this handler's future, which hyper drops
     // the moment the peer goes away — and a reverse proxy in front of a hosted
@@ -2941,7 +3108,228 @@ async fn chat_and_emit(
         turn_id,
         // …and it resolves nothing, so there is no resolve outcome to report.
         outcome: None,
+        review_feedback_applied: None,
+        settled_ids: None,
     })))
+}
+
+/// The HTTP status written immediately after `marker` in `lower`, when one is.
+///
+/// `lower` must already be lowercased. Only a three-digit run counts, so a
+/// message that merely mentions the marker cannot produce a status.
+///
+/// Needed because our own errors read `inference returned 429 Too Many
+/// Requests: …`, and `structured_http_status` looks for a status at the start
+/// of the string, after a `(`, or behind an `http`/`status:` marker — none of
+/// which that shape offers. The status we already knew was therefore invisible
+/// to the classifier, leaving classification to whatever prose the provider
+/// happened to choose.
+fn status_after_marker(lower: &str, marker: &str) -> Option<u16> {
+    let rest = lower.split_once(marker)?.1.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod turn_failure_notice_tests {
+    use super::{provider_failure_sentence, turn_failure_notice};
+
+    /// The failure that put a wall of provider JSON into company chat, verbatim
+    /// from the 1/9 round (issue #2016). None of it may reach the operator, and
+    /// what they read instead has to say whether waiting will help.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_rate_limit_reaches_the_operator_as_a_sentence_not_a_payload() {
+        let raw = concat!(
+            "turn for 'frontend_engineer': inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"Provider returned error","code":429,"metadata":"#,
+            r#"{"raw":"deepseek/deepseek-chat is temporarily rate-limited upstream. "#,
+            r#"Please retry shortly, or add your own key to accumulate your rate limits: "#,
+            r#"https://openrouter.ai/settings/integrations","provider_name":"DeepInfra"}}}"#,
+        );
+        let notice = turn_failure_notice(raw);
+
+        assert!(notice.contains("rate-limiting"), "{notice}");
+        for leaked in ["{", "openrouter.ai", "deepseek", "DeepInfra", "429"] {
+            assert!(
+                !notice.contains(leaked),
+                "the provider payload leaked {leaked:?} into chat: {notice}"
+            );
+        }
+    }
+
+    /// An empty inference is its own message: the harness has already retried it
+    /// by the time this is written, so leading with "try again" is wrong advice
+    /// and the cause is worth naming.
+    #[test]
+    fn an_empty_inference_says_so() {
+        let notice = turn_failure_notice(concat!(
+            "inference response carried neither choices[0].message.content nor tool_calls ",
+            "(finish_reason: failed; choices: 1; usage: in=0 out=0 total=0)"
+        ));
+
+        assert!(notice.contains("empty response"), "{notice}");
+        assert!(
+            !notice.contains("finish_reason"),
+            "diagnostics leaked into chat: {notice}"
+        );
+    }
+
+    /// Quota exhaustion is not wait-and-retry — somebody has to go and fix the
+    /// account — so it must not be worded like a transient blip.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn quota_exhaustion_points_at_the_account() {
+        let notice = turn_failure_notice(concat!(
+            "inference returned 429 Too Many Requests: ",
+            r#"{"error":{"message":"insufficient balance"}}"#
+        ));
+
+        assert!(notice.contains("quota or credit"), "{notice}");
+        assert!(notice.contains("Settings"), "{notice}");
+    }
+
+    /// A status our own error format hides from `structured_http_status`. With
+    /// it invisible, a 402 fell through to the `Retryable` default and was
+    /// reported as "temporarily unavailable" — telling an operator to wait for
+    /// something that will never clear on its own.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn a_status_only_our_own_prefix_carries_is_still_classified() {
+        let notice = turn_failure_notice("inference returned 402 Payment Required: no credit");
+
+        assert!(notice.contains("rejected the request"), "{notice}");
+    }
+
+    /// The guard against over-claiming. `classify_provider_failure` falls back
+    /// to `Retryable` for text it recognizes nothing in, so a tool that ran out
+    /// of wall-clock would otherwise be reported as a provider outage.
+    #[test]
+    fn a_failure_that_is_not_the_providers_is_not_blamed_on_it() {
+        let raw = "the tool call exceeded its wall-clock budget";
+
+        assert!(
+            provider_failure_sentence(raw).is_none(),
+            "a non-provider failure must not be classified as one"
+        );
+        let notice = turn_failure_notice(raw);
+        assert!(notice.contains("something went wrong"), "{notice}");
+        assert!(!notice.contains("provider"), "{notice}");
+    }
+
+    /// Whatever the cause, the operator is told the turn left nothing behind —
+    /// the one fact they need in order to decide whether to re-send.
+    #[test]
+    fn every_notice_states_that_nothing_was_half_done() {
+        for raw in [
+            "inference returned 429 Too Many Requests: rate limited",
+            "inference response carried neither choices[0].message.content nor tool_calls",
+            "something else entirely",
+        ] {
+            assert!(
+                turn_failure_notice(raw).contains("Nothing was left half-done"),
+                "missing for: {raw}"
+            );
+        }
+    }
+}
+
+/// What an operator is told when a turn could not be finished.
+///
+/// The raw error is a diagnostic and never belongs in company chat. On the
+/// rate-limit path it was a wall of provider JSON with a settings URL in it,
+/// which is what a tester saw instead of an answer (issue #2016). It is logged
+/// in full at the call site; this renders the one sentence that tells the
+/// operator whether to wait, retry, or go and fix something.
+///
+/// Deliberately narrow about when it blames the provider. `classify_provider_
+/// failure` falls back to `Retryable` for text it recognizes nothing in, so
+/// classifying every failure would describe a tool that timed out as a provider
+/// outage. A cause is named only when the error is one the inference path
+/// actually emits; anything else keeps the generic wording.
+fn turn_failure_notice(detail: &str) -> String {
+    const CLOSING: &str = "Nothing was left half-done.";
+    let cause = provider_failure_sentence(detail).unwrap_or(
+        "This turn couldn't be finished — something went wrong or a step took too long.",
+    );
+    format!("{cause} {CLOSING} Send the message again to retry.")
+}
+
+/// The operator-facing sentence for a failure the inference path produced, or
+/// `None` when the failure did not come from there.
+///
+/// Deliberately narrow about when it blames the provider. The classifier falls
+/// back to `Retryable` for text it recognizes nothing in, so classifying every
+/// failure indiscriminately would report a tool that ran out of wall-clock as a
+/// provider outage. A cause is named only when the error is one the inference
+/// path actually emits, or carries a recognizable HTTP status.
+fn provider_failure_sentence(detail: &str) -> Option<&'static str> {
+    let lower = detail.to_ascii_lowercase();
+
+    // An empty turn is its own case, and not one more retrying fixes: the
+    // harness has already retried it by the time this is written. Recognized
+    // from our own error text, so it holds in every build.
+    if lower.contains("carried neither") {
+        return Some(
+            "This turn couldn't be finished — the AI provider returned an empty response.",
+        );
+    }
+
+    let status = status_after_marker(&lower, "inference returned ");
+    let from_inference = lower.contains("inference returned")
+        || lower.contains("inference request failed")
+        || lower.contains("inference response")
+        || lower.contains("configured inference model");
+    if !from_inference && status.is_none() {
+        return None;
+    }
+
+    classified_provider_sentence(status, detail)
+}
+
+/// The sentence for a recognized provider failure, classified through the
+/// harness's own [`classify_provider_failure`].
+///
+/// Reused rather than re-implemented: the crate already knows which 429s are
+/// transient and which mean an account needs topping up, and a second
+/// classifier here would drift from the one that decides whether to retry.
+///
+/// [`classify_provider_failure`]: tinyagents_harness::retry::classify_provider_failure
+#[cfg(feature = "openhuman")]
+fn classified_provider_sentence(status: Option<u16>, detail: &str) -> Option<&'static str> {
+    use tinyagents_harness::retry::{
+        ProviderFailureClass, classify_provider_failure, structured_http_status,
+    };
+
+    let status = status.or_else(|| structured_http_status(detail));
+    Some(match classify_provider_failure(status, None, detail) {
+        ProviderFailureClass::RateLimited => {
+            "This turn couldn't be finished — the AI provider is rate-limiting requests."
+        }
+        ProviderFailureClass::NonRetryableRateLimit => {
+            "This turn couldn't be finished — the AI provider reports no quota or credit left. \
+             An admin needs to check the provider account under Settings."
+        }
+        ProviderFailureClass::NonRetryable => {
+            "This turn couldn't be finished — the AI provider rejected the request, usually a \
+             model or configuration mismatch. An admin can check Settings."
+        }
+        ProviderFailureClass::UpstreamUnhealthy | ProviderFailureClass::Retryable => {
+            "This turn couldn't be finished — the AI provider is temporarily unavailable."
+        }
+    })
+}
+
+/// The default build links no inference harness at all — it keeps the
+/// echo-brained offline behaviour — so it produces no provider failures to
+/// classify and has no classifier to reach for. The generic notice is the
+/// honest answer there.
+#[cfg(not(feature = "openhuman"))]
+fn classified_provider_sentence(_status: Option<u16>, _detail: &str) -> Option<&'static str> {
+    None
 }
 
 /// Everything a chat turn needs once it is off the request's future.
@@ -3001,6 +3389,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // bubble. `err.0` is the inner error (it carries `Display`);
                 // the `ApiError` newtype does not.
                 let notice = CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Issue #1890 D: threaded on exactly the terms a successful
                     // reply is. This notice IS the answer when there is no
                     // other one, and `reply_thread`'s whole argument is that
@@ -3018,18 +3407,22 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                     parent: reply_thread(parent, accepted.message_seq),
                     chat_id: desk.clone(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
-                    text: format!(
-                        "This turn couldn't be finished — something went wrong or \
-                         a step took too long ({}). Nothing was left half-done. \
-                         Send the message again to retry; if it keeps failing, \
-                         try breaking it into a smaller request.",
-                        err.0
-                    ),
+                    text: turn_failure_notice(&err.0.to_string()),
                     steps: Vec::new(),
                     task_id: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
                 };
+                // The raw provider text is a diagnostic, not an operator
+                // message: it is unbounded, provider-shaped, and on the rate-limit
+                // path it carried a wall of JSON and a settings URL into company
+                // chat. It stays here, in full (issue #2016).
+                tracing::warn!(
+                    company = %company,
+                    desk = %desk,
+                    detail = %err.0,
+                    "a chat turn could not be finished"
+                );
                 if let Err(journal_err) = runtime.events().append(&company, notice).await {
                     tracing::warn!(
                         company = %company,
@@ -3107,6 +3500,19 @@ pub(crate) async fn journal_chat_replies(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // A response that already carries a durable id was journaled by its
+        // producer, not by this loop — a hive desk episode journals its own
+        // turns and closing report directly (`EpisodeDriver::report`) and
+        // hands the report's own sequence back on the bubble precisely so
+        // this generic journal-on-return path does not write it a second
+        // time under a different sequence. `OutboundMessage::message_id` is
+        // documented as "stamped by the chat route after journaling, not
+        // produced by a brain" for every other producer, which is exactly
+        // what makes its presence here a reliable "already durable" signal
+        // rather than something a brain sets for itself.
+        if response.message_id.is_some() {
+            continue;
+        }
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
@@ -3129,6 +3535,7 @@ pub(crate) async fn journal_chat_replies(
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
@@ -3839,6 +4246,81 @@ async fn react_to_message_single(
     react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
 
+/// The operator's thread-scoped review verdict on a settled `in_review`
+/// dispatch card. Mirrors `ChatReviewRequest` in `frontend/src/api/types.ts`.
+///
+/// This is **not** the native-tool approval gate (`resolveApproval`): that
+/// settles a parked tool call, while this settles the board card the origin
+/// thread is reviewing.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReviewRequest {
+    /// The origin conversation — the desk/channel id — whose in-review
+    /// dispatch card this verdict settles.
+    chat_id: String,
+    /// The clicked pill's card id. A desk can have more than one card
+    /// `in_review` at once, so the verdict is bound to this specific card
+    /// rather than resolved by picking the desk's most-recently-updated one.
+    task_id: String,
+    /// `approve` finishes the card; `revise` re-runs it with `note`, on the
+    /// same path a chat reply of feedback takes.
+    decision: String,
+    /// The reviewer's note: recorded on the card, and the instruction the
+    /// re-run reads back on a `revise`.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// The card a review verdict left behind, so the console can reconcile its
+/// optimistic move. Mirrors `ChatReviewReceipt` in `frontend/src/api/types.ts`.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReviewReceipt {
+    /// The reviewed card's id.
+    task_id: String,
+    /// The column it landed in: `done` on approve, `in_progress` on revise —
+    /// or `in_review`, unchanged, on a revise with a blank note.
+    column: String,
+}
+
+/// `POST {scope}/chat/review` — settle the thread's in-review dispatch card
+/// per the operator's verdict.
+#[cfg(feature = "openhuman")]
+async fn review_card(
+    scope: ScopedCompany,
+    Json(body): Json<ChatReviewRequest>,
+) -> Result<Json<ChatReviewReceipt>, crate::server::Rejection> {
+    let decision = crate::harness::built_in::lifecycle::ReviewDecision::parse(&body.decision)
+        .ok_or_else(|| {
+            ApiError(crate::error::OpenCompanyError::InvalidRequest(format!(
+                "unknown review decision '{}'",
+                body.decision
+            )))
+        })?;
+    let _serialized = scope.runtime.task_writes.lock().await;
+    let card = scope
+        .runtime
+        .review_card_in_review(&body.task_id, &body.chat_id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| {
+            ApiError(crate::error::OpenCompanyError::NotFound(
+                "no card is awaiting review in this conversation".to_string(),
+            ))
+        })?;
+    let updated = scope
+        .runtime
+        .apply_review_decision(&card, decision, body.note.as_deref(), scope.actor.as_ref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(ChatReviewReceipt {
+        task_id: updated.id,
+        column: updated.column,
+    }))
+}
+
 /// `GET /api/v1/companies/{id}/approvals`.
 async fn list_approvals(
     CompanyAuth(auth): CompanyAuth,
@@ -3925,6 +4407,28 @@ struct ResolveApproval {
     /// live when it lapsed days earlier.
     #[serde(default)]
     expires_in_millis: Option<u64>,
+    /// Which of the four things the operator asked a parked **blocker** to do:
+    /// `retry`, `amend`, `skip` or `cancel`.
+    ///
+    /// It **narrows** the mandatory two-value `verdict` rather than replacing
+    /// it, the same shape [`amended_payload`](Self::amended_payload) uses: the
+    /// approve/deny it must be paired with is the one
+    /// [`BlockerVerdict::event_verdict`](crate::ports::blockers::BlockerVerdict::event_verdict)
+    /// lowers it onto, and a pair that disagrees is a 400. Absent leaves the
+    /// resolve exactly as it was.
+    ///
+    /// A `String` rather than the enum so an unrecognised token is an explicit
+    /// 400 naming the four it could have been, instead of a serde failure.
+    #[serde(default)]
+    blocker_verdict: Option<String>,
+    /// The words an `amend` re-enters the stopped step carrying.
+    ///
+    /// Mandatory and non-blank with `blocker_verdict: "amend"`, refused with
+    /// any other verdict. A blank amend is a 400 rather than a downgrade to a
+    /// retry: the step stopped for want of these words, so re-running it
+    /// without them repeats the failure the operator thought they had answered.
+    #[serde(default)]
+    blocker_answer: Option<String>,
 }
 
 /// The wire form of [`GrantScope`].
@@ -3997,6 +4501,93 @@ fn grant_scope(body: &ResolveApproval) -> Result<GrantScope, ApiError> {
                 expires_at_millis: crate::ports::now_millis().saturating_add(duration),
             })
         }
+    }
+}
+
+/// Validates the four-way blocker verdict a resolve carries, if any.
+///
+/// Every refusal here happens **before** the runtime is touched, so a bad
+/// request leaves the blocker parked and journals no verdict. What is refused:
+///
+/// * an unrecognised token — named, rather than a serde failure;
+/// * a `verdict`/`blocker_verdict` pair that disagree, judged by
+///   [`BlockerVerdict::event_verdict`];
+/// * `amend` with a blank or absent answer, and an answer sent with any other
+///   verdict;
+/// * `blocker_answer` with no `blocker_verdict` at all;
+/// * pairing with `amended_payload` — one edits a gated call's arguments, the
+///   other answers a question, and no approval is both;
+/// * pairing with `scope: "tool"` — a blocker is a question, and answering one
+///   grants no standing permission.
+///
+/// A build without the `openhuman` feature has no blocker resume to reach, so
+/// it refuses the field outright rather than accepting and ignoring it.
+fn blocker_verdict(body: &ResolveApproval) -> Result<Option<BlockerVerdict>, ApiError> {
+    let bad = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
+    let answer = body.blocker_answer.as_deref();
+    let Some(word) = body.blocker_verdict.as_deref() else {
+        if answer.is_some() {
+            return Err(bad(
+                "blocker_answer needs a blocker_verdict: words with no verdict do not say what \
+                 the stopped step should do"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    #[cfg(not(feature = "openhuman"))]
+    return Err(bad(format!(
+        "blocker_verdict {word:?} is not supported by this build: it has no blocker resume to \
+         answer"
+    )));
+    #[cfg(feature = "openhuman")]
+    {
+        let Some(verdict) = BlockerVerdict::from_wire(word) else {
+            return Err(bad(format!(
+                "unknown blocker_verdict {word:?}; expected \"retry\", \"amend\", \"skip\" or \
+                 \"cancel\""
+            )));
+        };
+        let owed = verdict.event_verdict();
+        if owed != body.verdict {
+            return Err(bad(format!(
+                "blocker_verdict {:?} is a {:?}, so it cannot accompany verdict {:?}",
+                verdict.as_str(),
+                owed,
+                body.verdict
+            )));
+        }
+        if verdict == BlockerVerdict::Amend {
+            if !answer.is_some_and(|words| !words.trim().is_empty()) {
+                return Err(bad(
+                    "blocker_verdict \"amend\" needs a non-empty blocker_answer: the step \
+                     stopped for want of an answer, so re-entering it without one repeats the \
+                     failure"
+                        .to_string(),
+                ));
+            }
+        } else if answer.is_some() {
+            return Err(bad(format!(
+                "blocker_answer only accompanies blocker_verdict \"amend\"; {:?} carries no \
+                 words back into the step",
+                verdict.as_str()
+            )));
+        }
+        if body.amended_payload.is_some() {
+            return Err(bad(
+                "blocker_verdict cannot accompany amended_payload: one answers a question, the \
+                 other edits a gated call's arguments"
+                    .to_string(),
+            ));
+        }
+        if body.scope == Some(ResolveScope::Tool) {
+            return Err(bad(
+                "blocker_verdict cannot accompany scope \"tool\": answering a blocker grants no \
+                 standing permission"
+                    .to_string(),
+            ));
+        }
+        Ok(Some(verdict))
     }
 }
 
@@ -4145,6 +4736,67 @@ struct ResolveReceiptDto {
     /// exclusive: two booleans can spell combinations that cannot happen, and
     /// every reader would have to know which ones are real.
     outcome: &'static str,
+    /// Every approval this one resolve settled, when it settled more than the
+    /// one addressed.
+    ///
+    /// A blocker answered here fans its verdict to its whole root-cause group,
+    /// exactly as answering it in a DM does, so the console has to drop the
+    /// siblings too rather than leave cards for questions the host has already
+    /// retired. Skipped when empty, which is every non-blocker resolve.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    settled_ids: Vec<String>,
+}
+
+/// Answers a parked blocker with the operator's four-way verdict, fanning it to
+/// the blocker's whole root-cause group and naming what it settled.
+///
+/// Reaches the same bank-arm-settle primitive a DM answer reaches, so a blocker
+/// answered on two surfaces cannot settle differently. A `blocker_verdict` on an
+/// approval that is not a parked blocker is a 400 here, not a resolve: it would
+/// otherwise silently fall back to the two-value path and lose the operator's
+/// verdict.
+#[cfg(feature = "openhuman")]
+async fn resolve_blocker(
+    runtime: &Arc<CompanyRuntime>,
+    id: &ApprovalId,
+    verdict: BlockerVerdict,
+    answer: &str,
+    actor: Actor,
+    settled_ids: &mut Vec<String>,
+) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
+    let Some(group) = runtime.parked_blocker_group(id) else {
+        // Already settled — by another tab, a double-click, or this very
+        // request racing a sibling's group fan-out. Ordinary approvals return
+        // 200 in this race (issue #243); a blocker must too, or a decision
+        // that landed successfully reports as a failure.
+        if let Some(answer) = runtime.already_resolved_blocker_receipt(id) {
+            *settled_ids = Vec::new();
+            return Ok(answer);
+        }
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "approval {id} is not a parked blocker, so it has no blocker_verdict to answer"
+        ))));
+    };
+    *settled_ids = group.iter().map(ToString::to_string).collect();
+    Ok(runtime
+        .apply_blocker_reply_spawned(&group, id, verdict, answer, Some(&actor))
+        .await?)
+}
+
+/// The refusal a build with no blocker resume owes: `blocker_verdict` has
+/// already been rejected by [`blocker_verdict`], so nothing reaches here.
+#[cfg(not(feature = "openhuman"))]
+async fn resolve_blocker(
+    _runtime: &Arc<CompanyRuntime>,
+    _id: &ApprovalId,
+    _verdict: BlockerVerdict,
+    _answer: &str,
+    _actor: Actor,
+    _settled_ids: &mut Vec<String>,
+) -> Result<(ResolveReceipt, JoinHandle<crate::Result<CycleReport>>), ApiError> {
+    Err(ApiError(OpenCompanyError::InvalidRequest(
+        "blocker_verdict is not supported by this build".to_string(),
+    )))
 }
 
 async fn run_resolve(
@@ -4157,28 +4809,46 @@ async fn run_resolve(
 ) -> Result<Response, ApiError> {
     runtime.ensure_running().await?;
     // Issue #374: validated before the runtime is touched, so a refused scope
-    // leaves the approval parked with no verdict journaled.
+    // leaves the approval parked with no verdict journaled. The blocker verdict
+    // is validated on the same terms and for the same reason.
+    let blocker = blocker_verdict(&body)?;
     let scope = grant_scope(&body)?;
     let id = ApprovalId::new(approval_id);
+    // Every approval this resolve settled, when it settled more than the one
+    // addressed — a blocker fans to its root-cause group.
+    let mut settled_ids: Vec<String> = Vec::new();
     // The verdict is settled inline; only the follow-up cycle is on the handle.
     // So by the time this returns — in either mode — the decision is journaled
     // and any grant is minted.
-    let (receipt, follow_up) = match (body.verdict, body.amended_payload) {
-        (Verdict::Approve, Some(payload)) => {
-            runtime
-                .resolve_approval_amended_spawned(&id, payload, actor)
-                .await?
+    let (receipt, follow_up) = match blocker {
+        Some(verdict) => {
+            resolve_blocker(
+                &runtime,
+                &id,
+                verdict,
+                body.blocker_answer.as_deref().unwrap_or_default(),
+                actor,
+                &mut settled_ids,
+            )
+            .await?
         }
-        (Verdict::Deny, Some(_)) => {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(
-                "amended_payload cannot accompany a deny verdict".to_string(),
-            )));
-        }
-        (verdict, None) => {
-            runtime
-                .resolve_approval_spawned(&id, verdict, actor, scope)
-                .await?
-        }
+        None => match (body.verdict, body.amended_payload) {
+            (Verdict::Approve, Some(payload)) => {
+                runtime
+                    .resolve_approval_amended_spawned(&id, payload, actor)
+                    .await?
+            }
+            (Verdict::Deny, Some(_)) => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(
+                    "amended_payload cannot accompany a deny verdict".to_string(),
+                )));
+            }
+            (verdict, None) => {
+                runtime
+                    .resolve_approval_spawned(&id, verdict, actor, scope)
+                    .await?
+            }
+        },
     };
 
     // Read once, here: the verdict is durable and the follow-up cycle — which is
@@ -4212,6 +4882,7 @@ async fn run_resolve(
             already_resolved: receipt.already_resolved(),
             still_awaiting,
             outcome,
+            settled_ids,
         })
         .into_response());
     }
@@ -4223,6 +4894,8 @@ async fn run_resolve(
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
+        review_feedback_applied: None,
+        settled_ids: (!settled_ids.is_empty()).then_some(settled_ids),
         // A resolve runs a follow-up cycle, not an operator turn, so it opens no
         // turn row of its own.
         turn_id: None,
@@ -4364,6 +5037,7 @@ mod test {
 
     use super::*;
     use crate::company::CompanyManifest;
+    use crate::ports::tasks::TaskTitle;
     use crate::ports::types::CompanyRecord;
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
@@ -5115,7 +5789,7 @@ mode = "full"
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(
-            tasks[0].origin_chat_id.as_deref(),
+            tasks[0].origin_chat_id(),
             Some("dm:designer"),
             "the thread as the console addressed it"
         );
@@ -5130,10 +5804,33 @@ mode = "full"
             .iter()
             .find(|c| c.title == "Draft the investor update")
             .expect("the second card");
+        // No desk, therefore no conversation and no thread inside one. Before
+        // #1890 step 5 this card carried a thread root beside no desk — the
+        // drifted pair — and the root was inert: `relay_reply` posts back
+        // through the desk, so a root with nothing to post into named nothing.
+        // `TaskOrigin` cannot hold that state, so it is simply absent now.
+        //
+        // Restoring a real origin here means stamping the General desk the
+        // route already folds this message into, which is a behaviour change
+        // and not this one.
         assert_eq!(
-            unaddressed.origin_chat_id, None,
-            "an unaddressed message has no thread to answer in"
+            unaddressed.origin_chat_id(),
+            None,
+            "an unaddressed message has no conversation to answer in"
         );
+        assert_eq!(
+            unaddressed.origin_parent(),
+            None,
+            "and therefore no thread inside one either"
+        );
+
+        // The addressed card, found by title rather than by index: the two are
+        // listed together from here on, and this assertion is about the one
+        // that has a desk.
+        let addressed = tasks
+            .iter()
+            .find(|c| c.origin_chat_id() == Some("dm:designer"))
+            .expect("the addressed card");
         // Reversed once #1890 D landed alongside B, and the reversal is the
         // point. B alone read the message's own `parent`, so a card raised from
         // a channel-level question recorded no thread — right while a thread
@@ -5145,7 +5842,7 @@ mode = "full"
         // would put the settle marker in the channel while the answer to the
         // same message sat in a thread — the split B exists to prevent.
         assert!(
-            tasks[0].origin_parent.is_some(),
+            addressed.origin_parent().is_some(),
             "a channel-level question is itself the thread its card was raised in",
         );
     }
@@ -5193,9 +5890,9 @@ mode = "full"
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
-        assert_eq!(tasks[0].origin_chat_id.as_deref(), Some("dm:designer"));
+        assert_eq!(tasks[0].origin_chat_id(), Some("dm:designer"));
         assert_eq!(
-            tasks[0].origin_parent,
+            tasks[0].origin_parent(),
             Some(crate::ports::types::EventSeq::new(41)),
             "the root the operator was answering in",
         );
@@ -7704,6 +8401,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -7721,6 +8419,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -7779,6 +8478,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -7848,14 +8548,13 @@ mode = "full"
                 runtime.id(),
                 &crate::ports::tasks::TaskRecord {
                     id: "t-77".to_string(),
-                    title: "Draft the launch note".to_string(),
+                    title: TaskTitle::authored("Draft the launch note"),
                     note: None,
                     column: crate::ports::tasks::COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
                     assignee: String::new(),
                     updated_at_millis: 1,
-                    origin_chat_id: None,
-                    origin_parent: None,
+                    origin: None,
                     parent_task_id: None,
                     output: None,
                     plan: None,
@@ -7864,6 +8563,7 @@ mode = "full"
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
+                    origin_message_seq: None,
                     bounced: None,
                 },
             )
@@ -7879,6 +8579,7 @@ mode = "full"
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        audience: Vec::new(),
                         mentions: Vec::new(),
                         mention_depth: 0,
                         parent: None,
@@ -7974,6 +8675,7 @@ mode = "full"
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            audience: Vec::new(),
                             mentions: Vec::new(),
                             mention_depth: 0,
                             parent: None,
@@ -8025,6 +8727,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8605,6 +9308,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8693,6 +9397,124 @@ mode = "full"
         assert!(
             general.iter().all(|m| m.get("reactions").is_none()),
             "a reaction crossed a channel boundary: {general:?}"
+        );
+    }
+
+    /// **Issue #2028 (finding 2, deadlock regression).** Answering a
+    /// task-backed blocker in a DM runs the whole path end to end: the route
+    /// reads and classifies the reply, settles the verdict, and waits on the
+    /// follow-up that re-dispatches the card — and that follow-up runs on a
+    /// spawned task which takes `task_writes` for its board edit.
+    ///
+    /// So the route must not still hold `task_writes` when it waits. It did,
+    /// having mirrored the guard from the review branch above it, and the two
+    /// together are a deadlock: the handler waits for a task that is waiting for
+    /// the handler's lock. Explicitly bounded rather than left to hang, so a
+    /// regression fails in seconds instead of taking a runner down for an hour.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dm_answer_to_a_task_backed_blocker_completes() {
+        use crate::company::blocker_sender::BlockerSenderSignals;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = build_state_with_brain_and_manifest(
+            &home,
+            "running",
+            AppConfig::default(),
+            None,
+            roster_manifest(),
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        let mut card = crate::ports::tasks::TaskRecord {
+            id: "t-9".to_string(),
+            title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
+            note: None,
+            column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+            priority: "medium".to_string(),
+            assignee: "backend_engineer".to_string(),
+            updated_at_millis: 1,
+            origin: None,
+            origin_message_seq: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            bounced: None,
+        };
+        card.origin =
+            crate::ports::tasks::TaskOrigin::new(Some("dm:backend_engineer".to_string()), None);
+        runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
+
+        runtime
+            .park_blocker(
+                &BlockerPayload {
+                    kind: BlockerKind::Infrastructure,
+                    source: BlockerSource::Provider,
+                    step: Some(BlockerStep::Task {
+                        task_id: "t-9".to_string(),
+                    }),
+                    reason: "the model id was rejected".to_string(),
+                    needed: "a model id this provider serves".to_string(),
+                    group_key: None,
+                },
+                "t-9",
+                BlockerSenderSignals {
+                    started_by: None,
+                    owner_desk: None,
+                    assignee: Some("backend_engineer".to_string()),
+                },
+            )
+            .await
+            .expect("parks the blocker into the teammate's DM");
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/companies/acme/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"chat":"dm:backend_engineer","text":"yes, go ahead and retry it"}"#,
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect(
+            "answering a task-backed blocker in a DM deadlocked: the route held the board \
+             lock while waiting on the follow-up that needs it",
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "the answered blocker is retired"
+        );
+        let moved = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|t| t.id == "t-9")
+            .expect("the card is still on the board");
+        assert_eq!(
+            moved.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the DM answer re-dispatched the paused card"
         );
     }
 
@@ -9190,6 +10012,589 @@ mode = "full"
 
     fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value) -> Request<Body> {
         resolve_request_scoped("/api/v1/company", approval_id, body)
+    }
+
+    // -- A blocker answered from the Approvals page (issue #2028) -------------
+
+    /// Parks a workflow-node blocker: `TaskLink::Unlinked` with no
+    /// conversation, which is the shape a node blocker takes and the reason the
+    /// chat blocker path — which filters on the thread — can never reach one.
+    #[cfg(feature = "openhuman")]
+    async fn park_node_blocker(
+        runtime: &Arc<CompanyRuntime>,
+        id: &str,
+        group_key: Option<&str>,
+    ) -> ApprovalId {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Infrastructure,
+            source: BlockerSource::Provider,
+            step: Some(BlockerStep::Node {
+                run_id: "run-1".to_string(),
+                node_id: "draft".to_string(),
+            }),
+            reason: "the model id `gpt-nope` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: group_key.map(str::to_string),
+        };
+        let approval = ApprovalId::new(id);
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: Some("run-1".to_string()),
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        approval
+    }
+
+    /// Every `BlockerResolved` line the durable journal holds, in append order —
+    /// what the operator's answer actually banked, read off disk rather than off
+    /// the in-memory map the resume consumes.
+    #[cfg(feature = "openhuman")]
+    async fn banked_resolutions(
+        home: &std::path::Path,
+        company: &CompanyId,
+    ) -> Vec<serde_json::Value> {
+        let path = crate::store::paths::Bundle::new(home, company).journal_jsonl();
+        let raw = tokio::fs::read_to_string(path).await.unwrap_or_default();
+        raw.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["record"] == "BlockerResolved")
+            .collect()
+    }
+
+    /// A company with one parked workflow-node blocker, and the pieces a resolve
+    /// test needs to read back what its click banked.
+    #[cfg(feature = "openhuman")]
+    struct BlockedCompany {
+        app: axum::Router,
+        runtime: Arc<CompanyRuntime>,
+        home: std::path::PathBuf,
+        company: CompanyId,
+        approval_id: ApprovalId,
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn blocked_company(home: &std::path::Path) -> BlockedCompany {
+        let home = home.to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let approval_id = park_node_blocker(&runtime, "blocker-1", None).await;
+        BlockedCompany {
+            app,
+            runtime,
+            home,
+            company,
+            approval_id,
+        }
+    }
+
+    /// Posts a resolve and returns its status and parsed body.
+    #[cfg(feature = "openhuman")]
+    async fn post_resolve(
+        app: &axum::Router,
+        id: &ApprovalId,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(resolve_request(id, body))
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// Every refusal owes the same two things beyond its 400: the blocker is
+    /// still parked, and nothing was banked. A validation that answered 400
+    /// after journaling a verdict would have spent the operator's question.
+    #[cfg(feature = "openhuman")]
+    async fn assert_refused(body: serde_json::Value, expect_in_error: &str) {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(&c.app, &c.approval_id, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        let message = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expect_in_error),
+            "the refusal must say why; got {message:?}"
+        );
+        assert!(
+            c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|p| p.id == c.approval_id),
+            "a refused request must leave the blocker parked"
+        );
+        assert!(
+            banked_resolutions(&c.home, &c.company).await.is_empty(),
+            "a refused request must journal no verdict"
+        );
+    }
+
+    /// **Issue #2028 — the bug.** An Approvals click that says `skip` banks a
+    /// skip. Before the route arm existed the same request banked a `retry`,
+    /// because `verdict: approve` was the only thing the host read.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_skip_from_the_approvals_page_banks_a_skip() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1, "one answer, one banked resolution");
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "skip",
+            "the operator asked to skip the node, not to run it again"
+        );
+    }
+
+    /// The amend twin: the words the operator typed reach the banked resolution
+    /// verbatim, which is what the re-entered step reads.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_amend_from_the_approvals_page_carries_the_answer_verbatim() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "amend",
+                "blocker_answer": "use gpt-4o-mini instead",
+                "detach": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0]["resolution"]["verdict"], "amend");
+        assert_eq!(
+            banked[0]["resolution"]["answer"], "use gpt-4o-mini instead",
+            "the correction must reach the step, or the re-run repeats the failure"
+        );
+    }
+
+    /// A cancel still denies, and is still the only verdict that does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_cancel_from_the_approvals_page_banks_a_cancel() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "deny", "blocker_verdict": "cancel", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&c.home, &c.company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(banked[0]["resolution"]["verdict"], "cancel");
+    }
+
+    /// Answering one member of a root-cause group answers all of them — the
+    /// same fan-out a DM answer performs — and the receipt names every id it
+    /// settled so the console can drop the siblings' cards too.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_group_settles_together_and_the_receipt_names_every_member() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let first = park_node_blocker(&runtime, "grouped-1", Some("connection:slack")).await;
+        let second = park_node_blocker(&runtime, "grouped-2", Some("connection:slack")).await;
+
+        let (status, answer) = post_resolve(
+            &app,
+            &first,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer["settledIds"],
+            serde_json::json!(["grouped-1", "grouped-2"]),
+            "the receipt must name the siblings the answer settled: {answer}"
+        );
+        assert!(
+            runtime.pending_approvals().is_empty(),
+            "one answer to a root-cause group retires every member of it"
+        );
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 2, "both members banked the same verdict");
+        for line in &banked {
+            assert_eq!(line["resolution"]["verdict"], "skip");
+        }
+        let _ = second;
+    }
+
+    /// An ordinary resolve is unchanged: no `settledIds` key at all, so a
+    /// console predating the field reads the same body it always did.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_ordinary_resolve_names_no_settled_ids() {
+        let home_dir = home();
+        let c = blocked_company(home_dir.path()).await;
+
+        let (status, answer) = post_resolve(
+            &c.app,
+            &c.approval_id,
+            serde_json::json!({ "verdict": "approve", "detach": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(
+            answer.get("settledIds").is_none(),
+            "a resolve that fanned to nothing must carry no list: {answer}"
+        );
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_disagreeing_verdict_pair_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "deny", "blocker_verdict": "skip" }),
+            "cannot accompany verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blank_amend_is_refused_rather_than_downgraded() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "amend",
+                "blocker_answer": "   \n\t ",
+            }),
+            "needs a non-empty blocker_answer",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_amend_with_no_answer_at_all_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "amend" }),
+            "needs a non-empty blocker_answer",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_answer_with_no_verdict_is_refused() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_answer": "use gpt-4o-mini" }),
+            "blocker_answer needs a blocker_verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_answer_on_a_wordless_verdict_is_refused() {
+        for verdict in ["retry", "skip", "cancel"] {
+            let event = if verdict == "cancel" {
+                "deny"
+            } else {
+                "approve"
+            };
+            assert_refused(
+                serde_json::json!({
+                    "verdict": event,
+                    "blocker_verdict": verdict,
+                    "blocker_answer": "words this verdict cannot carry",
+                }),
+                "only accompanies blocker_verdict",
+            )
+            .await;
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_unknown_blocker_verdict_is_refused_by_name() {
+        assert_refused(
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "ignore" }),
+            "unknown blocker_verdict",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_with_an_amended_payload_is_refused() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "skip",
+                "amended_payload": { "text": "edited" },
+            }),
+            "cannot accompany amended_payload",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_with_a_tool_scope_is_refused() {
+        assert_refused(
+            serde_json::json!({
+                "verdict": "approve",
+                "blocker_verdict": "skip",
+                "scope": "tool",
+                "expires_in_millis": 3_600_000,
+            }),
+            "cannot accompany scope",
+        )
+        .await;
+    }
+
+    /// A `blocker_verdict` on an approval that is not a parked blocker is a 400,
+    /// not a quiet fall-through to the two-value path — which would lose the
+    /// operator's verdict without telling anyone.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_blocker_verdict_on_an_ordinary_approval_is_refused() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+        let ordinary = park_for_extend(&runtime, "ordinary-1", crate::ports::now_millis()).await;
+
+        let (status, answer) = post_resolve(
+            &app,
+            &ordinary,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is not a parked blocker"),
+            "{answer}"
+        );
+        assert!(
+            runtime.pending_approvals().iter().any(|p| p.id == ordinary),
+            "a refused request must leave the approval parked"
+        );
+        assert!(banked_resolutions(&home, &company).await.is_empty());
+    }
+
+    /// **A documented limitation, pinned rather than left incidental.**
+    ///
+    /// A blocker raised by `escalate_to_human` carries no
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep), and every resume
+    /// reads the verdict's step and nothing else — so its card is never
+    /// re-dispatched however it is answered, on this route and on the
+    /// two-value one that predates it. The resume posts a note into the
+    /// blocker's thread and stops there.
+    ///
+    /// The route lets the verdict through rather than refusing it: the answer
+    /// is banked durably and correctly, so the resume that reads the approval's
+    /// own task link inherits a right answer rather than a discarded one, and
+    /// refusing only `skip`/`amend` would leave `approve` no-opping in exactly
+    /// the same way while looking supported. Tracked as its own defect; when it
+    /// is fixed this test's final assertion is what changes.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_agent_question_banks_its_verdict_but_re_dispatches_no_card() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-9".to_string(),
+                    title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "eng".to_string(),
+                    updated_at_millis: 1,
+                    origin: None,
+                    origin_message_seq: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Information,
+            source: BlockerSource::AgentQuestion,
+            step: None,
+            reason: "which of the two briefs is current?".to_string(),
+            needed: "an answer from you".to_string(),
+            group_key: None,
+        };
+        let approval = ApprovalId::new("question-1");
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: None,
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::from_task_id(Some("t-9")),
+                ApprovalConversation {
+                    thread: Some("dm:eng".to_string()),
+                    parent: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (status, answer) = post_resolve(
+            &app,
+            &approval,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer["settledIds"],
+            serde_json::json!(["question-1"]),
+            "the non-detached body names what it settled too: {answer}"
+        );
+
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "skip",
+            "the operator's verdict is banked whatever the resume can do with it"
+        );
+        assert!(
+            banked[0]["resolution"].get("step").is_none(),
+            "an agent question is parked with no step, which is the defect: {}",
+            banked[0]
+        );
+        let card = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-9")
+            .expect("the card still exists");
+        assert_eq!(
+            card.column,
+            crate::ports::tasks::COLUMN_PAUSED,
+            "the stepless resume moves no card — the limitation this pins"
+        );
+    }
+
+    /// A build with no blocker resume refuses the field outright. Accepting and
+    /// ignoring it would answer `200` to a skip that silently became a retry —
+    /// the exact defect, reintroduced by a feature flag.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn a_build_without_the_resume_refuses_a_blocker_verdict() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+
+        let response = app
+            .oneshot(resolve_request(
+                &ApprovalId::new("missing"),
+                serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not supported by this build"),
+            "{value}"
+        );
     }
 
     // -- Extend the deadline (issue #1805) -----------------------------------
@@ -10444,6 +11849,7 @@ mode = "full"
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -10478,6 +11884,7 @@ mode = "full"
     fn projects_agent_reply_with_viewer_mention_metadata() {
         use crate::ports::types::{Mention, MentionTarget};
         let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: vec![
                 Mention {
                     target: MentionTarget::User { id: "u-1".into() },
@@ -10520,6 +11927,7 @@ mode = "full"
     #[test]
     fn drops_owner_fallback_report_from_a_non_admin_viewer() {
         let event = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -10568,6 +11976,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(4)),
@@ -10747,6 +12156,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -10771,6 +12181,7 @@ mode = "full"
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -11287,6 +12698,7 @@ mode = "full"
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -11334,6 +12746,7 @@ mode = "full"
             run_id: "run-1".into(),
             scheduled: true,
             started_by: None,
+            resume_semantic: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(started["type"], "workflow_run_started");
@@ -11352,6 +12765,7 @@ mode = "full"
             run_id: "run-1".into(),
             scheduled: false,
             started_by: Some(crate::ports::types::StartedBy::Agent("ceo".into())),
+            resume_semantic: None,
         }))
         .expect("workflow_run_started reaches the console");
         assert_eq!(
@@ -13137,6 +14551,7 @@ mode = "full"
             .unwrap();
 
         let owner_fallback_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -13154,6 +14569,7 @@ mode = "full"
         );
 
         let ordinary_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -13184,5 +14600,663 @@ mode = "full"
 
         assert!(refreshed_is_admin(&runtime, None, true).await);
         assert!(!refreshed_is_admin(&runtime, None, false).await);
+    }
+
+    /// Two cards can be `in_review` on the same desk at once. Approving the
+    /// pill the operator actually clicked must move that card and leave the
+    /// other alone — resolving the desk's most-recently-updated card instead
+    /// (Codex #3903031183) moves the wrong one whenever the older pill is
+    /// clicked after a newer card has settled.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_settles_the_clicked_task_not_the_desks_latest() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        for (task_id, updated_at_millis) in [("t-old", 1u64), ("t-new", 2u64)] {
+            runtime
+                .tasks()
+                .upsert(
+                    runtime.id(),
+                    &crate::ports::tasks::TaskRecord {
+                        id: task_id.to_string(),
+                        title: TaskTitle::authored("Ship it"),
+                        note: None,
+                        column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                        priority: "medium".to_string(),
+                        assignee: "ceo".to_string(),
+                        updated_at_millis,
+                        origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                        parent_task_id: None,
+                        output: None,
+                        plan: None,
+                        planning_attempts: Vec::new(),
+                        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                        workflow_proposal: None,
+                        origin_run_id: None,
+                        origin_workflow_id: None,
+                        origin_message_seq: None,
+                        bounced: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let receipt = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-old".to_string(),
+                decision: "approve".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect("the clicked card is settled")
+        .0;
+        assert_eq!(receipt.task_id, "t-old");
+        assert_eq!(receipt.column, crate::ports::tasks::COLUMN_DONE);
+
+        let cards = runtime.tasks().list(runtime.id()).await.unwrap();
+        let old = cards.iter().find(|t| t.id == "t-old").unwrap();
+        let new = cards.iter().find(|t| t.id == "t-new").unwrap();
+        assert_eq!(
+            old.column,
+            crate::ports::tasks::COLUMN_DONE,
+            "the clicked pill's card must settle"
+        );
+        assert_eq!(
+            new.column,
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "the desk's newer card must be untouched by a verdict on the older pill"
+        );
+    }
+
+    /// A `task_id` naming a card outside the reviewed desk (or one that has
+    /// already left `in_review`) must not resolve to some other card in the
+    /// conversation — the request is rejected rather than silently falling
+    /// back to "whatever is in review here".
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_rejects_a_task_id_not_in_review_on_this_desk() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-review".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let err = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "does-not-exist".to_string(),
+                decision: "approve".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("an unknown task id must not fall back to the desk's own card");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// `apply_review_decision`'s `Revise` arm through the HTTP handler: the
+    /// card re-enters `in_progress` with the operator's note appended, rather
+    /// than settling to `done` the way `Approve` does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_revise_re_enters_in_progress_with_the_note() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: Some("[writer] first draft".to_string()),
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let receipt = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-1".to_string(),
+                decision: "revise".to_string(),
+                note: Some("tighten the intro".to_string()),
+            }),
+        )
+        .await
+        .expect("revise applies")
+        .0;
+        assert_eq!(receipt.task_id, "t-1");
+        assert_eq!(receipt.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        let note = after.note.expect("note");
+        assert!(note.contains("tighten the intro"), "{note}");
+    }
+
+    /// A thread reply intercepted as review feedback re-dispatches its card
+    /// instead of answering with `responses` here. Codex #3903907771:
+    /// `ChatView.send` reads an empty `responses` as "the turn produced
+    /// nothing" and renders a synthetic "(no reply)" bubble underneath the
+    /// operator's own feedback, even though the card was re-dispatched and
+    /// will answer through its later relay. `reviewFeedbackApplied` is what
+    /// tells the console this empty `responses` is expected.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn thread_reply_review_feedback_marks_the_response_not_empty_handed() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::DeskTaskCompleted {
+                    task_id: "t-1".to_string(),
+                    desk: "ceo".to_string(),
+                    output: "done".to_string(),
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    artifact_ids: Vec::new(),
+                    origin_chat_id: Some("strategy".to_string()),
+                    origin_parent: None,
+                },
+            )
+            .await
+            .unwrap();
+        let relay_seq = runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    chat_id: "strategy".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "Here is the draft.".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        let message = ChatMessage {
+            text: "needs another pass".to_string(),
+            chat: Some("strategy".to_string()),
+            parent: Some(relay_seq.value().to_string()),
+            deliverable: None,
+            detach: false,
+            mentions: None,
+            attachments: Vec::new(),
+        };
+
+        let outcome = chat_and_emit(&state, &id, runtime.clone(), message, None)
+            .await
+            .expect("review feedback applies");
+        let ChatOk::Settled(body) = outcome else {
+            panic!("a synchronous review-feedback intercept must not detach");
+        };
+        assert!(body.responses.is_empty());
+        assert_eq!(
+            body.review_feedback_applied,
+            Some(true),
+            "an empty `responses` here must be marked expected, not read as \
+             a silent turn"
+        );
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        assert_eq!(
+            after.column,
+            crate::ports::tasks::COLUMN_IN_PROGRESS,
+            "the reply still re-dispatches the card"
+        );
+    }
+
+    /// An unrecognized `decision` string rejects with `InvalidRequest` (400)
+    /// rather than falling through to either verdict.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_rejects_an_unknown_decision() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let scope = ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+            is_admin: true,
+        };
+        let err = review_card(
+            scope,
+            Json(ChatReviewRequest {
+                chat_id: "strategy".to_string(),
+                task_id: "t-1".to_string(),
+                decision: "yeet".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("an unknown decision string must not settle the card");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(err).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// `POST {scope}/chat/review` end to end through the real router: proves
+    /// the route is actually mounted by [`with_review_routes`] (not just that
+    /// the handler function works when called directly) and that the wire
+    /// body deserializes and settles the card via HTTP.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn chat_review_route_is_mounted_and_settles_via_http() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(
+                runtime.id(),
+                &crate::ports::tasks::TaskRecord {
+                    id: "t-1".to_string(),
+                    title: TaskTitle::authored("Ship it"),
+                    note: None,
+                    column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "ceo".to_string(),
+                    updated_at_millis: 1,
+                    origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    planning_attempts: Vec::new(),
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                    origin_message_seq: None,
+                    bounced: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat/review")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chatId": "strategy",
+                            "taskId": "t-1",
+                            "decision": "approve",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["taskId"], "t-1");
+        assert_eq!(value["column"], "done");
+    }
+
+    /// No card is `in_review` on the desk at all — as opposed to a `taskId`
+    /// naming the wrong card, covered above — must also 404, through the same
+    /// HTTP path the console calls.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn chat_review_route_404s_when_no_card_is_in_review() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat/review")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "chatId": "strategy",
+                            "taskId": "t-1",
+                            "decision": "approve",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "openhuman")]
+    fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::TaskRecord {
+        crate::ports::tasks::TaskRecord {
+            id: id.to_string(),
+            title: TaskTitle::authored("Ship it"),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin: crate::ports::TaskOrigin::new(Some(chat_id.to_string()), None),
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        }
+    }
+
+    /// Two review verdicts racing the same `in_review` card (PR #1981 review
+    /// finding, Codex P1) must not both resolve it before either applies —
+    /// same `task_writes`-serialized load-modify-save shape
+    /// `add_desk_member_serializes_against_the_company_write_lock` proves
+    /// above, applied to `review_card`.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_serializes_against_the_task_writes_lock() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
+            .await
+            .unwrap();
+
+        let guard = runtime.task_writes.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            let scope = ScopedCompany {
+                runtime: runtime_for_task,
+                actor: None,
+                may_read_contents: true,
+                is_admin: true,
+            };
+            review_card(
+                scope,
+                Json(ChatReviewRequest {
+                    chat_id: "strategy".to_string(),
+                    task_id: "t-1".to_string(),
+                    decision: "approve".to_string(),
+                    note: None,
+                }),
+            )
+            .await
+        });
+
+        let raced_ahead = tokio::time::timeout(Duration::from_millis(200), &mut task)
+            .await
+            .is_ok();
+        assert!(
+            !raced_ahead,
+            "review_card resolved and applied a verdict while task_writes was \
+             held elsewhere — it is not serializing against concurrent board \
+             writers"
+        );
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("review_card never resumed after task_writes was released")
+            .expect("review_card task panicked");
+        assert!(result.is_ok());
+    }
+
+    /// The revalidation half of the same finding: a review reply parked on
+    /// `task_writes` while a second verdict already settled the card must see
+    /// the now-current column once it resumes, not the stale `in_review`
+    /// snapshot it would have clone from before it blocked — so it 404s
+    /// instead of silently re-applying on top of the settled card.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn review_card_404s_when_the_card_left_review_while_the_reply_was_in_flight() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+
+        runtime
+            .tasks()
+            .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
+            .await
+            .unwrap();
+
+        let guard = runtime.task_writes.lock().await;
+
+        let runtime_for_task = runtime.clone();
+        let mut task = tokio::spawn(async move {
+            let scope = ScopedCompany {
+                runtime: runtime_for_task,
+                actor: None,
+                may_read_contents: true,
+                is_admin: true,
+            };
+            review_card(
+                scope,
+                Json(ChatReviewRequest {
+                    chat_id: "strategy".to_string(),
+                    task_id: "t-1".to_string(),
+                    decision: "approve".to_string(),
+                    note: None,
+                }),
+            )
+            .await
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(200), &mut task).await;
+
+        let card = runtime
+            .review_card_in_review("t-1", "strategy")
+            .await
+            .expect("task store lookup")
+            .expect("card is still in_review before the lock is released");
+        runtime
+            .apply_review_decision(
+                &card,
+                crate::harness::built_in::lifecycle::ReviewDecision::Revise,
+                Some("send it back"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("review_card never resumed after task_writes was released")
+            .expect("review_card task panicked");
+        assert!(
+            result.is_err(),
+            "a review reply that had already resolved the card must not \
+             silently re-apply its verdict once the card is no longer \
+             in_review"
+        );
+
+        let after = runtime
+            .tasks()
+            .list(runtime.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t-1")
+            .unwrap();
+        assert_eq!(after.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
+        let note = after.note.expect("note");
+        assert!(note.contains("send it back"), "{note}");
     }
 }

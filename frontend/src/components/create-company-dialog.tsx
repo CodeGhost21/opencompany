@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { COMPANY_SWITCHING_HIDDEN } from "@/product-scope";
 import {
   Select,
   SelectContent,
@@ -81,9 +82,22 @@ const POLICY_MODES: { value: string; label: string }[] = [
 export const CREATE_UNAVAILABLE_NOTE =
   "Creating a company needs a platform credential, which a person signed in here doesn't hold.";
 
-/** Whether this client can reach the provisioning + archive routes at all. */
+/**
+ * Whether a company can be created from this console at all.
+ *
+ * The one funnel every trigger asks, and the reason it is asked here rather
+ * than at each of them: provisioning is reachable from four places — the
+ * switcher's "New company", the picker's own button, the picker's per-card
+ * Reset, the no-company screen, and Settings' "Reset / Start clean", which
+ * archives and re-provisions through this same dialog. Gating them one at a
+ * time is how three of them stayed live after the first was hidden.
+ *
+ * Two conditions, deliberately in one place: the client has to hold a platform
+ * credential to reach the routes, and the product has to be offering company
+ * creation in the first place.
+ */
 export function canCreateCompanies(client: OpenCompanyClient): boolean {
-  return client.carriesPlatformBearer;
+  return !COMPANY_SWITCHING_HIDDEN && client.carriesPlatformBearer;
 }
 
 interface Props {

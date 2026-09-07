@@ -56,7 +56,8 @@ const TIERS = [
   {
     value: "readonly",
     label: "Read-only",
-    description: "The agents can look at things but change nothing and spend nothing.",
+    description:
+      "The agents can look at things but change nothing, contact nobody, and use no connected account. Billed tool calls are refused too — but the agents still think, and the company is billed for that.",
   },
   {
     value: "supervised",
@@ -147,10 +148,20 @@ describe("the lead sentence", () => {
     expect(leadSentence(TIERS[2].description)).toBe("Balanced execution autonomy.");
   });
 
-  it("uses a single-sentence description whole", () => {
-    expect(leadSentence(TIERS[0].description)).toBe(
-      "The agents can look at things but change nothing and spend nothing.",
+  // B-023: read-only's description is deliberately two sentences — the
+  // authority claim, then the billing caveat — because the pill can only carry
+  // the first. What the pill shows must therefore be true standing alone, and
+  // must not be the caveat's other half.
+  it("shows read-only's authority on the pill and leaves the billing caveat to the menu", () => {
+    const lead = leadSentence(TIERS[0].description);
+    expect(lead).toBe(
+      "The agents can look at things but change nothing, contact nobody, and use no connected account.",
     );
+    expect(lead).not.toContain("billed");
+  });
+
+  it("uses a single-sentence description whole", () => {
+    expect(leadSentence("Only one sentence.")).toBe("Only one sentence.");
   });
 
   it("uses a description with no sentence break whole", () => {

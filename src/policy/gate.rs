@@ -575,9 +575,10 @@ impl ManifestApprovalGate {
     ///
     /// It is the supervised checkpoint taxonomy read as a question about the
     /// past rather than the future: signing, publishing, touching identity,
-    /// spending at or over the cap, first contact with a counterparty. Those
-    /// are the effects `evaluate_supervised` refuses to wave through, and they
-    /// are refused precisely because they cannot be taken back.
+    /// spending or engaging anything but a known amount under a configured
+    /// cap, first contact with a counterparty. Those are the effects
+    /// `evaluate_supervised` refuses to wave through, and they are refused
+    /// precisely because they cannot be taken back.
     ///
     /// Deliberately **mode-independent**. A `full`-mode company executes every
     /// one of these without ever parking it, which is exactly the case this
@@ -646,13 +647,14 @@ impl ManifestApprovalGate {
     /// tiers.
     ///
     /// The **native** taxonomy has no such calls to wave through. Every group
-    /// [`evaluate_supervised`](Self::evaluate_supervised) parks — spend at or
-    /// over the cap, a message to a counterparty nobody has talked to, a
-    /// signature, a publish, an identity change, an engagement over the cap — is
-    /// by definition something that leaves the company or spends money, which is
-    /// the exact line `auto` says it stops at. The only inside-the-company
-    /// native bucket is [`EffectGroup::Other`], and `supervised` already allows
-    /// it. So there is nothing for `auto` to loosen here, and the honest
+    /// [`evaluate_supervised`](Self::evaluate_supervised) parks — a spend not
+    /// known to be under the cap, a message to a counterparty nobody has talked
+    /// to, a signature, a publish, an identity change, an engagement on those
+    /// same cap terms — is by definition something that leaves the company or
+    /// spends money, which is the exact line `auto` says it stops at. The only
+    /// inside-the-company native bucket is [`EffectGroup::Other`], and
+    /// `supervised` already allows it. So there is nothing for `auto` to loosen
+    /// here, and the honest
     /// implementation is one that says so.
     ///
     /// # Why not the stricter reading
@@ -689,14 +691,25 @@ impl ManifestApprovalGate {
         Self::evaluate_supervised_with_policy(&policy, effect)
     }
 
+    /// The one cap comparison both money groups read (issue #2037).
+    ///
+    /// True only when the amount and the cap are **both** known and the amount
+    /// is strictly under: an unstated amount and an unconfigured cap are not
+    /// evidence of a small number, so neither is under anything.
+    fn under_cap(amount: Option<f64>, cap: Option<f64>) -> bool {
+        matches!((amount, cap), (Some(amount), Some(cap)) if amount < cap)
+    }
+
     fn evaluate_supervised_with_cap(effect: &Effect, cap: Option<f64>) -> PolicyDecision {
         match effect.group() {
-            // Spend under the cap (strict `<`) is auto-allowed; at/over the cap,
-            // with no cap, or with an unknown amount, it parks.
-            EffectGroup::Spend => match (effect.amount_usd(), cap) {
-                (Some(amount), Some(cap)) if amount < cap => PolicyDecision::Allow,
-                _ => PolicyDecision::RequireApproval,
-            },
+            // Spend under the cap is auto-allowed; anything else parks.
+            EffectGroup::Spend => {
+                if Self::under_cap(effect.amount_usd(), cap) {
+                    PolicyDecision::Allow
+                } else {
+                    PolicyDecision::RequireApproval
+                }
+            }
             // First message to a new counterparty parks; established threads pass.
             EffectGroup::Send => {
                 if effect.is_established_thread() && !effect.is_first_time_counterparty() {
@@ -709,16 +722,14 @@ impl ManifestApprovalGate {
             EffectGroup::Sign | EffectGroup::Publish | EffectGroup::Identity => {
                 PolicyDecision::RequireApproval
             }
-            // Hiring parks for a first-time counterparty or at/over the cap.
+            // Hiring is auto-allowed under the cap, and only for a
+            // counterparty this company has dealt with before.
             EffectGroup::Hire => {
-                let over_cap = matches!(
-                    (effect.amount_usd(), cap),
-                    (Some(amount), Some(cap)) if amount >= cap
-                );
-                if effect.is_first_time_counterparty() || over_cap {
-                    PolicyDecision::RequireApproval
-                } else {
+                if Self::under_cap(effect.amount_usd(), cap) && !effect.is_first_time_counterparty()
+                {
                     PolicyDecision::Allow
+                } else {
+                    PolicyDecision::RequireApproval
                 }
             }
             EffectGroup::Other => PolicyDecision::Allow,
@@ -1032,6 +1043,93 @@ mod test {
         let mut cheap = effect("a2a.engage", EffectGroup::Hire);
         cheap.amount_usd = Some(10.0);
         assert_eq!(decide(&gate, &cheap).await, PolicyDecision::Allow);
+    }
+
+    /// Issue #2037: the two money gates read the **same** two inputs — an
+    /// amount that may be unknown, and a cap that may not be configured — so
+    /// they must not disagree about what those shapes mean.
+    ///
+    /// `Spend` has always failed closed on the omitting shapes and says so in a
+    /// comment. `Hire` computed its `over_cap` as `(Some, Some) if amount >=
+    /// cap`, which is `false` whenever *either* input is absent — so an unknown
+    /// amount and an unconfigured cap both read as "under the cap", and a paid
+    /// engagement of an established counterparty was waved straight through.
+    ///
+    /// Walked as one table across both groups, so neither arm can be relaxed on
+    /// its own again. Absence of information is not evidence of a small number.
+    #[tokio::test]
+    async fn the_money_gates_agree_on_every_cap_shape() {
+        let shapes: &[(&str, Option<f64>, Option<f64>, PolicyDecision)] = &[
+            (
+                "under a configured cap",
+                Some(10.0),
+                Some(100.0),
+                PolicyDecision::Allow,
+            ),
+            (
+                "exactly at a configured cap",
+                Some(100.0),
+                Some(100.0),
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "over a configured cap",
+                Some(250.0),
+                Some(100.0),
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "an unknown amount under a configured cap",
+                None,
+                Some(100.0),
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "a known amount with no cap configured",
+                Some(10.0),
+                None,
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "an unknown amount with no cap configured",
+                None,
+                None,
+                PolicyDecision::RequireApproval,
+            ),
+        ];
+
+        let mut checked = 0;
+        for (group, kind) in [
+            (EffectGroup::Spend, "x402.spend"),
+            (EffectGroup::Hire, "a2a.engage"),
+        ] {
+            for (label, amount, cap, expected) in shapes {
+                let gate = ManifestApprovalGate::new(policy("supervised", *cap));
+                // An established counterparty throughout: the cap is the only
+                // thing under test here, and first contact is asserted
+                // separately below.
+                let mut eff = effect(kind, group);
+                eff.amount_usd = *amount;
+                assert_eq!(decide(&gate, &eff).await, *expected, "{group:?}: {label}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2 * shapes.len(), "the walk skipped a shape");
+    }
+
+    /// First contact stays an independent reason to park, orthogonal to the cap
+    /// (issue #2037).
+    ///
+    /// An engagement can be small, known, and comfortably under a configured
+    /// cap and still be the first time this company has ever paid this
+    /// counterparty. Folding the two reasons into one cap check would lose it.
+    #[tokio::test]
+    async fn supervised_hire_parks_first_contact_even_under_the_cap() {
+        let gate = ManifestApprovalGate::new(policy("supervised", Some(100.0)));
+        let mut first = effect("a2a.engage", EffectGroup::Hire);
+        first.amount_usd = Some(10.0);
+        first.first_time_counterparty = true;
+        assert_eq!(decide(&gate, &first).await, PolicyDecision::RequireApproval);
     }
 
     // -----------------------------------------------------------------------
@@ -1515,6 +1613,40 @@ mod test {
             let mut cold = effect("email.send", EffectGroup::Send);
             cold.first_time_counterparty = true;
             assert!(gate.is_irreversible(&cold), "{mode}: first contact");
+
+            // Hire: the same cap, read the same way — plus first contact.
+            let mut cheap_hire = effect("a2a.engage", EffectGroup::Hire);
+            cheap_hire.amount_usd = Some(99.0);
+            assert!(!gate.is_irreversible(&cheap_hire), "{mode}: under the cap");
+            let mut at_cap_hire = effect("a2a.engage", EffectGroup::Hire);
+            at_cap_hire.amount_usd = Some(100.0);
+            assert!(gate.is_irreversible(&at_cap_hire), "{mode}: at the cap");
+            let mut first_hire = effect("a2a.engage", EffectGroup::Hire);
+            first_hire.amount_usd = Some(10.0);
+            first_hire.first_time_counterparty = true;
+            assert!(gate.is_irreversible(&first_hire), "{mode}: first contact");
+
+            // Issue #2037: the shapes that omit one of the two inputs, for both
+            // money groups. An engagement whose price nobody stated, and one in
+            // a company that configured no cap, are irreversible for the same
+            // reason a spend is — and they are the shapes the retry dialog lost,
+            // because `record_executed` files nothing for a reversible effect.
+            let uncapped = ManifestApprovalGate::new(policy(mode, None));
+            for (label, group, kind) in [
+                ("a spend", EffectGroup::Spend, "x402.spend"),
+                ("an engagement", EffectGroup::Hire, "a2a.engage"),
+            ] {
+                assert!(
+                    gate.is_irreversible(&effect(kind, group)),
+                    "{mode}: {label} of unknown amount",
+                );
+                let mut known = effect(kind, group);
+                known.amount_usd = Some(10.0);
+                assert!(
+                    uncapped.is_irreversible(&known),
+                    "{mode}: {label} with no cap configured",
+                );
+            }
 
             // A read changes nothing and warns about nothing.
             assert!(

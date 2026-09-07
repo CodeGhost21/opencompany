@@ -328,6 +328,25 @@ describe("disconnect routing", () => {
     });
   });
 
+  // BYOK changes who the host dials to revoke — Composio's own
+  // `DELETE /connected_accounts/{id}` rather than the backend's route — and not
+  // whether the console can offer it. The grid is therefore identical in both
+  // modes, which is what this pins: the route is resolved from what the tile is
+  // connected through, never from which Composio the company uses.
+  it("offers the Composio disconnect whichever Composio the company uses", () => {
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+      { gmail: [account({ id: "conn-gmail-1", account: "ops@acme.test" })] },
+    );
+    const tile = bySlug(providers, "gmail");
+    expect(tile.canDisconnect).toBe(true);
+    expect(disconnectRouteFor(tile)?.kind).toBe("composio");
+  });
+
   it("keeps the native route for a provider only the host itself holds", () => {
     const providers = buildGridProviders(
       [entry("gmail")],

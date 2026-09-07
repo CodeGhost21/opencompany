@@ -32,6 +32,7 @@ import { classifyLoadFailure } from "@/lib/section-load";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { cn } from "@/lib/utils";
 import { formatDuration, relativeTime } from "@/views/workflows/run-health";
+import { formatUsdCost } from "@/lib/cost";
 import { AnalyticsLens } from "./AnalyticsLens";
 import { AttemptCard } from "./AttemptCard";
 import { WaterfallLens } from "./WaterfallLens";
@@ -329,7 +330,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
             <span>
               <dt className="inline">cost</dt>{" "}
               <dd className="text-foreground inline tabular-nums">
-                ${summary.costUsd.toFixed(3)}
+                {formatUsdCost({ amountUsd: summary.costUsd }, "line") ?? "$0.00"}
               </dd>
             </span>
           </dl>

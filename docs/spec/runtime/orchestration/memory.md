@@ -123,13 +123,18 @@ resolved while landing the phase, and the distinction is load-bearing:
 
 | Path | Crate | `CONTRACT_VERSION` | Role |
 |---|---|---|---|
-| `vendor/openhuman/vendor/tinymemory/api` | `tinymemory-api` | `(2, 0)` | The contract. **Bind this.** |
-| `vendor/openhuman/vendor/tinycortex/api` | `tinycortex-api` | `(1, 0)` | Deprecated re-export of the above |
+| `vendor/openhuman/vendor/tinymemory/crates/tinymemory-api` | `tinymemory-api` | `(3, 0)` | The contract. **Bind this.** |
+| `vendor/openhuman/vendor/tinycortex/api` | `tinycortex-api` | `(3, 0)`, re-exported | Deprecated re-export of the above |
 | `vendor/openhuman/vendor/tinycortex` | `tinycortex` | — | The engine OpenHuman pins (removed as an OpenCompany memory backend in #1568) |
 
-`is_compatible` is major-equality only, so the two contract crates are declared
-incompatible — and since they are separate crates, their `MemoryProvider` traits
-are distinct types regardless of the version numbers. OpenHuman has additionally
+The two crates no longer disagree on a version: `tinycortex-api` re-exports
+`CONTRACT_VERSION` straight from `tinymemory_api`, so `is_compatible` —
+major-equality only — now answers *compatible* for the pair. The separation
+therefore rests entirely on crate identity: they are separate crates, so their
+`MemoryProvider` traits are distinct types no matter what the version says.
+Binding the wrong one is a type error rather than a version refusal, which is
+the stronger guarantee but a quieter one, so do not read a version check as
+enforcing it. OpenHuman has additionally
 inlined the v2 contract into its own tree at
 `vendor/openhuman/src/openhuman/memory/api/`, and that inlined copy is what its
 live binding uses; its module docs call `tinycortex-api` "now a deprecated

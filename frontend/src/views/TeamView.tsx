@@ -41,6 +41,7 @@ import {
   reportAddMember,
   type MissedStep,
 } from "@/lib/member-feedback";
+import { usd } from "@/lib/money";
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { personName } from "@/lib/person";
@@ -900,7 +901,6 @@ function DailyBudgetLine({
 
   const spent = member.spentTodayUsd ?? 0;
   const overBudget = spent >= cap;
-  const usd = (n: number) => `$${n.toFixed(2)}`;
   return (
     <div className="space-y-0.5">
       <p

@@ -60,22 +60,15 @@ export async function silenceTour(page: Page) {
 }
 
 /**
- * Opens the company's main line — the thread the orchestrator answers on.
+ * Opens the company's main line — the channel the orchestrator answers on.
  *
- * The thread is selected by name from the list rather than trusted to be the
- * default, so a company that grows another thread cannot silently move this.
- * Scoped to the thread list: the sidebar's company switcher is also a button
- * carrying the company's name and precedes the list in the DOM, so an unscoped
- * `.first()` opens the switcher and no thread at all.
+ * Bare `#/chat` rather than a rail click: Room resolves an absent channel
+ * segment through `generalChannelId`, so the address itself names the
+ * company-wide line and no thread can be left unselected under a composer that
+ * accepts a `fill` anyway.
  */
 export async function openMainLine(page: Page) {
-  await page.goto("/#/conversation");
-  await page
-    .getByRole("complementary")
-    .getByRole("button", { name: /Your company/ })
-    .first()
-    .click();
-  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
+  await openChannel(page, "");
 }
 
 /** Opens one desk channel by id in the chat workspace, and waits for the view. */
@@ -93,15 +86,13 @@ export async function say(page: Page, text: string) {
 /**
  * Every dispatch marker in the open main line.
  *
- * Matched as **text**, not as a link, and that difference is a property of this
- * surface rather than an oversight: the conversation view renders a system line
- * as a centred pill of plain text, where the `#/chat` workspace renders the
- * same marker as an anchor to the card. So a marker here says *that* a card
- * settled and where it landed, and `chat-dispatch-marker.spec.ts` — which drives
- * a desk channel — is where the per-card `href` is asserted.
+ * Matched as **text**, not as a link: this asserts *that* a card settled and
+ * where it landed, which is all these specs are about. Room renders the marker
+ * as an anchor to the card, and `chat-dispatch-marker.spec.ts` is where the
+ * per-card `href` is asserted.
  *
- * Scoped to the transcript, because the thread list renders a one-line preview
- * of each thread's last message and would otherwise be counted too.
+ * Scoped to the transcript, so the rail's one-line preview of each channel's
+ * last message is not counted too.
  */
 export function markers(page: Page): Locator {
   return page.getByRole("main").getByText(/^finished → /);
