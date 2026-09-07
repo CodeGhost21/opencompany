@@ -193,8 +193,9 @@ pub use types::{
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
     TOOL_PROVIDERS, Tools, creation_default_grants, grants_chargebee_explicit,
     grants_composio_explicit, grants_confer_native, grants_files_or_docs, grants_hosting_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, native_capability_namespaces, orchestrator_id,
+    grants_mcp_registry_explicit, grants_media_explicit, grants_paypal_explicit,
+    grants_search_explicit, grants_workspace_write_explicit, native_capability_namespaces,
+    orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
