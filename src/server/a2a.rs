@@ -463,6 +463,24 @@ mod test {
         siwx::header_value(&header)
     }
 
+    /// Builds a SIWX-signed `seo.audit` request carrying `auth` as its payment.
+    /// `site` varies the body so each request has its own SIWX signature.
+    fn paid_request(client: &LocalSigner, auth: &X402Authorization, site: &str) -> Request<Body> {
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": { "site": site }, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(client, "acme", &body, now_secs());
+        Request::builder()
+            .method("POST")
+            .uri("/a2a/acme")
+            .header(AUTHORIZATION, header)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
     fn task_body(skill: &str) -> Vec<u8> {
         serde_json::to_vec(&JsonRpcRequest::new(
             "tasks/send",
@@ -621,6 +639,100 @@ mod test {
             .find(|e| e.kind == "x402.in")
             .expect("x402.in row");
         assert_eq!(inflow.amount_usd, 25.0);
+    }
+
+    /// The same signed authorization, presented on two different tasks. Each
+    /// request carries its own SIWX signature, so the transport replay cache
+    /// admits both; only the payment layer can refuse the second.
+    #[tokio::test]
+    async fn replayed_x402_authorization_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let our_id = signer_for(dir.path(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        let app = router().with_state(state);
+
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+
+        let first = paid_request(&client, &auth, "first.example");
+        let response = app.clone().oneshot(first).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "first purchase is served"
+        );
+
+        let second = paid_request(&client, &auth, "second.example");
+        let response = app.oneshot(second).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the same authorization must not buy a second task"
+        );
+    }
+
+    /// Spending one nonce must not blind the company to the next payment.
+    #[tokio::test]
+    async fn a_freshly_minted_authorization_is_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let our_id = signer_for(dir.path(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        let app = router().with_state(state);
+
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+
+        for site in ["first.example", "second.example"] {
+            let auth = x402::authorize(&client, &challenge, now_secs());
+            let request = paid_request(&client, &auth, site);
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{site} pays its own way");
+        }
+    }
+
+    /// A skill id the card never advertises must not slip past the pricing gate
+    /// on a company that prices its work.
+    #[tokio::test]
+    async fn unknown_skill_id_is_refused_on_a_pricing_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state);
+
+        let body = task_body("seo.ghost");
+        let header = siwx_header(&client, "acme", &body, now_secs());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "an unpriced, unadvertised skill must not run for free"
+        );
     }
 
     #[tokio::test]
