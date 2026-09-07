@@ -39,6 +39,7 @@ import { Label } from "@/components/ui/label";
 import { applyAutonomy } from "@/hooks/use-autonomy";
 import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 
 /**
  * Tools worth naming as an *example* of something to always ask about, most
@@ -1094,6 +1095,10 @@ export function PolicySettings({ client, company }: Props) {
               </p>
               <Input
                 id="always-approve"
+                // The settings pane is full width (#2131), and a bare comma
+                // list stretched to 1400px puts the label and the caret a
+                // head-turn apart. Capped where every other settings field is.
+                className={SETTINGS_FIELD_COLUMN}
                 value={draftAlways}
                 disabled
                 list={wiredTools.length > 0 ? "always-approve-tools" : undefined}

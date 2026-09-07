@@ -97,8 +97,8 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
         rule — and the rail says "Settings", which is the section, while this
         says "General settings", which is the page.
       */}
-      <PageHeader title="General settings" width="3xl" />
-      <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <PageHeader title="General settings" width="full" />
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* Device pairing was here. Sessions are the frontend client's own
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}
