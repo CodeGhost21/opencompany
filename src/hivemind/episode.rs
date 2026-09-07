@@ -427,6 +427,11 @@ impl<'a> EpisodeDriver<'a> {
                                 chat_id: self.desk.id.clone(),
                                 agent_id: super::HIVE_REPORT_AUTHOR.to_string(),
                                 text: failure_note(&turn.agent_id, &error),
+                                // The room's own report is never private: a
+                                // reader who could not see that a turn failed
+                                // would be reading a transcript with a hole in
+                                // it that nothing accounts for.
+                                audience: Vec::new(),
                                 steps: Vec::new(),
                                 task_id: None,
                                 parent: self.thread_root,
@@ -449,6 +454,15 @@ impl<'a> EpisodeDriver<'a> {
                     continue;
                 }
             };
+            // Considered *before* the row is appended, because an audience is
+            // fixed at append time: widening one afterwards could never be
+            // redelivered, and would invalidate every citation naming it.
+            //
+            // A refusal is not an error. Every rung of the library's decision
+            // has a name, and every one of them means "this line is an ordinary
+            // desk row" — which is the safe direction: a line the room can read
+            // is never a leak, and the member has said what it meant to say.
+            let audience = self.aside_audience(&turn.agent_id, &line, &transcript, &roster_of);
             let seq = self
                 .events
                 .append(
@@ -457,6 +471,7 @@ impl<'a> EpisodeDriver<'a> {
                         chat_id: self.desk.id.clone(),
                         agent_id: turn.agent_id.clone(),
                         text: line.clone(),
+                        audience: audience.clone(),
                         // The episode's own turns carry no step timeline: the
                         // room is reading one line per turn, and a tool trace
                         // belongs to the turn's own bubble, which this path
@@ -847,6 +862,8 @@ impl<'a> EpisodeDriver<'a> {
                     chat_id: self.desk.id.clone(),
                     agent_id: super::HIVE_REPORT_AUTHOR.to_string(),
                     text: outcome.summary(),
+                    // Always desk-visible, for the reason above.
+                    audience: Vec::new(),
                     steps: Vec::new(),
                     task_id: None,
                     parent: self.thread_root,
