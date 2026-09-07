@@ -124,6 +124,41 @@ describe("nameFromDescription", () => {
     expect(name.endsWith("…")).toBe(true);
   });
 
+  it("never cuts an astral character in half at the cap", () => {
+    // `slice(0, 60)` on UTF-16 units splits a surrogate pair whenever the 60th
+    // unit is a high surrogate — 59 ASCII characters then an emoji. The lone
+    // surrogate that leaves is not representable on the wire: `JSON.stringify`
+    // emits it as a bare `\ud83d`, and a running host answers
+    // `400 Failed to parse the request body as JSON: name: unexpected end of
+    // hex escape`. On the sentence-only path that is a description that can
+    // never be created, however many times Create is pressed.
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (const sentence of [
+      `${"a".repeat(59)}\u{1F600} and then some more words about it`,
+      `${"a".repeat(58)}\u{1F600}\u{1F600} trailing`,
+      `\u{1F600}${"a".repeat(70)}`,
+      // A letter first, because a clause of pure emoji derives no name at all
+      // (see the "nothing usable" case below) and would pass this vacuously.
+      `a${"\u{1F600}".repeat(80)}`,
+    ]) {
+      const name = nameFromDescription(sentence);
+      expect(lone.test(name), `lone surrogate in ${JSON.stringify(name)}`).toBe(false);
+      // …and it survives the round trip the create actually makes.
+      expect(() => JSON.parse(JSON.stringify({ name }))).not.toThrow();
+      expect(JSON.stringify({ name })).not.toContain("\\ud");
+    }
+  });
+
+  it("still caps by count, and counts characters rather than code units", () => {
+    // A letter and 70 emoji is 141 UTF-16 units but 71 characters. Capping on
+    // units would keep 30 emoji; capping on characters keeps 59 of them.
+    const name = nameFromDescription(`a${"\u{1F600}".repeat(70)}`);
+    expect(Array.from(name)).toHaveLength(61); // 60 characters + the ellipsis
+    // 1 letter + 59 emoji + the ellipsis: 60 characters, 120 UTF-16 units.
+    expect(name.length, "the cap counts characters, not UTF-16 units").toBe(120);
+    expect(name.endsWith("…")).toBe(true);
+  });
+
   it("derives nothing from a sentence with nothing usable in it", () => {
     // The caller must ASK for a name here rather than write an empty one: an
     // empty name derives an empty id, and the id is the permanent join key

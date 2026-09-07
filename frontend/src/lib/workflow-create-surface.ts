@@ -263,7 +263,26 @@ export function nameFromDescription(description: string): string {
   // screen and slugs to nothing, which is the empty permanent id this contract
   // exists to refuse.
   if (!/[\p{L}\p{N}]/u.test(collapsed)) return "";
+  // Elided on **code points**, not UTF-16 units — the same rule
+  // `titleFromMessage` follows in `lib/chat.ts`, and here it is a correctness
+  // bug rather than a cosmetic one. `slice(0, 60)` cuts between the halves of
+  // an astral character whenever the 60th unit is a high surrogate (59 ASCII
+  // characters then an emoji), and the lone surrogate that leaves is not
+  // representable: `JSON.stringify` emits it as a bare `\ud83d`, and the host
+  // answers `400 Failed to parse the request body as JSON: name: unexpected
+  // end of hex escape` — verified against a running host. On the sentence-only
+  // path that is a description which can never be created, however often
+  // Create is pressed.
+  //
+  // Code points rather than grapheme clusters: splitting a ZWJ sequence or
+  // orphaning a combining mark leaves a slightly odd-looking name, which is
+  // cosmetic on a title the operator renames on the canvas. Splitting a
+  // surrogate pair leaves something the wire cannot carry at all.
+  const points = Array.from(collapsed);
   const capped =
-    collapsed.length <= NAME_CAP ? collapsed : `${collapsed.slice(0, NAME_CAP).trimEnd()}…`;
+    points.length <= NAME_CAP ? collapsed : `${points.slice(0, NAME_CAP).join("").trimEnd()}…`;
+  // Safe on an astral first character: `charAt(0)` is the lone high surrogate
+  // and `slice(1)` begins with its low half, so the two concatenate back into
+  // the pair. `toUpperCase()` leaves a lone surrogate alone.
   return capped.charAt(0).toUpperCase() + capped.slice(1);
 }
