@@ -120,13 +120,29 @@ class Host:
             raise SystemExit(f"sign-in: verify refused ({status}: {body})")
 
     def register_mcp(self, name: str, endpoint: str) -> tuple[int, Any]:
-        """Add the simulator as a *runtime* MCP server.
+        """Point the company's `vending` server at this run's simulator.
 
         Runtime is the only layer that accepts an ``http://`` endpoint — a
         server declared in a bundle's ``mcp.json`` must be ``https``
         (`content_test`). That is why the bundle ships `vending` disabled and
-        this registers the loopback one instead of enabling it.
+        pointing at a placeholder, and why this repoints it at loopback.
+
+        **It is a PUT, not a POST.** The name is already declared in the bundle,
+        so adding it is a 409 telling you to override it instead — and a POST
+        that 409s leaves the desks holding the shipped, disabled placeholder and
+        deliberating confidently with no tools at all. `PUT` creates a runtime
+        override of the manifest entry, which is exactly the layer-4 override
+        `docs/spec/runtime/tools.md` describes.
         """
+        status, body = self.call(
+            "PUT",
+            f"{SCOPE}/mcp/servers/{urllib.parse.quote(name)}",
+            {"endpoint": endpoint, "enabled": True},
+        )
+        if status < 300:
+            return status, body
+        # No such name to override: a company that does not ship the entry at
+        # all (someone running this against a hand-rolled bundle). Add it.
         return self.call(
             "POST", f"{SCOPE}/mcp/servers", {"name": name, "endpoint": endpoint}
         )
