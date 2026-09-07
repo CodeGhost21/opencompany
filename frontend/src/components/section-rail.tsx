@@ -150,7 +150,13 @@ export function SectionRail({
                 aria-current={row === current ? "page" : undefined}
                 className={cn(
                   "shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors",
-                  row.active ? "bg-accent text-accent-foreground" : "text-muted-foreground",
+                  // The leaf, not every active row. Finance is active on
+                  // `#/finances/wallet` and so is Wallet, and this row has no
+                  // indent to say which of the two you are on — two filled
+                  // chips read as two current destinations (Codex P2 review).
+                  // What says "you are in this branch" here is the same thing
+                  // that says it on the rail: its children are in the row at all.
+                  row === current ? "bg-accent text-accent-foreground" : "text-muted-foreground",
                 )}
               >
                 {row.label}

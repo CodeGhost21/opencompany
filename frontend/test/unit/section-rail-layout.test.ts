@@ -182,6 +182,20 @@ describe("one line per row, with the gloss on hover", () => {
     // And exactly once — not under every chip.
     expect(chips.textContent?.match(/Tool servers and their tools/g)).toHaveLength(1);
   });
+
+  it("fills exactly one chip, so a flat row never shows two current destinations", () => {
+    // Codex P2 on this PR: the chip row had the accent on every *active* row,
+    // so on `#/finances/wallet` both Finance and Wallet were filled — and
+    // unlike the rail, a chip row has no indent to say which of the two you are
+    // on. What says "you are in this branch" here is the same thing that says
+    // it on the rail: its children are in the row at all.
+    render("finances", "wallet");
+    const chips = container.querySelector(".lg\\:hidden")!;
+    const filled = [...chips.querySelectorAll("button")]
+      .filter((b) => b.className.includes("bg-accent"))
+      .map((b) => b.textContent?.trim());
+    expect(filled).toEqual(["Wallet"]);
+  });
 });
 
 describe("the tour anchors travelled with the rows", () => {
