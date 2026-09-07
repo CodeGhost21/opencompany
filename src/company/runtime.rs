@@ -9627,7 +9627,7 @@ mod tests {
         let (rt, _home) = runtime_that_may_refer().await;
         let rt = Arc::new(rt);
         let gate = Arc::new(tokio::sync::Mutex::new(()));
-        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1);
+        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4);
 
         let forward = |trigger: u64| tinyhivemind::referral::Referral {
             key: tinyhivemind::dispatch::DispatchKey {
@@ -9677,7 +9677,7 @@ mod tests {
         let gate = Arc::new(tokio::sync::Mutex::new(()));
         // A cap high enough not to be what this test measures: the second
         // enqueue must be refused as `Already`, by the marker, not by width.
-        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8);
+        let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8, 4);
 
         let referral = tinyhivemind::referral::Referral {
             key: tinyhivemind::dispatch::DispatchKey {

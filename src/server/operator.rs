@@ -3561,6 +3561,7 @@ pub(crate) async fn refer_committed_replies(
         runtime.clone(),
         gate.clone(),
         config.peer_cap(),
+        policy.max_hops,
     );
 
     for response in &report.responses {

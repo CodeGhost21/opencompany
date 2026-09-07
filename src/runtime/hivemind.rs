@@ -785,7 +785,7 @@ mod test {
         };
 
         assert_eq!(
-            returned_answer(&record, &referral),
+            returned_answer(&record, &referral, REFERRAL_MAX_HOPS),
             body,
             "a forward carries the asker's own words into a room people read"
         );
@@ -798,7 +798,7 @@ mod test {
         referral.from = referral.to.clone();
         referral.source_id = "product_designer".to_string();
         referral.content = "use a skeleton, not a spinner".to_string();
-        let framed = returned_answer(&record, &referral);
+        let framed = returned_answer(&record, &referral, REFERRAL_MAX_HOPS);
         assert!(
             framed.contains("use a skeleton, not a spinner"),
             "the answer survives the framing: {framed}"
@@ -821,7 +821,7 @@ mod test {
         // the question gets journaled in the channel and never delivered, so it
         // reads as though the other desk had ignored it.
         referral.child_hop = REFERRAL_MAX_HOPS;
-        let last = returned_answer(&record, &referral);
+        let last = returned_answer(&record, &referral, REFERRAL_MAX_HOPS);
         assert!(
             last.contains("exchange 2 of 2") && last.contains("last exchange"),
             "the asker is told this is the end: {last}"
@@ -1176,6 +1176,10 @@ pub struct JournalReferralQueue {
     /// turn that produced several replies gets several chances, and nothing
     /// counted them.
     peer_cap: u32,
+    /// The effective `max_hops` for this desk, carried so the returning frame
+    /// can tell the asker how much of the chain is left. It must be the SAME
+    /// number the policy enforces — see `returned_answer`.
+    max_hops: u32,
     /// Crossing forwards already spent under this queue. Returns are exempt:
     /// a return spends no turn of its own, and refusing one would strand an
     /// answer that has already been paid for.
@@ -1196,11 +1200,13 @@ impl JournalReferralQueue {
         runtime: std::sync::Arc<crate::company::runtime::CompanyRuntime>,
         gate: std::sync::Arc<tokio::sync::Mutex<()>>,
         peer_cap: u32,
+        max_hops: u32,
     ) -> Self {
         Self {
             runtime,
             gate,
             peer_cap,
+            max_hops,
             asked: std::sync::Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
@@ -1410,7 +1416,7 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
             // 5. The child turn, on the TARGET's conversation.
             self.runtime.clone().spawn_referred_turn(
                 referral.to.desk_id.clone(),
-                returned_answer(&record, &referral),
+                returned_answer(&record, &referral, self.max_hops),
                 referral.source_id.clone(),
                 referral.origin.clone(),
                 // The depth THIS child sits at, so the chain it may start is
@@ -1439,12 +1445,17 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
 /// that cannot converge in two exchanges is not going to converge in six, and
 /// every hop is a model call somebody pays for.
 ///
-/// **One constant, two readers.** The policy bounds the chain and
-/// [`returned_answer`] tells the asker how much of it is left. Those must
-/// agree: an asker invited to ask again by a frame the policy then refuses is
-/// worse off than one never invited, because the question it writes is
-/// journaled in its channel and never delivered — so it reads to everyone as
-/// though the other desk had been asked and had not bothered to answer.
+/// **Not the policy.** The bound in force comes from the desk's
+/// `[[group_chat]].hive.referral` block and is carried to
+/// [`returned_answer`] on the queue, so the frame and the policy cannot
+/// disagree. They briefly did: this constant said 4 while a desk that opted in
+/// without naming `max_hops` got 2, and the frame invited a follow-up the
+/// policy would then refuse — a question journaled in its own channel and never
+/// delivered, reading to everyone as though the other desk had ignored it.
+///
+/// Kept only as the value a test asserts against, and deliberately not read by
+/// production code.
+#[cfg(test)]
 pub(crate) const REFERRAL_MAX_HOPS: u32 = 4;
 
 /// Separates the other desk's actual answer from the note addressed to the
@@ -1493,7 +1504,11 @@ pub(crate) const RELAY_NOTE_MARKER: &str = "\n\n[referral-note]\n";
 /// A forward is passed through untouched: that content is the asker's own words,
 /// and it RENDERS on the desk it lands on. Framing it would put the host's
 /// scaffolding in a room where a person is reading.
-fn returned_answer(record: &CompanyRecord, referral: &tinyhivemind::referral::Referral) -> String {
+fn returned_answer(
+    record: &CompanyRecord,
+    referral: &tinyhivemind::referral::Referral,
+    max_hops: u32,
+) -> String {
     if !matches!(referral.kind, tinyhivemind::referral::ReferralKind::Return) {
         return referral.content.clone();
     }
@@ -1509,8 +1524,8 @@ fn returned_answer(record: &CompanyRecord, referral: &tinyhivemind::referral::Re
     // A turn offers its own replies at the depth it was created at, so this one
     // may ask again exactly when that depth is still under the bound.
     let round = referral.child_hop.div_ceil(2);
-    let rounds = REFERRAL_MAX_HOPS.div_ceil(2);
-    let ending = if referral.child_hop < REFERRAL_MAX_HOPS {
+    let rounds = max_hops.div_ceil(2);
+    let ending = if referral.child_hop < max_hops {
         [
             "Decide which of these the answer deserves:",
             "- It covers the question: report back in your channel, in your own words, what they said. Do not paste it back verbatim.",
