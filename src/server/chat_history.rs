@@ -3171,6 +3171,7 @@ mod referral_origin_test {
             parent: None,
             mentions: Vec::new(),
             mention_depth: 0,
+            audience: Vec::new(),
         });
         for event in events {
             runtime.events().append(&id, event).await.expect("journal");

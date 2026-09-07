@@ -3829,8 +3829,12 @@ impl HarnessBrain {
                     // its own turns back out of it to fold the next step, so a
                     // driver with nowhere to append could not deliberate at
                     // all, and falling through answers exactly as before.
-                    if crate::runtime::mentions::mention_responder(&self.record(), mentions)
-                        .is_none()
+                    if crate::runtime::mentions::mention_responder(
+                        &self.record(),
+                        chat.as_deref(),
+                        mentions,
+                    )
+                    .is_none()
                         && let Some(events) = self.deps.events.clone()
                         && let Some(desk) =
                             crate::hivemind::desk_episode(&self.record(), chat.as_deref())

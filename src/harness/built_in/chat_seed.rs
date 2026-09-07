@@ -142,6 +142,19 @@ impl ChatSeedRequest {
             &people,
         );
         let query = SessionQuery {
+            // **The seed is narrowed for the agent it is FOR.**
+            //
+            // `project_for` is the only thing that elides, and it can only
+            // elide for a reader it can name — which is why the viewer rides on
+            // the query. Reading as this agent means an aside it is not party
+            // to arrives elided rather than in full.
+            //
+            // Deliberately NOT `Viewer::Operator`: that reads everything, which
+            // is right for a driver folding one transcript for a whole room and
+            // exactly wrong here, where the fold becomes one agent's context.
+            viewer: tinyhivemind_hive::aside::Viewer::Agent {
+                id: self.reader.clone(),
+            },
             conversation: Conversation {
                 desk_id: desk_id.to_string(),
                 desk_name: desk_name.to_string(),

@@ -163,6 +163,7 @@ impl JournalSessionLog<'_> {
                 agent_id,
                 text,
                 parent,
+                audience,
                 ..
             } => Some(LogMessage {
                 sequence,
@@ -170,6 +171,20 @@ impl JournalSessionLog<'_> {
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: self.agent_author(agent_id),
                 content: text.clone(),
+                // Read from the row, never assumed. An empty list is
+                // desk-visible — what every row written before asides existed
+                // means, and what an ordinary turn means now — and a non-empty
+                // one is an aside whose members are its addressees. Defaulting
+                // to `Desk` here would publish a private exchange into a seed
+                // its reader is not party to, which is the exact failure the
+                // library made this field required to prevent.
+                audience: if audience.is_empty() {
+                    tinyhivemind_hive::aside::Audience::Desk
+                } else {
+                    tinyhivemind_hive::aside::Audience::Aside {
+                        members: audience.clone(),
+                    }
+                },
             }),
             CompanyEvent::OperatorMessage {
                 text,
@@ -183,6 +198,9 @@ impl JournalSessionLog<'_> {
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: self.authored_by(by.as_ref()),
                 content: text.clone(),
+                // An operator message is addressed to the desk; there is no
+                // narrower audience for it to carry.
+                audience: tinyhivemind_hive::aside::Audience::Desk,
             }),
             CompanyEvent::DeskTaskCompleted {
                 column,
@@ -203,6 +221,9 @@ impl JournalSessionLog<'_> {
                 // a third would make a marker reword itself depending on which
                 // reader rendered it.
                 content: crate::server::chat_history::dispatch_marker_text(column),
+                // A settle marker is the room's own line: everyone on the desk
+                // is meant to see that the card moved.
+                audience: tinyhivemind_hive::aside::Audience::Desk,
             }),
             _ => None,
         }
@@ -397,6 +418,8 @@ mod test {
             agent_id: agent_id.to_string(),
             text: text.to_string(),
             steps: Vec::new(),
+            // Desk-visible: these fixtures exercise the desk fold, not asides.
+            audience: Vec::new(),
         }
     }
 
@@ -460,6 +483,9 @@ mod test {
         let projected = project_session(
             &log,
             &SessionQuery {
+                // These fold the whole desk — attribution and desk scoping —
+                // and carry no asides, so they read as the room does.
+                viewer: tinyhivemind_hive::aside::Viewer::Operator,
                 conversation: Conversation {
                     desk_id: "engineering".to_string(),
                     desk_name: "Engineering".to_string(),
@@ -512,6 +538,9 @@ mod test {
         let projected = project_session(
             &log,
             &SessionQuery {
+                // These fold the whole desk — attribution and desk scoping —
+                // and carry no asides, so they read as the room does.
+                viewer: tinyhivemind_hive::aside::Viewer::Operator,
                 conversation: Conversation {
                     desk_id: "General".to_string(),
                     desk_name: "General".to_string(),
