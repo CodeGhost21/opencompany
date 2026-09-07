@@ -127,8 +127,14 @@ async fn only_the_aside_row_is_narrowed() {
 #[tokio::test]
 async fn a_support_written_inside_an_aside_carries_nothing() {
     let script: &[(&str, &str)] = &[
-        ("planner", "!propose #stage Stage the rollout behind a flag."),
-        ("critic", "!evidence #stage ^3 The last full rollout broke checkout."),
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
+        (
+            "critic",
+            "!evidence #stage ^3 The last full rollout broke checkout.",
+        ),
         ("scout", "!aside @planner !support #stage ^4 I am with you."),
         ("critic", "!question does anybody else hold this?"),
     ];
