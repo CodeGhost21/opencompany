@@ -4763,6 +4763,7 @@ mod tests {
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -4825,6 +4826,7 @@ mod tests {
                 approval_ids: Vec::new(),
                 unparkable: 2,
                 stranded: 0,
+                blockers: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -8253,6 +8255,7 @@ mod tests {
                             approval_ids: vec!["appr-1".to_string()],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 0,
                         }],
                         approvals: vec![crate::ports::WorkflowRunApprovalRow {
                             node_id: Some("spec".to_string()),
@@ -8321,6 +8324,7 @@ mod tests {
                             approval_ids: vec!["appr-gone".to_string()],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 0,
                         }],
                         approvals: Vec::new(),
                     },
@@ -8415,6 +8419,7 @@ mod tests {
                             approval_ids: vec![approval_id.as_ref().to_string()],
                             unparkable: 0,
                             stranded: 0,
+                            blockers: 0,
                         }],
                         approvals: Vec::new(),
                     },

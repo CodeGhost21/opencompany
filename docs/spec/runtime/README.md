@@ -34,6 +34,9 @@ Supporting docs:
     applied, and how a company created before it keeps working
   - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
     why an ephemeral data root refuses to boot
+  - [memory-engine-cortex.md](memory-engine-cortex.md) — the hosted-Cortex
+    design record for #1936, with its measurements split into
+    [memory-engine-cortex-evidence.md](memory-engine-cortex-evidence.md)
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
     and two processes wanting the same directory
   - [offline.md](offline.md) — running with no network at all: the documented

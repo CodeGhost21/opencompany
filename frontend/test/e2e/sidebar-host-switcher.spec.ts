@@ -31,7 +31,7 @@ test.beforeEach(async ({ page }) => {
 /** Must match `companies/e2e_harness/company.toml`'s `[users] admins`. */
 const ADMIN_EMAIL = "harness-e2e@tinyhumans.ai";
 
-test("the sidebar owns the left edge, and its header switches hosts", async ({
+test("the sidebar owns the left edge, and its header names the company", async ({
   page,
   baseURL,
 }) => {
@@ -109,12 +109,29 @@ test("the sidebar owns the left edge, and its header switches hosts", async ({
     "the switcher is inside the sidebar, not a column of its own to the left of it",
   ).toBeGreaterThanOrEqual(sidebarBox!.x);
 
-  // Reachable from the keyboard, which the rail's unlabelled icon buttons
-  // effectively were not — and holding both seeded hosts, plus the way to add
-  // another that the rail's "+" used to be.
+  // And it is a nameplate, not a control. Two hosts are seeded above and it
+  // still opens nothing: the roster, "Add a host" and "Manage hosts" are hidden
+  // while the product is scoped to one company (`src/product-scope.ts`).
+  //
+  // Asserted after a click AND a keyboard Enter, because the trap this guards is
+  // a trigger that still opens — onto a menu with every group hidden, which is a
+  // chevron over an empty popup rather than a name.
+  await switcher.click();
   await switcher.focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByTestId("host-row-switcher-spec-primary")).toBeVisible();
-  await expect(page.getByTestId("host-row-switcher-spec-second")).toBeVisible();
-  await expect(page.getByTestId("host-switcher-add")).toBeVisible();
+
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+  await expect(page.getByTestId("host-row-switcher-spec-primary")).toHaveCount(0);
+  await expect(page.getByTestId("host-row-switcher-spec-second")).toHaveCount(0);
+  await expect(page.getByTestId("host-switcher-add")).toHaveCount(0);
+  await expect(page.getByTestId("host-switcher-manage")).toHaveCount(0);
+  await expect(page.getByTestId("switcher-new-company")).toHaveCount(0);
+
+  // It still names the company, and still reports the roster's health to a
+  // reader that cannot open it — the two things the trigger carried all along.
+  // The count includes the browser's own same-origin bootstrap alongside the two
+  // seeded here, so this asserts the signal survives rather than a exact total.
+  await expect(switcher).toHaveAttribute("data-host-count", /\d+/);
+  await expect(switcher).toHaveAttribute("data-worst-status", /\w+/);
+  await expect(switcher.locator("button")).toHaveCount(0);
 });

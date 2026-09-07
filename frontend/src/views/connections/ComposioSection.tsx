@@ -32,12 +32,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
- * The two routes to Composio, as an operator chooses between them.
+ * The routes to Composio.
  *
  * One table so the tile's label, its explanation and its billing line cannot
- * drift apart, and so the order below is the order they render.
+ * drift apart, and so the order below is the order they render. Every route stays
+ * here even when it is not offered: this is what labels the route a company is
+ * already on.
  */
 const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string }> = {
   managed: {
@@ -55,7 +58,39 @@ const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string
 };
 
 /** The routes in render order — also the order the arrow keys walk. */
-const MODE_ORDER: ComposioMode[] = ["managed", "byok"];
+const ALL_MODE_ORDER: ComposioMode[] = ["managed", "byok"];
+
+/** The routes on offer. {@link MODES} keeps every descriptor; only this list is filtered. */
+const MODE_ORDER: ComposioMode[] = ALL_MODE_ORDER.filter(
+  (mode) => mode !== "managed" || !COMPOSIO_MANAGED_HIDDEN,
+);
+
+/** Whether this console offers `mode` as something to choose. */
+function isOffered(mode: ComposioMode): boolean {
+  return MODE_ORDER.includes(mode);
+}
+
+/**
+ * The route the form works in.
+ *
+ * With one route on offer there is nothing to choose, so the form opens on it
+ * rather than behind a picker: the operator lands on the credential field for
+ * the only account this company can use. `persistedMode` still reports what the
+ * host holds, which is what the switch confirmation keys on.
+ */
+function formModeFor(status: ComposioStatus | null): ComposioMode {
+  return MODE_ORDER.length === 1 ? MODE_ORDER[0] : modeOf(status);
+}
+
+/**
+ * What a route this console does not offer is called on screen.
+ *
+ * Says nothing about the route it stands in for. `MODES` still holds that
+ * route's own name, which is a brand for a choice this console does not
+ * present — so the tile that stands in for it says only what is true of every
+ * value that lands there: nothing is configured here.
+ */
+const NOT_CONFIGURED = "Not configured";
 
 /**
  * The route to render for whatever the host said.
@@ -199,7 +234,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       const s = await getComposioStatus(client, company);
       if (generation !== requestGeneration.current) return;
       setStatus(s);
-      setMode(modeOf(s));
+      setMode(formModeFor(s));
       setPersistedMode(modeOf(s));
       // Hide the whole section when the feature is not compiled into this build.
       setLoad(s.inBuild ? "ready" : "unavailable");
@@ -284,7 +319,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     try {
       const res = await setComposioApiKey(client, company, apiKey.trim());
       setStatus(res.status);
-      setMode(modeOf(res.status));
+      setMode(formModeFor(res.status));
       setPersistedMode(modeOf(res.status));
       setApiKey("");
       setConfirmSwitch(false);
@@ -303,7 +338,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
     try {
       const res = await setComposioApiKey(client, company, "");
       setStatus(res.status);
-      setMode(modeOf(res.status));
+      setMode(formModeFor(res.status));
       setPersistedMode(modeOf(res.status));
       setApiKey("");
       setConfirmSwitch(false);
@@ -409,20 +444,22 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
         {!canManage
           ? "Your teammates reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : onByok
-            ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — OpenHuman proxies nothing and bills nothing. Connect providers in the grid below; they are connected in that account."
-            : attested
-              ? "Your teammates reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
+            ? "Your teammates reach providers through this company's own Composio account. Calls go straight to Composio with the API key stored here — nothing is proxied and nothing is billed elsewhere. Connect providers in the grid below; they are connected in that account."
+            : // Two facts, and they had been collapsed into one sentence. The
+              // route a company is on today is not what the form beneath does,
+              // and while the form is fixed to this company's own account those
+              // two can disagree — an operator was told there was nothing to
+              // paste directly above a field asking them to paste it.
+              //
+              // So: name what is wired now, then say what saving would change.
+              // A company already reaching providers is switching accounts, not
+              // filling a blank, and the grid it is looking at belongs to the
+              // account it is leaving.
+              attested
+              ? "Your teammates reach providers through Composio today, linked through this instance's own cluster identity — nothing is stored here for that. Saving an API key below moves this company onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
               : companyKey
-                ? "Your teammates reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every teammate in the company can then use what you connect."
-                : // The last arm is the only one that *instructs*, and the
-                  // instruction is route-specific — so it follows the route the
-                  // operator is looking at rather than the one still stored.
-                  // Telling someone to paste a backend token underneath a
-                  // Composio API key field is how copy comes to contradict the
-                  // form directly beneath it.
-                  mode === "byok"
-                  ? "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account rather than OpenHuman's."
-                  : "Your teammates reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
+                ? "Your teammates reach providers through Composio today, on the account this company's stored credential authorizes. Saving an API key below moves it onto its own Composio account instead: the providers connected now live in the account it is leaving, so the grid will look empty until they are connected again here."
+                : "Your teammates reach providers through Composio. Nothing is wired yet — paste this company's own Composio API key below, and it will act through its own Composio account."}
       </p>
 
       {load === "loading" ? (
@@ -502,12 +539,38 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     operator is trying to evaluate. Same radiogroup shape
                     `policy-settings` uses for approval tiers, roving tabindex
                     included. */}
+                {MODE_ORDER.length > 1 && (
                 <div
                   role="radiogroup"
                   aria-label="Which Composio account this company uses"
-                  className="grid gap-2 sm:grid-cols-2"
+                  className={cn("grid gap-2", MODE_ORDER.length > 1 && "sm:grid-cols-2")}
                   onKeyDown={handleModeKeyDown}
                 >
+                  {/* A stored route the list does not offer still gets a tile.
+                      Without one no radio in the group is checked — every tile
+                      reports `aria-checked="false"` and the control claims the
+                      company has chosen nothing, which is a different (and
+                      wrong) statement from "it is on a route not offered here".
+
+                      Disabled: it is the state the company is in, not a route to
+                      go back to. */}
+                  {!isOffered(mode) && (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked
+                      tabIndex={0}
+                      disabled
+                      data-testid="composio-mode-unconfigured"
+                      className="rounded-md border border-primary bg-primary/5 p-3 text-left disabled:cursor-not-allowed"
+                    >
+                      <span className="text-sm font-medium">{NOT_CONFIGURED}</span>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        No Composio account is configured for this company. Add an API key below to
+                        connect one.
+                      </p>
+                    </button>
+                  )}
                   {MODE_ORDER.map((m, index) => {
                     const active = mode === m;
                     return (
@@ -549,12 +612,13 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     );
                   })}
                 </div>
+                )}
 
                 {/* The endpoint, so the routing claim above is checkable rather
                     than merely asserted — but only when the managed token card
                     below is not already printing it. Two copies of one URL on
                     one screen reads as two different facts. */}
-                {status && !showTokenCard && (
+                {status && !showTokenCard && isOffered(persistedMode) && (
                   <p className="truncate font-mono text-xs text-muted-foreground">
                     {status.backendUrl}
                   </p>
@@ -593,12 +657,12 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       className="inline-flex items-center gap-2 text-xs font-medium"
                     >
                       <AlertTriangle className="size-3.5 shrink-0" />
-                      Providers connected through OpenHuman stay there
+                      Providers connected before this stay where they are
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      They live in OpenHuman&apos;s Composio account, not in this one, so the grid
-                      below will look empty until you connect them again here. Clearing the key puts
-                      this company back where it is now.
+                      They live in the Composio account this company reached before, not in this
+                      one, so the grid below will look empty until you connect them again here.
+                      Clearing the key puts this company back where it is now.
                     </p>
                     <div className="flex flex-wrap gap-2">
                       <Button
@@ -634,14 +698,35 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                 {!confirmSwitch && (mode === "byok" || onByok) && (
                   <div className="flex flex-wrap items-center gap-2">
                     {mode === "byok" ? (
-                      <Button disabled={busy !== null || !apiKey.trim()} onClick={requestApiKeySave}>
-                        {busy === "route" ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <Save className="size-4" />
-                        )}
-                        {onByok ? "Rotate key" : "Save key"}
-                      </Button>
+                      <>
+                        <Button
+                          disabled={busy !== null || !apiKey.trim()}
+                          onClick={requestApiKeySave}
+                        >
+                          {busy === "route" ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Save className="size-4" />
+                          )}
+                          {onByok ? "Rotate key" : "Save key"}
+                        </Button>
+                        {/* No Clear control here, deliberately.
+                            Clearing is not "the key goes away": the host derives
+                            the route from whether a key exists, so
+                            `store_api_key("")` writes the mode back to the one
+                            this console no longer offers, and a company with any
+                            credential on that route resumes acting through it —
+                            a different account, billed differently.
+                            Reaching that used to require picking the other tile,
+                            which named it. With no tile to pick, a button here
+                            could only either say what it does — naming the route
+                            — or not say it, which is the switch happening
+                            silently. The status read carries no signal for
+                            whether that route has a credential, so the control
+                            cannot be offered only where clearing is inert
+                            either. Rotating a key stays; removing one needs a
+                            host that can express "no key, no route". */}
+                      </>
                     ) : (
                       onByok && (
                         <Button disabled={busy !== null} onClick={() => void clearApiKey()}>
@@ -650,7 +735,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                           ) : (
                             <Trash2 className="size-4" />
                           )}
-                          Clear key & use OpenHuman-managed
+                          {COMPOSIO_MANAGED_HIDDEN
+                            ? "Clear key"
+                            : "Clear key & use OpenHuman-managed"}
                         </Button>
                       )
                     )}
@@ -706,7 +793,7 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     value={token}
                     onChange={(e) => setToken(e.target.value)}
                   />
-                  {status && (
+                  {status && isOffered(persistedMode) && (
                     <p className="truncate text-xs text-muted-foreground">{status.backendUrl}</p>
                   )}
                 </div>

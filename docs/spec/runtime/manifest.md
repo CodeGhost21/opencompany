@@ -98,9 +98,37 @@ provider = "openhuman"             # delegate to an OpenHuman channel
 [[group_chat]]
 id = "creative"                    # a desk: who the human talks to
 name = "Creative studio"
-members = ["copywriter"]           # ids from the roster
+members = ["copywriter", "editor"] # ids from the roster
 tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
                                    # empty narrows nothing. See runtime/tools.md
+hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
+         require_evidential = true, refutation_cap = 2,
+         dominance_cap = 4, repetition_cap = 2,
+         moves = { copywriter = ["propose", "support", "commit"],
+                   editor = ["object", "refute", "evidence", "question"] } }
+                                   # how this desk answers. Every key optional;
+                                   # omit the table entirely for the defaults.
+                                   # `moves` assigns each member the markers it
+                                   # may open a line with — a room where
+                                   # everyone may `!propose` votes instead of
+                                   # deliberating. A member the table omits
+                                   # keeps every move. `commit` (with
+                                   # `question`/`defer`) is ungated: every
+                                   # seat keeps it whether or not the table
+                                   # names it, so a `commit` entry here is
+                                   # accepted for documentation only and
+                                   # restricts nothing. See runtime/hivemind.md
+
+[group_chat.hive.referral]         # NEW: may this desk ask ANOTHER desk?
+enabled = true                     # off unless this says so; the whole block
+                                   # defaults to referring nothing
+max_hops = 2                       # chain depth; 2 is one round trip
+reach = "desks"                    # local | channels | desks — widens strictly
+returns = true                     # carry the answer back to the desk that asked
+peer_cap = 2                       # crossing questions per episode. The library
+                                   # bounds depth; only a host knows what a
+                                   # question costs, so width is ours
+                                   # See runtime/hivemind-referral.md
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin

@@ -40,6 +40,11 @@ pub mod globals;
 /// echo-brained, offline behaviour unchanged.
 #[cfg(feature = "openhuman")]
 pub mod harness;
+/// Hive-mind desks: a `[[group_chat]]` with two or more members answers an
+/// operator message as a bounded deliberation episode rather than as one
+/// teammate's turn. Ungated — the episode machine is pure and the routing
+/// decision is one the default build makes as readily as the harness one does.
+pub mod hivemind;
 /// Turning dropped files and links into memory: extraction, then chunking.
 /// The console's Brain drop zone is the caller; the ports are unchanged.
 pub mod ingest;

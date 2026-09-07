@@ -382,14 +382,18 @@ Named so they are countable rather than implied.
   be reporting nothing, with every signal in this product saying it is healthy.
   This was observed against a real project, not imagined. Check quota in Sentry
   itself; nothing in the boot line or `sentry-test` will say.
-- **The two surfaces' release tags can disagree on the version.** Both are
-  shaped `opencompany@<version>[+<commit>]`, but the host reads
-  `Cargo.toml`'s version and the console reads `frontend/package.json`'s, and
-  nothing keeps those two numbers in step — they are `0.1.1` and `0.1.0` as
-  this is written. The commit half still matches for a build that sets
-  `OPENCOMPANY_BUILD_COMMIT` / `VITE_BUILD_COMMIT`, which is what actually
+- **Nothing enforces that the two surfaces' versions stay in step.** Both tags
+  are shaped `opencompany@<version>[+<commit>]`, but the host reads
+  `Cargo.toml`'s version and the console reads `frontend/package.json`'s. They
+  agree as this is written, and they agree only because someone kept them that
+  way: no check compares them, so a release that bumps one and forgets the
+  other drifts them silently and nothing reports it. That is not hypothetical —
+  `chore(release): 0.1.1` bumped `Cargo.toml`, both `src-tauri` manifests and
+  `tauri.conf.json`, missed `frontend/package.json`, and the gap was found in
+  review rather than by any lane. The commit half still matches for a build that
+  sets `OPENCOMPANY_BUILD_COMMIT` / `VITE_BUILD_COMMIT`, which is what actually
   identifies a build; set `SENTRY_RELEASE` explicitly if the two surfaces must
-  file under one exact string.
+  file under one exact string whatever the versions say.
 - **Host spans stop at the HTTP boundary.** See
   [tracing.md](tracing.md#known-limitations).
 - **`Authorization: Token <value>` with an unprefixed value is not scrubbed.**

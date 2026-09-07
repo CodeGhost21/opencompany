@@ -48,6 +48,7 @@ import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { lifecycleAffordances } from "@/lib/lifecycle-controls";
+import { canCreateCompanies } from "@/components/create-company-dialog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -309,7 +310,11 @@ export function LifecycleControls({
     }
   }
 
-  const platform = client.carriesPlatformBearer;
+  // Through the funnel, not the raw bearer: "Reset / Start clean" archives this
+  // company and re-provisions it through the same dialog "New company" opens, so
+  // it is company creation wearing another label and has to answer the same
+  // question the other triggers do.
+  const platform = canCreateCompanies(client);
   const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
     lifecycleAffordances(state, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);

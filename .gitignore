@@ -57,3 +57,10 @@ instance-id
 # config). CI and normal runs write `frontend/test-results/`, which
 # `frontend/.gitignore` already covers; this catches the root-level copy.
 test-results/
+
+# Python bytecode from the headless drivers in `scripts/` (e.g.
+# `scripts/hive-euler.py`). CPython writes these beside the script whenever one
+# is imported rather than run, and the tag is interpreter-specific, so a
+# committed copy is both noise and wrong for the next reader's Python.
+__pycache__/
+*.pyc

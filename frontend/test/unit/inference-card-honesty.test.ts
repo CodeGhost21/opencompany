@@ -144,13 +144,19 @@ describe("the Provider select shows the provider the host holds (issue #1737)", 
 
   it("rehydrates after a save rather than snapping back to the default", async () => {
     // The reported sequence: save under one provider, and the select goes on
-    // reading "Managed (TinyHumans)" while the header reads the saved one.
+    // reading the initializer's value while the header reads the saved one.
+    //
+    // Was staged from `managed`, which this console no longer offers as a route
+    // — its select row is the disabled "Not configured" stand-in and Save is
+    // withheld there, so the save under test could not fire. The defect was
+    // never about which two providers: it was the select not re-reading the
+    // host, which two offered providers exercise exactly as well.
     const client = stubClient(
-      [status({ provider: "managed" }), status({ provider: "openrouter" })],
+      [status({ provider: "openai_compatible" }), status({ provider: "openrouter" })],
       status({ provider: "openrouter" }),
     );
     await mount(client);
-    expect(providerSelect()).toBe("Managed (TinyHumans)");
+    expect(providerSelect()).toBe("Custom (OpenAI-compatible)");
 
     await act(async () => {
       (testId("inference-save") as HTMLButtonElement).click();
@@ -161,11 +167,15 @@ describe("the Provider select shows the provider the host holds (issue #1737)", 
   });
 
   it("names the key that belongs in the field, for the provider it is stored against", async () => {
-    // The managed brain is OpenRouter with the platform paying, so a key set
-    // here is sent to OpenRouter. This line asked for a TinyHumans key — true
-    // when `managed` was a provider of its own, and never updated when it
-    // stopped being one. It is what the reported 401 actually was.
-    await mount(stubClient([status({ provider: "managed" })]));
+    // This line asked for a TinyHumans key — true when `managed` was a provider
+    // of its own, and never updated when it stopped being one. It is what the
+    // reported 401 actually was.
+    //
+    // Asserted against OpenRouter rather than `managed`: the key field is
+    // withheld entirely for a route this console does not offer, so the note
+    // has no rendering there to check. What the test is for — the note naming
+    // the key of the provider it is stored against — is unchanged.
+    await mount(stubClient([status({ provider: "openrouter" })]));
     expect(testId("inference-key-note")?.textContent).toContain("an OpenRouter key");
   });
 });

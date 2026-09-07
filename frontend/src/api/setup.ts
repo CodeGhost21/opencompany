@@ -12,6 +12,7 @@
 // consistent with the file the whole surface exists to write.
 
 import type { OpenCompanyClient } from "./client";
+import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 
 /** Which precedence layer supplied a field's current value. */
 export type ConfigLayer = "env" | "config.toml" | "manifest" | "default";
@@ -170,6 +171,15 @@ export const INFERENCE_PROVIDERS = [
 ] as const;
 
 export type InferenceProviderId = (typeof INFERENCE_PROVIDERS)[number]["id"];
+
+/**
+ * The providers the wizard offers. {@link INFERENCE_PROVIDERS} keeps every
+ * entry, so a host already reporting a hidden one still resolves its label and
+ * its key/URL requirements.
+ */
+export const SETUP_INFERENCE_OPTIONS = INFERENCE_PROVIDERS.filter(
+  (provider) => provider.id !== "managed" || !INFERENCE_MANAGED_HIDDEN,
+);
 
 /** What the connection test answers. */
 export interface InferenceTestResult {

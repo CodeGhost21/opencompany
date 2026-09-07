@@ -445,6 +445,14 @@ export interface ChatResponse {
    * answer, and on a host that predates the field.
    */
   reviewFeedbackApplied?: boolean;
+  /**
+   * On a resolve: every approval it settled, when it settled more than the one
+   * addressed. A blocker answered here fans its verdict to its whole
+   * root-cause group, so the queue owes the siblings the same removal it gives
+   * the card that was clicked. Absent on every other answer, and on a host that
+   * predates the field.
+   */
+  settledIds?: string[];
 }
 
 /**
@@ -715,6 +723,24 @@ export interface ApprovalSummary {
    * blocker particular to its own step; those group alone.
    */
   group_key?: string | null;
+  /**
+   * Which kind of stopped step this blocker names (#2028) — `"task"` for a
+   * paused board card, `"node"` for a stopped workflow-run node. Mirrors
+   * `ApprovalSummary::blocker_step_kind` in `src/runtime/types.rs`; the
+   * tokens are the wire tokens.
+   *
+   * A `skip` or `cancel` does not do the same thing on both: a card
+   * redispatches on skip and returns to To-do on cancel, while a node
+   * produces nothing on skip and stops the run on cancel — so a caller
+   * wording a verdict's consequence must not describe one path's behaviour
+   * on the other's card.
+   *
+   * Absent for a non-blocker approval, a blocker with no step behind it (a
+   * bare agent question), and a host that predates the field. All three read
+   * as "unknown" — a caller must not assume either kind's behaviour, and
+   * should fall back to wording that is true regardless.
+   */
+  blocker_step_kind?: BlockerStepKind;
 }
 
 /**
@@ -757,9 +783,53 @@ export interface ResolveReceipt {
    * predates the field.
    */
   stillAwaiting?: number;
+  /**
+   * Every approval this resolve settled, when it settled more than the one
+   * addressed — the receipt twin of {@link ChatResponse.settledIds}.
+   */
+  settledIds?: string[];
 }
 
 export type Verdict = "approve" | "deny";
+
+/**
+ * What an operator asks a parked **blocker** to do — the four-way answer the
+ * two-value {@link Verdict} cannot carry. Mirrors `BlockerVerdict` in
+ * `src/ports/blockers.rs`; the tokens are the wire tokens.
+ *
+ * It narrows the verdict rather than replacing it: `retry`, `amend` and `skip`
+ * ride an `approve`, `cancel` rides a `deny`, and the host refuses a pair that
+ * disagrees.
+ */
+export type BlockerVerdict = "retry" | "amend" | "skip" | "cancel";
+
+/**
+ * Which kind of stopped step a parked blocker names — `"task"` for a paused
+ * board card, `"node"` for a stopped workflow-run node. Mirrors
+ * {@link ApprovalSummary.blocker_step_kind}; see there for what "unknown"
+ * (the field absent) means and why a caller must not guess between the two.
+ */
+export type BlockerStepKind = "task" | "node";
+
+/**
+ * How every surface hands a decision back: one approval, its two-value verdict,
+ * what an approve buys, and — for a parked blocker — which of the four things
+ * the operator asked the stopped step to do.
+ *
+ * One alias rather than the signature written at each hop, so a surface cannot
+ * be wired up while quietly dropping the blocker verdict on the way down.
+ */
+export type DecideApproval = (
+  approval: ApprovalSummary,
+  verdict: Verdict,
+  scope: GrantScope,
+  blocker?: { verdict: BlockerVerdict; answer?: string },
+) => void;
+
+/** The `approve`/`deny` a blocker verdict must be sent with. */
+export function blockerEventVerdict(verdict: BlockerVerdict): Verdict {
+  return verdict === "cancel" ? "deny" : "approve";
+}
 
 /**
  * What an approve buys (#374).

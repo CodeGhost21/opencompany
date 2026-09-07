@@ -44,6 +44,7 @@ import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
 import type { CompanyStatus } from "@/api/types";
 import type { Connection, ConnectionStatus } from "@/connections/types";
 import { cn } from "@/lib/utils";
+import { COMPANY_SWITCHING_HIDDEN, HOSTS_HIDDEN } from "@/product-scope";
 
 /**
  * How a connection's state reads, and what colour says so.
@@ -256,8 +257,17 @@ export function HostSwitcher({
   const hosts = useHosts();
   const { connections, selected, hub } = hosts;
 
-  const interactive = hostSwitcherInteractive(connections.length, hub);
-  const menu = hostSwitcherMenu(connections.length, hub);
+  const interactive = !HOSTS_HIDDEN && hostSwitcherInteractive(connections.length, hub);
+  // Whether there is anything to offer under Companies. Hidden entirely on a
+  // console with one company and nowhere else to go — the same condition the
+  // sidebar footer row used before it moved in here.
+  const showCompanies =
+    !COMPANY_SWITCHING_HIDDEN &&
+    !!((companies.length > 1 && onSwitchCompany) || onBackToPicker || onCreateCompany);
+  // A trigger that opens nothing is a nameplate. Derived from what the menu would
+  // actually hold, so hiding every group falls to the nameplate branch below
+  // rather than leaving a chevron over an empty popup.
+  const menu = (!HOSTS_HIDDEN && hostSwitcherMenu(connections.length, hub)) || showCompanies;
   const active = connections.find((c) => c.id === selected) ?? null;
   const worst = worstStatus(connections);
 
@@ -436,15 +446,6 @@ export function HostSwitcher({
     );
   }
 
-  // Whether there is anything to offer under Companies. Hidden entirely on a
-  // console with one company and nowhere else to go — the same condition the
-  // sidebar footer row used before it moved in here.
-  const showCompanies = !!(
-    (companies.length > 1 && onSwitchCompany) ||
-    onBackToPicker ||
-    onCreateCompany
-  );
-
   const renderMenu = (side: "right" | "bottom") => (
     <DropdownMenuContent className="min-w-72 rounded-lg" align="start" side={side} sideOffset={4}>
       {/* Companies first, and hosts below: the trigger names the COMPANY, so
@@ -496,80 +497,85 @@ export function HostSwitcher({
           <DropdownMenuSeparator />
         </>
       )}
-      {/* `DropdownMenuLabel` is Base UI's `Menu.GroupLabel`, and it throws
-            outside a `Menu.Group` — the group is what it labels. */}
-      <DropdownMenuGroup>
-        <DropdownMenuLabel>Hosts</DropdownMenuLabel>
-        {connections.map((connection, index) => {
-          const status = statusCopy(connection);
-          const shortcut = hostShortcutLabel(index);
-          return (
-            <DropdownMenuItem
-              key={connection.id}
-              data-testid={`host-row-${connection.id}`}
-              data-status={connection.status}
-              aria-current={connection.id === selected}
-              // Native `title`, not a tooltip component: the reason a host is
-              // unreachable has to be readable without extra machinery on a
-              // row that must render while its host is down.
-              title={`${connection.label} — ${status.label}${
-                connection.error ? `\n${connection.error}` : ""
-              }`}
-              onClick={() => hosts.onSelect(connection.id)}
-              className="gap-2"
-            >
-              <span className={cn("size-2 shrink-0 rounded-full", status.dot)} />
-              <span className={cn("flex-1 truncate", connection.id === selected && "font-medium")}>
-                {connection.label}
-              </span>
-              {connection.status === "live" ? (
-                // Nothing to say out loud on a host that is simply working, so
-                // the state stays where a screen reader can still reach it.
-                <span className="sr-only">{status.label}</span>
-              ) : (
-                // In words, not in hue (issue #1167). A colour is no help to
-                // anyone who cannot tell these two apart, and even where it is
-                // read correctly "amber" does not say *what* is wrong —
-                // leaving an operator to discover an unreachable host by
-                // landing on its failure. This is the row telling them first.
-                <span
-                  data-testid={`host-row-state-${connection.id}`}
-                  className="shrink-0 text-xs text-muted-foreground"
-                >
-                  {status.label}
+      {/* The host roster, and the two ways to change it. */}
+      {!HOSTS_HIDDEN && (
+        <>
+        {/* `DropdownMenuLabel` is Base UI's `Menu.GroupLabel`, and it throws
+              outside a `Menu.Group` — the group is what it labels. */}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Hosts</DropdownMenuLabel>
+          {connections.map((connection, index) => {
+            const status = statusCopy(connection);
+            const shortcut = hostShortcutLabel(index);
+            return (
+              <DropdownMenuItem
+                key={connection.id}
+                data-testid={`host-row-${connection.id}`}
+                data-status={connection.status}
+                aria-current={connection.id === selected}
+                // Native `title`, not a tooltip component: the reason a host is
+                // unreachable has to be readable without extra machinery on a
+                // row that must render while its host is down.
+                title={`${connection.label} — ${status.label}${
+                  connection.error ? `\n${connection.error}` : ""
+                }`}
+                onClick={() => hosts.onSelect(connection.id)}
+                className="gap-2"
+              >
+                <span className={cn("size-2 shrink-0 rounded-full", status.dot)} />
+                <span className={cn("flex-1 truncate", connection.id === selected && "font-medium")}>
+                  {connection.label}
                 </span>
-              )}
-              {shortcut && <DropdownMenuShortcut>{shortcut}</DropdownMenuShortcut>}
-              {connection.id === selected && <Check className="size-4 shrink-0" />}
-            </DropdownMenuItem>
-          );
-        })}
-        {connections.length === 0 && (
-          <p className="px-1.5 py-1 text-xs text-muted-foreground">No hosts yet.</p>
-        )}
-      </DropdownMenuGroup>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem
-        data-testid="host-switcher-add"
-        onClick={() => hosts.setAddingHost(true)}
-        className="gap-2"
-      >
-        <Plus className="size-4" />
-        Add a host
-      </DropdownMenuItem>
-      {/* The other half of adding one. Kept out of the rows themselves: a row
-          is a *filter* — clicking it puts that host on screen — and hanging an
-          edit and a delete off the same row makes a menu whose click targets
-          disagree about what a row is for. The page says what each host is,
-          which the menu deliberately does not. */}
-      <DropdownMenuItem
-        data-testid="host-switcher-manage"
-        onClick={() => hosts.setManagingHosts(true)}
-        className="gap-2"
-      >
-        <Settings2 className="size-4" />
-        Manage hosts
-      </DropdownMenuItem>
+                {connection.status === "live" ? (
+                  // Nothing to say out loud on a host that is simply working, so
+                  // the state stays where a screen reader can still reach it.
+                  <span className="sr-only">{status.label}</span>
+                ) : (
+                  // In words, not in hue (issue #1167). A colour is no help to
+                  // anyone who cannot tell these two apart, and even where it is
+                  // read correctly "amber" does not say *what* is wrong —
+                  // leaving an operator to discover an unreachable host by
+                  // landing on its failure. This is the row telling them first.
+                  <span
+                    data-testid={`host-row-state-${connection.id}`}
+                    className="shrink-0 text-xs text-muted-foreground"
+                  >
+                    {status.label}
+                  </span>
+                )}
+                {shortcut && <DropdownMenuShortcut>{shortcut}</DropdownMenuShortcut>}
+                {connection.id === selected && <Check className="size-4 shrink-0" />}
+              </DropdownMenuItem>
+            );
+          })}
+          {connections.length === 0 && (
+            <p className="px-1.5 py-1 text-xs text-muted-foreground">No hosts yet.</p>
+          )}
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          data-testid="host-switcher-add"
+          onClick={() => hosts.setAddingHost(true)}
+          className="gap-2"
+        >
+          <Plus className="size-4" />
+          Add a host
+        </DropdownMenuItem>
+        {/* The other half of adding one. Kept out of the rows themselves: a row
+            is a *filter* — clicking it puts that host on screen — and hanging an
+            edit and a delete off the same row makes a menu whose click targets
+            disagree about what a row is for. The page says what each host is,
+            which the menu deliberately does not. */}
+        <DropdownMenuItem
+          data-testid="host-switcher-manage"
+          onClick={() => hosts.setManagingHosts(true)}
+          className="gap-2"
+        >
+          <Settings2 className="size-4" />
+          Manage hosts
+        </DropdownMenuItem>
+        </>
+      )}
     </DropdownMenuContent>
   );
 

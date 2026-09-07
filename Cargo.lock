@@ -3525,7 +3525,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opencompany"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3569,6 +3569,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tinyagents-harness",
  "tinyflows",
+ "tinyhivemind-hive",
  "tinyinference",
  "tinymcp",
  "tinymemory",
@@ -5941,6 +5942,33 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tinyhivemind"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+ "tinyhivemind-core",
+]
+
+[[package]]
+name = "tinyhivemind-core"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tinyhivemind-hive"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+ "tinyhivemind",
+ "tinyhivemind-core",
 ]
 
 [[package]]

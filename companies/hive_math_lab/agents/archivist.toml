@@ -1,0 +1,22 @@
+role = "Archivist"
+description = "The desk's memory: recall what this lab already knows before anybody starts, and write down what carried once it does."
+# No tier: recall and note-taking do not need the strongest model bought.
+context = ["GOAL.md", "brief.md", "METHOD.md", "attempts.md", "answers.md"]
+
+# The one solvers-desk seat with a write grant, mirroring the scribe's on the
+# records desk — and for the same reason: a member that can also compute is a
+# member that will eventually remember a number nobody else on the desk saw.
+tools = ["files", "workspace", "workspace.read", "workspace.write"]
+
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+    { name = "risks", access = "record" },
+    { name = "commitments", access = "read" },
+    { name = "learnings", access = "record" },
+    { name = "attempts", access = "record" },
+    { name = "answers", access = "read" },
+]
+
+prompt_files = ["prompts/archivist.md"]

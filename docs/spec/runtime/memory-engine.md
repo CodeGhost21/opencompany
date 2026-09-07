@@ -39,9 +39,10 @@ driver against v0.9.8 has to do and what each call costs.
 
 | Env var | Required | Notes |
 |---|---|---|
-| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, `cognee`, or `cortex`. No default — see below. Read [`memory-engine-cortex.md`](memory-engine-cortex.md) before choosing `cortex`. |
+| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, `cognee`, `cortexdb`, or `cortex`. No default — see below. `cortexdb` and `cortex` are two adapters for the same CortexDB service: `cortexdb` is this repo's own and sends `X-Cortex-Actor` (see `OPENCOMPANY_MEMORY_ACTOR`), `cortex` is the dialect `tinymemory-remote` ships. Read [`memory-engine-cortex.md`](memory-engine-cortex.md) before choosing either. |
 | `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
 | `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
+| `OPENCOMPANY_MEMORY_ACTOR` | no (`cortexdb` only) | The `X-Cortex-Actor` header value, `type:id` (type one of `user`, `agent`, `service`, `system` — a bare id is refused). CortexDB hard-refuses a request whose actor does not match the bearer token's subject; unset falls back to the token's own `sub` JWT claim, then to `service:opencompany`. |
 
 ### `remote` is conformance-backed
 
@@ -329,7 +330,9 @@ comes first.
    seam and is refused by name — for those, `opencompany export` reads the
    live engine (base backend plus memory overlay, operator facts included)
    and is the capture tool. Target drivers are the hosted engines
-   `supermemory`, `mem0` and `cognee`.
+   `supermemory`, `mem0`, `cognee`, `cortexdb` and `cortex`. Hosted tenants run
+   **`cortex`** — the manager injects that id at provision — so a migration onto
+   a provisioned engine names `cortex`, not `cortexdb`.
 
    Two hosted-deployment cautions. The copy is **engine-level**: every
    namespace the source credential can see crosses, which is exactly right
@@ -355,3 +358,31 @@ comes first.
 
 Misconfiguration never falls back: an unknown mode, a missing driver, URL or
 key, or a missing cargo feature is a boot refusal naming the knob to change.
+
+## Running CortexDB locally
+
+`cortexdb` (`src/store/memory/cortexdb.rs`) speaks to a standalone
+[CortexDB](https://github.com/tinyhumansai) instance (`cortexdb/cortexdb`
+Docker image) over its own HTTP API — it is not the removed in-pod
+`tinycortex` engine, and does not reintroduce it. `scripts/cortexdb-up.sh`
+starts (or reuses) a local instance on `127.0.0.1:3141` with enrichment,
+layers and graph extraction off by default, so writes cost one embedding call
+and nothing else; it prints the exact `OPENCOMPANY_MEMORY_*` exports this
+build needs:
+
+```bash
+./scripts/cortexdb-up.sh
+export OPENCOMPANY_MEMORY=remote
+export OPENCOMPANY_MEMORY_DRIVER=cortexdb
+export OPENCOMPANY_MEMORY_URL=http://127.0.0.1:3141
+export OPENCOMPANY_MEMORY_API_KEY=<printed by the script>
+cargo run --bin opencompany -- serve
+```
+
+CortexDB namespaces every write under `org:opencompany/ns:<hash>`, one scope
+per tinymemory namespace (which already carries this host's own per-company
+isolation — see "Tenant isolation across the seam" above), so two companies
+never share a CortexDB scope and therefore never share recall. Two headers
+travel on every request: `Authorization: Bearer <key>` and
+`X-Cortex-Actor: <actor>` — CortexDB hard-401s a mismatch between them, which
+is why `OPENCOMPANY_MEMORY_ACTOR` exists.

@@ -946,7 +946,11 @@ fn raw_tool_call_requested(payload: &serde_json::Value) -> bool {
 /// probe, and every payload-shape test — gets exactly the wire parse and no
 /// text recovery.
 fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResponse> {
-    model_response_from_payload_offering(payload, &std::collections::BTreeSet::new())
+    model_response_from_payload_offering(
+        payload,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeMap::new(),
+    )
 }
 
 /// [`model_response_from_payload`], plus the tool names **this turn offered the
@@ -959,6 +963,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
 fn model_response_from_payload_offering(
     payload: serde_json::Value,
     offered: &std::collections::BTreeSet<String>,
+    schemas: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> TaResult<ModelResponse> {
     // Content may be a plain string OR an array of `{type:"text",text:…}`
     // parts; tolerate both.
@@ -1168,7 +1173,7 @@ fn model_response_from_payload_offering(
         && finished_or_unstated
         && !offered.is_empty()
         && let Some((cleaned, recovered)) =
-            crate::harness::native_salvage::recover_text_tool_calls(&content, offered)
+            crate::harness::native_salvage::recover_text_tool_calls(&content, offered, schemas)
     {
         // The same fail-closed batch check the parsed path gets. Applied to the
         // recovered batch too, or a text response pairing `request_approval`
@@ -1316,6 +1321,31 @@ impl MockProvider {
     }
 }
 
+/// The per-request output cap actually sent, given the cap the harness asked
+/// for.
+///
+/// The vendored harness stamps every request with a fixed
+/// `AGENT_TURN_MAX_OUTPUT_TOKENS` (16384) sized for a model whose visible
+/// answer is all it emits. A reasoning model routed through an OpenAI-shaped
+/// endpoint counts its hidden reasoning stream against the same `max_tokens`,
+/// so on a hard problem the model exhausts the cap before writing a single
+/// visible token and the turn fails with `finish_reason: length` and an empty
+/// message. `OPENCOMPANY_INFERENCE_MAX_TOKENS` raises the floor for such a
+/// deployment: the larger of the harness's cap and the variable is sent, so the
+/// variable can never *lower* a cap the harness relied on, and an unset or
+/// unparsable value changes nothing.
+fn output_cap(requested: Option<u32>) -> Option<u32> {
+    let floor = std::env::var("OPENCOMPANY_INFERENCE_MAX_TOKENS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0);
+    match (requested, floor) {
+        (Some(cap), Some(floor)) => Some(cap.max(floor)),
+        (Some(cap), None) => Some(cap),
+        (None, floor) => floor,
+    }
+}
+
 #[async_trait]
 impl ChatModel<()> for MockProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
@@ -1408,6 +1438,7 @@ impl HostedProvider {
 }
 
 #[async_trait]
+
 impl ChatModel<()> for HostedProvider {
     /// Advertise native tool calling so openhuman's turn loop drives structured
     /// `tools`/`tool_calls` instead of prompt-guided XML. See [`MANAGED_PROFILE`].
@@ -1431,7 +1462,7 @@ impl ChatModel<()> for HostedProvider {
             "temperature": temperature,
             "messages": messages,
         });
-        if let Some(cap) = request.max_tokens {
+        if let Some(cap) = output_cap(request.max_tokens) {
             body["max_tokens"] = serde_json::json!(cap);
         }
         // Native tool calling: expose the turn's tools so the model emits
@@ -1446,6 +1477,10 @@ impl ChatModel<()> for HostedProvider {
         // so what the response is allowed to name can never drift from what the
         // request authorized.
         let offered = crate::harness::native_salvage::authorized_tool_names(
+            &request.tools,
+            &request.tool_choice,
+        );
+        let schemas = crate::harness::native_salvage::authorized_tool_schemas(
             &request.tools,
             &request.tool_choice,
         );
@@ -1513,7 +1548,7 @@ impl ChatModel<()> for HostedProvider {
         let payload: serde_json::Value = response.json().await.map_err(|e| {
             InferenceError::Model(format!("hosted inference response was not JSON: {e}"))
         })?;
-        model_response_from_payload_offering(payload, &offered)
+        model_response_from_payload_offering(payload, &offered, &schemas)
     }
 }
 
@@ -1611,7 +1646,7 @@ pub async fn request_plan(
         "temperature": temperature,
         "messages": messages,
     });
-    if let Some(cap) = max_tokens {
+    if let Some(cap) = output_cap(max_tokens) {
         body["max_tokens"] = serde_json::json!(cap);
     }
     let supports_parallel_control =
@@ -1921,6 +1956,10 @@ impl ChatModel<()> for TenantProvider {
             &request.tools,
             &request.tool_choice,
         );
+        let schemas = crate::harness::native_salvage::authorized_tool_schemas(
+            &request.tools,
+            &request.tool_choice,
+        );
         // Always this harness's real id — `self.scope.id` is meaningful
         // whether or not this is the company's *default* harness (the
         // default's own `[harness.inference]` beats the company mapping the
@@ -1953,7 +1992,7 @@ impl ChatModel<()> for TenantProvider {
         // its own, so keeping the last *successful* model is strictly more
         // accurate than advertising one that never ran.
         *self.model.write().unwrap() = Some(crate::metering::ModelSlug::classify(&plan.model));
-        model_response_from_payload_offering(payload, &offered)
+        model_response_from_payload_offering(payload, &offered, &schemas)
     }
 }
 
@@ -2062,6 +2101,25 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
+
+    /// The output floor only ever raises the harness's cap (issue: reasoning
+    /// models exhaust a 16k `max_tokens` on their hidden stream).
+    #[test]
+    fn output_cap_floor_raises_but_never_lowers() {
+        let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
+        env.set("OPENCOMPANY_INFERENCE_MAX_TOKENS", "32000");
+        assert_eq!(output_cap(Some(16384)), Some(32000));
+        assert_eq!(output_cap(Some(64000)), Some(64000));
+        assert_eq!(output_cap(None), Some(32000));
+    }
+
+    #[test]
+    fn output_cap_without_the_variable_is_the_harness_cap() {
+        let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
+        env.remove("OPENCOMPANY_INFERENCE_MAX_TOKENS");
+        assert_eq!(output_cap(Some(16384)), Some(16384));
+        assert_eq!(output_cap(None), None);
+    }
     use super::*;
     use crate::app::config::MapEnv;
 
@@ -2645,8 +2703,12 @@ mod tests {
             }]
         });
         let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
-        let err = model_response_from_payload_offering(payload, &offered)
-            .expect_err("a reasoning-only turn must not parse as success");
+        let err = model_response_from_payload_offering(
+            payload,
+            &offered,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect_err("a reasoning-only turn must not parse as success");
         let msg = err.to_string();
         assert!(
             msg.contains("neither"),
@@ -2681,7 +2743,11 @@ mod tests {
                     }
                 }]
             });
-            let resp = model_response_from_payload_offering(payload, &offered);
+            let resp = model_response_from_payload_offering(
+                payload,
+                &offered,
+                &std::collections::BTreeMap::new(),
+            );
             let calls = resp.map(|r| r.message.tool_calls.len()).unwrap_or(0);
             assert_eq!(
                 calls, 0,
@@ -2710,8 +2776,12 @@ mod tests {
             }]
         });
         let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
-        let resp = model_response_from_payload_offering(payload, &offered)
-            .expect("the refusal turn still parses");
+        let resp = model_response_from_payload_offering(
+            payload,
+            &offered,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("the refusal turn still parses");
 
         assert!(
             resp.message.tool_calls.is_empty(),
@@ -2744,8 +2814,12 @@ mod tests {
         });
         let offered =
             std::collections::BTreeSet::from(["read_ledger".to_string(), approval.to_string()]);
-        let err = model_response_from_payload_offering(payload, &offered)
-            .expect_err("the whole recovered batch must be refused");
+        let err = model_response_from_payload_offering(
+            payload,
+            &offered,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect_err("the whole recovered batch must be refused");
 
         assert!(
             err.to_string().contains("approval boundary"),

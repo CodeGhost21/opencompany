@@ -70,7 +70,7 @@ import {
 import {
   ApiError,
   type ApprovalSummary,
-  type GrantScope,
+  type DecideApproval,
   type Verdict,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
@@ -429,7 +429,7 @@ export function TaskDetailView({
   deciding?: ReadonlyMap<string, Verdict>;
   decided?: Readonly<Record<string, DecidedApproval>>;
   failed?: Record<string, string>;
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: DecideApproval;
   /**
    * What the address asked this screen to open (issue #339): a pinned artifact
    * or an attempt's trace. Empty — the ordinary "open the card" navigation —
@@ -2086,7 +2086,7 @@ export function AwaitingApprovalRow({
   deciding: ReadonlyMap<string, Verdict>;
   decided: Readonly<Record<string, DecidedApproval>>;
   failed: Record<string, string>;
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: DecideApproval;
 }) {
   const pending = pendingApprovalWait(approvals, now);
   /**

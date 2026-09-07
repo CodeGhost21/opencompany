@@ -32,6 +32,7 @@ import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 interface Props {
   client: OpenCompanyClient;
@@ -576,15 +577,21 @@ export function OAuthView({ client, company }: Props) {
           </Alert>
         )}
 
-        {/* The general answer sits above the Composio-specific one: this key
-            authorizes every brokered surface, and the Composio token below is
-            the escape hatch (issue #586). */}
-        <CompanyCredentialCard
-          client={client}
-          company={company}
-          canManage={canManage}
-          onChanged={() => setCredentialGeneration((n) => n + 1)}
-        />
+        {/* The general answer sat above the Composio-specific one: one key
+            authorizing every brokered surface, with the Composio credential as
+            the escape hatch (issue #586). While this company reaches Composio
+            through its own account and nothing else, that key buys nothing —
+            and asking for it on the first-run screen sends an operator after a
+            credential this console can no longer use. The Composio section
+            below is the whole answer now. */}
+        {!COMPOSIO_MANAGED_HIDDEN && (
+          <CompanyCredentialCard
+            client={client}
+            company={company}
+            canManage={canManage}
+            onChanged={() => setCredentialGeneration((n) => n + 1)}
+          />
+        )}
 
         {/* Remounted on a credential change so its status is re-read: the tier
             it reports (`company` vs `attested` vs `none`) is downstream of the

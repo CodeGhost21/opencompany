@@ -8,15 +8,22 @@
 // how long it has waited. Two copies of that would drift, and the half that
 // drifted would be the one nobody was reading when it mattered.
 //
-// What is deliberately NOT here: the action buttons and the deciding state.
-// The page's buttons resolve with the default response shape; the inline card's
-// resolve detached (#391), because a body-delivered reply plus its SSE echo
-// would put one continuation into the channel twice. Same content, different
-// verbs — so the verbs stay with their owners.
+// What is deliberately NOT here: the approve/decline buttons and the deciding
+// state. The page's buttons resolve with the default response shape; the inline
+// card's resolve detached (#391), because a body-delivered reply plus its SSE
+// echo would put one continuation into the channel twice. Same content,
+// different verbs — so the verbs stay with their owners.
+//
+// `BlockerDecide` is the exception, and it belongs here on the module's own
+// rule: it carries no verb (the caller supplies `onDecide`, so each surface
+// keeps its own response shape) and everything it does carry is content — which
+// of four things the operator may ask for, and what each of them does. Two
+// copies of that is exactly the drift this module exists to prevent.
 
 import { useEffect, useMemo, useState, useRef } from "react";
 import {
   AtSign,
+  Check,
   ChevronDown,
   ChevronUp,
   CreditCard,
@@ -26,6 +33,7 @@ import {
   Globe,
   HelpCircle,
   KeyRound,
+  Loader2,
   Mail,
   MessageSquare,
   Repeat,
@@ -40,16 +48,25 @@ import {
 
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  blockerEventVerdict,
   GRANT_DURATIONS,
   type ApprovalSummary,
+  type BlockerVerdict,
   type GrantScope,
+  type Verdict,
 } from "@/api/types";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
   approvalAction,
   approvalDeadline,
+  BLOCKER_VERDICTS,
+  blockerVerdictConsequence,
+  blockerVerdictLabel,
   type DeadlineTone,
+  decisionLabel,
   money,
   payloadAge,
   payloadLines,
@@ -200,6 +217,145 @@ export function blockerFields(a: ApprovalSummary): {
     ? groupKey.slice("connection:".length)
     : undefined;
   return { reason: str(payload.reason), needed: str(payload.needed), connection };
+}
+
+/**
+ * A parked blocker's four controls (#2028).
+ *
+ * A blocker is a question, not a call waiting to be authorised, and the host
+ * has always taken four answers to one: run the step again, run it again with
+ * an answer, move past it, or stop the run. Approve/Decline could only reach
+ * two of them — approve became a retry and decline a cancel — so skip and amend
+ * were unreachable from this page whatever the operator meant.
+ *
+ * Skip and cancel are opposite outcomes sitting next to each other, so they are
+ * separated three ways at once: different words, different weight, and a line
+ * each saying what actually happens. The consequence lines come from
+ * `lib/language` rather than this file so the same sentence reaches the
+ * confirmation toast the click produces.
+ */
+export function BlockerDecide({
+  approval: a,
+  askerNames,
+  now,
+  deciding,
+  onDecide,
+}: {
+  approval: ApprovalSummary;
+  askerNames: Map<string, string>;
+  now: number;
+  deciding: boolean;
+  onDecide: (
+    verdict: Verdict,
+    scope: GrantScope,
+    blocker?: { verdict: BlockerVerdict; answer?: string },
+  ) => void;
+}) {
+  const [answering, setAnswering] = useState(false);
+  const [answer, setAnswer] = useState("");
+  const [pendingVerdict, setPendingVerdict] = useState<BlockerVerdict | null>(null);
+  const once: GrantScope = { kind: "once" };
+  const send = (verdict: BlockerVerdict, words?: string) => {
+    setPendingVerdict(verdict);
+    onDecide(blockerEventVerdict(verdict), once, { verdict, answer: words });
+  };
+  // `deciding` covers the whole card, not which of the four verdicts it is
+  // for — clear the local pick once the parent says nothing is in flight
+  // any more, on both the resolved and the rejected path.
+  useEffect(() => {
+    if (!deciding) setPendingVerdict(null);
+  }, [deciding]);
+
+  return (
+    <div data-testid="blocker-decide" className="flex w-full flex-col gap-3">
+      <ul className="space-y-0.5 text-xs text-muted-foreground">
+        {BLOCKER_VERDICTS.map((verdict) => (
+          <li key={verdict}>
+            <span className="font-medium text-foreground">
+              {blockerVerdictLabel(verdict).replace("\u2026", "")}
+            </span>{" "}
+            {blockerVerdictConsequence(verdict, a.blocker_step_kind)}
+          </li>
+        ))}
+      </ul>
+      {answering && (
+        <div className="flex flex-col gap-2">
+          <Textarea
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+            placeholder="What the step needs to know…"
+            aria-label={`Answer: ${decisionLabel(a, askerNames, now)}`}
+            className="min-h-20 text-sm"
+            autoFocus
+          />
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              // Blank is refused by the host rather than downgraded to a retry,
+              // so the control must not offer to send one.
+              disabled={deciding || answer.trim().length === 0}
+              aria-label={`Send this answer: ${decisionLabel(a, askerNames, now)}`}
+              onClick={() => send("amend", answer)}
+            >
+              {deciding && pendingVerdict === "amend" ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : null}{" "}
+              Send answer
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button
+          variant="destructive"
+          size="sm"
+          aria-label={`Cancel run: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("cancel", a.blocker_step_kind)}`}
+          disabled={deciding}
+          onClick={() => send("cancel")}
+        >
+          {deciding && pendingVerdict === "cancel" ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : null}{" "}
+          {blockerVerdictLabel("cancel")}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          aria-label={`Skip this step: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("skip", a.blocker_step_kind)}`}
+          disabled={deciding}
+          onClick={() => send("skip")}
+        >
+          {deciding && pendingVerdict === "skip" ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : null}{" "}
+          {blockerVerdictLabel("skip")}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          aria-pressed={answering}
+          aria-label={`Answer this question: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("amend", a.blocker_step_kind)}`}
+          disabled={deciding}
+          onClick={() => setAnswering((open) => !open)}
+        >
+          {blockerVerdictLabel("amend")}
+        </Button>
+        <Button
+          size="sm"
+          aria-label={`Retry this step: ${decisionLabel(a, askerNames, now)} — ${blockerVerdictConsequence("retry", a.blocker_step_kind)}`}
+          disabled={deciding}
+          onClick={() => send("retry")}
+        >
+          {deciding && pendingVerdict === "retry" ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Check className="size-4" />
+          )}{" "}
+          {blockerVerdictLabel("retry")}
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 /** The glyph for an effect kind; a question for a blocker, a shield for the unknown. */

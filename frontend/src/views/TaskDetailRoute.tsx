@@ -22,7 +22,7 @@
 import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
+import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import {
   readTaskFocus,
   taskTabHref,
@@ -61,7 +61,7 @@ export function TaskDetailRoute({
   deciding?: ReadonlyMap<string, Verdict>;
   decided?: Readonly<Record<string, DecidedApproval>>;
   failed?: Record<string, string>;
-  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+  onDecide?: DecideApproval;
   /** The shell's host thread → Room channel map, which places this card's origin. */
   chatChannelByThread?: Readonly<Record<string, string>>;
   /** Opens the Room channel this card's conversation lives on (issue #246). */

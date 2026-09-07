@@ -1,0 +1,11 @@
+{
+  "$comment": "This company's whole work environment is one MCP server. The `vending` entry below is the hosted deployment of scripts/vending/mcp_server.py and ships DISABLED with an authSecret, because a shipped template must not send an agent's traffic to a server nobody has provisioned. For a LOCAL run, do not enable this entry — run the simulator on loopback and register it at runtime, which is the only layer where an http:// endpoint is accepted. scripts/vending-sim.py does exactly that.",
+  "mcpServers": {
+    "vending": {
+      "url": "https://vending-ops.northgatevending.example/mcp",
+      "description": "The vending operation itself: fleet telemetry, warehouse and lead times, margin, host clients, incidents and the market feed, plus the writes that change any of it (restock, service, order, price, renegotiate). Every read an agent makes and every change it causes is a tool call here.",
+      "enabled": false,
+      "authSecret": "mcp/vending/auth"
+    }
+  }
+}
