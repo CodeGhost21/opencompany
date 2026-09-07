@@ -635,6 +635,32 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
+        // Codex review finding on PR #2140 (`3951723394`): `ensure_accepting`
+        // (or `ensure_not_emergency_stopped` for a continuation) is checked by
+        // the caller before this lock is even requested, and that wait is
+        // unbounded — "behind a busy company, an unbounded time later" per this
+        // function's own doc above. A stop engaged while a cycle queues behind
+        // this lock must still catch it once the lock is actually held, or a
+        // queued request starts a turn after the switch was pulled. Checked
+        // before the journal is touched, so a refusal here leaves nothing
+        // claimed and nothing to unwind.
+        if let Err(err) = self.rt.ensure_not_emergency_stopped() {
+            if let Err(finish_err) = self
+                .rt
+                .journal
+                .record_cycle_finished(&cycle_id, Some(err.to_string()))
+                .await
+            {
+                tracing::warn!(
+                    company = %self.rt.id,
+                    cycle = %cycle_id,
+                    %finish_err,
+                    "could not journal a cycle finish for a stop-refused cycle"
+                );
+            }
+            drop(guard);
+            return Err(err);
+        }
         let mut claimed: Vec<ApprovalContinuation> = Vec::new();
         for continuation in continuation_claims {
             if let Err(error) = self
@@ -7790,6 +7816,75 @@ members = ["writer"]
         assert!(
             rt.journal.open_cycles().is_empty(),
             "the bracket closes when the cycle ends"
+        );
+    }
+
+    /// Codex review finding on PR #2140 (`3951723394`): `ensure_accepting` is
+    /// checked by the caller *before* this bracket even requests the lock, and
+    /// that wait is unbounded behind a busy company. A cycle that queued before
+    /// the emergency stop was engaged, but only reaches the front of the lock
+    /// after, must still be refused — otherwise the stop's own "halts
+    /// admission" promise has a hole exactly the size of that queue.
+    ///
+    /// Reuses `a_cycles_bracket_opens_before_the_serial_lock`'s setup: holding
+    /// `rt.serial` directly stands in for "another cycle is running", and
+    /// waiting on `journal.open_cycles()` proves the queued cycle is already
+    /// past `ensure_accepting` and stuck on the near side of the lock — the
+    /// exact window this fix closes.
+    #[tokio::test]
+    async fn a_cycle_queued_behind_the_lock_is_refused_once_the_stop_engages_while_it_waits() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let guard = rt.serial.lock().await;
+
+        let spawned = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.run_cycle(Vec::new()).await })
+        };
+
+        let mut open = Vec::new();
+        for _ in 0..200 {
+            open = rt.journal.open_cycles();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            open.len(),
+            1,
+            "the queued cycle must already be bracketed before the stop engages"
+        );
+
+        rt.emergency_pause(
+            Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            },
+            None,
+        )
+        .await
+        .expect("pause");
+
+        drop(guard);
+        let result = spawned.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::OpenCompanyError::EmergencyStop(_))
+            ),
+            "a cycle queued before the stop but reaching the lock after it must still be \
+             refused, got {result:?}"
+        );
+        assert!(
+            rt.journal.open_cycles().is_empty(),
+            "the bracket must still close on a stop-refused cycle"
         );
     }
 
