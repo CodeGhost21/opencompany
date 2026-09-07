@@ -22,6 +22,7 @@ import {
   destinationLabel,
   createWorkflow,
   draftWorkflowFromDescription,
+  getWorkflow,
   listWiredChannels,
   listWorkflowRevisions,
   listWorkflows,
@@ -48,6 +49,13 @@ import {
   hasConfigForm,
 } from "@/lib/workflow-node-config";
 import { draftBanners, draftLanding } from "@/lib/workflow-draft";
+import {
+  createSurface,
+  draftCapabilityGap,
+  draftDecline,
+  nameFromDescription,
+  writeRefusalHandsOverForm,
+} from "@/lib/workflow-create-surface";
 import { isSafeId, slugifyWorkflowId } from "@/lib/workflow-id";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
@@ -738,7 +746,12 @@ export function draftNodes(graph: WorkflowGraph): DraftNode[] {
     const common = {
       id: n.id,
       kind: n.kind,
-      name: n.name,
+      // Defaulted, not asserted. Every row control and `nodeLabel` call
+      // `name.trim()`, so a graph carrying a node with no `name` — which the API
+      // type says cannot happen and a copilot draft has produced — threw during
+      // render and white-screened the whole view. A hand-over is exactly when
+      // that graph arrives, so it must survive one.
+      name: n.name ?? "",
       summary: n.summary ?? "",
       agent: n.agent ?? "",
       schedule: n.schedule ?? "",
@@ -771,6 +784,101 @@ function draftEdges(graph: WorkflowGraph): DraftEdge[] {
   }));
 }
 
+/**
+ * Everything the one box needs to finish a create it already started — the
+ * graph, the corrections that came with it, and the sentence that earned both.
+ *
+ * See `heldDraftRef` for why a failed write keeps this rather than throwing it
+ * away and drafting again.
+ */
+interface HeldDraft {
+  /** The sentence that produced `graph`. The retry is keyed on it. */
+  sentence: string;
+  /** The host's own drafted graph, written verbatim — id included. */
+  graph: WorkflowGraph;
+  /** The host's corrections (issue #813), owed to the canvas on success. */
+  notes: string[];
+}
+
+/**
+ * The graph as the console sent it, in a form two copies of it can be compared
+ * in — with every field the **host** owns stripped out.
+ *
+ * Three things differ between what goes on the wire and what comes back, none
+ * of them a difference in the graph:
+ *
+ * - **Key order.** The console serialises in its own field order and the host
+ *   in serde's, so the objects are re-emitted key-sorted.
+ * - **Node and edge order.** A live host answered the nodes in a different
+ *   order from the one they were posted in, so both lists are sorted by their
+ *   own canonical form rather than zipped positionally.
+ * - **Host-owned fields.** `version` is minted by the write. `enabled` is
+ *   decided by the host — a scheduled workflow is created **paused**, so it
+ *   comes back `false` having been sent otherwise. `editable` is the host's
+ *   judgment about the workflow, not an input.
+ *
+ * Everything else is compared, whole: node `kind`, `agent`, `schedule`,
+ * `config`, approval and retry policy, edge `label`. A partial compare — ids
+ * and endpoints only — passes a workflow that shares this one's shape and
+ * nothing else, which is the adoption {@link isPreparedGraph} exists to refuse.
+ */
+function comparableGraph(graph: WorkflowGraph): string {
+  // `undefined` members are dropped, matching what `JSON.stringify` actually
+  // puts on the wire — so a field the console omitted and one the host did not
+  // send back are the same absence rather than a difference.
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      const src = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(src).sort()) {
+        if (src[key] === undefined) continue;
+        out[key] = canonical(src[key]);
+      }
+      return out;
+    }
+    return value;
+  };
+  const byCanonicalForm = (a: unknown, b: unknown) => {
+    const [x, y] = [JSON.stringify(canonical(a)), JSON.stringify(canonical(b))];
+    return x < y ? -1 : x > y ? 1 : 0;
+  };
+  // Destructured off and never read: `noUnusedLocals` exempts the siblings of
+  // an object rest element, which is exactly what this is doing.
+  const { version, enabled, editable, ...sent } = graph;
+  return JSON.stringify(
+    canonical({
+      ...sent,
+      name: sent.name.trim(),
+      description: (sent.description ?? "").trim(),
+      nodes: [...sent.nodes].sort(byCanonicalForm),
+      edges: [...sent.edges].sort(byCanonicalForm),
+    }),
+  );
+}
+
+/**
+ * Whether a saved graph is the one this dialog prepared, rather than a
+ * different workflow that merely owns the same id.
+ *
+ * The reconcile read after an ambiguous write asks "did my create land?", and
+ * an id alone cannot answer it. The write may have been refused with a `409`
+ * whose response was then mangled by the same hop that ate the success — the
+ * host wrote nothing, the id belongs to something else, and adopting what comes
+ * back would take the operator to a workflow they did not create and pin this
+ * draft's corrections to it.
+ *
+ * So the whole graph is compared, not a fingerprint of it: see
+ * {@link comparableGraph} for what is normalised away and why nothing else is.
+ *
+ * The failure direction is the safe one, which is what makes a strict compare
+ * the right call here: a false "not ours" hands over the form with a `409` for
+ * a workflow that is in fact the operator's — recoverable, and it names the id.
+ * A false "ours" is the silent adoption this exists to stop.
+ */
+function isPreparedGraph(saved: WorkflowGraph, prepared: WorkflowGraph): boolean {
+  return comparableGraph(saved) === comparableGraph(prepared);
+}
 
 export function WorkflowCreateDialog({
   client,
@@ -787,8 +895,16 @@ export function WorkflowCreateDialog({
   company: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Called with the stored graph after a create. Create mode only. */
-  onCreated?: (graph: WorkflowGraph) => void;
+  /**
+   * Called with the stored graph after a create. Create mode only.
+   *
+   * `notes` are the host's corrections to a copilot draft — "matched the
+   * teammate you named by role to `qa_engineer`", and so on. On the one-box
+   * path the dialog closes onto the canvas the instant the write lands, so
+   * these have nowhere to be read unless the caller surfaces them there; an
+   * empty array means the draft needed no corrections, or none was drafted.
+   */
+  onCreated?: (graph: WorkflowGraph, notes?: string[]) => void;
   /**
    * The saved graph to edit (issue #259). `null` is create mode. Pass the graph
    * straight from `getWorkflow` — its `version` is what makes the save
@@ -859,6 +975,15 @@ export function WorkflowCreateDialog({
    * fixed there and the form field is read-only.
    */
   const [confirmingId, setConfirmingId] = useState(false);
+  /**
+   * The graph a one-box Create is waiting to confirm the id of (issue #1808).
+   *
+   * `null` on the form path, where the confirm reads the `id`/`name` fields. The
+   * one-box fallback has no fields on screen, so the graph it is about to write
+   * — id included — has to travel with the confirm rather than be read off a
+   * form that is not there.
+   */
+  const [derivedPending, setDerivedPending] = useState<WorkflowGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
@@ -957,6 +1082,51 @@ export function WorkflowCreateDialog({
   // graph handed in via `prefilledDraft`. Read-only — it never blocks Save.
   const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
+  /**
+   * The host's message from a draft that hit a **capability gap** — `not_wired`
+   * (404), `inference_required` or `restart_required` (409). Retires the one-box
+   * dialog for this open and hands over the manual form, which is the same
+   * outcome an `echo` company gets before it has clicked anything. See
+   * {@link draftCapabilityGap}.
+   */
+  const [draftGap, setDraftGap] = useState<string | null>(null);
+  /**
+   * Whether a one-box create was refused by the host.
+   *
+   * The refusal with teeth is a `409` on the minted id or the drafted name: the
+   * host mints ids by slugging and deduping against **saved** workflows, and
+   * nothing reserves one, so two similar descriptions drafted before either is
+   * created mint the same id and the second Create is told to "pick a different
+   * id" — by a dialog with no id field. Every refusal therefore hands the
+   * operator the full form, hydrated with exactly the graph that was refused,
+   * so there is no state the one-box dialog can leave them stuck in.
+   */
+  const [writeRefused, setWriteRefused] = useState(false);
+  /**
+   * A drafted graph whose write failed **ambiguously**, kept so the next Create
+   * settles that write instead of starting a new one.
+   *
+   * Without it the one box was a duplicate-workflow machine on exactly the
+   * failure it was hardened for. A `500`, a `502` or a dropped connection on
+   * `POST …/workflows` leaves the box up with the sentence still in it — the
+   * right call, because the write may not have landed. But the *commit* can
+   * land and only the *response* be lost, and the next Create would then draft
+   * from scratch: a second billed model call, and a host that mints the id by
+   * deduping against the workflows it has SAVED
+   * (`safe_workflow_id`, `src/harness/built_in/workflow_build/tools.rs`) —
+   * which now include the first one. So `weekly-digest` was stored and
+   * `weekly-digest-2` written beside it, permanently, with nothing on screen
+   * that had said anything twice.
+   *
+   * Holding the prepared graph makes the retry answer the open question rather
+   * than re-ask a settled one: it reads the id back first, and lands the
+   * operator on the workflow that already exists.
+   *
+   * Keyed on the **sentence**, so an operator who rewords the box is drafting a
+   * new thing and gets a new draft — which is what they asked for. Cleared with
+   * everything else on a fresh open: this is a fact about one attempt.
+   */
+  const heldDraftRef = useRef<HeldDraft | null>(null);
   const formId = useId();
   /** The fingerprint of the draft as this open hydrated it (issue #1006).
    * Rewritten by the hydration effect below — which is the only place the form
@@ -1010,6 +1180,7 @@ export function WorkflowCreateDialog({
     // Issue #1808: a fresh open (or a re-hydrate) never carries a prior attempt's
     // pending id confirm — the previewed id it named may not be this graph's.
     setConfirmingId(false);
+    setDerivedPending(null);
     // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
     // the previous graph's history. It re-loads on the next expand, and against
     // the freshly-restored body's version token.
@@ -1024,6 +1195,17 @@ export function WorkflowCreateDialog({
     setDraftSummary(null);
     setDraftReason(null);
     setDraftNotes([]);
+    // …and never carries the previous open's reason for showing the manual
+    // form. Both are answers about a request that is over: a capability gap can
+    // have been closed in Settings since, and a refused id says nothing about
+    // the next description. Leaving either latched would silently retire the
+    // one-box dialog for the rest of the session.
+    setDraftGap(null);
+    setWriteRefused(false);
+    // …nor a graph the previous open prepared and failed to write. It is an
+    // answer about one attempt on one sentence; carrying it into a fresh open
+    // would write a graph nobody on this open ever asked for.
+    heldDraftRef.current = null;
     // Issue #840 (PR-3): a copilot-corrected graph handed in hydrates the form
     // directly — nodes/edges/name from the correction, not the description round
     // trip — while `workflow` above still supplies the id + version token the
@@ -1140,6 +1322,69 @@ export function WorkflowCreateDialog({
     };
   }, [open, editing, client, company]);
 
+  // A CLOSED dialog has moved on too (issue #1052 extended). The reset effect
+  // above bumps the epoch on every open, which was enough while a landing draft
+  // only ever wrote to form state — writing to a form nobody is looking at
+  // costs nothing. The one-box path makes the same landing WRITE A WORKFLOW, so
+  // a Cancel pressed during the round trip has to be able to stop it, and a
+  // close that is never followed by a reopen bumps nothing. Both halves are
+  // needed: this one ends the in-flight request's claim on the dialog the
+  // instant it closes.
+  useEffect(() => {
+    if (!open) draftEpochRef.current += 1;
+  }, [open]);
+
+  /**
+   * Whether the copilot is expected to be able to draft for this company, i.e.
+   * which of the two New-workflow dialogs is on screen. Decided in exactly one
+   * place — {@link createSurface} — because the wrong answer here is silent in
+   * one direction: rendering the manual form on a company that CAN draft looks
+   * precisely like the dialog did before this change, so nothing reports it.
+   */
+  // Issue #753: `echo` is the offline brain — there is no model to draft with.
+  // Declared here rather than beside the composer it used to serve, because
+  // `draftUnavailable` below is computed with the surface and reads it.
+  const echoing = cognition === "echo";
+
+  const describing = createSurface({ editing, writeRefused }) === "describe";
+
+  /**
+   * Why the copilot cannot draft here, in the host's own words — `null` when it
+   * can, or when nothing has said otherwise yet.
+   *
+   * This no longer changes which dialog is on screen (see {@link createSurface}
+   * for why it used to). It changes what the dialog *says* and what Create
+   * *does*: the notice above the box tells the operator the copilot cannot draft
+   * this, and Create builds the workflow from their sentence — the same route
+   * "Create it anyway" takes past a decline — instead of a round trip that is
+   * already known to fail.
+   *
+   * `echo` is the case we know before the operator has clicked anything: it is
+   * the offline brain, so there is no model to draft with and no host message to
+   * quote yet. The rest arrive as a capability gap from a draft that was tried.
+   */
+  /**
+   * A copilot decline, classified and worded (see {@link draftDecline}).
+   *
+   * `automatable: false` is one flag over two different events — the copilot's
+   * opinion about the work, and the copilot failing at it — and the one-box
+   * dialog used to render both as advice in the host's own words. For a failure
+   * those words are the internal gate diagnostics, which name `trigger` nodes
+   * and node ids: the exact vocabulary this dialog exists to stop putting in
+   * front of an operator, offered as if it were a considered recommendation.
+   *
+   * Only the one-box branch reads this. The manual form below still shows the
+   * reason verbatim — over there the operator is looking at the nodes it is
+   * talking about.
+   */
+  const decline = draftReason ? draftDecline(draftReason) : null;
+
+  const draftUnavailable =
+    draftGap ??
+    (echoing
+      ? "This company has no model configured, so the copilot can’t draft yet — set one in Settings → Inference."
+      : null);
+
   /**
    * Whether the form holds edits that closing would destroy (issue #1006).
    *
@@ -1150,7 +1395,12 @@ export function WorkflowCreateDialog({
    * replaced — reporting unsaved work that no longer exists.
    */
   const dirty =
-    open && draftFingerprint(id, name, description, nodes, edges) !== pristineRef.current;
+    open &&
+    (draftFingerprint(id, name, description, nodes, edges) !== pristineRef.current ||
+      // On the one-box dialog the sentence IS the work — every other field is
+      // off screen, so the fingerprint above can only ever say "pristine" and
+      // Esc would drop what the operator typed without asking.
+      (describing && copilotPrompt.trim() !== ""));
 
   /** Close the dialog, asking first if that would throw work away (#1006).
    * Every deliberate exit routes through here — Esc, a click outside, Cancel —
@@ -1630,10 +1880,6 @@ export function WorkflowCreateDialog({
     }
   }
 
-  // Issue #753: `echo` is the offline brain — there is no model to draft with, so
-  // the copilot composer is disabled until the check settles onto a real path.
-  const echoing = cognition === "echo";
-
   /** Whether the form holds anything a copilot draft would overwrite. The blank
    * starter — no id/name/description, no edges, one untouched `start` trigger —
    * is NOT dirty, so the first draft hydrates without a confirm; anything the
@@ -1736,6 +1982,10 @@ export function WorkflowCreateDialog({
         setDraftReason(banners.reason);
       }
     } catch (e) {
+      // Issue #1052, the same rule the hydrate above obeys: a rejection that
+      // lands after the dialog was closed and reopened is about contents that
+      // are gone, and its banner would sit over a form it says nothing about.
+      if (draftEpochRef.current !== requestedEpoch) return;
       // A capability gap (404/409) or a network failure — surface it inline; the
       // operator can still author by hand.
       setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
@@ -1776,7 +2026,35 @@ export function WorkflowCreateDialog({
    * conflict handoff live once. The caller supplies only the verb — `create()`
    * posts, the edit branch of `submit()` puts — via `write`.
    */
-  async function runWrite(write: (graph: WorkflowGraph) => Promise<void>) {
+  async function runWrite(
+    write: (graph: WorkflowGraph) => Promise<void>,
+    /**
+     * The graph to write, when the caller already has one. The one-box path
+     * posts the host's own drafted graph **verbatim** rather than round-tripping
+     * it through the form's state: the form is not on screen there, and a field
+     * it has no control for (`ownerDesk`, a node config key added since) would
+     * be silently dropped on the way through — the class of bug #1866/#1937 are
+     * about. Omitted, the graph is assembled from the form as it always was.
+     */
+    prepared?: WorkflowGraph,
+    /**
+     * Called when the host refused the write, before the banner goes up. The
+     * one-box dialog uses it to hand over the full form: there is no id or name
+     * control on screen, so a `409` naming one is otherwise an instruction the
+     * operator cannot follow.
+     */
+    onRefused?: () => void,
+    /**
+     * Called when the write failed and the failure does **not** say whether it
+     * landed — a `500`, a `502`, a dropped connection. The exact complement of
+     * `onRefused`, so a caller cannot be told both or neither.
+     *
+     * The one-box dialog uses it to keep the graph it prepared: the commit can
+     * succeed with only the response lost, and its next Create has to settle
+     * that write rather than draft a second workflow over it.
+     */
+    onUnresolved?: () => void,
+  ) {
     // Set before the first `await` — the caller has already run `validate()`, so
     // a draft the client rejects never latches the guard.
     submittingRef.current = true;
@@ -1789,7 +2067,9 @@ export function WorkflowCreateDialog({
       // dialog's own `onOpenChange`. The operator was locked in the dialog, and
       // the only remaining exit, reloading the page, was the one that lost the
       // edit. Everything that can fail now clears `submitting` on the way out.
-      const assembled = assembleGraph({ id, name, description, ownerDesk, nodes, edges });
+      const assembled: AssembledGraph = prepared
+        ? { ok: true, graph: prepared }
+        : assembleGraph({ id, name, description, ownerDesk, nodes, edges });
       if (!assembled.ok) {
         // `validate()` already passed, so this is the form and the serializer
         // disagreeing — a defect, not something the author did. Say which node
@@ -1808,6 +2088,18 @@ export function WorkflowCreateDialog({
       // graph-level field (`from`/`to`/`workflow_id`), a config key this kind
       // has no control for, or a node that no longer exists — falls through to
       // the banner, so nothing the host said is ever silently dropped.
+      // Before anything is rendered about the refusal: whatever the host ASKED
+      // FOR, the operator needs the controls to act on it. On the one-box dialog
+      // that means the form, hydrated with the graph that was refused.
+      //
+      // Gated, and the gate is the point. This used to be the first statement in
+      // the block, so every failure counted as a refusal — a dropped connection
+      // or a 500 retired the one-box dialog for the rest of the open and left
+      // the operator hand-authoring a graph on a host that would have written
+      // theirs a second later. The hand-over is one-way, so the wrong answer
+      // here is not recoverable by trying again.
+      if (writeRefusalHandsOverForm(e)) onRefused?.();
+      else onUnresolved?.();
       if (e instanceof ApiError && e.problems?.length) {
         const mapped: Record<string, string> = {};
         const leftovers: string[] = [];
@@ -1873,6 +2165,7 @@ export function WorkflowCreateDialog({
       // not linger, or its inert backdrop swallows the next click. A no-op in
       // edit mode, where `confirmingId` is never set.
       setConfirmingId(false);
+      setDerivedPending(null);
     }
   }
 
@@ -1880,13 +2173,361 @@ export function WorkflowCreateDialog({
    * The create write, gated behind the id confirm (issue #1808). The confirm's
    * primary action calls this; the shared guard in {@link runWrite} keeps it
    * single-fire even though it is reachable only after the confirm opens.
+   *
+   * `draftNotes` rides out with the created graph for the same reason the
+   * one-box path sends its own: they are the host's corrections to the graph
+   * being written (issue #813), and the canvas is where they are read. This
+   * used to send nothing, which lost them on the one route that most needs
+   * them — a one-box create the host refused hands over this form carrying the
+   * drafted graph, so the write that eventually succeeds here is the write that
+   * earned those corrections. Empty on a hand-authored graph, which is correct:
+   * nothing corrected it.
    */
   async function create() {
     if (submittingRef.current) return;
     await runWrite(async (graph) => {
       const created = await createWorkflow(client, company, graph);
-      onCreated?.(created);
+      onCreated?.(created, draftNotes);
     });
+  }
+
+  /**
+   * Hand the operator the full form, loaded with exactly the graph that was
+   * about to be written — or that the host just refused.
+   *
+   * **The one-box dialog never dead-ends.** It shows no id, no name and no
+   * nodes, so every refusal it can earn ("pick a different id", "that name is
+   * taken", a per-node `workflow_invalid`) names something the operator has no
+   * control for. Rather than word around that, the fields come back, carrying
+   * the refused graph, and from there it is the dialog it has always been.
+   */
+  function handOverToForm(graph: WorkflowGraph) {
+    // Issue #1053: this id was chosen (minted by the host, or derived from the
+    // sentence), so editing the name must not slug over it.
+    setAuthoredId(graph.id);
+    setName(graph.name);
+    setDescription(graph.description ?? "");
+    setOwnerDesk(graph.ownerDesk);
+    setNodes(draftNodes(graph));
+    setEdges(draftEdges(graph));
+    setWriteRefused(true);
+  }
+
+  /**
+   * The one box's keystroke handler: the sentence, and the answers about it
+   * that the keystroke just invalidated.
+   *
+   * The decline is the one that had teeth. `automatable: false` renders a
+   * banner whose action is **"Create it anyway"** — a bypass the operator is
+   * authorised to press *because the copilot argued against this description*.
+   * The banner did not clear when the box did, so after rewording A into B it
+   * was still on screen, still offering the bypass, and
+   * {@link createAnyway} reads `copilotPrompt` — the CURRENT sentence. One
+   * click then created B, unexamined, on a justification that was only ever
+   * about A. The copilot might have drafted B perfectly well; nobody asked it.
+   *
+   * The draft error goes with it for the ordinary reason: it is an answer about
+   * a sentence that no longer exists.
+   *
+   * A capability gap (`draftGap`) deliberately survives — it is a fact about
+   * the deployment, not about the description, and rewording does not wire a
+   * model into the build. `heldDraftRef` needs no clearing either: it is keyed
+   * on the sentence, so a changed one already fails to match, and a sentence
+   * typed back to what it was should still settle the write it started.
+   */
+  function describeBoxChanged(value: string) {
+    setCopilotPrompt(value);
+    if (draftReason !== null) setDraftReason(null);
+    if (draftError !== null) setDraftError(null);
+  }
+
+  /**
+   * The one-box Create: draft from the sentence, save what came back, land on
+   * the canvas (issue #1110 already takes a create there).
+   *
+   * Review moves **after** the write — the drafted graph is not shown in a form
+   * first, because there is no form. That is the trade the canvas pays for: it
+   * is the editor, the host's `notes` ride out to it through `onCreated`, and a
+   * draft that turns out wrong is three clicks from deleted (Delete → Delete
+   * workflow) rather than three screens from built.
+   */
+  async function describeAndCreate() {
+    const sentence = copilotPrompt.trim();
+    if (!sentence || drafting) return;
+    // A graph this open already prepared, whose write failed without saying
+    // whether it landed. Settle THAT rather than preparing a second one — see
+    // `heldDraftRef` for why a second draft is the expensive wrong answer.
+    if (await settledHeldDraft(sentence)) return;
+    // Nothing to draft with — an `echo` company, or a draft this open already
+    // came back with a capability gap. Take the route "Create it anyway" takes
+    // rather than a request that is known to fail: the sentence becomes the
+    // name and the description, the graph is the blank starter, and the canvas
+    // is where it gets built. The notice above the box has already said exactly
+    // that, so this is what the operator pressed Create expecting.
+    if (draftUnavailable) {
+      await createAnyway();
+      return;
+    }
+    const requestedEpoch = draftEpochRef.current;
+    setDrafting(true);
+    setError(null);
+    setDraftError(null);
+    setDraftSummary(null);
+    setDraftReason(null);
+    setDraftNotes([]);
+    let drafted;
+    try {
+      drafted = await draftWorkflowFromDescription(client, company, sentence);
+    } catch (e) {
+      // Issue #1052 again, and the success path below has always checked it:
+      // a rejection that lands after the dialog closed and reopened belongs to
+      // contents nobody is looking at any more. Writing `draftGap` from one is
+      // not a cosmetic stale banner — it retires drafting for the NEW open, and
+      // the next Create silently takes the `createAnyway()` fallback and builds
+      // an empty canvas for a description the copilot was never asked about.
+      if (draftEpochRef.current !== requestedEpoch) return;
+      // A build that cannot draft at all says so with a code, not with prose.
+      // It retires DRAFTING for this open, not the dialog: the notice above the
+      // box changes to the host's own message, and the next Create builds the
+      // workflow from the sentence. Anything else — a network blip, a 500 — is
+      // about this one attempt and says nothing about the copilot, so it stays
+      // an error and the next Create tries again.
+      const gap = draftCapabilityGap(e);
+      if (gap) setDraftGap(gap);
+      else setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
+      return;
+    } finally {
+      // Only the request that still owns the dialog may clear the spinner.
+      if (draftEpochRef.current === requestedEpoch) setDrafting(false);
+    }
+    // Issue #1052, and it matters far more here than it did: the dialog moving
+    // on used to mean a hydrate landing on a form nobody was looking at. Now it
+    // would mean CREATING A WORKFLOW after the operator pressed Cancel.
+    if (draftEpochRef.current !== requestedEpoch) return;
+    const banners = draftBanners(drafted);
+    if (!(drafted.automatable && drafted.workflow)) {
+      // The copilot judged the work better done once. That is advice, not a
+      // verdict — the reason renders with a "Create it anyway" beside it.
+      setDraftReason(banners.reason);
+      return;
+    }
+    await writePreparedGraph(
+      { sentence, graph: drafted.workflow, notes: banners.notes },
+      false,
+    );
+  }
+
+  /**
+   * Settle a held graph if this sentence is the one that produced it, and say
+   * whether it did.
+   *
+   * Both of the one box's Create routes go through here first — the button in
+   * the footer ({@link describeAndCreate}) and "Create it anyway" on a decline
+   * ({@link createAnyway}) — because either can be the press that follows an
+   * ambiguous write, and each would otherwise start the whole preparation over:
+   * a second model call on one, a second id confirm on the other, and on both a
+   * write that may duplicate a workflow the host already has.
+   *
+   * A confirmed id is not re-confirmed. The operator confirmed this exact id
+   * before the write that failed; asking again would be asking about a decision
+   * they have already made.
+   */
+  async function settledHeldDraft(sentence: string): Promise<boolean> {
+    const held = heldDraftRef.current;
+    if (!held || held.sentence !== sentence) return false;
+    await writePreparedGraph(held, true);
+    return true;
+  }
+
+  /**
+   * Write a graph the one box has prepared — drafted by the copilot, or derived
+   * from the sentence — and remember it if the write fails in a way that does
+   * not say whether it landed.
+   *
+   * `reconcile` asks the host for the id first. It is set only on the retry of
+   * a {@link heldDraftRef} write, where the previous attempt may well have
+   * committed — the read is the difference between landing the operator on the
+   * workflow they already have and writing a second one beside it.
+   */
+  async function writePreparedGraph(draft: HeldDraft, reconcile: boolean) {
+    if (submittingRef.current) return;
+    await runWrite(
+      async (g) => {
+        const answer = reconcile ? await savedWorkflow(g.id) : ({ kind: "absent" } as const);
+        // The read did not answer. Raising it here keeps the graph held — the
+        // failure is a transport one, so `writeRefusalHandsOverForm` leaves the
+        // box up and `onUnresolved` puts the draft back — and the next Create
+        // asks the same question again. Writing blind instead is what produces
+        // the duplicate: see {@link savedWorkflow}.
+        if (answer.kind === "unknown") throw answer.error;
+        const landed = answer.kind === "found" ? answer.graph : null;
+        // A graph under our id that is NOT the one we prepared means the lost
+        // answer was a `409`, not a lost success: the id belongs to something
+        // else, and adopting it would take the operator to a workflow they
+        // never created and hand it this draft's corrections. Raise the refusal
+        // the mangled response was, and let the ordinary hand-over below give
+        // them the id field the message asks them to use.
+        if (landed && !isPreparedGraph(landed, g)) {
+          throw new ApiError(
+            409,
+            "conflict",
+            `A workflow with id \`${g.id}\` already exists. Pick a different id.`,
+            true,
+          );
+        }
+        const created = landed ?? (await createWorkflow(client, company, g));
+        heldDraftRef.current = null;
+        onCreated?.(created, draft.notes);
+      },
+      draft.graph,
+      () => {
+        heldDraftRef.current = null;
+        // The corrections the host made on the way to this graph (issue #813).
+        // The drafted path hands them to the canvas through `onCreated`; a
+        // refusal has no canvas to hand them to yet, so they are put on the
+        // form the operator is being handed instead — and `create()` carries
+        // them out to the canvas when that form's write finally succeeds.
+        // Without this they are dropped on the floor by the one path where the
+        // saved graph still has them.
+        setDraftNotes(draft.notes);
+        handOverToForm(draft.graph);
+      },
+      () => {
+        heldDraftRef.current = draft;
+      },
+    );
+  }
+
+  /**
+   * What the host says is stored under `wid` — and, crucially, whether it
+   * actually answered.
+   *
+   * Three outcomes, not two. The middle one used to be folded into "absent",
+   * which quietly recreated the bug the reconcile exists to prevent: a `404` is
+   * a real answer, but a dropped connection or a `500` is **no answer at all**,
+   * and treating it as absence sends the write out again. If the first write
+   * had in fact committed, that retry earns a definitive `409`, hands over the
+   * form, and instructs the operator to pick a different id — and obeying that
+   * instruction is exactly how a second copy of an already-created workflow
+   * gets made.
+   *
+   * So only a `404` the **host** sent counts as absence. Anything else leaves
+   * the question open, and the caller keeps the prepared graph and asks again.
+   */
+  async function savedWorkflow(
+    wid: string,
+  ): Promise<
+    { kind: "found"; graph: WorkflowGraph } | { kind: "absent" } | { kind: "unknown"; error: unknown }
+  > {
+    try {
+      return { kind: "found", graph: await getWorkflow(client, company, wid) };
+    } catch (e) {
+      // `fromHost` matters as much as the status: a proxy's own 404 (an HTML
+      // error page from a hop that never reached the host) says nothing about
+      // whether the workflow exists — the same distinction #380 exists for, and
+      // the same one `writeRefusalHandsOverForm` turns on a few lines up.
+      if (e instanceof ApiError && e.fromHost && e.status === 404) return { kind: "absent" };
+      return { kind: "unknown", error: e };
+    }
+  }
+
+  /**
+   * Create anyway, over the copilot's decline.
+   *
+   * The copilot returns no graph when it declines, so there is nothing to save
+   * but the operator's own sentence: it becomes the description, its first
+   * clause becomes the name, and the graph is the same single `start` trigger
+   * the blank form has always started from. That is exactly what an operator
+   * gets today by opening this dialog and typing a name, minus the typing.
+   *
+   * A sentence with no letters or digits in it ("🎉🎉") derives no name, and an
+   * empty name derives an empty id — the permanent join key nothing can fix
+   * afterwards. So that case hands over the form to be named rather than
+   * inventing something the operator never saw.
+   *
+   * Everything else stops at the id confirm (#1808) rather than writing here.
+   * The id this mints is permanent and derived from a clause the operator wrote
+   * as prose, and the one-box dialog has no field that would ever show it to
+   * them — which is precisely the silence #1808 exists to break.
+   */
+  async function createAnyway() {
+    if (submittingRef.current) return;
+    const sentence = copilotPrompt.trim();
+    // Reached from the decline banner as well as from Create, so it needs the
+    // same first question: is this press the retry of a write that may already
+    // have landed? If so it is settled here, without re-deriving and without a
+    // second confirm of an id the operator has already confirmed once.
+    if (await settledHeldDraft(sentence)) return;
+    const derivedName = nameFromDescription(sentence);
+    const assembled = assembleGraph({
+      id: slugifyWorkflowId(derivedName),
+      name: derivedName,
+      description: sentence,
+      ownerDesk,
+      nodes: starterNodes(),
+      edges: [],
+    });
+    if (!assembled.ok || !derivedName || !isSafeId(assembled.graph.id)) {
+      // Nothing derivable, or the serializer disagreed: show the fields rather
+      // than a Create that cannot work, carrying the sentence the operator did
+      // type. NOT through `handOverToForm` — that latches the id against
+      // derivation (issue #1053), and here the whole point is that typing a
+      // Name should mint one.
+      setId("");
+      setIdTouched(false);
+      setName(derivedName);
+      setDescription(sentence);
+      setNodes(starterNodes());
+      setEdges([]);
+      setWriteRefused(true);
+      showError("Give this workflow a name — the description alone doesn’t make one.");
+      return;
+    }
+    // Issue #1808, and this is the path that needs it most. The id is a
+    // permanent backend join key, minted here by slugging the operator's first
+    // clause — so on a company with no copilot the one box would otherwise mint
+    // `chase-overdue-invoices-every-friday` from a sentence nobody wrote as a
+    // name, and never show it. The confirm is the whole of #1808's remedy: say
+    // the id once, before it is permanent.
+    //
+    // Only this path. A drafted graph's id is the host's (`safe_workflow_id`),
+    // chosen alongside a graph the operator asked for and reviews on the canvas;
+    // putting an id in front of them there would reinstate the field this
+    // redesign removed, to confirm a decision the console did not make.
+    setDerivedPending(assembled.graph);
+    setConfirmingId(true);
+  }
+
+  /**
+   * The one-box fallback's write, once its id is confirmed.
+   *
+   * Split out from {@link createAnyway} so the confirm sits between deriving the
+   * graph and writing it, and takes the same {@link writePreparedGraph} the
+   * drafted path does — the hand-over on a refusal, and the hold-and-reconcile
+   * on a write that does not say whether it landed.
+   *
+   * It needs that second half as much as the drafted path, for a different
+   * reason. There is no model call to waste here and the id is deterministic, so
+   * a blind retry cannot mint a duplicate on its own — but if the first write
+   * committed and its answer was lost, the retry earns a `409` on the id the
+   * operator just confirmed, and the form then tells them to pick a different
+   * one. Obeying that instruction is how they end up with two copies of a
+   * workflow they successfully created once. The reconcile lands them on it
+   * instead.
+   *
+   * The sentence is taken from the graph's own `description`, which
+   * {@link createAnyway} set to exactly the trimmed sentence — so a box edited
+   * between the confirm opening and being accepted correctly fails to match on
+   * the retry, and derives afresh.
+   *
+   * `notes` is empty and stays so: nothing corrected this graph. It is the
+   * blank starter with the operator's own words on it.
+   */
+  async function createDerived(graph: WorkflowGraph) {
+    await writePreparedGraph(
+      { sentence: (graph.description ?? "").trim(), graph, notes: [] },
+      false,
+    );
   }
 
   async function submit() {
@@ -1900,6 +2541,14 @@ export function WorkflowCreateDialog({
     // the render that built this closure, so two calls in the same tick would
     // both see `false` and the guard would pass twice.
     if (submittingRef.current) return;
+    // The one-box dialog first. `validate()` below speaks entirely about fields
+    // that are not on screen here — its first answer is "Give the workflow an
+    // id.", raised over a dialog whose whole premise is that the operator is
+    // never asked for one.
+    if (describing) {
+      await describeAndCreate();
+      return;
+    }
     const problem = validate();
     if (problem) {
       showError(problem);
@@ -1969,7 +2618,11 @@ export function WorkflowCreateDialog({
           <DialogDescription>
             {editing
               ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
-              : "Describe it and let the copilot draft it, or define the graph by hand — nodes, then how they connect."}
+              : describing
+                ? draftUnavailable
+                  ? "Say what it should do in a sentence. It opens on the canvas, ready to build."
+                  : "Say what it should do in a sentence. The copilot builds the graph and opens it on the canvas."
+                : "Describe it and let the copilot draft it, or define the graph by hand — nodes, then how they connect."}
           </DialogDescription>
         </DialogHeader>
 
@@ -2024,11 +2677,92 @@ export function WorkflowCreateDialog({
           </div>
         )}
 
+        {/* The one-box dialog — every create, on every company and every build.
+            A sentence, and the Create button in the footer. Name, Workflow ID,
+            Description, Nodes and Connections are not rendered: the host mints
+            the id, the copilot writes the rest where it can, and the canvas is
+            where a graph is actually edited. Where it cannot, the notice below
+            says so and Create starts the workflow from the sentence — the box
+            is the dialog either way. */}
+        {!editing && describing && (
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+            <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
+              <Sparkles className="size-4" />
+              Describe the workflow
+            </Label>
+            <Textarea
+              id={`${formId}-copilot`}
+              rows={4}
+              value={copilotPrompt}
+              onChange={(e) => describeBoxChanged(e.target.value)}
+              placeholder="e.g. Every Monday morning, have the writer draft the weekly digest and email it to the team."
+              disabled={drafting || submitting}
+              data-testid="workflow-describe-box"
+            />
+            {/* What Create will actually do, said before it is pressed. The
+                copilot's availability changes this sentence and nothing else on
+                screen — never which controls the operator is looking at. */}
+            {draftUnavailable ? (
+              <Alert data-testid="workflow-draft-unavailable">
+                <AlertDescription>
+                  {draftUnavailable} Create still works — it names the workflow
+                  from your description and opens it on an empty canvas, ready to
+                  build.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <p className="text-2xs leading-snug text-muted-foreground">
+                The copilot drafts the graph, names it, and opens it on the canvas —
+                rename it, rewire it or delete it from there.
+              </p>
+            )}
+            {/* Nothing was drafted, and WHY decides what this says. A judgment
+                is advice — the copilot's own words, and an operator who
+                disagrees gets a workflow anyway rather than an argument. A
+                failure is not advice, so it is not dressed as any: it says the
+                copilot did not manage it, in our words rather than in the
+                gates' node-and-trigger vocabulary, and the action beside it
+                offers the canvas instead of pretending to overrule an opinion
+                nobody expressed. */}
+            {decline && (
+              <Alert
+                data-testid="workflow-draft-declined"
+                data-decline-kind={decline.kind}
+              >
+                <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+                  <span>{decline.message}</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void createAnyway()}
+                    disabled={submitting || drafting}
+                    data-testid="workflow-create-anyway"
+                  >
+                    {decline.action}
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+            {draftError && (
+              <Alert variant="destructive">
+                <AlertDescription>{draftError}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
+
         {/* Issue #753: the create-time copilot. Create mode only — an edit
             already has a graph. It drafts a graph from a sentence and hydrates
             the form below with it; the operator reviews and edits in that form,
-            then presses Create as usual. Nothing is saved by drafting. */}
-        {!editing && (
+            then presses Create as usual. Nothing is saved by drafting.
+
+            One thing reaches this now: a create the host REFUSED. The refusal
+            names an id or a node, so the fields have to be on screen to obey it
+            — and once they are, this is the dialog it has always been.
+            Deliberately unchanged, so there is no second implementation of the
+            graph editor to keep in step. */}
+        {!editing && !describing && (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
               <Sparkles className="size-4" />
@@ -2111,6 +2845,14 @@ export function WorkflowCreateDialog({
           `display: contents` keeps it out of the layout — the grids below still
           see their own children.
         */}
+        {/* NOT rendered on the one-box dialog — not merely hidden. `hidden`
+            would be a no-op here anyway (`display: contents` from the class
+            outranks the UA `[hidden]` rule), and an off-screen-but-present
+            control is exactly the failure this redesign is about: the operator
+            was being told to "Give the workflow an id." by a field they were
+            never shown. Unmounting costs nothing — every value lives in state
+            above, so a hand-over puts the fields back with their contents. */}
+        {!describing && (
         <fieldset disabled={submitting} className="contents">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-2">
@@ -2264,6 +3006,7 @@ export function WorkflowCreateDialog({
             </div>
           </div>
         </fieldset>
+        )}
 
         {/* The host's early verdict (issue #1074). Rendered only while it still
             describes the graph on screen, and only when the submit-time banner
@@ -2273,7 +3016,9 @@ export function WorkflowCreateDialog({
             author mid-edit must not be interrupted by it. `unavailable` and
             `asking` render nothing at all: "we could not ask" is not a verdict
             on the graph, and a spinner on every pause is noise. */}
-        {!error && preflightIsCurrent(preflight, preflightKey ?? "") && (
+        {/* …and never on the one-box dialog, which has no graph on screen for a
+            verdict to be about. */}
+        {!describing && !error && preflightIsCurrent(preflight, preflightKey ?? "") && (
           <>
             {preflight.status === "refused" && (
               <div role="status" aria-live="polite" data-testid="preflight-refused">
@@ -2398,19 +3143,29 @@ export function WorkflowCreateDialog({
           <Button variant="ghost" onClick={requestClose} disabled={submitting}>
             Cancel
           </Button>
+          {/* On the one-box dialog this button is the whole interaction: it
+              drafts, it saves, and it lands on the canvas. It reports the two
+              phases separately — "Drafting…" is seconds of model call, and an
+              operator who is told "Creating…" for that long reasonably wonders
+              what is being created. Dead with an empty box, because there is
+              nothing to draft from. */}
           <Button
             onClick={() => void submit()}
-            disabled={submitting}
+            disabled={submitting || (describing && (drafting || !copilotPrompt.trim()))}
             data-testid="workflow-dialog-submit"
           >
-            {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+            {(submitting || (describing && drafting)) && (
+              <Loader2 className="mr-1.5 size-4 animate-spin" />
+            )}
             {editing
               ? submitting
                 ? "Saving…"
                 : "Save changes"
               : submitting
                 ? "Creating…"
-                : "Create workflow"}
+                : describing && drafting
+                  ? "Drafting…"
+                  : "Create workflow"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -2427,7 +3182,10 @@ export function WorkflowCreateDialog({
           onOpenChange={(o) => {
             // Opening is driven by `submit()`; only react to a dismiss — Esc, an
             // outside click, or the Close primitive behind Back/Create.
-            if (!o) setConfirmingId(false);
+            if (!o) {
+              setConfirmingId(false);
+              setDerivedPending(null);
+            }
           }}
         >
           <AlertDialogContent data-testid="workflow-id-confirm">
@@ -2439,20 +3197,28 @@ export function WorkflowCreateDialog({
               </AlertDialogDescription>
             </AlertDialogHeader>
             <div className="grid gap-1 rounded-md border bg-muted/40 p-3 text-center">
-              {name.trim() && (
-                <span className="text-xs text-muted-foreground">{name.trim()}</span>
+              {/* The one-box fallback confirms the graph it derived, not the
+                  form: there is no form on screen there, and its fields hold
+                  whatever the last hand-over left in them. */}
+              {(derivedPending?.name ?? name).trim() && (
+                <span className="text-xs text-muted-foreground">
+                  {(derivedPending?.name ?? name).trim()}
+                </span>
               )}
               <code
                 data-testid="workflow-id-confirm-value"
                 className="font-mono text-lg font-semibold break-all"
               >
-                {id.trim()}
+                {(derivedPending?.id ?? id).trim()}
               </code>
             </div>
             <AlertDialogFooter>
               <AlertDialogCancel
                 data-testid="workflow-id-confirm-back"
-                onClick={() => setConfirmingId(false)}
+                onClick={() => {
+                  setConfirmingId(false);
+                  setDerivedPending(null);
+                }}
                 disabled={submitting}
               >
                 Back
@@ -2462,7 +3228,9 @@ export function WorkflowCreateDialog({
                   launched and the confirm dismisses in the same click. */}
               <AlertDialogAction
                 data-testid="workflow-id-confirm-create"
-                onClick={() => void create()}
+                onClick={() =>
+                  void (derivedPending ? createDerived(derivedPending) : create())
+                }
                 disabled={submitting}
               >
                 {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
