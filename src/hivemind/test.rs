@@ -123,13 +123,13 @@ impl EventLog for MemoryLog {
 /// so a test that scripted a flat sequence would be asserting the bid order by
 /// accident and would break for reasons that have nothing to do with what it
 /// meant to check.
-struct ScriptedRunner {
+pub(super) struct ScriptedRunner {
     lines: Mutex<Vec<(String, String)>>,
     asked: Mutex<Vec<(String, String)>>,
 }
 
 impl ScriptedRunner {
-    fn new(lines: &[(&str, &str)]) -> Self {
+    pub(super) fn new(lines: &[(&str, &str)]) -> Self {
         Self {
             lines: Mutex::new(
                 lines
@@ -142,7 +142,7 @@ impl ScriptedRunner {
     }
 
     /// Every `(agent, prompt)` the episode asked for, in order.
-    fn asked(&self) -> Vec<(String, String)> {
+    pub(super) fn asked(&self) -> Vec<(String, String)> {
         self.asked.lock().expect("script poisoned").clone()
     }
 }
@@ -454,7 +454,7 @@ fn the_derived_policy_scales_with_the_room() {
 // The log adapter
 // ---------------------------------------------------------------------------
 
-async fn seed_desk(log: &MemoryLog) -> EventSeq {
+pub(super) async fn seed_desk(log: &MemoryLog) -> EventSeq {
     let company = MemoryLog::company();
     // Rows the desk must not see, interleaved so the adapter has to filter
     // rather than merely truncate.

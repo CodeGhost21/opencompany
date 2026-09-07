@@ -69,6 +69,8 @@ pub mod scope;
 pub mod types;
 
 #[cfg(test)]
+mod aside_test;
+#[cfg(test)]
 mod concurrency_test;
 #[cfg(test)]
 mod deliberation_test;
