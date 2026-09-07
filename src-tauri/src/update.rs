@@ -148,20 +148,52 @@ mod test {
         assert!(is_configured(A_REAL_PUBKEY));
     }
 
+    /// The updater public key this repository ships, installed when desktop
+    /// auto-update landed (`846913029`).
+    ///
+    /// Pinned here on purpose. A minisign **public** key is meant to be
+    /// distributed — it is what a shipped binary verifies a release against,
+    /// and it is inert without the private half, which stays an operator
+    /// secret — so carrying it is not the leak the pre-auto-update version of
+    /// this test was guarding against.
+    const SHIPPED_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxMjNEREM2ODQ3NzA0MkMKUldRc0JIZUV4dDBqY1NnMnBmK21oc0xGdnBhNTl3djVGWWErWFJ0aG1IYkZJTWpVczJZUjBzcGIK";
+
+    /// The config carries the key this repository intends, and no other.
+    ///
+    /// # Why this replaced `the_shipped_placeholder_is_not_configured`
+    ///
+    /// That test asserted `tauri.conf.json` never carries a usable key, back
+    /// when the repository shipped a placeholder and the real key was injected
+    /// at release time. `846913029` installed the key deliberately, and the two
+    /// then contradicted each other: the `Desktop` lane went red on main and,
+    /// because pull-request CI builds the merge commit, on every open PR at
+    /// once — where it reads to each author as though their own branch broke
+    /// the desktop build.
+    ///
+    /// The old test invited exactly this edit: *"If this fails because somebody
+    /// pasted a real public key in, that is fine — but it has to be a
+    /// deliberate edit to this test, not a silent one to the config."* This is
+    /// that edit, and it keeps the half of the guarantee that still applies.
+    /// The point was never "no key"; it was "no *silent* change to the key", so
+    /// the assertion is now equality against a pinned constant. A rotation
+    /// still has to come here and say so, which is what the original was
+    /// protecting.
     #[test]
-    fn the_shipped_placeholder_is_not_configured() {
+    fn the_shipped_updater_key_is_the_intended_one() {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let pubkey = config["plugins"]["updater"]["pubkey"].as_str().unwrap();
 
-        // The config in this repository must never carry a usable key: the
-        // private half is an operator secret. If this fails because somebody
-        // pasted a real public key in, that is fine — but it has to be a
-        // deliberate edit to this test, not a silent one to the config.
         assert!(
-            !is_configured(pubkey),
-            "tauri.conf.json carries a real-looking updater pubkey ({pubkey}); \
-             the repository ships a placeholder and the key belongs in the release",
+            is_configured(pubkey),
+            "tauri.conf.json carries no usable updater pubkey ({pubkey}); \
+             a shipped desktop build cannot verify an update without one",
+        );
+        assert_eq!(
+            pubkey, SHIPPED_PUBKEY,
+            "the updater pubkey in tauri.conf.json changed; rotating it is fine, \
+             but update SHIPPED_PUBKEY in the same commit so the change is on \
+             the record rather than silent",
         );
     }
 
