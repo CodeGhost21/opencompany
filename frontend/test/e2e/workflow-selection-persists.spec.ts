@@ -173,7 +173,20 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
   }
 });
 
-test("a company switch does not reuse the previous company's workflow route (#864)", async ({
+// Skipped, not deleted: #864 is still a real guarantee and this is still the
+// spec for it. What is gone is any way to *reach* the switch.
+// `src/product-scope.ts` sets `COMPANY_SWITCHING_HIDDEN`, which makes
+// `showCompanies` false in `host-switcher.tsx`; with `HOSTS_HIDDEN` alongside it
+// the trigger has nothing to open and falls to its nameplate branch. So
+// `getByTestId("host-switcher").click()` opens no menu and the "Other" item this
+// drives never exists — the 60s timeout it failed with, not a routing regression.
+//
+// Driving the switch another way would assert a path no operator can take.
+// Skipped at the declaration rather than on the flag because `test/e2e` cannot
+// import `@/product-scope`: this project supplies no `@/*` alias, deliberately
+// (see `tsconfig.e2e.json`). When company switching comes back, clear the flag
+// and drop this `.skip`.
+test.skip("a company switch does not reuse the previous company's workflow route (#864)", async ({
   page,
 }) => {
   await mockCompanySwitchApi(page);
