@@ -801,6 +801,64 @@ interface HeldDraft {
 }
 
 /**
+ * The graph as the console sent it, in a form two copies of it can be compared
+ * in — with every field the **host** owns stripped out.
+ *
+ * Three things differ between what goes on the wire and what comes back, none
+ * of them a difference in the graph:
+ *
+ * - **Key order.** The console serialises in its own field order and the host
+ *   in serde's, so the objects are re-emitted key-sorted.
+ * - **Node and edge order.** A live host answered the nodes in a different
+ *   order from the one they were posted in, so both lists are sorted by their
+ *   own canonical form rather than zipped positionally.
+ * - **Host-owned fields.** `version` is minted by the write. `enabled` is
+ *   decided by the host — a scheduled workflow is created **paused**, so it
+ *   comes back `false` having been sent otherwise. `editable` is the host's
+ *   judgment about the workflow, not an input.
+ *
+ * Everything else is compared, whole: node `kind`, `agent`, `schedule`,
+ * `config`, approval and retry policy, edge `label`. A partial compare — ids
+ * and endpoints only — passes a workflow that shares this one's shape and
+ * nothing else, which is the adoption {@link isPreparedGraph} exists to refuse.
+ */
+function comparableGraph(graph: WorkflowGraph): string {
+  // `undefined` members are dropped, matching what `JSON.stringify` actually
+  // puts on the wire — so a field the console omitted and one the host did not
+  // send back are the same absence rather than a difference.
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      const src = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(src).sort()) {
+        if (src[key] === undefined) continue;
+        out[key] = canonical(src[key]);
+      }
+      return out;
+    }
+    return value;
+  };
+  const byCanonicalForm = (a: unknown, b: unknown) => {
+    const [x, y] = [JSON.stringify(canonical(a)), JSON.stringify(canonical(b))];
+    return x < y ? -1 : x > y ? 1 : 0;
+  };
+  const { version, enabled, editable, ...sent } = graph;
+  void version;
+  void enabled;
+  void editable;
+  return JSON.stringify(
+    canonical({
+      ...sent,
+      name: sent.name.trim(),
+      description: (sent.description ?? "").trim(),
+      nodes: [...sent.nodes].sort(byCanonicalForm),
+      edges: [...sent.edges].sort(byCanonicalForm),
+    }),
+  );
+}
+
+/**
  * Whether a saved graph is the one this dialog prepared, rather than a
  * different workflow that merely owns the same id.
  *
@@ -811,33 +869,16 @@ interface HeldDraft {
  * back would take the operator to a workflow they did not create and pin this
  * draft's corrections to it.
  *
- * Compared on the fields the console sends **verbatim** — `createWorkflow`
- * posts the graph as-is and the create route stores it — so a match is not a
- * heuristic. Order is not compared: the host answers nodes in its own order
- * (observed on a live host), so the ids are set-compared rather than zipped.
- * `version` is excluded because the host mints it, which is the one field a
- * successful write is guaranteed to differ on.
+ * So the whole graph is compared, not a fingerprint of it: see
+ * {@link comparableGraph} for what is normalised away and why nothing else is.
  *
- * The failure direction is the safe one: a false "not ours" hands over the form
- * with a `409` for a workflow that is in fact the operator's — recoverable, and
- * it names the id. A false "ours" is the silent adoption this exists to stop.
+ * The failure direction is the safe one, which is what makes a strict compare
+ * the right call here: a false "not ours" hands over the form with a `409` for
+ * a workflow that is in fact the operator's — recoverable, and it names the id.
+ * A false "ours" is the silent adoption this exists to stop.
  */
 function isPreparedGraph(saved: WorkflowGraph, prepared: WorkflowGraph): boolean {
-  // `JSON.stringify` of the sorted arrays rather than a joined string: a
-  // separator character that can appear inside a node id makes two different
-  // graphs compare equal, and these ids come from the host rather than from
-  // `isSafeId`.
-  const ids = (g: WorkflowGraph) =>
-    JSON.stringify(g.nodes.map((n) => n.id).sort());
-  const wires = (g: WorkflowGraph) =>
-    JSON.stringify(g.edges.map((e) => [e.from, e.to]).sort());
-  return (
-    saved.id === prepared.id &&
-    saved.name.trim() === prepared.name.trim() &&
-    (saved.description ?? "").trim() === (prepared.description ?? "").trim() &&
-    ids(saved) === ids(prepared) &&
-    wires(saved) === wires(prepared)
-  );
+  return comparableGraph(saved) === comparableGraph(prepared);
 }
 
 export function WorkflowCreateDialog({

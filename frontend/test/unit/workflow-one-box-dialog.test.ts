@@ -1225,6 +1225,46 @@ describe("the New-workflow dialog reconciling against a stranger's id", () => {
     );
   });
 
+  it("refuses a lookalike that differs only in what the nodes actually do", async () => {
+    // The shape is identical — same id, name, description, node ids, wiring —
+    // and everything that decides what the workflow DOES is different. A
+    // comparator keyed on ids and endpoints passes this, and the operator is
+    // handed a workflow whose steps are somebody else's.
+    const posted: unknown[] = [];
+    const lookalike: WorkflowGraph = {
+      ...DRAFTED,
+      version: "v1",
+      nodes: [
+        { id: "start", kind: "trigger", name: "Start", schedule: "*/5 * * * *" },
+        { id: "write", kind: "agent", name: "Draft it", agent: "someone-else" },
+      ],
+    };
+    await open(
+      stubClient({
+        cognition: "hosted",
+        saved: { "weekly-digest": lookalike },
+        create: failFirstCreate(posted),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(onCreated, "a different schedule and a different agent is a different workflow")
+      .not.toHaveBeenCalled();
+    expect(inDialog(ID_INPUT), "the id field must come back").toBeTruthy();
+    expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
+      "Pick a different id",
+    );
+  });
+
   it("still adopts the graph it did write, ordering and all", async () => {
     // The complement, and the reason the comparison is set-based: a host
     // answers the nodes in its own order, and a zipped compare would reject
