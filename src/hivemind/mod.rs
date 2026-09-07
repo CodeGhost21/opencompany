@@ -41,6 +41,7 @@
 //!
 //! # Modules
 //!
+//! - [`aside`] — two members of a desk comparing notes without the room.
 //! - [`episode`] — the host loop, and the one-function turn seam.
 //! - [`evidential`] — whether a `!support` reaches a fact, and the correction
 //!   it gets when it does not.
@@ -56,6 +57,7 @@
 //!
 //! See `docs/spec/runtime/hivemind.md`.
 
+pub mod aside;
 pub mod episode;
 pub mod evidential;
 pub mod log;
@@ -77,6 +79,7 @@ mod referral_test;
 #[cfg(test)]
 mod test;
 
+pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
 pub use episode::{EpisodeDriver, HiveTurnRunner};
 pub use log::EventLogSessionLog;
 pub use memory::{

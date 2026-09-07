@@ -73,6 +73,19 @@ pub struct HiveConfig {
     /// desk quietly goes on voting.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub moves: BTreeMap<String, Vec<String>>,
+    /// Whether two members of this desk may say something the rest of it
+    /// cannot read, and under what bounds.
+    ///
+    /// Off unless a desk says otherwise, and off for a reason that was
+    /// measured rather than assumed: upstream found a private pairwise check
+    /// buys no answer quality and costs some. What it does buy is bounded
+    /// independence and an auditable record of it — see
+    /// [`aside`](super::aside) for the whole argument.
+    #[serde(
+        default,
+        skip_serializing_if = "super::aside::AsideConfig::is_default"
+    )]
+    pub aside: super::aside::AsideConfig,
     /// Whether support must trace back to a stated fact rather than to another
     /// opinion.
     ///
