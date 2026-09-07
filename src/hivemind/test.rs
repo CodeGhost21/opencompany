@@ -699,7 +699,8 @@ async fn the_blind_round_hides_peers_and_the_prompt_says_so() {
     // message is — it is the task, and it predates the watermark.
     let (_, second) = &asked[1];
     assert!(
-        second.contains("You cannot yet see your peers' positions"),
+        second.contains("You cannot yet see your peers' positions")
+            && second.contains("Put what you *know* on the floor"),
         "{second}"
     );
     assert!(
