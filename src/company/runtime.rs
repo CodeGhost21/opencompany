@@ -3877,6 +3877,23 @@ impl CompanyRuntime {
                 self.retire_blocked_stash(&turn).await;
                 continue;
             }
+            // Codex review finding on PR #2140 (`3952230580`): this whole
+            // function is one `await`-laden loop, so the single guard at the
+            // top only proves the stop was clear when the loop *started* —
+            // another owner can re-engage it while an earlier stash's own
+            // awaits (the journal reads above, `resume_blocked_agent_node`'s
+            // own writes) are still in flight. Rechecked immediately before
+            // the one call in this loop that actually starts real work, the
+            // same placement as `run_bracketed`'s post-lock recheck.
+            if self.ensure_not_emergency_stopped().is_err() {
+                tracing::info!(
+                    company = %self.id,
+                    %turn,
+                    "[approval] the emergency stop re-engaged mid-reconciliation; leaving this \
+                     stash armed instead of resuming it"
+                );
+                continue;
+            }
             let placeholder = ApprovalId::new(format!("boot-reconcile:{turn}"));
             if let Err(error) = self
                 .resume_blocked_agent_node(&placeholder, &turn, Vec::new())
