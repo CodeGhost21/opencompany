@@ -1059,14 +1059,33 @@ function AddMemberDialog({
       : undefined;
   const budgetInvalid = budget.trim() !== "" && budgetUsdDaily === undefined;
 
+  /**
+   * Shut the dialog and clear it, whichever control did the shutting.
+   *
+   * One function because the reset MUST NOT hang off Radix's `onOpenChange`
+   * alone. Cancel used to call the raw `onOpenChange(false)` prop, which closes
+   * the dialog without going through the wrapper that resets — so Escape and
+   * the overlay cleared the form and Cancel did not. Invisible until the dialog
+   * had a second shape: one hand-over to the full form, cancelled rather than
+   * escaped, left `roleUnderivable` true and retired the reduced dialog for the
+   * rest of the page's life, still carrying the abandoned attempt's text. The
+   * `reset` below promises "the hand-over lasts for one open"; only this makes
+   * that true.
+   */
+  function close() {
+    onOpenChange(false);
+    reset();
+  }
+
   function submit() {
     if (describing) {
       const fields = describedTeammateFields(described);
       if (!fields) {
-        // The sentence yielded no role — nothing in it survived the clause
-        // split. Hand over the full form carrying what WAS typed rather than
-        // writing a role-less teammate, which would land the operator on a
-        // detail page whose Save is dead and whose copilot is switched off.
+        // The sentence cannot serve as a role — no letters in it, or too long
+        // to be a job title. Hand over the full form carrying what WAS typed
+        // rather than writing a role-less teammate, which would land the
+        // operator on a detail page whose Save is dead and whose copilot is
+        // switched off — or a truncated one they were never shown.
         setDraft((d) => ({
           ...d,
           name: described.name.trim(),
@@ -1104,8 +1123,8 @@ function AddMemberDialog({
     <Dialog
       open={open}
       onOpenChange={(o) => {
+        if (!o) return close();
         onOpenChange(o);
-        if (!o) reset();
       }}
     >
       <DialogContent className="sm:max-w-md">
@@ -1135,8 +1154,8 @@ function AddMemberDialog({
                 no-model path, where this form is simply what the dialog is. */}
             {roleUnderivable && (
               <p className="text-2xs text-muted-foreground" data-testid="team-add-handover">
-                We couldn&apos;t read a role out of that description, so here are all the
-                fields.
+                We couldn&apos;t read a short role out of that description, so here are
+                all the fields.
               </p>
             )}
             <AgentFields
@@ -1231,7 +1250,7 @@ function AddMemberDialog({
                   {missing.length > 1 ? "are" : "is"} required.
                 </p>
               )}
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
           <Button

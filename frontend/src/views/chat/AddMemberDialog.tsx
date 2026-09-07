@@ -121,14 +121,34 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     setRoleUnderivable(false);
   }
 
+  /**
+   * Shut the dialog and clear it, whichever control did the shutting.
+   *
+   * One function because the reset MUST NOT hang off Radix's `onOpenChange`
+   * alone. Cancel used to call the raw `onOpenChange(false)` prop, which closes
+   * the dialog without going through the wrapper that resets — so Escape and
+   * the overlay cleared the form and Cancel did not. That is invisible until
+   * the dialog has a second shape: one hand-over to the full form, cancelled
+   * rather than escaped, left `roleUnderivable` true and retired the reduced
+   * dialog for the rest of the page's life, still carrying the name and the
+   * sentence from the abandoned attempt. Verified in a browser: Cancel then
+   * reopen showed six fields and the old text; Escape then reopen showed two
+   * empty ones. The module's own promise is "the hand-over lasts for one open",
+   * and only this makes it true.
+   */
+  function close() {
+    onOpenChange(false);
+    reset();
+  }
+
   function submit() {
     if (describing) {
       const fields = describedTeammateFields(described);
       if (!fields) {
-        // Nothing in the sentence survived the clause split. Hand over the full
-        // form carrying what WAS typed, rather than writing a teammate whose
-        // blank role breaks its own system prompt and switches off the copilot
-        // on the page this create was about to open.
+        // The sentence cannot serve as a role — no letters in it, or too long
+        // to be a job title. Hand over the full form carrying what WAS typed,
+        // rather than writing a teammate whose blank role breaks its own system
+        // prompt, or a truncated one nobody was ever shown.
         setName(described.name.trim());
         setDescription(described.description.trim());
         setRoleUnderivable(true);
@@ -147,8 +167,8 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     <Dialog
       open={open}
       onOpenChange={(o) => {
+        if (!o) return close();
         onOpenChange(o);
-        if (!o) reset();
       }}
     >
       <DialogContent className="sm:max-w-md">
@@ -177,8 +197,8 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
                 the no-model path, where this form is simply what the dialog is. */}
             {roleUnderivable && (
               <p className="text-2xs text-muted-foreground" data-testid="chat-add-handover">
-                We couldn&apos;t read a role out of that description, so here are all the
-                fields.
+                We couldn&apos;t read a short role out of that description, so here are
+                all the fields.
               </p>
             )}
             <div className="grid gap-2">
@@ -227,7 +247,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               {describeBlocked}
             </p>
           )}
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
           <Button
