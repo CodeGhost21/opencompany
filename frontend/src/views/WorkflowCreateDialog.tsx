@@ -800,6 +800,46 @@ interface HeldDraft {
   notes: string[];
 }
 
+/**
+ * Whether a saved graph is the one this dialog prepared, rather than a
+ * different workflow that merely owns the same id.
+ *
+ * The reconcile read after an ambiguous write asks "did my create land?", and
+ * an id alone cannot answer it. The write may have been refused with a `409`
+ * whose response was then mangled by the same hop that ate the success — the
+ * host wrote nothing, the id belongs to something else, and adopting what comes
+ * back would take the operator to a workflow they did not create and pin this
+ * draft's corrections to it.
+ *
+ * Compared on the fields the console sends **verbatim** — `createWorkflow`
+ * posts the graph as-is and the create route stores it — so a match is not a
+ * heuristic. Order is not compared: the host answers nodes in its own order
+ * (observed on a live host), so the ids are set-compared rather than zipped.
+ * `version` is excluded because the host mints it, which is the one field a
+ * successful write is guaranteed to differ on.
+ *
+ * The failure direction is the safe one: a false "not ours" hands over the form
+ * with a `409` for a workflow that is in fact the operator's — recoverable, and
+ * it names the id. A false "ours" is the silent adoption this exists to stop.
+ */
+function isPreparedGraph(saved: WorkflowGraph, prepared: WorkflowGraph): boolean {
+  // `JSON.stringify` of the sorted arrays rather than a joined string: a
+  // separator character that can appear inside a node id makes two different
+  // graphs compare equal, and these ids come from the host rather than from
+  // `isSafeId`.
+  const ids = (g: WorkflowGraph) =>
+    JSON.stringify(g.nodes.map((n) => n.id).sort());
+  const wires = (g: WorkflowGraph) =>
+    JSON.stringify(g.edges.map((e) => [e.from, e.to]).sort());
+  return (
+    saved.id === prepared.id &&
+    saved.name.trim() === prepared.name.trim() &&
+    (saved.description ?? "").trim() === (prepared.description ?? "").trim() &&
+    ids(saved) === ids(prepared) &&
+    wires(saved) === wires(prepared)
+  );
+}
+
 export function WorkflowCreateDialog({
   client,
   company,
@@ -2174,14 +2214,10 @@ export function WorkflowCreateDialog({
   async function describeAndCreate() {
     const sentence = copilotPrompt.trim();
     if (!sentence || drafting) return;
-    // A graph this open already drafted, whose write failed without saying
-    // whether it landed. Settle THAT rather than drafting a second one — see
+    // A graph this open already prepared, whose write failed without saying
+    // whether it landed. Settle THAT rather than preparing a second one — see
     // `heldDraftRef` for why a second draft is the expensive wrong answer.
-    const held = heldDraftRef.current;
-    if (held && held.sentence === sentence) {
-      await writeDraftedGraph(held, true);
-      return;
-    }
+    if (await settledHeldDraft(sentence)) return;
     // Nothing to draft with — an `echo` company, or a draft this open already
     // came back with a capability gap. Take the route "Create it anyway" takes
     // rather than a request that is known to fail: the sentence becomes the
@@ -2235,26 +2271,63 @@ export function WorkflowCreateDialog({
       setDraftReason(banners.reason);
       return;
     }
-    await writeDraftedGraph(
+    await writePreparedGraph(
       { sentence, graph: drafted.workflow, notes: banners.notes },
       false,
     );
   }
 
   /**
-   * Write a graph the copilot drafted, and remember it if the write fails in a
-   * way that does not say whether it landed.
+   * Settle a held graph if this sentence is the one that produced it, and say
+   * whether it did.
+   *
+   * Both of the one box's Create routes go through here first — the button in
+   * the footer ({@link describeAndCreate}) and "Create it anyway" on a decline
+   * ({@link createAnyway}) — because either can be the press that follows an
+   * ambiguous write, and each would otherwise start the whole preparation over:
+   * a second model call on one, a second id confirm on the other, and on both a
+   * write that may duplicate a workflow the host already has.
+   *
+   * A confirmed id is not re-confirmed. The operator confirmed this exact id
+   * before the write that failed; asking again would be asking about a decision
+   * they have already made.
+   */
+  async function settledHeldDraft(sentence: string): Promise<boolean> {
+    const held = heldDraftRef.current;
+    if (!held || held.sentence !== sentence) return false;
+    await writePreparedGraph(held, true);
+    return true;
+  }
+
+  /**
+   * Write a graph the one box has prepared — drafted by the copilot, or derived
+   * from the sentence — and remember it if the write fails in a way that does
+   * not say whether it landed.
    *
    * `reconcile` asks the host for the id first. It is set only on the retry of
    * a {@link heldDraftRef} write, where the previous attempt may well have
    * committed — the read is the difference between landing the operator on the
    * workflow they already have and writing a second one beside it.
    */
-  async function writeDraftedGraph(draft: HeldDraft, reconcile: boolean) {
+  async function writePreparedGraph(draft: HeldDraft, reconcile: boolean) {
     if (submittingRef.current) return;
     await runWrite(
       async (g) => {
         const landed = reconcile ? await savedWorkflow(g.id) : null;
+        // A graph under our id that is NOT the one we prepared means the lost
+        // answer was a `409`, not a lost success: the id belongs to something
+        // else, and adopting it would take the operator to a workflow they
+        // never created and hand it this draft's corrections. Raise the refusal
+        // the mangled response was, and let the ordinary hand-over below give
+        // them the id field the message asks them to use.
+        if (landed && !isPreparedGraph(landed, g)) {
+          throw new ApiError(
+            409,
+            "conflict",
+            `A workflow with id \`${g.id}\` already exists. Pick a different id.`,
+            true,
+          );
+        }
         const created = landed ?? (await createWorkflow(client, company, g));
         heldDraftRef.current = null;
         onCreated?.(created, draft.notes);
@@ -2316,6 +2389,11 @@ export function WorkflowCreateDialog({
   async function createAnyway() {
     if (submittingRef.current) return;
     const sentence = copilotPrompt.trim();
+    // Reached from the decline banner as well as from Create, so it needs the
+    // same first question: is this press the retry of a write that may already
+    // have landed? If so it is settled here, without re-deriving and without a
+    // second confirm of an id the operator has already confirmed once.
+    if (await settledHeldDraft(sentence)) return;
     const derivedName = nameFromDescription(sentence);
     const assembled = assembleGraph({
       id: slugifyWorkflowId(derivedName),
@@ -2360,18 +2438,31 @@ export function WorkflowCreateDialog({
    * The one-box fallback's write, once its id is confirmed.
    *
    * Split out from {@link createAnyway} so the confirm sits between deriving the
-   * graph and writing it, and takes the same {@link runWrite} refusal hand-over
-   * the drafted path does.
+   * graph and writing it, and takes the same {@link writePreparedGraph} the
+   * drafted path does — the hand-over on a refusal, and the hold-and-reconcile
+   * on a write that does not say whether it landed.
+   *
+   * It needs that second half as much as the drafted path, for a different
+   * reason. There is no model call to waste here and the id is deterministic, so
+   * a blind retry cannot mint a duplicate on its own — but if the first write
+   * committed and its answer was lost, the retry earns a `409` on the id the
+   * operator just confirmed, and the form then tells them to pick a different
+   * one. Obeying that instruction is how they end up with two copies of a
+   * workflow they successfully created once. The reconcile lands them on it
+   * instead.
+   *
+   * The sentence is taken from the graph's own `description`, which
+   * {@link createAnyway} set to exactly the trimmed sentence — so a box edited
+   * between the confirm opening and being accepted correctly fails to match on
+   * the retry, and derives afresh.
+   *
+   * `notes` is empty and stays so: nothing corrected this graph. It is the
+   * blank starter with the operator's own words on it.
    */
   async function createDerived(graph: WorkflowGraph) {
-    if (submittingRef.current) return;
-    await runWrite(
-      async (g) => {
-        const created = await createWorkflow(client, company, g);
-        onCreated?.(created, []);
-      },
-      graph,
-      () => handOverToForm(graph),
+    await writePreparedGraph(
+      { sentence: (graph.description ?? "").trim(), graph, notes: [] },
+      false,
     );
   }
 

@@ -1161,3 +1161,170 @@ describe("the New-workflow dialog's corrections across a refusal", () => {
     expect(onCreated.mock.calls[0]![1]).toEqual([]);
   });
 });
+
+/**
+ * **A reconcile read answers "is my workflow there?", not "is the id taken?".**
+ *
+ * The two look identical from the console. A write refused with a `409` — the
+ * id belongs to something else, nothing was stored — can have its answer eaten
+ * by the same hop that eats a success, and then the retry's read finds a
+ * workflow under that id and every field of it is somebody else's. Adopting it
+ * takes the operator to a workflow they did not create, closes the dialog as if
+ * they had, and pins this draft's corrections to it.
+ */
+describe("the New-workflow dialog reconciling against a stranger's id", () => {
+  /** A workflow that owns `weekly-digest` and has nothing to do with us. */
+  const STRANGER: WorkflowGraph = {
+    id: "weekly-digest",
+    name: "Weekly digest",
+    description: "Somebody else's weekly digest, built by hand months ago.",
+    version: "v9",
+    nodes: [{ id: "kickoff", kind: "trigger", name: "Kickoff", schedule: "0 6 * * *" }],
+    edges: [],
+  };
+
+  function failFirstCreate(posted: unknown[]) {
+    return (body: unknown) => {
+      posted.push(body);
+      return posted.length === 1
+        ? Promise.reject(new ApiError(502, "http_502", "Bad Gateway"))
+        : Promise.resolve({ ...(body as WorkflowGraph), version: "v1" });
+    };
+  }
+
+  it("hands over the form rather than adopting a workflow it did not write", async () => {
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "hosted",
+        // The id is taken — by this, which is not the graph we prepared.
+        saved: { "weekly-digest": STRANGER },
+        create: failFirstCreate(posted),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // Nothing was adopted and nothing was created…
+    expect(onCreated, "a stranger's workflow is not this operator's create").not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    // …and the refusal the mangled answer actually was is raised, with the id
+    // field the message asks the operator to use.
+    expect(inDialog(ID_INPUT), "the id field must come back").toBeTruthy();
+    expect(inDialog<HTMLInputElement>(ID_INPUT)!.value).toBe("weekly-digest");
+    expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
+      "Pick a different id",
+    );
+  });
+
+  it("still adopts the graph it did write, ordering and all", async () => {
+    // The complement, and the reason the comparison is set-based: a host
+    // answers the nodes in its own order, and a zipped compare would reject
+    // the operator's own workflow and send them to the form for no reason.
+    const posted: unknown[] = [];
+    const reordered: WorkflowGraph = {
+      ...DRAFTED,
+      version: "v1",
+      nodes: [...DRAFTED.nodes].reverse(),
+    };
+    await open(
+      stubClient({
+        cognition: "hosted",
+        saved: { "weekly-digest": reordered },
+        create: failFirstCreate(posted),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(posted, "the write that landed must not be repeated").toHaveLength(1);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0]![0].version).toBe("v1");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+/**
+ * **The sentence-only fallback needs the same reconcile.**
+ *
+ * It has no model call to waste and its id is deterministic, so a blind retry
+ * cannot mint a duplicate on its own. What it does instead is worse to read:
+ * the retry earns a `409` on the id the operator confirmed a moment ago, and
+ * the form then instructs them to pick a different one. Obeying that is how an
+ * operator ends up with two copies of a workflow they created exactly once.
+ */
+describe("the New-workflow dialog's sentence-only fallback after a lost answer", () => {
+  it("lands on the workflow it already wrote, without a second confirm", async () => {
+    const posted: WorkflowGraph[] = [];
+    const reads = { count: 0 };
+    // The host's own store, filled by the write that commits — so this models
+    // "committed, answer lost" without the test having to guess the id the
+    // sentence derives or the graph `createAnyway` assembles.
+    const saved: Record<string, WorkflowGraph> = {};
+    await open(
+      stubClient({
+        cognition: "echo",
+        reads,
+        saved,
+        create: (body) => {
+          const g = body as WorkflowGraph;
+          posted.push(g);
+          if (posted.length === 1) {
+            saved[g.id] = { ...g, version: "v1" };   // the host commits…
+            return Promise.reject(                    // …and the answer is lost
+              new ApiError(502, "http_502", "Bad Gateway"),
+            );
+          }
+          return Promise.resolve({ ...g, version: "v1" });
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Chase the overdue invoices every Friday.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await confirmCreate();
+    expect(posted, "the first write goes out").toHaveLength(1);
+    expect(describeBox(), "a 502 keeps the box").toBeTruthy();
+    const writtenId = posted[0]!.id;
+
+    // The operator presses Create again on the same sentence.
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // No second confirm of an id they already confirmed…
+    expect(
+      document.querySelector('[data-testid="workflow-id-confirm-create"]'),
+      "the id was confirmed before the write that failed",
+    ).toBeNull();
+    // …no second write, and no instruction to pick a different id.
+    expect(reads.count, "the retry asks whether the write landed").toBe(1);
+    expect(posted, "a committed write must not be written again").toHaveLength(1);
+    expect(inDialog(ID_INPUT), "the form must not come back").toBeNull();
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated.mock.calls[0]![0].id).toBe(writtenId);
+    expect(onCreated.mock.calls[0]![0].version).toBe("v1");
+    expect(onCreated.mock.calls[0]![1]).toEqual([]);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
