@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { PrefilledDraft, WorkflowGraph } from "@/api/workflows";
@@ -39,6 +39,8 @@ function savedGraph(): WorkflowGraph {
     edges: [{ from: "start", to: "search" }],
   } as WorkflowGraph;
 }
+
+const validationRequests: { path: string; graph: WorkflowGraph }[] = [];
 
 /** A host that answers every read the dialog makes on open. */
 function stubClient(): OpenCompanyClient {
@@ -157,6 +159,7 @@ async function openCreateForm() {
 }
 
 beforeEach(() => {
+  validationRequests.length = 0;
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
   container = document.createElement("div");
@@ -167,6 +170,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 afterAll(() => {
@@ -293,6 +297,30 @@ describe("deriving stops the moment the id is somebody's (#1053)", () => {
 });
 
 describe("edit mode never derives (#1053)", () => {
+  it("answers the validation debounce while the saved graph is still mounted", async () => {
+    vi.useFakeTimers();
+    await open({ workflow: savedGraph() });
+
+    // Cross the actual debounce while mounted, rather than hoping a busy
+    // worker happens to keep a name/id test alive long enough to reach it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+    });
+
+    expect(validationRequests).toEqual([{
+      path: "/api/companies/acme/workflows/validate",
+      graph: expect.objectContaining({
+        id: "weekly_report",
+        name: "Weekly report",
+        nodes: expect.arrayContaining([
+          expect.objectContaining({ id: "start", kind: "trigger" }),
+          expect.objectContaining({ id: "search", kind: "tool_call" }),
+        ]),
+        edges: [{ from: "start", to: "search" }],
+      }),
+    }]);
+  });
+
   it("leaves the saved id alone however the name is edited", async () => {
     await open({ workflow: savedGraph() });
     expect(field("id").value).toBe("weekly_report");
