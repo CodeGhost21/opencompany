@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use tinyhivemind_hive::{
-    LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
+    Audience, LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
 };
 
 use super::scope::EpisodeScope;
@@ -148,6 +148,7 @@ impl EventLogSessionLog {
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: SessionAuthor::Operator,
                 content: text,
+                audience: Audience::Desk,
             }),
             CompanyEvent::AgentReply {
                 chat_id,
@@ -161,6 +162,7 @@ impl EventLogSessionLog {
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: author_of(&agent_id),
                 content: text,
+                audience: Audience::Desk,
             }),
             _ => None,
         }
