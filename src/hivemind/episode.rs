@@ -898,7 +898,7 @@ impl<'a> EpisodeDriver<'a> {
         // the budget and the settlement debt are per party. A `@#desk` or an
         // `@everyone` addresses nobody privately — the library refuses those
         // too, and this agrees with it rather than inventing a second rule.
-        let addressed: Vec<String> = mentions
+        let mut party: Vec<String> = mentions
             .iter()
             .filter(|mention| !mention.quiet)
             .filter_map(|mention| match &mention.target {
@@ -906,7 +906,6 @@ impl<'a> EpisodeDriver<'a> {
                 _ => None,
             })
             .collect();
-        let mut party: Vec<String> = addressed.clone();
         party.push(agent_id.to_owned());
         party.sort();
         party.dedup();
