@@ -357,14 +357,23 @@ class World:
         triggers: list[dict[str, Any]] = []
         for _ in range(max(1, days)):
             self.day += 1
-            triggers.extend(self._receive_deliveries())
-            triggers.extend(self._draw_demand())
-            triggers.extend(self._spoil())
-            triggers.extend(self._draw_incidents())
-            triggers.extend(self._age_incidents())
-            triggers.extend(self._draw_news())
-            triggers.extend(self._recover(triggers))
-            triggers.extend(self._contract_watch())
+            # Accumulated separately from `triggers` and reset each iteration:
+            # `_recover` asks "did this site have a bad day *today*", and handing
+            # it the whole period's list would let one bad Monday block recovery
+            # for the rest of the fortnight. That also made `advance(21)` and
+            # twenty-one `advance(1)` calls disagree, which would have been a
+            # silent difference between a batch run and the day-at-a-time one
+            # the scenario driver actually makes.
+            today: list[dict[str, Any]] = []
+            today.extend(self._receive_deliveries())
+            today.extend(self._draw_demand())
+            today.extend(self._spoil())
+            today.extend(self._draw_incidents())
+            today.extend(self._age_incidents())
+            today.extend(self._draw_news())
+            today.extend(self._recover(today))
+            today.extend(self._contract_watch())
+            triggers.extend(today)
         return triggers
 
     def _receive_deliveries(self) -> list[dict[str, Any]]:
