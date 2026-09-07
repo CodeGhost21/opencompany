@@ -102,7 +102,11 @@ fn connection(params: &Value) -> Result<&str, String> {
 /// owner string.
 fn owner(auth: &GqlAuth) -> String {
     match auth {
-        GqlAuth::User(user) => format!("user:{}", user.user_id),
+        // `user_id` is only guaranteed stable within `user.company` — two
+        // companies can legitimately mint the same id — so both are part of
+        // the key, or a collision would let a second company's user share a
+        // connection binding with the first's.
+        GqlAuth::User(user) => format!("user:{}:{}", user.company, user.user_id),
         GqlAuth::Platform(claims) => format!("platform:{}", claims.tenant),
     }
 }
@@ -522,6 +526,31 @@ mod test {
     #[test]
     fn an_empty_prompt_is_refused() {
         assert!(prompt_text(&json!({ "prompt": [] })).is_err());
+    }
+
+    #[test]
+    fn owner_keys_a_user_by_company_as_well_as_id() {
+        // `user_id` is only guaranteed unique within a company, so two
+        // companies minting the same id must not collide into one owner.
+        let same_id_in_acme = GqlAuth::User(UserPrincipal {
+            company: CompanyId::new("acme"),
+            user_id: "u1".to_string(),
+            email: "a@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+        let same_id_in_globex = GqlAuth::User(UserPrincipal {
+            company: CompanyId::new("globex"),
+            user_id: "u1".to_string(),
+            email: "b@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: crate::ports::SessionKind::Browser,
+        });
+        assert_ne!(owner(&same_id_in_acme), owner(&same_id_in_globex));
     }
 
     /// A brain that answers a cycle with nothing, so the ACP `prompt` turn
