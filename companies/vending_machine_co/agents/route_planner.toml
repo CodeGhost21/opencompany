@@ -8,7 +8,7 @@ context = ["GOAL.md", "brief.md", "board.md"]
 tools = ["workspace", "docs", "mcp:vending"]
 
 ledgers = [
-    { name = "decisions", access = "record" },
+    { name = "episodes", access = "record" },
     { name = "incidents", access = "read" },
     { name = "clients", access = "read" },
 ]

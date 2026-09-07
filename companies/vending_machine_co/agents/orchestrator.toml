@@ -11,6 +11,7 @@ tools = ["workspace.read", "docs"]
 
 ledgers = [
     { name = "decisions", access = "read" },
+    { name = "episodes", access = "read" },
     { name = "clients", access = "read" },
     { name = "incidents", access = "read" },
     { name = "signals", access = "read" },

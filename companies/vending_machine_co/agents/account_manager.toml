@@ -7,7 +7,7 @@ tools = ["workspace", "docs", "mcp:vending"]
 
 ledgers = [
     { name = "clients", access = "record" },
-    { name = "decisions", access = "record" },
+    { name = "episodes", access = "record" },
     { name = "incidents", access = "read" },
 ]
 

@@ -7,7 +7,7 @@ tools = ["workspace.read", "docs", "mcp:vending"]
 
 ledgers = [
     { name = "incidents", access = "record" },
-    { name = "decisions", access = "read" },
+    { name = "episodes", access = "read" },
 ]
 
 prompt_files = ["prompts/fleet_tech.md"]

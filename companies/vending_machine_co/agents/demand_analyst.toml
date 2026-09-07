@@ -7,7 +7,7 @@ tools = ["workspace.read", "docs", "mcp:vending"]
 
 ledgers = [
     { name = "signals", access = "record" },
-    { name = "decisions", access = "record" },
+    { name = "episodes", access = "record" },
 ]
 
 prompt_files = ["prompts/demand_analyst.md"]
