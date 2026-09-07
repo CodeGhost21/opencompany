@@ -267,9 +267,17 @@ async fn a2a_task(
         SkillCharge::Priced(pay) => match extract_payment(&rpc.params) {
             None => return payment_required(&state, &runtime, pay).await,
             Some(auth) => {
-                if let Err(err) = x402::verify(&auth, state.x402_nonce(), now_secs()) {
-                    return ApiError(err).into_response();
-                }
+                // Checked against the claimed (not yet verified) fields,
+                // before `x402::verify` spends the nonce below: on a
+                // multi-company host, a correctly-signed authorization
+                // submitted against the wrong company's handle — or one
+                // that underpays — would otherwise burn its nonce on this
+                // re-challenge and could never be resubmitted, even against
+                // the right company or with the right amount. A forged
+                // recipient or amount is still caught by `verify`'s
+                // signature check right after, since those fields are part
+                // of what it signs.
+                //
                 // Bind the payment to THIS company: the payer must have signed a
                 // `recipient` equal to our own agent id. Without this a
                 // counterparty could self-sign an authorization paying anyone
@@ -286,6 +294,9 @@ async fn a2a_task(
                 if paid < price {
                     // Underpaid: re-challenge for the correct amount.
                     return payment_required(&state, &runtime, pay).await;
+                }
+                if let Err(err) = x402::verify(&auth, state.x402_nonce(), now_secs()) {
+                    return ApiError(err).into_response();
                 }
                 // Journal the inbound receipt before doing the work.
                 let entry = LedgerEntry {
@@ -796,7 +807,7 @@ mod test {
     async fn paid_skill_with_wrong_recipient_is_rechallenged() {
         let dir = tempfile::tempdir().unwrap();
         let (state, client) = seeded_state(dir.path()).await;
-        let app = router().with_state(state);
+        let app = router().with_state(state.clone());
 
         // A well-formed, correctly-signed authorization that pays SOMEONE ELSE
         // (a self-dealing payer) must not buy priced work from this company.
@@ -829,6 +840,67 @@ mod test {
 
         // Re-challenged with a 402, not served for free.
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        // And the rejection must not have spent the nonce: on a multi-company
+        // host, submitting a valid authorization against the wrong company's
+        // handle would otherwise burn it here and reject the payer's retry
+        // against the right company as a replay, even though it was never
+        // accepted anywhere (codex review).
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_underpaid_authorization_does_not_spend_its_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state.clone());
+
+        let our_id = signer_for(state.home(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        let challenge = X402Challenge {
+            amount: "1.00".into(), // below seo.audit's price
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": {}, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(&client, "acme", &body, now_secs());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer"),
+            "an underpaid authorization must not burn its nonce — the payer \
+             cannot fix the amount without re-signing, but nothing here \
+             should have consumed it either"
+        );
     }
 
     #[tokio::test]
