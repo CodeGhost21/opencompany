@@ -216,6 +216,12 @@ for (const theme of ["light", "dark"] as const) {
     const graph = await page.evaluate(() => {
       const card = document.querySelector('[data-testid="content-surface"]')!;
       const kg = document.querySelector(".oc-kg");
+      // The section rail, if this address is filed under one of the four
+      // sections — `#/company/graph` is, so since #2130 the card holds a 240px
+      // navigation column and then the page. Read from the DOM rather than
+      // assumed: at the widths below `lg` where the rail is a chip row instead,
+      // there is no column here and the page runs to the card's own edge.
+      const rail = card.querySelector("nav[aria-label]");
       const box = card.getBoundingClientRect();
       // The card's INNER box. Its 1px hairline is part of its border box, so the
       // content starts one pixel in on every side — `clientLeft`/`clientTop` are
@@ -231,16 +237,25 @@ for (const theme of ["light", "dark"] as const) {
         const r = el.getBoundingClientRect();
         return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
       };
-      return { inner, kg: rect(kg) };
+      return { inner, kg: rect(kg), rail: rect(rail) };
     });
 
-    // Every page is framed now, the graph included. What matters is that it
-    // takes the height the card actually has rather than the height of the
-    // window: it used to claim `h-svh`, which inside a card shorter than the
-    // viewport lays the graph out taller than the box that clips it and crops
-    // the bottom band — the legend with it.
+    // Every page is framed now, the graph included, and it fills every pixel the
+    // card gives it. What matters is that it takes the height the card actually
+    // has rather than the height of the window: it used to claim `h-svh`, which
+    // inside a card shorter than the viewport lays the graph out taller than the
+    // box that clips it and crops the bottom band — the legend with it.
+    //
+    // Three of the four edges are the card's. The leading edge is the card's too
+    // *unless* the address is filed under a section, in which case the card's
+    // first column is that section's navigation (#2130) and the graph starts
+    // where the rail ends. Asserted against the rail's measured right edge
+    // rather than against a width constant, so a change to the rail's width
+    // does not need this file changed with it — and a graph that ignored the
+    // rail and drew underneath it still fails, which is the spill this test is
+    // for.
     expect(graph.kg).not.toBeNull();
-    expect(graph.kg!.left).toBeCloseTo(graph.inner.left, 0);
+    expect(graph.kg!.left).toBeCloseTo(graph.rail?.right ?? graph.inner.left, 0);
     expect(graph.kg!.top).toBeCloseTo(graph.inner.top, 0);
     expect(graph.kg!.right).toBeCloseTo(graph.inner.right, 0);
     expect(graph.kg!.bottom).toBeCloseTo(graph.inner.bottom, 0);
