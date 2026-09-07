@@ -94,7 +94,13 @@ export function SectionRail({
   // meaningful under a fourth. Following the rail costs one extra tap and keeps
   // the two surfaces saying the same thing.
   const chips = rows.flatMap((row) => [row, ...(row.active ? (row.children ?? []) : [])]);
-  const open = chips.find((row) => row.active);
+  // The DEEPEST active row, not the first. On `#/finances/wallet` both Finance
+  // and Wallet are active and Finance comes first, so a `find` here named the
+  // parent — "What it earns and spends" — on the one surface where the label
+  // alone does not say which page you are on (Codex P2 review). The leaf is
+  // also the row that carries `aria-current`, for the same reason: there is one
+  // current page, and an ancestor of it is not a second one.
+  const current = chips.filter((row) => row.active).at(-1);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -111,11 +117,14 @@ export function SectionRail({
         <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">{label}</div>
         {rows.map((row) => (
           <Fragment key={row.key}>
-            <RailRow row={row} />
+            <RailRow row={row} current={row === current} />
             {/* A row's own sub-pages, only while it is the row you are on.
                 Always-visible would put every leaf of every branch on one rail,
                 which is the wall `ledgers-console-ia.md` Rule 2 rejected. */}
-            {row.active && row.children?.map((child) => <RailRow key={child.key} row={child} nested />)}
+            {row.active &&
+              row.children?.map((child) => (
+                <RailRow key={child.key} row={child} current={child === current} nested />
+              ))}
           </Fragment>
         ))}
       </nav>
@@ -138,7 +147,7 @@ export function SectionRail({
                 type="button"
                 title={row.hint}
                 onClick={row.onSelect}
-                aria-current={row.active ? "page" : undefined}
+                aria-current={row === current ? "page" : undefined}
                 className={cn(
                   "shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors",
                   row.active ? "bg-accent text-accent-foreground" : "text-muted-foreground",
@@ -153,7 +162,7 @@ export function SectionRail({
               so this line is the only gloss it has — and it describes the
               *active* page rather than repeating itself under all of them.
               That is not a second line per row, which is what was removed. */}
-          {open && <p className="px-3 pb-2 text-xs text-muted-foreground">{open.hint}</p>}
+          {current && <p className="px-3 pb-2 text-xs text-muted-foreground">{current.hint}</p>}
         </div>
 
         {children}
@@ -177,20 +186,34 @@ export function SectionRail({
  * the sidebar's rows have, so every selector written as
  * `[data-tour="nav-x"] >> role=button` works against both.
  */
-function RailRow({ row, nested = false }: { row: SectionRailRow; nested?: boolean }) {
+function RailRow({
+  row,
+  current,
+  nested = false,
+}: {
+  row: SectionRailRow;
+  /** The deepest active row — the one page you are actually on. */
+  current: boolean;
+  nested?: boolean;
+}) {
   return (
     <div data-tour={row.anchor}>
       <button
         type="button"
         title={row.hint}
         onClick={row.onSelect}
-        aria-current={row.active ? "page" : undefined}
+        // Exactly one row per rail says `page`, and it is the leaf. Finance is
+        // *active* while you are on `#/finances/wallet` — it is the branch you
+        // are in — but it is not a second current page, and two nodes answering
+        // `aria-current="page"` is a page a screen reader cannot locate you on.
+        // What says "you are in this branch" is that its children are showing.
+        aria-current={current ? "page" : undefined}
         className={cn(
           "flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors",
           // Depth is what the indent says. Every row is one line now, so this is
           // the only thing distinguishing a sub-page from its parent.
           nested && "pl-8",
-          row.active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+          current ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
         )}
       >
         <row.icon className="size-4 shrink-0 text-muted-foreground" />

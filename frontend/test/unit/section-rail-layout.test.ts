@@ -130,15 +130,32 @@ describe("never two rails at once", () => {
     expect(railRows()).not.toContain("Wallet");
   });
 
-  it("marks exactly one row current, at whichever depth it is", () => {
+  it("marks exactly one row current, and it is the leaf", () => {
     render("finances", "invoicing");
     const current = [...container.querySelectorAll('nav [aria-current="page"]')].map((el) =>
       (el.textContent ?? "").trim(),
     );
-    // Finance is the section row you are in AND Invoicing is the page — both
-    // light, which is the same two-register marking the sidebar used to do with
-    // its section row and its child row.
-    expect(current).toEqual(["Finance", "Invoicing"]);
+    // Finance is the branch you are in, not a second page you are on. Two nodes
+    // answering `aria-current="page"` is a page a screen reader cannot locate
+    // you on; what says "you are in this branch" is that its children show.
+    expect(current).toEqual(["Invoicing"]);
+  });
+
+  it("names the page below lg, not the branch above it", () => {
+    // Codex P2 on this PR: the chip row's explanatory line took the FIRST
+    // active row, which on any `#/finances/…` address is Finance — so the one
+    // surface where the label alone does not say which page you are on named
+    // the parent instead. It takes the deepest active row.
+    for (const [sub, hint] of [
+      [null, "Balance, budget and spend from the ledger"],
+      ["invoicing", "What customers owe, through Chargebee"],
+      ["wallet", "The PayPal balance and what moved through it"],
+    ] as const) {
+      render("finances", sub);
+      const chips = container.querySelector(".lg\\:hidden")!;
+      expect(chips.textContent, String(sub)).toContain(hint);
+      expect(chips.textContent, String(sub)).not.toContain("What it earns and spends");
+    }
   });
 });
 
