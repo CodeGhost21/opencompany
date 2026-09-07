@@ -314,6 +314,133 @@ impl ProfileDraft {
     }
 }
 
+/// The longest a designed role may be.
+///
+/// A role is an identity phrase, not a sentence: it is interpolated into
+/// `persona_prompt`'s "You are {name}, the {role} at {company}." and rendered
+/// beside an id in the orchestrator's Team block, both of which read a job
+/// title and neither of which reads a paragraph. Every role shipped in
+/// `companies/` and `globals/` today is under 25 characters, so this is loose
+/// by a factor of two rather than tight.
+///
+/// Enforced host-side on the way out of a design pass, for the same reason
+/// [`ProfileField::clamp`] is: the console must not be the only thing holding
+/// a bound that ends up in a system prompt.
+pub const MAX_ROLE: usize = 60;
+
+/// Brings a designed role inside [`MAX_ROLE`], collapsing whitespace.
+///
+/// Truncation here is a **last** resort and is not how a long answer is
+/// normally handled — [`TeammateDesign::from_parts`] refuses a role that needs
+/// cutting, because a job title with its end sliced off is worse than no job
+/// title: it is stored, shown on every roster card, and read into every prompt,
+/// and nobody was ever asked about it. This exists so the type cannot hold an
+/// unbounded string even if a future caller forgets that rule.
+pub fn clamp_role(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(MAX_ROLE).collect::<String>()
+}
+
+/// A whole teammate as one design pass wrote it (issue #1989).
+///
+/// ## Why a role may be drafted here, when `ProfileField` deliberately excludes one
+///
+/// The exclusion above is real and it stays. Its reason is that **a role is
+/// what delegation grounds on, so a drafted one would change who the company
+/// routes work to** — and that is a statement about *editing an existing
+/// teammate*: work is already routed to it, and a model re-pointing that
+/// without the operator choosing to is the harm.
+///
+/// At **creation** there is nothing to re-route. The teammate does not exist,
+/// no work is addressed to it, no orchestrator has ever seen it. So the
+/// property the exclusion protects is not in play, and the alternative is not a
+/// safe blank: `role` is required by every write path, `persona_prompt`
+/// interpolates it unguarded, and the console's previous answer was to cut the
+/// operator's sentence at sixty characters and store the front half as a job
+/// title. A model that reads the sentence and answers "Wholesale Account
+/// Manager" is strictly better than that, and it is shown to the operator on
+/// the page the create lands on, in an editable field, before it can matter.
+///
+/// The separation is kept at the route, not here: `POST {scope}/team/design`
+/// is creation-only and takes no agent id, while `POST {scope}/team/{id}/draft`
+/// still refuses anything but `description` and `instructions`. There is no way
+/// to reach this type with an existing teammate's id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeammateDesign {
+    /// The job title, bounded by [`MAX_ROLE`].
+    pub role: String,
+    /// The mandate — one line on what this teammate owns.
+    pub description: String,
+    /// The persona appended to this teammate's system prompt.
+    pub instructions: String,
+}
+
+impl TeammateDesign {
+    /// Builds a design from a model's three fields, or `None` when any of them
+    /// is unusable.
+    ///
+    /// All-or-nothing on purpose. A partial design is the failure mode this
+    /// whole change exists to remove: a teammate holding a real mandate and a
+    /// role that is a fragment is exactly what shipped before, and it looks
+    /// finished. If the pass cannot produce all three, the console hands the
+    /// operator the full form and asks — which is honest, and which is the same
+    /// answer a company with no model gets.
+    ///
+    /// A role needing truncation is refused rather than cut, for the reason
+    /// given on [`clamp_role`].
+    pub fn from_parts(role: &str, description: &str, instructions: &str) -> Option<Self> {
+        let role = role.split_whitespace().collect::<Vec<_>>().join(" ");
+        let description = description.trim();
+        let instructions = instructions.trim();
+        if role.is_empty() || description.is_empty() || instructions.is_empty() {
+            return None;
+        }
+        if role.chars().count() > MAX_ROLE {
+            return None;
+        }
+        // Not a job title anyone could read: punctuation, emoji, whitespace.
+        if !role.chars().any(char::is_alphanumeric) {
+            return None;
+        }
+        Some(Self {
+            role,
+            description: clamp_description(description),
+            instructions: cap_persona_instructions(instructions),
+        })
+    }
+}
+
+/// What one design pass produced: a whole teammate, or a reason there is none.
+///
+/// The same two-armed shape as [`ProfileDraft`], and for the same reason — every
+/// unhappy path here is something the operator is shown and can act on, so
+/// there is no error for a caller to handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesignedTeammate {
+    /// The model designed the teammate.
+    Designed(TeammateDesign),
+    /// It could not, and why.
+    Refused(DraftRefusal),
+}
+
+impl DesignedTeammate {
+    /// The design, or `None` when the pass refused.
+    pub fn design(&self) -> Option<&TeammateDesign> {
+        match self {
+            Self::Designed(design) => Some(design),
+            Self::Refused(_) => None,
+        }
+    }
+
+    /// The refusal, or `None` when it designed one.
+    pub fn refusal(&self) -> Option<DraftRefusal> {
+        match self {
+            Self::Designed(_) => None,
+            Self::Refused(reason) => Some(*reason),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +594,105 @@ mod tests {
         assert_eq!(DraftRefusal::NoModel.as_str(), "no_model");
         assert_eq!(DraftRefusal::ModelUnreachable.as_str(), "model_unreachable");
         assert_eq!(DraftRefusal::Unreadable.as_str(), "unreadable");
+    }
+
+    /// A designed teammate is three fields or none (issue #1989).
+    ///
+    /// The all-or-nothing rule, and the reason for it: a teammate holding a
+    /// real mandate and a fragment for a role is what shipped before this, and
+    /// on screen it looks finished.
+    #[test]
+    fn a_design_needs_all_three_fields() {
+        assert!(
+            TeammateDesign::from_parts("Wholesale Account Manager", "Owns stockists.", "Be terse.")
+                .is_some()
+        );
+        for (role, description, instructions) in [
+            ("", "Owns stockists.", "Be terse."),
+            ("  ", "Owns stockists.", "Be terse."),
+            ("Manager", "", "Be terse."),
+            ("Manager", "   ", "Be terse."),
+            ("Manager", "Owns stockists.", ""),
+            ("Manager", "Owns stockists.", "  \n "),
+        ] {
+            assert!(
+                TeammateDesign::from_parts(role, description, instructions).is_none(),
+                "({role:?}, {description:?}, {instructions:?}) must not become a teammate"
+            );
+        }
+    }
+
+    /// A role too long to be a job title is refused, never cut.
+    ///
+    /// This is the whole defect, stated as an invariant. The console used to
+    /// take the operator's sentence, cut it at sixty characters and append `…`,
+    /// and store the result as a permanent job title — read back on every
+    /// roster card, interpolated unguarded into `persona_prompt`, and rendered
+    /// beside the id in the orchestrator's Team block. A truncated role is
+    /// worse than no role: no role is a question somebody gets asked, and a
+    /// truncated one is a record nobody was shown.
+    #[test]
+    fn a_role_that_would_need_cutting_is_refused() {
+        let long = "a".repeat(MAX_ROLE + 1);
+        assert!(TeammateDesign::from_parts(&long, "Owns stockists.", "Be terse.").is_none());
+        // The bound itself is a bound, not a cut point.
+        let exact = "b".repeat(MAX_ROLE);
+        let design = TeammateDesign::from_parts(&exact, "Owns stockists.", "Be terse.")
+            .expect("a role exactly at the bound is fine");
+        assert_eq!(design.role, exact);
+        assert!(!design.role.contains('…'));
+    }
+
+    /// Whitespace inside a role is collapsed and the edges trimmed, so a model
+    /// that answered across two lines does not store a job title with a newline
+    /// in the middle of it — that reaches the persona line verbatim.
+    #[test]
+    fn a_designed_role_is_one_line() {
+        let design =
+            TeammateDesign::from_parts("  Wholesale\n  Account   Manager  ", "Owns.", "Be terse.")
+                .expect("a multi-line answer is still a role");
+        assert_eq!(design.role, "Wholesale Account Manager");
+    }
+
+    /// Punctuation and emoji are not job titles. The console's own guard says
+    /// the same thing, and this is the half that holds when the console is not
+    /// the caller.
+    #[test]
+    fn a_role_with_nothing_readable_in_it_is_refused() {
+        for role in ["🎉🎉", "...", "!?!", "— —"] {
+            assert!(
+                TeammateDesign::from_parts(role, "Owns stockists.", "Be terse.").is_none(),
+                "{role:?} is not a job title"
+            );
+        }
+    }
+
+    /// The mandate and the persona are bounded by the same clamps the fields
+    /// themselves obey, so a design cannot store what an edit could not.
+    ///
+    /// A long *mandate* is clamped rather than refused, unlike a long role, and
+    /// the asymmetry is the point. `clamp_description` cuts on a word boundary
+    /// and marks the cut with `…` — the same treatment the roster designer's
+    /// mandates get — because a mandate is a one-line card summary and a
+    /// shortened one still says what the teammate owns. A role is an identity
+    /// interpolated into a sentence in every prompt that teammate ever runs,
+    /// and half of one is not a shorter job title, it is a broken one.
+    #[test]
+    fn a_design_is_bounded_by_the_fields_it_fills() {
+        let design =
+            TeammateDesign::from_parts("Manager", &"m ".repeat(MAX_DESCRIPTION), &"p".repeat(200))
+                .expect("a long answer is still a design");
+        // The clamp's own ellipsis is the one character over the layout bound.
+        assert!(design.description.chars().count() <= MAX_DESCRIPTION + 1);
+        assert!(design.description.ends_with('…'));
+        assert!(!design.instructions.is_empty());
+    }
+
+    /// `clamp_role` is the belt to `from_parts`' braces: the type cannot hold an
+    /// unbounded string even if a future caller forgets the refusal rule.
+    #[test]
+    fn clamp_role_bounds_and_collapses() {
+        assert_eq!(clamp_role("  Growth   Marketer "), "Growth Marketer");
+        assert_eq!(clamp_role(&"z".repeat(500)).chars().count(), MAX_ROLE);
     }
 }

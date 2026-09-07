@@ -74,6 +74,18 @@ pub fn router() -> Router<AppState> {
             "/team/draft",
             post(super::team_agent::draft_new_profile),
         ))
+        // Issue #1989: designs a WHOLE teammate from a name and a sentence, for
+        // the reduced Add-teammate dialog. A static segment beside `/team/draft`
+        // and for the same reason — nothing serves `POST` on `/team/{agent_id}`,
+        // so this cannot be confused with a teammate whose id is `design`.
+        //
+        // Deliberately id-less: this is the only pass that may write a `role`,
+        // and taking no agent id is what makes it structurally unable to rewrite
+        // an existing teammate's. See `design_teammate`.
+        .merge(scoped(
+            "/team/design",
+            post(super::team_agent::design_teammate),
+        ))
         // Issue #1776: drafting a mandate or persona for one teammate. Its own
         // path rather than another method on `/team/{agent_id}`, because it is
         // not a write to that teammate — it reads the record and returns text,
