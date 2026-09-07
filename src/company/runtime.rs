@@ -7153,7 +7153,20 @@ impl CompanyRuntime {
         // Only now, with the release durably recorded, does enforcement stop.
         // A restart between the append and this line comes up running, which
         // matches what the log says the operator decided.
-        Ok(self.approval_gate.set_emergency(false))
+        let released = self.approval_gate.set_emergency(false);
+        if released {
+            // Codex review finding on PR #2140 (`3951723403`): a blocked node
+            // stranded by `reconcile_stranded_blocked_nodes`'s own emergency-stop
+            // guard while this company was stopped otherwise sat armed until the
+            // next full restart — that function's own doc says "this runs again
+            // on the boot after the release", which was true only because
+            // nothing ran it any sooner. Running it here catches the same case
+            // up on the still-live process, the moment an operator actually
+            // releases the stop, instead of leaving a durable decision
+            // undelivered until somebody restarts the host.
+            self.reconcile_stranded_blocked_nodes().await;
+        }
+        Ok(released)
     }
 
     /// Rejects operation on a company that is not accepting work.
@@ -13563,6 +13576,58 @@ to = "draft"
                 remaining.is_empty(),
                 "the reconciler must prune the checkpoint lineage an unapproved stranded stash \
                  names, not only release the stash: {remaining:?}"
+            );
+        }
+
+        /// Codex review finding on PR #2140 (`3951723403`): a stash stranded by
+        /// [`CompanyRuntime::reconcile_stranded_blocked_nodes`]'s own
+        /// emergency-stop guard while the company was stopped previously stayed
+        /// armed until the next full restart — that function's own doc says
+        /// "this runs again on the boot after the release", true only because
+        /// nothing ran it any sooner. `emergency_resume` now runs it itself, so
+        /// releasing the stop catches this up on the still-live process instead
+        /// of requiring an operator to restart the host.
+        #[tokio::test]
+        async fn emergency_resume_reconciles_a_stranded_stash_without_a_restart() {
+            let home = seed_home();
+            let rt = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_id(CompanyId::new("acme"))
+                .with_seed_dir(home.path().to_path_buf())
+                .build()
+                .await
+                .expect("runtime builds");
+
+            let operator = crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::Operator,
+                id: "owner".into(),
+            };
+            rt.emergency_pause(operator.clone(), None)
+                .await
+                .expect("pause");
+
+            // Stashed but never approved — the same "stranded, unapproved" shape
+            // a crash mid-cleanup leaves behind, here left behind by the stop
+            // instead of a restart.
+            let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+            rt.blocked_nodes.arm_checkpointed(
+                &turn,
+                "reporting",
+                &json!({ "topic": "quarterly numbers" }),
+                &crate::ports::types::StartedBy::from_scheduled(false),
+                Some(RUN_ID),
+                None,
+            );
+            assert!(
+                rt.blocked_nodes.is_armed(&turn),
+                "the stash exists while the company is stopped"
+            );
+
+            rt.emergency_resume(operator, None).await.expect("resume");
+
+            assert!(
+                !rt.blocked_nodes.is_armed(&turn),
+                "releasing the stop must reconcile the stranded stash immediately, without \
+                 waiting for a restart"
             );
         }
     }
