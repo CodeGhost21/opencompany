@@ -172,13 +172,23 @@ describe("ChatView, mounted off its own route", () => {
     // go on showing what it loaded once — in plain sight, because the rail is on
     // screen the whole time.
     expect(chatView).toContain("const [roomVisits, setRoomVisits] = useState(0);");
-    expect(chatView).toContain("if (routeOpen) setRoomVisits((n) => n + 1);");
-    // The roster, the viewer's people, the desks, the Operator channel and the
-    // mention directory: everything the rail and the composer draw. Five, and
-    // deliberately not `reloadDirectory`'s own `useCallback` — that is a handle
+    // A `false → true` transition, and only after the mount. Counting
+    // `routeOpen` being true at all counted the ordinary startup — the console
+    // opens on `#/chat` — so every read ran twice in a row and `loadDesks`
+    // dropped the pane back to its loading state a frame after it arrived
+    // (Codex P2).
+    expect(chatView).toContain("const entered = routeOpen && !wasRouteOpen.current;");
+    expect(chatView).toContain("if (entered) setRoomVisits((n) => n + 1);");
+    // Cognition, the roster, the viewer's people, the desks, the Operator
+    // channel and the mention directory: everything the rail, the composer and
+    // the warning strip draw. Cognition is in the set even though it refreshes
+    // on `visibilitychange` — that event is about the tab, not the route, and an
+    // admin who fixes Inference and comes back has never hidden the tab.
+    //
+    // Deliberately NOT `reloadDirectory`'s own `useCallback`: that is a handle
     // other code calls after it changes something, not a read on a schedule, and
     // re-keying it would only churn its identity.
-    expect(chatView.match(/\}, \[client, company, roomVisits\]\);/g) ?? []).toHaveLength(5);
+    expect(chatView.match(/\}, \[client, company, roomVisits\]\);/g) ?? []).toHaveLength(6);
     expect(chatView).toContain("const reloadDirectory = useCallback");
 
     // On ENTRY, not on `routeOpen` itself: that moves in both directions, so

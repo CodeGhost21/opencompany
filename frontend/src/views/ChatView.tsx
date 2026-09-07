@@ -485,10 +485,26 @@ export function ChatView({
    * And gating the reads on `routeOpen` instead would leave the rail empty on a
    * console loaded straight onto `#/company`, which is the one thing this whole
    * change exists to prevent — the reads still run on mount, wherever that is.
+   *
+   * The cognition read is in the set too, and it was not at first: it already
+   * refreshes on `visibilitychange`, which sounded like enough and is not. That
+   * event is about the *tab*, not the route — an admin who follows the Room
+   * warning to Settings → Inference, configures a provider and comes back has
+   * never hidden the tab, so the stale warning and its echo placeholders would
+   * have stayed (Codex P2 review).
    */
   const [roomVisits, setRoomVisits] = useState(0);
+  const wasRouteOpen = useRef(routeOpen);
   useEffect(() => {
-    if (routeOpen) setRoomVisits((n) => n + 1);
+    // A `false → true` transition, and only after the mount (Codex P2 review).
+    // Bumping on `routeOpen` being true at all counted the ordinary startup —
+    // the console opens on `#/chat` — so every read below ran twice in a row,
+    // and `loadDesks` clears the desk list on its way, dropping the pane back to
+    // its loading state a frame after it had arrived. The mount's own pass is
+    // the first visit; this counts the ones after it.
+    const entered = routeOpen && !wasRouteOpen.current;
+    wasRouteOpen.current = routeOpen;
+    if (entered) setRoomVisits((n) => n + 1);
   }, [routeOpen]);
 
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -665,7 +681,7 @@ export function ChatView({
       live = false;
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [client, company]);
+  }, [client, company, roomVisits]);
 
   /**
    * The host's answer *for the company on screen right now*, or `null` while
