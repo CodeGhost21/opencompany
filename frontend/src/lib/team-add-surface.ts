@@ -108,10 +108,24 @@ export function addTeammateSurface(args: {
    */
   roleUnderivable: boolean;
 }): AddTeammateSurface {
-  // Issue #753: `echo` is the offline brain — there is no model to draft with,
-  // so the reduced dialog would create a teammate nothing could finish. That
-  // company keeps the full form, which is the operator's decision on #1988
-  // applied here: the can't-draft path is hidden, never deleted.
+  // Issue #753: `echo` is the offline brain, and the reduced dialog is a
+  // handoff — it collects a name and a sentence and sends the operator to
+  // `#/team/<id>?edit` for everything else. On `echo` there is nothing at the
+  // other end of that handoff. No draft-a-whole-teammate route exists to fill
+  // the dialog in before the write (see the module header: `draftAgentField`
+  // drafts ONE field, and `name`/`role` are excluded on purpose), and the
+  // detail page's copilot switches itself off on this path outright —
+  // `disabled={saving || cognition === "echo" || !draft.role.trim()}` in
+  // `AgentDetailView.tsx`. Reducing the dialog here would therefore land the
+  // operator on a page whose drafting is dead, having already stopped asking
+  // for the fields that page can no longer write. The full form asks for what
+  // nothing on this path can supply, which is the only honest answer.
+  //
+  // This is NOT the argument #1988 settled, and citing that issue here would be
+  // wrong: its dialog reduced to one box on EVERY company (commit `a318c92ad`,
+  // not an ancestor of this branch), so "the can't-draft path keeps today's
+  // form" is not a decision to inherit. #1988's dialog had a whole-thing draft
+  // route behind it; this one does not. The reason above is this dialog's own.
   if (args.cognition === "echo") return "form";
   if (args.roleUnderivable) return "form";
   return "describe";
