@@ -251,8 +251,10 @@ fn delete_session(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Va
     // Authorize against the session when it exists. A never-existing session,
     // and a connection this caller does not own, both delete silently — ACP
     // says so for the former, and an id is opaque enough that saying "I never
-    // had that" leaks nothing useful either way.
-    if let Some(session) = registry.get(conn, &owner, session_id, crate::ports::now_millis())
+    // had that" leaks nothing useful either way. `peek`, not `get`: deleting
+    // renews nothing, so there is no reason to touch the idle TTL of a
+    // session this call may yet refuse to act on.
+    if let Some(session) = registry.peek(conn, &owner, session_id)
         && authorize_address(state, auth, &session.company).is_some()
     {
         return Err("not authorized for this company".to_string());
@@ -285,18 +287,20 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
         .get("sessionId")
         .and_then(Value::as_str)
         .ok_or_else(|| "`sessionId` is required".to_string())?;
-    let session = state
-        .acp_sessions()
-        .get(
-            connection(params)?,
-            &owner(auth),
-            session_id,
-            crate::ports::now_millis(),
-        )
+    let conn = connection(params)?;
+    let owner = owner(auth);
+    let registry = state.acp_sessions();
+    // `peek`, not `get`: authorization can still refuse this call below, and
+    // renewing the idle TTL ahead of that would let a caller whose access to
+    // this session's company was revoked keep the session's cap slot alive
+    // indefinitely by repeatedly presenting it and losing the check.
+    let session = registry
+        .peek(conn, &owner, session_id)
         .ok_or_else(|| "unknown ACP session".to_string())?;
     if authorize_address(state, auth, &session.company).is_some() {
         return Err("not authorized for this company".to_string());
     }
+    registry.touch(conn, &owner, session_id, crate::ports::now_millis());
     let text = prompt_text(params)?;
     let runtime = state
         .registry()

@@ -134,6 +134,20 @@ pub const MAX_SESSIONS_TOTAL: usize = 8_192;
 /// generous enough to outlast a normal gap between prompts — one working day.
 pub const SESSION_TTL_MILLIS: u64 = 24 * 60 * 60 * 1000;
 
+/// How often [`SessionSweeper`] checks for expired sessions.
+///
+/// Deliberately much shorter than [`SESSION_TTL_MILLIS`]: a session that goes
+/// idle right after one sweep tick is not stale enough for the *next* tick
+/// (a full [`SESSION_TTL_MILLIS`] later) to reclaim either, so sweeping once
+/// per TTL lets a session squat its cap slot for up to twice its own TTL. An
+/// hourly cadence bounds that overshoot to about an hour instead.
+pub const SESSION_SWEEP_INTERVAL_MILLIS: u64 = 60 * 60 * 1000;
+
+const _: () = assert!(
+    SESSION_SWEEP_INTERVAL_MILLIS < SESSION_TTL_MILLIS,
+    "sweeping no more often than the TTL reintroduces the up-to-2x-TTL overshoot this constant exists to bound",
+);
+
 /// Why [`SessionRegistry::open`] refused a `session/new`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenSessionRefusal {
@@ -254,6 +268,47 @@ impl SessionRegistry {
         Some(Arc::clone(&entry.session))
     }
 
+    /// Looks up a session for `owner` without renewing its idle TTL, refusing
+    /// a connection id it does not hold.
+    ///
+    /// For a caller that still has to run `authorize_address` on the
+    /// session's company before it may act on it — the ACP transport's
+    /// `session/delete` and `session/prompt`. Renewing the TTL via [`Self::get`]
+    /// before that check can still refuse the caller would let a tenant whose
+    /// access to one company under it was revoked keep a session's cap slot
+    /// alive indefinitely, by repeatedly presenting it and losing the
+    /// authorization check every time.
+    pub fn peek(&self, connection: &str, owner: &str, id: &str) -> Option<Arc<AcpSession>> {
+        let by_connection = self
+            .by_connection
+            .lock()
+            .expect("session registry poisoned");
+        let conn = by_connection.get(connection)?;
+        if conn.owner != owner {
+            return None;
+        }
+        Some(Arc::clone(&conn.sessions.get(id)?.session))
+    }
+
+    /// Renews a session's idle TTL, once the caller's authorization to act on
+    /// it is already confirmed (typically via a prior [`Self::peek`]).
+    ///
+    /// A silent no-op for a connection or session `owner` does not hold, or
+    /// that vanished between the authorization check and this call — nothing
+    /// here needs a second refusal for a session that already will not run.
+    pub fn touch(&self, connection: &str, owner: &str, id: &str, now_millis: u64) {
+        let mut by_connection = self
+            .by_connection
+            .lock()
+            .expect("session registry poisoned");
+        if let Some(conn) = by_connection.get_mut(connection)
+            && conn.owner == owner
+            && let Some(entry) = conn.sessions.get_mut(id)
+        {
+            entry.last_used_millis = now_millis;
+        }
+    }
+
     /// Every session on a connection `owner` holds, for `session/list`.
     /// `None` when the connection is unknown or belongs to someone else.
     pub fn list(&self, connection: &str, owner: &str) -> Option<Vec<Arc<AcpSession>>> {
@@ -354,7 +409,8 @@ impl SessionSweeper {
         Self { registry }
     }
 
-    /// Runs until `shutdown` is notified, sweeping once per [`SESSION_TTL_MILLIS`].
+    /// Runs until `shutdown` is notified, sweeping every
+    /// [`SESSION_SWEEP_INTERVAL_MILLIS`].
     pub fn spawn(self, shutdown: Arc<Notify>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let notified = shutdown.notified();
@@ -362,7 +418,7 @@ impl SessionSweeper {
             loop {
                 tokio::select! {
                     _ = &mut notified => break,
-                    _ = tokio::time::sleep(Duration::from_millis(SESSION_TTL_MILLIS)) => {
+                    _ = tokio::time::sleep(Duration::from_millis(SESSION_SWEEP_INTERVAL_MILLIS)) => {
                         self.registry.sweep_expired(crate::ports::now_millis());
                     }
                 }
@@ -560,6 +616,60 @@ mod test {
                 .get("conn-a", "alice", "s1", SESSION_TTL_MILLIS)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn peek_does_not_renew_the_idle_ttl() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        // A `peek` at half the TTL — a pre-authorization check — must not
+        // extend the clock the way `get` does.
+        assert!(registry.peek("conn-a", "alice", "s1").is_some());
+        assert_eq!(
+            registry.sweep_expired(SESSION_TTL_MILLIS + 1),
+            1,
+            "peek must not have renewed the session past its original TTL"
+        );
+    }
+
+    #[test]
+    fn peek_refuses_a_connection_or_owner_it_does_not_hold() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        assert!(registry.peek("conn-b", "alice", "s1").is_none());
+        assert!(registry.peek("conn-a", "mallory", "s1").is_none());
+        assert!(registry.peek("conn-a", "alice", "s1").is_some());
+    }
+
+    #[test]
+    fn touch_renews_the_idle_ttl_that_peek_left_alone() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        assert!(registry.peek("conn-a", "alice", "s1").is_some());
+        registry.touch("conn-a", "alice", "s1", SESSION_TTL_MILLIS / 2);
+        assert_eq!(
+            registry.sweep_expired(SESSION_TTL_MILLIS),
+            0,
+            "touch renewed at TTL/2, so a full TTL later it is not yet idle that long"
+        );
+    }
+
+    #[test]
+    fn touch_is_a_silent_no_op_for_a_connection_or_owner_it_does_not_hold() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        // Neither call may panic, and neither may renew alice's session.
+        registry.touch("conn-b", "alice", "s1", SESSION_TTL_MILLIS / 2);
+        registry.touch("conn-a", "mallory", "s1", SESSION_TTL_MILLIS / 2);
+        assert_eq!(registry.sweep_expired(SESSION_TTL_MILLIS + 1), 1);
     }
 
     #[test]
