@@ -65,6 +65,11 @@ interface Stub {
   saved?: Record<string, WorkflowGraph>;
   /** Counts reconcile reads, so "it asked before writing again" is provable. */
   reads?: { count: number };
+  /**
+   * Fails the single-workflow read instead of answering it — the state where
+   * the console cannot tell "not there" from "could not ask".
+   */
+  readFails?: () => unknown;
 }
 
 /** The prefix a single-workflow read sits under. */
@@ -97,6 +102,7 @@ function stubClient(opts: Stub): OpenCompanyClient {
         const wid = decodeURIComponent(path.slice(WORKFLOW_PATH.length));
         if (!PICKER_SUBROUTES.has(wid)) {
           if (opts.reads) opts.reads.count += 1;
+          if (opts.readFails) return Promise.reject(opts.readFails());
           const found = opts.saved?.[wid];
           return found
             ? Promise.resolve(found)
@@ -1297,6 +1303,125 @@ describe("the New-workflow dialog reconciling against a stranger's id", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
     expect(onCreated.mock.calls[0]![0].version).toBe("v1");
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+/**
+ * **A reconcile read that did not answer is not an answer.**
+ *
+ * A `404` says the workflow is not there. A dropped connection or a `500` says
+ * nothing at all, and folding the two together sends the write out again — at
+ * which point a first write that DID commit earns a definitive `409`, the form
+ * comes back, and the operator is told to pick a different id. Obeying that is
+ * how a second copy of an already-created workflow gets made, which is the one
+ * outcome this whole reconcile exists to prevent.
+ */
+describe("the New-workflow dialog when the reconcile read cannot be made", () => {
+  it("keeps the graph and asks again, rather than writing blind", async () => {
+    const posted: unknown[] = [];
+    const reads = { count: 0 };
+    await open(
+      stubClient({
+        cognition: "hosted",
+        reads,
+        // The write committed; its answer was lost; and the network is still
+        // bad enough that the read cannot be made either.
+        saved: { "weekly-digest": { ...DRAFTED, version: "v1" } },
+        readFails: () => new TypeError("Failed to fetch"),
+        create: (body) => {
+          posted.push(body);
+          return Promise.reject(new ApiError(502, "http_502", "Bad Gateway"));
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(reads.count, "it tried to ask").toBe(1);
+    // It did NOT write blind — that write would have 409'd and sent the
+    // operator to the form to pick a different id.
+    expect(posted, "an unreadable reconcile must not become a second write").toHaveLength(1);
+    expect(inDialog(ID_INPUT), "and the form must not come back").toBeNull();
+    expect(describeBox(), "the box stays, with the sentence in it").toBeTruthy();
+    expect(inDialog('[data-testid="create-error"]')!.textContent).toContain("Failed to fetch");
+
+    // And the graph is still held: the next press asks the same question again
+    // rather than starting over with a fresh draft.
+    expect(onCreated).not.toHaveBeenCalled();
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(reads.count, "the next Create re-asks").toBe(2);
+    expect(posted, "still nothing written blind").toHaveLength(1);
+  });
+
+  it("treats a proxy's 404 as unreadable too, not as absence", async () => {
+    // `fromHost` matters as much as the status: an HTML 404 from a hop that
+    // never reached the host says nothing about whether the workflow exists.
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "hosted",
+        saved: { "weekly-digest": { ...DRAFTED, version: "v1" } },
+        readFails: () => new ApiError(404, "http_404", "HTTP 404"),
+        create: (body) => {
+          posted.push(body);
+          return Promise.reject(new ApiError(502, "http_502", "Bad Gateway"));
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(posted, "a hop's 404 is not the host saying it is not there").toHaveLength(1);
+    expect(inDialog(ID_INPUT)).toBeNull();
+  });
+
+  it("still writes when the HOST says the workflow is not there", async () => {
+    // The complement: a real 404 from the host is a real answer, and the write
+    // must go out — otherwise a genuine failure could never be retried at all.
+    const posted: unknown[] = [];
+    await open(
+      stubClient({
+        cognition: "hosted",
+        saved: {},   // a host-origin 404, which is what the stub answers
+        create: (body) => {
+          posted.push(body);
+          return posted.length === 1
+            ? Promise.reject(new ApiError(502, "http_502", "Bad Gateway"))
+            : Promise.resolve({ ...(body as WorkflowGraph), version: "v1" });
+        },
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    expect(posted, "an absent workflow must be written").toHaveLength(2);
+    expect(onCreated).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,4 +1,5 @@
 import { ApiError } from "@/api/types";
+import { utf8ByteLength } from "@/views/chat/mentions";
 
 /**
  * Which of the two New-workflow dialogs is on screen.
@@ -233,6 +234,21 @@ export function draftDecline(reason: string | null | undefined): DraftDecline {
 const NAME_CAP = 60;
 
 /**
+ * The host's own ceiling on a workflow name, in **UTF-8 bytes**.
+ *
+ * `MAX_WORKFLOW_NAME_LEN` (`src/company/workflow_create.rs:183`), checked there
+ * as `draft.name.trim().len() > MAX_WORKFLOW_NAME_LEN` — and Rust's `str::len`
+ * counts bytes, however the message words it ("at most 200 characters").
+ *
+ * {@link NAME_CAP} alone does not imply this. Sixty code points of emoji is 240
+ * bytes, and the refusal it earns is a graph-level `400` with no `problems`, so
+ * it neither hands over the form nor changes on a second press: the description
+ * is simply uncreatable, on the one path that has no copilot to name the
+ * workflow instead.
+ */
+const NAME_BYTE_CAP = 200;
+
+/**
  * A workflow name from the sentence the operator typed — the fallback for the
  * one path that has no copilot draft to take a name from.
  *
@@ -265,24 +281,36 @@ export function nameFromDescription(description: string): string {
   if (!/[\p{L}\p{N}]/u.test(collapsed)) return "";
   // Elided on **code points**, not UTF-16 units — the same rule
   // `titleFromMessage` follows in `lib/chat.ts`, and here it is a correctness
-  // bug rather than a cosmetic one. `slice(0, 60)` cuts between the halves of
-  // an astral character whenever the 60th unit is a high surrogate (59 ASCII
-  // characters then an emoji), and the lone surrogate that leaves is not
-  // representable: `JSON.stringify` emits it as a bare `\ud83d`, and the host
-  // answers `400 Failed to parse the request body as JSON: name: unexpected
-  // end of hex escape` — verified against a running host. On the sentence-only
-  // path that is a description which can never be created, however often
-  // Create is pressed.
+  // bug rather than a cosmetic one. Slicing UTF-16 units cuts between the
+  // halves of an astral character whenever the 60th unit is a high surrogate
+  // (59 ASCII characters then an emoji), and the lone surrogate that leaves is
+  // not representable: `JSON.stringify` emits it as a bare `\ud83d`, and the
+  // host answers `400 Failed to parse the request body as JSON: name:
+  // unexpected end of hex escape` — verified against a running host.
   //
   // Code points rather than grapheme clusters: splitting a ZWJ sequence or
   // orphaning a combining mark leaves a slightly odd-looking name, which is
   // cosmetic on a title the operator renames on the canvas. Splitting a
   // surrogate pair leaves something the wire cannot carry at all.
   const points = Array.from(collapsed);
-  const capped =
-    points.length <= NAME_CAP ? collapsed : `${points.slice(0, NAME_CAP).join("").trimEnd()}…`;
-  // Safe on an astral first character: `charAt(0)` is the lone high surrogate
-  // and `slice(1)` begins with its low half, so the two concatenate back into
-  // the pair. `toUpperCase()` leaves a lone surrogate alone.
-  return capped.charAt(0).toUpperCase() + capped.slice(1);
+  // `charAt(0).toUpperCase()` is safe on an astral first character: it is the
+  // lone high surrogate and `slice(1)` begins with its low half, so the two
+  // concatenate back into the pair, and `toUpperCase()` leaves a lone
+  // surrogate alone. It CAN change the byte length ("ß" uppercases to "SS"),
+  // which is why the byte check below measures the finished name.
+  const build = (kept: number): string => {
+    const body = points.slice(0, kept).join("").trimEnd();
+    const elided = kept < points.length ? `${body}…` : body;
+    return elided.charAt(0).toUpperCase() + elided.slice(1);
+  };
+  let kept = Math.min(points.length, NAME_CAP);
+  let name = build(kept);
+  // …and then down to the host's byte ceiling, a whole code point at a time so
+  // the surrogate rule above is never undone by the one below. Measured on the
+  // finished, trimmed name because that is the string the host measures.
+  while (kept > 1 && utf8ByteLength(name.trim()) > NAME_BYTE_CAP) {
+    kept -= 1;
+    name = build(kept);
+  }
+  return name;
 }

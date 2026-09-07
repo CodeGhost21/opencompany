@@ -2353,7 +2353,14 @@ export function WorkflowCreateDialog({
     if (submittingRef.current) return;
     await runWrite(
       async (g) => {
-        const landed = reconcile ? await savedWorkflow(g.id) : null;
+        const answer = reconcile ? await savedWorkflow(g.id) : ({ kind: "absent" } as const);
+        // The read did not answer. Raising it here keeps the graph held — the
+        // failure is a transport one, so `writeRefusalHandsOverForm` leaves the
+        // box up and `onUnresolved` puts the draft back — and the next Create
+        // asks the same question again. Writing blind instead is what produces
+        // the duplicate: see {@link savedWorkflow}.
+        if (answer.kind === "unknown") throw answer.error;
+        const landed = answer.kind === "found" ? answer.graph : null;
         // A graph under our id that is NOT the one we prepared means the lost
         // answer was a `409`, not a lost success: the id belongs to something
         // else, and adopting it would take the operator to a workflow they
@@ -2392,18 +2399,35 @@ export function WorkflowCreateDialog({
   }
 
   /**
-   * The saved workflow under `wid`, or `null` if the host has none.
+   * What the host says is stored under `wid` — and, crucially, whether it
+   * actually answered.
    *
-   * A `404` is the answer that matters and the common one. Anything else — the
-   * connection is still down — leaves the question open, and the create that
-   * follows settles it: the id is fixed, so a write that already landed earns
-   * the host's own `409` and the form hand-over, rather than a silent duplicate.
+   * Three outcomes, not two. The middle one used to be folded into "absent",
+   * which quietly recreated the bug the reconcile exists to prevent: a `404` is
+   * a real answer, but a dropped connection or a `500` is **no answer at all**,
+   * and treating it as absence sends the write out again. If the first write
+   * had in fact committed, that retry earns a definitive `409`, hands over the
+   * form, and instructs the operator to pick a different id — and obeying that
+   * instruction is exactly how a second copy of an already-created workflow
+   * gets made.
+   *
+   * So only a `404` the **host** sent counts as absence. Anything else leaves
+   * the question open, and the caller keeps the prepared graph and asks again.
    */
-  async function savedWorkflow(wid: string): Promise<WorkflowGraph | null> {
+  async function savedWorkflow(
+    wid: string,
+  ): Promise<
+    { kind: "found"; graph: WorkflowGraph } | { kind: "absent" } | { kind: "unknown"; error: unknown }
+  > {
     try {
-      return await getWorkflow(client, company, wid);
-    } catch {
-      return null;
+      return { kind: "found", graph: await getWorkflow(client, company, wid) };
+    } catch (e) {
+      // `fromHost` matters as much as the status: a proxy's own 404 (an HTML
+      // error page from a hop that never reached the host) says nothing about
+      // whether the workflow exists — the same distinction #380 exists for, and
+      // the same one `writeRefusalHandsOverForm` turns on a few lines up.
+      if (e instanceof ApiError && e.fromHost && e.status === 404) return { kind: "absent" };
+      return { kind: "unknown", error: e };
     }
   }
 

@@ -100,6 +100,9 @@ describe("draftCapabilityGap", () => {
   });
 });
 
+/** UTF-8 byte length — what the host counts, and what JavaScript does not. */
+const utf8 = (s: string): number => new TextEncoder().encode(s).length;
+
 describe("nameFromDescription", () => {
   it("takes the first clause, which is where a sentence says what the thing is", () => {
     expect(
@@ -149,14 +152,34 @@ describe("nameFromDescription", () => {
     }
   });
 
-  it("still caps by count, and counts characters rather than code units", () => {
-    // A letter and 70 emoji is 141 UTF-16 units but 71 characters. Capping on
-    // units would keep 30 emoji; capping on characters keeps 59 of them.
-    const name = nameFromDescription(`a${"\u{1F600}".repeat(70)}`);
+  it("counts characters rather than code units when the character cap binds", () => {
+    // 200 ASCII characters: the character cap is what stops this, and 60 of
+    // them plus an ellipsis is well inside the byte ceiling.
+    const name = nameFromDescription("a".repeat(200));
     expect(Array.from(name)).toHaveLength(61); // 60 characters + the ellipsis
-    // 1 letter + 59 emoji + the ellipsis: 60 characters, 120 UTF-16 units.
-    expect(name.length, "the cap counts characters, not UTF-16 units").toBe(120);
-    expect(name.endsWith("…")).toBe(true);
+    expect(utf8(name)).toBeLessThanOrEqual(200);
+  });
+
+  it("also stays under the host's byte ceiling, which 60 characters can breach", () => {
+    // The host checks `draft.name.trim().len() > MAX_WORKFLOW_NAME_LEN` and
+    // Rust's `str::len` counts BYTES (`src/company/workflow_create.rs:183`, 200).
+    // Sixty code points of emoji is 240 bytes, so a character-only cap sails
+    // past it — and the refusal is a graph-level 400 with no `problems`, so it
+    // neither hands over the form nor changes on a second press. The sentence
+    // is simply uncreatable.
+    for (const sentence of [
+      `a${"\u{1F600}".repeat(70)}`,
+      // The shape that needs no elision at all to breach it: 51 characters,
+      // 201 bytes. A cap that only counted characters would let this straight
+      // through untouched.
+      `A${"\u{1F600}".repeat(50)}`,
+      `\u{1F600}${"e\u0301".repeat(90)}`,
+    ]) {
+      const name = nameFromDescription(sentence);
+      expect(utf8(name.trim()), `over the byte cap: ${JSON.stringify(name)}`)
+        .toBeLessThanOrEqual(200);
+      expect(Array.from(name).length).toBeLessThanOrEqual(61);
+    }
   });
 
   it("derives nothing from a sentence with nothing usable in it", () => {
