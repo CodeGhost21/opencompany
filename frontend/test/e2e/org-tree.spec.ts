@@ -88,10 +88,33 @@ let desksReadable = true;
 /** The host's desks, as this stub holds them. Mutated by the write routes. */
 let desks: Desk[] = [];
 
+/**
+ * What this stub's `/inference` reports, which decides which Add-teammate
+ * dialog renders (issue #1989).
+ *
+ * `echo` — the offline brain — is the default, and that is a statement about
+ * what these tests are for rather than a way to keep the old ones passing. Every
+ * test in this file is about the *chart*: a desk that takes a member, a
+ * half-landed placement, a teammate the chart cannot read back, a toast that
+ * names the right person. The full form is the surface a real no-model company
+ * gets, it is what those walks were written against, and it is the one that
+ * stays on the chart long enough to assert a tree — the reduced dialog leaves
+ * for `#/team/<id>?edit` by design, so a desk assertion after it would be an
+ * assertion about a page the operator is no longer on.
+ *
+ * The reduced dialog gets a test of its own below, which sets this to `harness`
+ * and asserts the departure rather than working around it. Without one, a mock
+ * that answers `echo` for everything would quietly retire the redesign from
+ * this file — which is the same silent failure `addTeammateSurface` exists to
+ * make impossible.
+ */
+let cognition = "echo";
+
 function reset() {
   writes = [];
   roster = [...ROSTER];
   teamWriteAvailable = true;
+  cognition = "echo";
   deskAddAvailable = true;
   desksReadFailsAfterCreate = false;
   desksReadable = true;
@@ -308,6 +331,24 @@ async function mockApi(page: Page) {
     // `undefined` and, since `/me` above already resolves this operator as
     // admin, opens the blocking gate over every one of this file's tests
     // instead of the shell they actually exercise.
+    // Which Add-teammate dialog renders is decided on this (issue #1989). Before
+    // it existed the catch-all below answered `[]`, whose `cognition` is
+    // `undefined` — read as "can draft", so every test in this file met the
+    // reduced dialog and waited forever for a Role field it does not have.
+    if (path.endsWith("/inference"))
+      return json({
+        provider: "managed",
+        slug: "managed",
+        baseUrl: "",
+        models: {},
+        defaultTierModels: {},
+        source: "default",
+        keyConfigured: false,
+        cognition,
+        usageMetering: cognition === "echo" ? "none" : "perTurn",
+        restartRequired: false,
+        harnessReachable: cognition !== "echo",
+      });
     if (path.endsWith("/activation"))
       return json({
         nameConfirmed: true,
@@ -564,6 +605,60 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
   await expect(deskNode(page, "Growth")).toContainText("Babbage");
+});
+
+test("#1989 the reduced dialog derives a role and lands on the teammate's page", async ({
+  page,
+}) => {
+  // The redesign, on the surface three of its four entry points share. The
+  // sentence below is the one that made the derivation worth fixing: no comma
+  // and no semicolon, which is ordinary English and which the clause split this
+  // replaced turned into "Runs wholesale outreach to boutique retailers and
+  // keeps the…" — ellipsis included, stored as the teammate's job title.
+  cognition = "harness";
+  const sentence =
+    "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.";
+  await mockApi(page);
+  await openChart(page);
+
+  const growth = deskNode(page, "Growth");
+  await growth.getByRole("button", { name: "Add teammate" }).click();
+  await page.getByRole("menuitem", { name: "Add teammate to Growth" }).click();
+  const dialog = page.getByRole("dialog");
+
+  // A name and a box, and nothing else. Role is derived; What they do IS the
+  // box; the persona, the budget and the inbox are on the page this lands on.
+  await expect(dialog.getByTestId("team-describe-box")).toBeVisible();
+  await expect(dialog.getByLabel("Role")).toHaveCount(0);
+  await dialog.getByTestId("team-describe-name").fill("Sable");
+  await dialog.getByTestId("team-describe-box").fill(sentence);
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
+
+  // `?edit` opens the edit form on arrival, which is where the copilot is. Land
+  // on the read-only profile instead and the reduction is fields taken away.
+  await expect(page).toHaveURL(/#\/team\/new-5\?edit/, { timeout: 30_000 });
+
+  const created = writes.find(
+    (write) => write.method === "POST" && write.path.endsWith("/team"),
+  );
+  expect(created, "the teammate is written before the operator is taken away").toBeTruthy();
+  // The operator's whole sentence, un-truncated and with no ellipsis in it. The
+  // role is what `persona_prompt` interpolates and what the orchestrator's Team
+  // block renders, so a piece of a sentence here is a piece of a sentence in
+  // every prompt this teammate is ever built with.
+  expect((created!.body as { role: string }).role).toBe(
+    "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm",
+  );
+  expect((created!.body as { description: string }).description).toBe(sentence);
+
+  // And the desk placement happened first: the operator is told what half-landed
+  // on the chart they are leaving, and only then taken off it.
+  expect(
+    writes.some(
+      (write) =>
+        write.method === "POST" && write.path.endsWith("/desks/growth/members"),
+    ),
+  ).toBe(true);
 });
 
 test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {

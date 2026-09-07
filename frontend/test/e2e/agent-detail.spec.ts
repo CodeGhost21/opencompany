@@ -60,6 +60,34 @@ async function dismissOnboarding(page: Page) {
   await expect(skip).toHaveCount(0);
 }
 
+/**
+ * Which Add-teammate dialog this host renders (issue #1989).
+ *
+ * The dialog has two shapes: a name and one box on a company whose copilot can
+ * draft, and the original six-field form on one whose cannot. Both ship, and
+ * this spec runs against both hosts — the default-feature lane compiles no
+ * harness at all, and the live-brain lane has a model behind it — so it has to
+ * ask rather than assume.
+ *
+ * Asked of the **host**, over the same route the dialog itself reads, rather
+ * than sniffed off the DOM. Sniffing cannot work here: `cognition` is `null`
+ * until `/inference` answers, and `null` renders the reduced dialog, so a probe
+ * that looked at the dialog a moment after opening it would report "reduced" on
+ * an `echo` host and then watch the form replace it. Asking the host is also
+ * the stronger claim — it makes the branch an assertion about a company rather
+ * than a description of whatever appeared.
+ *
+ * The rule is `addTeammateSurface`'s, restated deliberately: a spec that asked
+ * the component which surface it had chosen would agree with itself no matter
+ * what either of them did.
+ */
+async function addTeammateSurface(page: Page): Promise<"describe" | "form"> {
+  const status = await page.request.get("/api/v1/company/inference");
+  if (!status.ok()) return "describe";
+  const { cognition } = (await status.json()) as { cognition?: string };
+  return cognition === "echo" ? "form" : "describe";
+}
+
 async function goToTeam(page: Page) {
   // The Company page, whose Cards half is the roster (issue #1141). Bare
   // `#/team` redirects here; this asks for the address that exists.
@@ -156,27 +184,52 @@ test("desk membership is on the agent, and an agent is reachable by link", async
 
 test("an agent defined in the console can be read back and edited", async ({ page }) => {
   const role = "Spec Runner";
+  // The reduced dialog collects ONE sentence and derives the role from it, so
+  // on that surface the role and the description are necessarily the same
+  // string. Seeding both with it on the full form too is what lets the rest of
+  // this test be a single walk rather than two — everything below asserts on
+  // the same record whichever dialog wrote it.
+  const seeded = role;
 
   // The `try` opens BEFORE the teammate is created, not after. The POST lands
   // as soon as the dialog is submitted, so a failure in the assertion that
   // follows it would otherwise skip the cleanup and leave the teammate on the
   // host — which breaks the next run of a spec that is meant to be repeatable,
   // and leaves a second card for `card(page, role)` to match.
+  const surface = await addTeammateSurface(page);
+
   try {
     // Define one through the dialog the issue calls create-only.
     await page.getByRole("button", { name: "Add teammate" }).first().click();
     const dialog = page.getByRole("dialog");
-    await dialog.getByTestId("agent-field-name").fill("Detail Spec");
-    await dialog.getByTestId("agent-field-role").fill(role);
-    await dialog.getByTestId("agent-field-description").fill("Original instructions.");
-    await dialog.getByRole("button", { name: "Add teammate" }).click();
+    if (surface === "describe") {
+      await expect(dialog.getByTestId("team-describe-box")).toBeVisible();
+      // Nothing else to fill: Role, What they do, Instructions, the budget and
+      // the inbox are not on this dialog at all.
+      await expect(dialog.getByTestId("agent-field-role")).toHaveCount(0);
+      await dialog.getByTestId("team-describe-name").fill("Detail Spec");
+      await dialog.getByTestId("team-describe-box").fill(seeded);
+      await dialog.getByRole("button", { name: "Add teammate" }).click();
+      // The redirect is the other half of the reduced dialog rather than a
+      // flourish after it: `?edit` is what puts the copilot on screen, and the
+      // fields this dialog stopped asking for are the ones it drafts.
+      await expect(page).toHaveURL(/#\/team\/[^?]+\?edit/, { timeout: 30_000 });
+      // Back to the roster, so the walk below is the same walk on both hosts.
+      await goToTeam(page);
+    } else {
+      await expect(dialog.getByTestId("agent-field-role")).toBeVisible();
+      await dialog.getByTestId("agent-field-name").fill("Detail Spec");
+      await dialog.getByTestId("agent-field-role").fill(role);
+      await dialog.getByTestId("agent-field-description").fill(seeded);
+      await dialog.getByRole("button", { name: "Add teammate" }).click();
+    }
     await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
 
     // Open it. This is the half that was impossible: the roster was write-once
     // per member, so iterating on an agent meant deleting it and starting over.
     await card(page, role).getByTestId("team-card-open").click();
     await expect(page.getByTestId("agent-source")).toHaveText("Added here");
-    await expect(page.getByTestId("agent-description")).toContainText("Original instructions.");
+    await expect(page.getByTestId("agent-description")).toContainText(seeded);
 
     // A console-defined agent holds the company's standard grant, so it reads
     // back with the whole allow-list rather than an empty tool list.
