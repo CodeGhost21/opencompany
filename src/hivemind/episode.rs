@@ -32,7 +32,7 @@ use super::evidential;
 use super::log::EventLogSessionLog;
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT};
 use super::moves::{self, MoveViolation};
-use super::prompt::{EpisodePrompt, marker_line};
+use super::prompt::{EpisodePrompt, marker_line, split_reply};
 use super::referral::{EpisodeReferrals, HiveFederation, HiveReferralRunner, ReferralLedger};
 use super::scope::EpisodeScope;
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
@@ -604,16 +604,23 @@ impl<'a> EpisodeDriver<'a> {
         prompt: &str,
         visible: &[tinyhivemind_hive::SessionMessage],
         violations: &mut Vec<MoveViolation>,
+        aside: &mut Option<String>,
     ) -> Result<String> {
         let allowed = self.desk.config.moves_for(agent_id);
-        let line = marker_line(&self.runner.speak(agent_id, prompt).await?);
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, prompt).await?);
+        *aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
                 .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
                 .await;
         };
         let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
-        let line = marker_line(&self.runner.speak(agent_id, &corrected).await?);
+        // The retry's aside replaces the first attempt's: the corrected reply is
+        // the turn that actually happened, and carrying a private line over from
+        // a reply the room never saw would publish something its author did not
+        // write on the turn it was written for.
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
+        *aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
                 .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
