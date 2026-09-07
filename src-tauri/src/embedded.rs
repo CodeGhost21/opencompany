@@ -270,11 +270,11 @@ pub async fn start_with(
     // this sweeper from its own `async_main`, which the embedded host never
     // runs, so nothing here ever reclaimed an idle ACP session — they and
     // their per-connection and host-wide cap slots piled up for the life of
-    // the process (codex review). `AppState::spawn_acp_session_sweeper` is a
+    // the process. `AppState::spawn_acp_session_sweeper` is a
     // no-op in a build without the `acp` feature — this crate's own default
     // dependency features don't include it (`Cargo.toml`), only the
     // release/CI feature set does, and this call site has to compile and do
-    // the right thing either way (codex review, round two).
+    // the right thing either way.
     //
     // Never notified: `Drop` aborts the task directly, matching how `server`
     // below is already stopped, rather than plumbing a second shutdown path
@@ -286,8 +286,7 @@ pub async fn start_with(
             // The sweeper was already running (an infinite loop with no other
             // shutdown path here), so a failed bind must abort it explicitly
             // or it outlives this whole attempt — one more sweeper leaked per
-            // retry a caller makes after a busy-port failure (coderabbit
-            // review).
+            // retry a caller makes after a busy-port failure.
             sweeper.abort();
             return Err(error);
         }

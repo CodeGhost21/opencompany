@@ -276,7 +276,7 @@ fn delete_session(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Va
 /// under the same lock — so there is no snapshot for a concurrent
 /// `session/new` to land in after the check and survive the disconnect,
 /// unlike the list-then-remove loop this replaced. The per-session check
-/// stays (coderabbit review): `owner` names a tenant, not an authorization
+/// stays: `owner` names a tenant, not an authorization
 /// scope, and two platform credentials for the same tenant can carry
 /// different company allow-lists — closing every session unconditionally
 /// would let a narrowly-scoped credential remove sessions for companies

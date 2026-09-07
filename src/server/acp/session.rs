@@ -744,7 +744,7 @@ mod test {
         // Landing in the gap between two sweeper ticks must not let a lookup
         // (and the touch a caller runs after it authorizes) revive a session
         // that is already stale — the sweep is a cleanup convenience, not the
-        // only place staleness is enforced (codex review).
+        // only place staleness is enforced.
         let registry = SessionRegistry::new();
         registry
             .open("conn-a", "alice", session("s1", "acme"), 0)
@@ -778,7 +778,7 @@ mod test {
         // `peek` and `get` already refuse it as expired, landing in the same
         // gap between two hourly sweeper ticks — otherwise a client is told a
         // session is resumable and then has `session/prompt` immediately
-        // report it unknown (codex review).
+        // report it unknown.
         let registry = SessionRegistry::new();
         registry
             .open("conn-a", "alice", session("s1", "acme"), 0)
@@ -845,7 +845,7 @@ mod test {
         // `owner` names a tenant, not an authorization scope: two platform
         // credentials for the same tenant can carry different company
         // allow-lists, so a connection can hold sessions the *presented*
-        // credential is not itself authorized to act on (coderabbit review).
+        // credential is not itself authorized to act on.
         let registry = SessionRegistry::new();
         registry
             .open("conn-a", "platform:acme", session("s-allowed", "acme"), 0)

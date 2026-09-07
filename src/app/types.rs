@@ -1320,7 +1320,7 @@ mod tests {
     /// point of the facade: an embedder linking this crate as a library
     /// (`src-tauri/src/embedded.rs`) cannot know at its own compile time
     /// whether this crate's default dependency features happened to include
-    /// `acp` (codex review), so the call site must never need a `cfg` of its
+    /// `acp`, so the call site must never need a `cfg` of its
     /// own to stay buildable.
     #[tokio::test]
     async fn spawn_acp_session_sweeper_is_always_callable_and_stoppable() {
@@ -1331,8 +1331,7 @@ mod tests {
         // `shutdown` and the sweeper its only waiter, and unlike
         // `notify_waiters`, `notify_one` stores a permit for a task that has
         // not registered as waiting yet — so this cannot lose the
-        // notification to the same scheduling race declined as out of scope
-        // for the sweeper's own shutdown convention (coderabbit review).
+        // notification to a scheduling race.
         shutdown.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
             .await
