@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { SkillsView } from "@/views/SkillsView";
 
@@ -57,11 +58,15 @@ const REGISTRY: Array<{
  * `resolve_principal` on the host: a hub console can carry both a platform
  * bearer and a signed-in member (`authHeaders`'s own doc comment), and the
  * host tries the session first, falling back to the bearer only when there is
- * none at all. `session: "none"` makes `/auth/me` reject the way it does for
- * an unauthenticated or bearer-only caller.
+ * none at all. `session: "none"` makes `/auth/me` reject the way the host's
+ * own `no_session()` does — a real `ApiError` from its `{error, code}`
+ * envelope — for an unauthenticated or bearer-only caller. `session: "error"`
+ * rejects with a plain network-style error, the ambiguous case coderabbit
+ * flagged: not a confirmed absence of a session, so it must not be read as
+ * one.
  */
 function clientWith(
-  session: "admin" | "member" | "none" = "admin",
+  session: "admin" | "member" | "none" | "error" = "admin",
   carriesPlatformBearer = false,
 ): OpenCompanyClient {
   return {
@@ -69,9 +74,13 @@ function clientWith(
     carriesPlatformBearer,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) {
-        return session === "none"
-          ? Promise.reject(new Error("no session"))
-          : Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
+        if (session === "none") {
+          return Promise.reject(new ApiError(401, "unauthorized", "not signed in", true));
+        }
+        if (session === "error") {
+          return Promise.reject(new Error("network down"));
+        }
+        return Promise.resolve({ id: "u1", email: "a@b.c", role: session, company: "acme", hasPassword: true });
       }
       if (path.endsWith("/skills/registry")) {
         return Promise.resolve(REGISTRY);
@@ -179,6 +188,19 @@ describe("SkillsView authority", () => {
     expect(
       Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
     ).toBe(true);
+  });
+
+  it("stays read-only on an ambiguous /auth/me failure, even with a bearer present", async () => {
+    // A network error, a timeout, or a 5xx is not a confirmed absence of a
+    // session — a member's session could still be live and would still take
+    // precedence on the host (coderabbit review). Only the host's own
+    // no_session() answer may be read as "the bearer is what's left".
+    await show(clientWith("error", true));
+
+    expect(at("skills-admin-only")?.textContent).toContain("Only an admin");
+    expect(
+      Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add skill")),
+    ).toBe(false);
   });
 
   it("defers to a member session even when a platform bearer is also present", async () => {
