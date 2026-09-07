@@ -1610,6 +1610,14 @@ async fn run_workflow(
     // Refused with the same `LifecycleConflict` chat answers, so one pause reads
     // identically wherever it is met, rather than a second rule with a second
     // error shape.
+    //
+    // Emergency-stop checked first, ahead of the ordinary pause: it is a
+    // separate switch from `lifecycle` (a stopped company still reports
+    // `running`), so `ensure_running` alone would miss it — this was the one
+    // manual workflow-run door `CompanyRuntime::ensure_not_emergency_stopped`'s
+    // three doorways did not cover, because it never reaches `run_cycle`,
+    // `spawn_follow_up`, or the boot reconciler at all.
+    company.runtime.ensure_not_emergency_stopped()?;
     company.runtime.ensure_running().await?;
 
     // No runner wired. THREE very different causes look identical from here —
@@ -10965,6 +10973,45 @@ label = "ok"
                 "the synchronous response must not carry the detach discriminator: {body}"
             );
             assert!(body["runId"].as_str().is_some(), "{body}");
+        }
+
+        /// Codex review finding on PR #2140 (`3952230576`): the emergency stop
+        /// is a separate switch from `lifecycle` (a stopped company still
+        /// reports `running`), so `ensure_running` alone missed it here. This
+        /// POST was the one manual admission door
+        /// `CompanyRuntime::ensure_not_emergency_stopped`'s own doc did not
+        /// enumerate, because a workflow run never reaches `run_cycle`,
+        /// `spawn_follow_up`, or the boot reconciler.
+        #[tokio::test]
+        async fn an_emergency_stopped_company_refuses_a_manual_run() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+            c.runtime
+                .emergency_pause(
+                    crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Operator,
+                        id: "owner".into(),
+                    },
+                    None,
+                )
+                .await
+                .expect("pause");
+
+            let response = c
+                .app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "input": {} })))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "a stopped company must refuse a manual run exactly as it refuses chat"
+            );
+            assert!(
+                !c.completed.load(Ordering::SeqCst),
+                "the refusal must return before the runner ever ran, let alone finished"
+            );
         }
 
         /// Cancel a live run: `200`, and it settles as cancelled rather than as
