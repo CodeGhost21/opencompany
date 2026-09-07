@@ -144,13 +144,25 @@ test("a member sees what is connected but is offered nothing that changes it", a
 
 test("an admin is still offered every control across the three pages", async ({ page }) => {
   await openSettingsPage(page, "oauth");
-  // The member's banner is absent, and the credential surface is present.
-  // The company-credential key is the Apps page's write surface on every
-  // build: the Composio token card only renders when the host reports a
-  // composio credential the admin may override (default-feature hosts never
-  // do), so it is not the invariant to assert here.
+  // The member's banner is absent, and the control it was refused is present.
+  //
+  // This used to assert `#company-credential`, on the reasoning that the
+  // company-credential key is the Apps page's write surface on every build.
+  // `src/product-scope.ts` hides the OpenHuman-managed Composio route and
+  // `OAuthView` hides that card with it — deliberately, since a company
+  // reaching Composio through its own account has nothing to spend that key on.
+  // It is no longer a surface on any build, so it cannot be the invariant.
+  //
+  // What survives is the provider grid's own "Sign in", which is exactly the
+  // control the member case above asserts a member does NOT get. Presence, not
+  // enabledness: with no credential there is nothing to authorize against, so it
+  // renders disabled on a host with no Composio compiled in — which is this
+  // lane. Asserting it is enabled would pass only on the gated build and turn
+  // this into a second Composio test.
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
-  await expect(page.locator("#company-credential")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(1, {
+    timeout: 30_000,
+  });
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);
