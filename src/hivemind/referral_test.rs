@@ -646,7 +646,7 @@ async fn a_far_turn_that_does_not_finish_leaves_the_room_running() {
     assert!(outcome.referrals.asked.is_empty());
     assert!(matches!(outcome.ending, EpisodeEnding::Converged { .. }));
     assert!(
-        outcome.summary().contains("1 went unanswered"),
+        outcome.summary().contains("1 question went unanswered"),
         "{}",
         outcome.summary()
     );
