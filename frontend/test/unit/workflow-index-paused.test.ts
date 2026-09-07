@@ -174,6 +174,15 @@ async function createThroughDialog() {
       .querySelector<HTMLButtonElement>('[data-testid="workflow-dialog-submit"]')
       ?.click();
   });
+  // Issue #1808: an id the CONSOLE derived — here, slugged from the sentence
+  // above — is confirmed before it becomes permanent. The confirm is portalled
+  // onto `document.body`, so it is found from the document rather than inside
+  // the dialog.
+  await act(async () => {
+    document
+      .querySelector<HTMLButtonElement>('[data-testid="workflow-id-confirm-create"]')
+      ?.click();
+  });
 }
 
 describe("the workflows index shows a disarmed schedule", () => {

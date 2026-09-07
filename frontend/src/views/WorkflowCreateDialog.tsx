@@ -874,6 +874,15 @@ export function WorkflowCreateDialog({
    * fixed there and the form field is read-only.
    */
   const [confirmingId, setConfirmingId] = useState(false);
+  /**
+   * The graph a one-box Create is waiting to confirm the id of (issue #1808).
+   *
+   * `null` on the form path, where the confirm reads the `id`/`name` fields. The
+   * one-box fallback has no fields on screen, so the graph it is about to write
+   * — id included — has to travel with the confirm rather than be read off a
+   * form that is not there.
+   */
+  const [derivedPending, setDerivedPending] = useState<WorkflowGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
@@ -1045,6 +1054,7 @@ export function WorkflowCreateDialog({
     // Issue #1808: a fresh open (or a re-hydrate) never carries a prior attempt's
     // pending id confirm — the previewed id it named may not be this graph's.
     setConfirmingId(false);
+    setDerivedPending(null);
     // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
     // the previous graph's history. It re-loads on the next expand, and against
     // the freshly-restored body's version token.
@@ -2010,6 +2020,7 @@ export function WorkflowCreateDialog({
       // not linger, or its inert backdrop swallows the next click. A no-op in
       // edit mode, where `confirmingId` is never set.
       setConfirmingId(false);
+      setDerivedPending(null);
     }
   }
 
@@ -2131,6 +2142,11 @@ export function WorkflowCreateDialog({
    * empty name derives an empty id — the permanent join key nothing can fix
    * afterwards. So that case hands over the form to be named rather than
    * inventing something the operator never saw.
+   *
+   * Everything else stops at the id confirm (#1808) rather than writing here.
+   * The id this mints is permanent and derived from a clause the operator wrote
+   * as prose, and the one-box dialog has no field that would ever show it to
+   * them — which is precisely the silence #1808 exists to break.
    */
   async function createAnyway() {
     if (submittingRef.current) return;
@@ -2160,7 +2176,30 @@ export function WorkflowCreateDialog({
       showError("Give this workflow a name — the description alone doesn’t make one.");
       return;
     }
-    const graph = assembled.graph;
+    // Issue #1808, and this is the path that needs it most. The id is a
+    // permanent backend join key, minted here by slugging the operator's first
+    // clause — so on a company with no copilot the one box would otherwise mint
+    // `chase-overdue-invoices-every-friday` from a sentence nobody wrote as a
+    // name, and never show it. The confirm is the whole of #1808's remedy: say
+    // the id once, before it is permanent.
+    //
+    // Only this path. A drafted graph's id is the host's (`safe_workflow_id`),
+    // chosen alongside a graph the operator asked for and reviews on the canvas;
+    // putting an id in front of them there would reinstate the field this
+    // redesign removed, to confirm a decision the console did not make.
+    setDerivedPending(assembled.graph);
+    setConfirmingId(true);
+  }
+
+  /**
+   * The one-box fallback's write, once its id is confirmed.
+   *
+   * Split out from {@link createAnyway} so the confirm sits between deriving the
+   * graph and writing it, and takes the same {@link runWrite} refusal hand-over
+   * the drafted path does.
+   */
+  async function createDerived(graph: WorkflowGraph) {
+    if (submittingRef.current) return;
     await runWrite(
       async (g) => {
         const created = await createWorkflow(client, company, g);
@@ -2823,7 +2862,10 @@ export function WorkflowCreateDialog({
           onOpenChange={(o) => {
             // Opening is driven by `submit()`; only react to a dismiss — Esc, an
             // outside click, or the Close primitive behind Back/Create.
-            if (!o) setConfirmingId(false);
+            if (!o) {
+              setConfirmingId(false);
+              setDerivedPending(null);
+            }
           }}
         >
           <AlertDialogContent data-testid="workflow-id-confirm">
@@ -2835,20 +2877,28 @@ export function WorkflowCreateDialog({
               </AlertDialogDescription>
             </AlertDialogHeader>
             <div className="grid gap-1 rounded-md border bg-muted/40 p-3 text-center">
-              {name.trim() && (
-                <span className="text-xs text-muted-foreground">{name.trim()}</span>
+              {/* The one-box fallback confirms the graph it derived, not the
+                  form: there is no form on screen there, and its fields hold
+                  whatever the last hand-over left in them. */}
+              {(derivedPending?.name ?? name).trim() && (
+                <span className="text-xs text-muted-foreground">
+                  {(derivedPending?.name ?? name).trim()}
+                </span>
               )}
               <code
                 data-testid="workflow-id-confirm-value"
                 className="font-mono text-lg font-semibold break-all"
               >
-                {id.trim()}
+                {(derivedPending?.id ?? id).trim()}
               </code>
             </div>
             <AlertDialogFooter>
               <AlertDialogCancel
                 data-testid="workflow-id-confirm-back"
-                onClick={() => setConfirmingId(false)}
+                onClick={() => {
+                  setConfirmingId(false);
+                  setDerivedPending(null);
+                }}
                 disabled={submitting}
               >
                 Back
@@ -2858,7 +2908,9 @@ export function WorkflowCreateDialog({
                   launched and the confirm dismisses in the same click. */}
               <AlertDialogAction
                 data-testid="workflow-id-confirm-create"
-                onClick={() => void create()}
+                onClick={() =>
+                  void (derivedPending ? createDerived(derivedPending) : create())
+                }
                 disabled={submitting}
               >
                 {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}

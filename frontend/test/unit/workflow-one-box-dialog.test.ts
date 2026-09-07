@@ -304,6 +304,13 @@ describe("the New-workflow dialog when the copilot can draft", () => {
     await act(async () => {
       anyway!.click();
     });
+    // Issue #1808: the console derives this id from a clause the operator wrote
+    // as prose, so it is said out loud before it is permanent.
+    expect(confirmedId(), "a console-derived id is confirmed, not minted in silence").toBe(
+      "email-priya-the-q3-numbers",
+    );
+    expect(posted, "nothing is written until the id is confirmed").toHaveLength(0);
+    await confirmCreate();
     expect(posted, "Create it anyway must actually create").toHaveLength(1);
     const graph = posted[0] as WorkflowGraph;
     // Named and described from the operator's own sentence, with the same
@@ -396,6 +403,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
     await act(async () => {
       submitButton().click();
     });
+    await confirmCreate();
     expect(posted, "Create must still create with no copilot").toHaveLength(1);
     const graph = posted[0] as WorkflowGraph;
     expect(graph.name).toBe("Every Monday");
@@ -461,6 +469,12 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     // No round trip that is already known to fail — the cognition read has
     // settled on the offline brain, so there is nothing to ask.
     expect(drafts.count, "the copilot must not be asked on the offline brain").toBe(0);
+    // Issue #1808 again, and this is the case it was written about: a company
+    // with no copilot slugs the operator's first clause into a permanent backend
+    // join key, and the one-box dialog has no field that would ever show it.
+    expect(confirmedId()).toBe("chase-overdue-invoices-every-friday");
+    expect(posted, "nothing is written before the id is confirmed").toHaveLength(0);
+    await confirmCreate();
     // …and the same route "Create it anyway" takes: the sentence names it and
     // describes it, over the single trigger the blank form has always started
     // from.
