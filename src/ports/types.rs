@@ -1028,6 +1028,34 @@ pub enum CompanyEvent {
         /// moment a loop was being chased.
         #[serde(default, skip_serializing_if = "is_zero_depth")]
         mention_depth: u8,
+        /// The teammates this reply is addressed to, when that is **narrower
+        /// than the desk it was written on** — a private aside
+        /// (`docs/spec/runtime/hivemind-asides.md`).
+        ///
+        /// Empty is the ordinary case and means desk-visible: every row written
+        /// before this field existed, and every row this host writes unless a
+        /// desk opted in to asides and one was authorized. The audience is the
+        /// author **plus** these ids; the author is not repeated here.
+        ///
+        /// Privacy between agents, never a security boundary. An operator and
+        /// every person reads an aside in full; what narrows is the projection
+        /// handed to a *peer agent*, and even there the row is elided rather
+        /// than removed — its sequence, author and audience stay visible, so a
+        /// `^N` citation still resolves and a peer can see that an exchange it
+        /// may not read happened. Nothing downstream should treat this as
+        /// access control.
+        ///
+        /// Fixed at append time. Widening one later could never be redelivered
+        /// (a sharing watermark advances past filtered rows unconditionally)
+        /// and would invalidate citations besides.
+        ///
+        /// Additive on exactly the terms `task_id`, `parent` and `mentions`
+        /// above are: `#[serde(default)]` is what lets an already-persisted log
+        /// load, and `skip_serializing_if` is what keeps a desk-visible reply
+        /// serializing byte-for-byte as it did before this field existed, so no
+        /// stored record needs migrating.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audience: Vec<String>,
     },
     /// A reaction was set or cleared on one chat message (issue #364).
     ///
