@@ -27,11 +27,29 @@ budget and by nothing else — the same bound a single-responder desk has at 1.
 
 What a room buys over one responder is not parallelism. It is:
 
-- **Independence.** The opening round is *blind*: a member forms its own
-  position before it can read its peers'. A shared transcript destroys
-  independence — the third speaker has already read the first two — and this is
-  the cheapest available repair, costing a projection flag rather than any
-  concurrency.
+- **Independence.** The opening round is *blind*: a member forms its own view
+  before it can read its peers'. A shared transcript destroys independence —
+  the third speaker has already read the first two — and this is the cheapest
+  available repair, costing a projection flag rather than any concurrency.
+
+  **What a blind member is asked for is a deposit, not a position**, and that
+  distinction is load-bearing rather than stylistic. The prompt used to say
+  "form your own first". On any question where members hold correlated priors
+  and one member holds the decisive fact — which is what a desk of specialists
+  *is*, since the fleet technician holds machine facts nobody else does — that
+  instruction is fatal: every member opens by advocating what its own reading
+  favours, a proposal counts as its own author's support, and the option the
+  shared prior favours reaches quorum **inside the blind round**, before the
+  informed member has said anything. The room is not converging; it is
+  amplifying a shared error and calling the result agreement.
+
+  Measured on the deliberation benchmark over 2000 seeded rooms
+  (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`): asking for a
+  deposit instead takes a hidden-profile room from **16.2% to 66.6%** correct,
+  and costs 3.7 points (78.8% → 75.1%) where every member's reading is equally
+  good. Raising `quorum` was tried first and does not work — at unanimity the
+  room simply stops deciding (31% of episodes reach one, accuracy 10.1%). The
+  bar is not the problem; what the bar counts is.
 - **A reason to stop.** The episode ends on a quorum it can name, not when one
   agent decides it is finished.
 
