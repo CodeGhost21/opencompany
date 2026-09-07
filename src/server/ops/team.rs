@@ -487,6 +487,32 @@ async fn add_member(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
 ) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
+    // The blank-field gap, closed (issue #1989). This was the ONE write path in
+    // the repository that stored a teammate's `name` and `role` exactly as they
+    // arrived: `PATCH {scope}/team/{agent_id}` refuses a blank one through
+    // `trimmed_field`, the orchestrator's `add_agent` tool refuses one,
+    // `company.toml` refuses one and `agents/<id>.toml` refuses one — and this
+    // route accepted `{"name": "", "role": ""}` with a `200`.
+    //
+    // What that produced is not a tidiness complaint. `persona_prompt`
+    // (`src/company/prompt.rs`) interpolates the role UNGUARDED while the
+    // description and instructions blocks beside it are blank-guarded, so a
+    // blank role ships the teammate a system prompt reading "You are Dana, the
+    //  at Acme."; the orchestrator's Team block and the auto-responder's
+    // channel-member block both render `id — role`, so delegation is grounded
+    // on a dash; and the detail page's copilot disables itself on a blank role,
+    // which is the page the console's create flow lands on. A console-side
+    // check is not a substitute for this one — the wire is open to anything
+    // holding a session, and the invariant belongs where the record is written.
+    //
+    // Before the authority check below rather than after, unlike
+    // `edit_agent`'s deliberate existence-then-authority ordering: there is no
+    // resource to confirm or deny the existence of here, so nothing is
+    // disclosed by answering "this request is malformed" first, and a
+    // request that cannot be stored should not first cost a permission lookup.
+    let name = required_field(&body.name, "name").map_err(|e| e.into_response())?;
+    let role = required_field(&body.role, "role").map_err(|e| e.into_response())?;
+
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
@@ -610,9 +636,9 @@ async fn add_member(
         // stamps every artifact it authors, so it has to be right on the first
         // save. The surrounding write lock is what makes the uniqueness check
         // and the save below one atomic step.
-        id: record.mint_agent_id(&body.name),
-        name: body.name,
-        role: body.role,
+        id: record.mint_agent_id(&name),
+        name,
+        role,
         description: body.description,
         // Issue #661 / L5: the teammate's own grant, intersected with the
         // company allow-list by the shared reads/roster build. A teammate created
@@ -1040,6 +1066,26 @@ async fn load_domain(company: &ScopedCompany) -> Result<Option<String>, ApiError
     };
     let status: DomainStatus = serde_json::from_str(value.expose())?;
     Ok(Some(status.domain))
+}
+
+/// A required create-time field, trimmed, refusing a blank one (issue #1989).
+///
+/// Deliberately the same refusal and the same wording as `trimmed_field` in
+/// `team_agent.rs`, which is what `PATCH {scope}/team/{agent_id}` applies to the
+/// same two fields — a teammate that cannot be *edited* into a blank name or
+/// role must not be *born* with one, and an operator who meets both routes
+/// should meet one sentence. It is a separate function rather than a shared one
+/// because the shapes differ: `PATCH` takes `Option<&str>` where absent means
+/// leave-alone, and at creation there is nothing to leave alone — these fields
+/// are required by `AddMember` itself, so only their emptiness is in question.
+fn required_field(value: &str, field: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a teammate's {field} can't be empty."
+        ))));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -1512,6 +1558,89 @@ mod tests {
             "the cap and the teammate landed in one save: {row}"
         );
         assert!(row["budgetSetBy"].is_string(), "{row}");
+    }
+
+    /// Issue #1989: `POST {scope}/team` refuses a blank name or role, which it
+    /// used to store.
+    ///
+    /// This was the only write path in the repository that did not. `PATCH
+    /// {scope}/team/{agent_id}`, the orchestrator's `add_agent`, `company.toml`
+    /// and `agents/<id>.toml` all refuse one, so a teammate with an empty role
+    /// was unreachable by every route except this one — and reachable by this
+    /// one with a plain `200`.
+    ///
+    /// Asserted through the wire and then read back off the roster, because the
+    /// failure this closes is a *stored* record: a blank role interpolates into
+    /// `persona_prompt` unguarded ("You are Dana, the  at Acme.") and renders as
+    /// `id — ` in the orchestrator's Team block, neither of which errors and
+    /// neither of which anyone is told about.
+    #[tokio::test]
+    async fn add_member_refuses_a_blank_name_or_role() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        // Whitespace as well as empty: `"   "` is what a form sends when
+        // somebody tabs through a field, and it stores just as blank.
+        for body in [
+            json!({"name": "", "role": "Growth"}),
+            json!({"name": "   ", "role": "Growth"}),
+            json!({"name": "Jamie", "role": ""}),
+            json!({"name": "Jamie", "role": "  \t "}),
+        ] {
+            let (status, answer) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team",
+                Some(body.clone()),
+                Some(&member),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{body} must be refused, not stored: {answer}"
+            );
+            assert!(
+                answer.to_string().contains("can't be empty"),
+                "and refused in the same words `PATCH` uses: {answer}"
+            );
+        }
+
+        // Nothing landed. The roster is still exactly the manifest's.
+        let (status, roster) = send(
+            &state,
+            "GET",
+            "/api/v1/company/team",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{roster}");
+        assert!(
+            roster.as_array().unwrap().iter().all(|row| !row["role"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()),
+            "no teammate may exist with a blank role: {roster}"
+        );
+
+        // And the surrounding whitespace is trimmed off a good one rather than
+        // stored, so `" Jamie "` and `"Jamie"` are not two different teammates.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "  Jamie  ", "role": "  Growth  "})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["name"], "Jamie", "{created}");
+        assert_eq!(created["role"], "Growth", "{created}");
     }
 
     /// Issue #1530: a teammate can be born with a persona override — the
