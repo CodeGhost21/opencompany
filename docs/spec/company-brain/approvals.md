@@ -123,21 +123,24 @@ owner-scoped and both take a confirmation phrase in the body. Normative:
   escape hatch from the switch: an operator could approve the very effects they
   just stopped without ever releasing it. Denial returns to the brain as a
   refusal it replans around, which is what "park all new work" has to mean.
-- **`Other` stays allowed, so chat survives.** The operator has to be able to
-  ask the company what it was doing. Effects classified as `Other` remain
-  allowed while the emergency stop is engaged; the gate otherwise treats
-  `Other` as a catch-all group, not a chat-only one, and does not police which
-  tools it covers.
+- **The stop halts admission, not just effects — chat included.**
+  `CompanyRuntime::ensure_not_emergency_stopped` refuses a new cycle before it
+  ever reaches the gate, so a chat message gets the same `409` a denied effect
+  does; a turn already running is not killed. The gate's own `Other`-group
+  exemption is unchanged underneath this — it is what let chat through before
+  admission was gated too, and it still governs release, which restores
+  evaluation to its exact pre-stop shape.
 - **It is orthogonal to `lifecycle`.** `lifecycle = "paused"` rejects every
   request with a `409`, chat included — the opposite of what an emergency
   needs. A company can be `running` *and* stopped; resuming one does not resume
   the other. `GET /api/v1/companies/{id}` reports `emergency_paused`
   separately, and a console that reads only `lifecycle` will show a stopped
   company as healthy.
-- **Already-parked approvals stay resolvable.** The switch gates `evaluate`,
-  which runs before an effect executes; resolution does not pass through it.
-  New work stops, in-flight decisions the operator was already asked for do
-  not become unanswerable.
+- **An already-parked approval is frozen, not resolvable, while stopped.**
+  Resolution starts the continuation turn the verdict owes, which is new work
+  by the same rule as anything else — so it is refused with the same `409`
+  until the stop is released. The card is not lost: it rides down the
+  deadline it already had, and releasing the stop makes it answerable again.
 - **The event log is the durable state.** The last
   `CompanyEvent::EmergencyPauseChanged` decides, replayed at boot, so a stop
   survives a restart. There is deliberately no `CompanyRecord` field: a second
