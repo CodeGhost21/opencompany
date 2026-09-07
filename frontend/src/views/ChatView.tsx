@@ -156,6 +156,21 @@ interface Props {
    */
   routeOpen?: boolean;
   onNavigate: (channelId: string) => void;
+  /**
+   * Leave chat for a teammate's detail page, with `edit` opening its edit form
+   * too (issue #1989).
+   *
+   * The one navigation out of this view, and it exists for one reason: the
+   * reduced Add-teammate dialog collects a name and a sentence, and the copilot
+   * that drafts the description and the persona lives in that form. Creating a
+   * teammate here and staying in chat would leave them half-written with
+   * nothing pointing at where to finish them.
+   *
+   * Optional, so `ChatView` still mounts standalone in tests — but a mount
+   * without it turns the reduced dialog's create into a dead end, so the shell
+   * always passes it.
+   */
+  onOpenAgent?: (agentId: string, options?: { edit?: boolean }) => void;
   /** Called after a reply lands, so the shell can refresh approvals/status. */
   onReply?: () => void;
   /**
@@ -428,6 +443,7 @@ export function ChatView({
   sub,
   routeOpen = true,
   onNavigate,
+  onOpenAgent,
   onReply,
   transcripts,
   setTranscripts,
@@ -1695,7 +1711,9 @@ export function ChatView({
             <AddMemberDialog
               open={addOpen}
               onOpenChange={setAddOpen}
-              onAdd={(fields) => void addMember(fields)}
+              onAdd={addMember}
+              client={client}
+              company={company}
             />
           }
         />
@@ -2338,11 +2356,27 @@ export function ChatView({
    * falling back to a local-only add for a host without the write plane yet —
    * the same 404 fallback `boot` uses for the roster read itself.
    */
-  async function addMember(fields: NewMemberFields) {
+  /**
+   * Writes the teammate and answers whether the write landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when this fails — it used to be called
+   * fire-and-forget and the dialog cleared itself regardless.
+   */
+  async function addMember(fields: NewMemberFields): Promise<boolean> {
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
-        { name: fields.name, role: fields.role, description: fields.description || undefined },
+        {
+          name: fields.name,
+          role: fields.role,
+          description: fields.description || undefined,
+          // Issue #1989: the reduced dialog arrives with a persona the host
+          // designed alongside the role and the mandate, so the teammate is
+          // born complete. Omitted by the full form, which collects none — an
+          // absent key leaves the blueprint's own wording in force.
+          instructions: fields.instructions?.trim() || undefined,
+        },
         company,
       );
     } catch (error) {
@@ -2351,7 +2385,9 @@ export function ChatView({
         setMembers((m) => [...m, newMember(fields)]);
       } else {
         reportAddMember(addMemberFailure(error));
-        return;
+        // The dialog keeps what it holds: this is the transient case, and a
+        // retry must not cost a second design pass.
+        return false;
       }
     }
     let outcome: AddMemberOutcome;
@@ -2395,6 +2431,13 @@ export function ChatView({
     }
     setAddOpen(false);
     reportAddMember(outcome);
+    // Issue #1989: the reduced dialog collected a name and a sentence, so the
+    // rest of the teammate is still to be written — on their own page, beside
+    // the copilot that drafts it. Guarded on `created`, not on the flag alone:
+    // the 404 fallback above adds a console-only row with no host id, and there
+    // is no detail page for a teammate the host has never heard of.
+    if (fields.landOnProfile && created) onOpenAgent?.(created.id, { edit: true });
+    return true;
   }
 
   /**
@@ -2933,7 +2976,13 @@ export function ChatView({
         </div>
       )}
 
-      <AddMemberDialog open={addOpen} onOpenChange={setAddOpen} onAdd={(fields) => void addMember(fields)} />
+      <AddMemberDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onAdd={addMember}
+        client={client}
+        company={company}
+      />
       <ChannelCreateDialog
         client={client}
         company={company}

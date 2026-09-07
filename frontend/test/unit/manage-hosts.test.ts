@@ -125,6 +125,9 @@ const NEW = "https://new.acme.test";
  * rather than that it is somehow prevented from finishing.
  */
 class GatedTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly urls: string[] = [];
   private waiting: (() => void)[] = [];
 

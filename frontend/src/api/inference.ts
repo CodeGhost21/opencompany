@@ -86,6 +86,31 @@ export interface InferenceStatus {
    */
   harnessReachable: boolean;
   /**
+   * Whether this company can run a profile design pass — the one behind
+   * `POST {scope}/team/design` and the two `/team/…/draft` routes.
+   *
+   * Optional because an older host does not send it. `undefined` means "this
+   * host did not say", which is read exactly as `cognition: null` is: the
+   * capability is unknown, so the reduced dialog is offered and the refusal
+   * (if any) is met honestly. Only an explicit `false` retires it up front.
+   *
+   * Here at all because the console had no way to ask, and was inferring the
+   * answer from `cognition`: the reduced Add-teammate dialog treated every
+   * path but `echo` as able to draft. That is wrong for three of the six —
+   * `profile_drafter()` on the host is built from `workflow_harness_deps`,
+   * which is assigned in exactly one place, inside the embedded harness arm of
+   * `RuntimeBuilder::build`. So `hosted`, `sidecar` and `custom` companies
+   * have no drafter either, and every create through the reduced dialog on
+   * them went: type a sentence, press Create, wait on a model call that could
+   * only answer `no_model`, then meet the full form and write it by hand.
+   *
+   * Not the same question as `harnessReachable`, which is the pool being
+   * *attached* rather than this company having *booted onto* it: a company
+   * whose config failed to resolve at boot reports `harnessReachable: true`
+   * and has no drafter.
+   */
+  designsProfiles?: boolean;
+  /**
    * Whether this host can rebuild the company's runtime in place, so the
    * console may offer to perform the restart `restartRequired` names (issue
    * #1736).

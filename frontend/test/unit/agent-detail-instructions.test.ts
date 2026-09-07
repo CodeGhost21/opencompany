@@ -184,3 +184,59 @@ describe("the agent detail instructions editor", () => {
     expect(el("agent-instructions-reset")).toBeNull();
   });
 });
+
+/**
+ * What the Instructions card actually shows (issue #1989).
+ *
+ * The card holds two different fields and used to label neither. In read mode
+ * it rendered the *description* as a bare paragraph under a heading reading
+ * "Instructions" and a subtitle reading "What this teammate was defined to do.
+ * It frames every turn they take." — which describes the persona, not the
+ * mandate. For a teammate with no persona that paragraph was the whole card, so
+ * the mislabelling was the default rather than an edge, and nothing on screen
+ * said the persona was empty at all.
+ *
+ * The operator who found it asked, of a teammate created through the reduced
+ * dialog: "is this how a Role, What they do, and Instructions should be
+ * surfaced?" These are the two facts that answer that.
+ */
+describe("what the Instructions card names", () => {
+  function labels(): string[] {
+    return Array.from(document.querySelectorAll("p.text-xs.font-medium")).map(
+      (node) => node.textContent?.trim() ?? "",
+    );
+  }
+
+  it("labels the mandate and the persona apart", async () => {
+    const client = makeClient(
+      overlay({
+        description: "Owns the stockist pipeline.",
+        instructions: "Escalate anything under 40% margin.",
+      }),
+    );
+    await mount(client, "agent-overlay");
+
+    expect(el("agent-description")!.textContent).toContain("Owns the stockist pipeline.");
+    expect(el("agent-instructions")!.textContent).toContain("Escalate anything under 40% margin.");
+    // Both named, so neither can be read as the other.
+    expect(labels()).toEqual(
+      expect.arrayContaining(["What they do", expect.stringContaining("Persona instructions")]),
+    );
+  });
+
+  it("says so when there is no persona, instead of showing the mandate alone", async () => {
+    const client = makeClient(
+      overlay({ description: "Owns the stockist pipeline.", instructions: undefined }),
+    );
+    await mount(client, "agent-overlay");
+
+    // The mandate is still there and still labelled as the mandate.
+    expect(el("agent-description")!.textContent).toContain("Owns the stockist pipeline.");
+    expect(el("agent-instructions"), "there is no persona to render").toBeNull();
+    // And the empty persona is stated. An operator could previously only find
+    // out by opening the edit form.
+    const empty = el("agent-instructions-empty");
+    expect(empty, "an absent persona is said, not left blank").not.toBeNull();
+    expect(empty!.textContent).toContain("default wording");
+  });
+});

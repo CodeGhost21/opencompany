@@ -292,13 +292,21 @@ export function FieldCopilot({
                   )}
                   <p className="whitespace-pre-wrap text-sm">{turn.draft}</p>
                   <div className="flex items-center gap-2">
+                    {/* Honours `disabled` like every other control here. It
+                        did not, and the panel can outlive the condition that
+                        disabled it: a form mid-submit has already captured its
+                        payload, so a draft accepted now is one the request did
+                        not carry and the reset after a successful write throws
+                        away. `close()` is not enough either — the panel may
+                        already be open when the form goes busy. */}
                     <Button
                       type="button"
                       size="sm"
                       className="h-7"
+                      disabled={disabled}
                       onClick={() => {
                         const text = turn.draft;
-                        if (!text) return;
+                        if (!text || disabled) return;
                         epoch.current += 1;
                         onAccept(text);
                         close();
