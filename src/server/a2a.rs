@@ -18,9 +18,9 @@
 //! (skew + single-use replay protection via the host-global
 //! [`NonceCache`](crate::economy::NonceCache)) before anything reaches cognition,
 //! answer a `402` challenge for a priced skill lacking a valid, unspent
-//! [`X402Authorization`](crate::economy::X402Authorization) — refusing outright
-//! a skill id the Agent Card never advertised, which is a different thing from
-//! one it advertises for nothing — sanitize the
+//! [`X402Authorization`](crate::economy::X402Authorization), refuse outright a
+//! skill id the Agent Card never advertised (a different thing from one it
+//! advertises for nothing), sanitize the
 //! counterparty payload (a minimal promptguard pass), and only then append an
 //! [`A2aTaskReceived`](crate::ports::types::CompanyEvent::A2aTaskReceived) event
 //! and run one cycle. A paying customer runs under the same approval gates as any

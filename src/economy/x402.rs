@@ -221,7 +221,8 @@ fn authorize_amount(
     }
 }
 
-/// Verifies an authorization and spends its nonce, at most once ever.
+/// Verifies an authorization and spends its nonce, so one signature buys one
+/// task.
 ///
 /// Enforces, in order: the signature against the declared `agentId`, freshness
 /// within [`MAX_AGE_SECS`], and single use of the nonce against `spent`.
