@@ -14,6 +14,16 @@
 //! Resolution never touches the process environment directly: it reads through
 //! the [`EnvSource`] seam, which tests satisfy with an in-memory map (no
 //! `std::env::set_var` races).
+//!
+//! `api_url` and `tinyplace_api_url` default to the production TinyHumans and
+//! tiny.place hubs, which is the right built-in for a deployment an operator
+//! owns (self-hosted, desktop) — there is nothing else it could mean. A
+//! [`Deployment::HostedTenant`] container instead receives every setting from
+//! the platform that provisions it, so the same silent default there is a
+//! platform bug wearing a working boot: the tenant looks configured and talks
+//! to production regardless. `resolve` refuses to fill either field for a
+//! hosted tenant and fails loudly instead, naming the variable that must be
+//! set.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +31,7 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+use crate::app::deployment::Deployment;
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::types::SecretValue;
 
@@ -773,6 +784,7 @@ pub fn resolve(
     manifest: &crate::company::CompanyManifest,
 ) -> Result<(RuntimeConfig, ConfigProvenance)> {
     let mut prov = ConfigProvenance::default();
+    let deployment = Deployment::from_env(env);
 
     let bind = resolve_str(
         &mut prov,
@@ -792,23 +804,25 @@ pub fn resolve(
         default_data_dir_str(env),
     );
 
-    let api_url = resolve_str(
+    let api_url = resolve_base_url(
         &mut prov,
         "api_url",
+        "TINYHUMANS_API_URL",
+        deployment,
         env.get("TINYHUMANS_API_URL"),
         config_toml.and_then(|c| c.api_url.clone()),
-        None,
         DEFAULT_API_URL.to_string(),
-    );
+    )?;
 
-    let tinyplace_api_url = resolve_str(
+    let tinyplace_api_url = resolve_base_url(
         &mut prov,
         "tinyplace_api_url",
+        "TINYPLACE_API_URL",
+        deployment,
         env.get("TINYPLACE_API_URL"),
         config_toml.and_then(|c| c.tinyplace_api_url.clone()),
-        None,
         DEFAULT_TINYPLACE_API_URL.to_string(),
-    );
+    )?;
 
     // brain_mode: env <- config.toml <- manifest (always present) <- default.
     let brain_raw = resolve_str(
@@ -981,6 +995,52 @@ fn resolve_str(
         prov.set(field, ConfigLayer::Default);
         default_val
     }
+}
+
+/// Resolves a base-URL field that names which real backend this process talks
+/// to (`api_url`, `tinyplace_api_url`).
+///
+/// Behaves exactly like [`resolve_str`] for [`Deployment::SelfHosted`] and
+/// [`Deployment::Desktop`]: env, then `config.toml`, then the built-in
+/// default — the operator running either owns the choice, and the default
+/// (production) *is* that choice when they name nothing.
+///
+/// For [`Deployment::HostedTenant`] the default is refused instead: a tenant
+/// container is handed its entire environment by the platform that
+/// provisions it, so nobody ever chose the destination that a silent default
+/// would apply. The caller gets a config error naming `var_name` rather than
+/// a container that boots and quietly talks to production.
+///
+/// An env or `config.toml` value that is empty (after trimming) counts as
+/// unset in both branches — a launcher that exported the variable with
+/// nothing in it has said nothing.
+fn resolve_base_url(
+    prov: &mut ConfigProvenance,
+    field: &'static str,
+    var_name: &str,
+    deployment: Deployment,
+    env_val: Option<String>,
+    toml_val: Option<String>,
+    default_val: String,
+) -> Result<String> {
+    if let Some(value) = env_val.filter(|v| !v.trim().is_empty()) {
+        prov.set(field, ConfigLayer::Env);
+        return Ok(value);
+    }
+    if let Some(value) = toml_val.filter(|v| !v.trim().is_empty()) {
+        prov.set(field, ConfigLayer::ConfigToml);
+        return Ok(value);
+    }
+    if deployment == Deployment::HostedTenant {
+        return Err(OpenCompanyError::Config(format!(
+            "{var_name} is not set. This is a hosted-tenant deployment, which is handed its \
+             whole environment by the platform that provisions it — so this refuses to boot \
+             rather than silently default to production. Set {var_name} explicitly (the \
+             production hub, or the staging hub for a staging tenant)."
+        )));
+    }
+    prov.set(field, ConfigLayer::Default);
+    Ok(default_val)
 }
 
 /// Resolves an optional string field, recording its winning layer (`Default`
@@ -1543,6 +1603,110 @@ mod test {
         let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
         assert_eq!(cfg.bind, DEFAULT_BIND);
         assert_eq!(prov.layer("bind"), Some(ConfigLayer::Default));
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_base_url (AD-001 / AD-014): a hosted tenant is handed its
+    // whole environment by the platform that provisions it, so an unset
+    // api_url/tinyplace_api_url must refuse to boot instead of silently
+    // becoming production. Every other deployment kind is unaffected — the
+    // pinned decision in `defaults_fill_in_when_nothing_set` above still
+    // holds for an undeclared (self-hosted) process.
+    // -----------------------------------------------------------------
+
+    fn hosted_tenant_env<const N: usize>(pairs: [(&str, &str); N]) -> MapEnv {
+        let mut all = vec![("OPENCOMPANY_DEPLOYMENT", "hosted-tenant")];
+        all.extend(pairs);
+        MapEnv::new(all)
+    }
+
+    #[test]
+    fn hosted_tenant_refuses_to_boot_with_no_api_url() {
+        let env = hosted_tenant_env([]);
+        let err = resolve(&env, None, &default_manifest()).unwrap_err();
+        assert_eq!(err.code(), "config_error");
+        let message = err.to_string();
+        assert!(message.contains("TINYHUMANS_API_URL"), "{message}");
+    }
+
+    #[test]
+    fn hosted_tenant_refuses_to_boot_with_no_tinyplace_api_url() {
+        // api_url set so the failure under test is unambiguously about
+        // tinyplace_api_url, not the sibling field checked above.
+        let env = hosted_tenant_env([("TINYHUMANS_API_URL", "https://api.tinyhumans.ai")]);
+        let err = resolve(&env, None, &default_manifest()).unwrap_err();
+        assert_eq!(err.code(), "config_error");
+        let message = err.to_string();
+        assert!(message.contains("TINYPLACE_API_URL"), "{message}");
+    }
+
+    #[test]
+    fn hosted_tenant_treats_an_empty_api_url_as_unset() {
+        let env = hosted_tenant_env([
+            ("TINYHUMANS_API_URL", "   "),
+            ("TINYPLACE_API_URL", "https://api.tiny.place"),
+        ]);
+        let err = resolve(&env, None, &default_manifest()).unwrap_err();
+        assert!(err.to_string().contains("TINYHUMANS_API_URL"));
+    }
+
+    #[test]
+    fn hosted_tenant_uses_an_explicitly_set_api_url_unchanged() {
+        let env = hosted_tenant_env([
+            ("TINYHUMANS_API_URL", "https://staging-api.tinyhumans.ai"),
+            ("TINYPLACE_API_URL", "https://staging-api.tiny.place"),
+        ]);
+        let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
+        assert_eq!(cfg.api_url, "https://staging-api.tinyhumans.ai");
+        assert_eq!(prov.layer("api_url"), Some(ConfigLayer::Env));
+        assert_eq!(cfg.tinyplace_api_url, "https://staging-api.tiny.place");
+        assert_eq!(prov.layer("tinyplace_api_url"), Some(ConfigLayer::Env));
+    }
+
+    /// A hosted tenant may also state the URL in `config.toml` rather than
+    /// the environment — the gate is "was it stated", not "which layer".
+    #[test]
+    fn hosted_tenant_accepts_api_url_from_config_toml() {
+        let env = hosted_tenant_env([]);
+        let file = ConfigFile {
+            api_url: Some("https://staging-api.tinyhumans.ai".into()),
+            tinyplace_api_url: Some("https://staging-api.tiny.place".into()),
+            ..ConfigFile::default()
+        };
+        let (cfg, prov) = resolve(&env, Some(&file), &default_manifest()).unwrap();
+        assert_eq!(cfg.api_url, "https://staging-api.tinyhumans.ai");
+        assert_eq!(prov.layer("api_url"), Some(ConfigLayer::ConfigToml));
+    }
+
+    /// The other side of the split: self-hosted and desktop deployments keep
+    /// defaulting. Forcing every plain `serve` to name a backend it never
+    /// had to before would break the documented zero-config quickstart for a
+    /// deployment kind that owns the choice by construction.
+    #[test]
+    fn self_hosted_and_desktop_still_default_api_url_when_unset() {
+        for kind in ["self-hosted", ""] {
+            let env = MapEnv::new([("OPENCOMPANY_DEPLOYMENT", kind)]);
+            let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
+            assert_eq!(cfg.api_url, DEFAULT_API_URL, "deployment={kind:?}");
+            assert_eq!(prov.layer("api_url"), Some(ConfigLayer::Default));
+        }
+
+        let env = MapEnv::new([("OPENCOMPANY_DEPLOYMENT", "desktop")]);
+        let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
+        assert_eq!(cfg.api_url, DEFAULT_API_URL);
+        assert_eq!(cfg.tinyplace_api_url, DEFAULT_TINYPLACE_API_URL);
+        assert_eq!(prov.layer("api_url"), Some(ConfigLayer::Default));
+    }
+
+    /// The tenant-namespace inference (`OPENCOMPANY_TENANT_ID` alone, no
+    /// explicit `OPENCOMPANY_DEPLOYMENT`) names a hosted tenant too — see
+    /// `Deployment::from_env` — so it must gate the same as an explicit
+    /// declaration rather than being read as self-hosted.
+    #[test]
+    fn tenant_namespace_alone_also_gates_as_hosted_tenant() {
+        let env = MapEnv::new([("OPENCOMPANY_TENANT_ID", "acme")]);
+        let err = resolve(&env, None, &default_manifest()).unwrap_err();
+        assert!(err.to_string().contains("TINYHUMANS_API_URL"));
     }
 
     // -----------------------------------------------------------------
