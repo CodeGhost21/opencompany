@@ -845,7 +845,7 @@ mod test {
         // host, submitting a valid authorization against the wrong company's
         // handle would otherwise burn it here and reject the payer's retry
         // against the right company as a replay, even though it was never
-        // accepted anywhere (codex review).
+        // accepted anywhere.
         assert!(
             state
                 .x402_nonce()
