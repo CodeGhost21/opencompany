@@ -374,7 +374,7 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
         .run_journaled_cycle(vec![(message_seq, event)], None)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(prompt_result(&session.id, report))
+    Ok(prompt_result(report))
 }
 
 /// Builds a `session/prompt` result from a finished cycle.
@@ -383,7 +383,7 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
 /// module docs) — the cycle still completes and answers `end_turn`. The
 /// client learns of the park through a notification per parked approval
 /// instead.
-fn prompt_result(session_id: &str, report: crate::runtime::CycleReport) -> Value {
+fn prompt_result(report: crate::runtime::CycleReport) -> Value {
     let mut updates = report
         .responses
         .into_iter()
@@ -934,7 +934,7 @@ mode = "full"
             persisted_seq: None,
             input_seqs: Vec::new(),
         };
-        let result = prompt_result("sess-1", report);
+        let result = prompt_result(report);
         assert_eq!(result["stopReason"], "end_turn");
         let updates = result["updates"].as_array().expect("updates array");
         assert_eq!(updates.len(), 1);
@@ -951,7 +951,7 @@ mode = "full"
             persisted_seq: None,
             input_seqs: Vec::new(),
         };
-        let result = prompt_result("sess-1", report);
+        let result = prompt_result(report);
         assert_eq!(result["stopReason"], "end_turn");
         assert!(
             result["updates"]
