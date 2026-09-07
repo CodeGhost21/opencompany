@@ -396,15 +396,21 @@ fn design_system_prompt() -> String {
 /// not one the company already has. Nothing else about the company reaches it.
 fn design_user_prompt(subject: &ProfileSubject) -> String {
     let mut out = format!("Company: {}\n", subject.company_name.trim());
-    if let Some(output) = subject.company_output.as_deref().map(str::trim) {
-        if !output.is_empty() {
-            out.push_str(&format!("What it makes: {output}\n"));
-        }
+    if let Some(output) = subject
+        .company_output
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str(&format!("What it makes: {output}\n"));
     }
-    if let Some(name) = subject.name.as_deref().map(str::trim) {
-        if !name.is_empty() {
-            out.push_str(&format!("The teammate is called: {name}\n"));
-        }
+    if let Some(name) = subject
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str(&format!("The teammate is called: {name}\n"));
     }
     if !subject.siblings.is_empty() {
         out.push_str("Teammates it will work beside — do not duplicate one of these jobs:\n");
