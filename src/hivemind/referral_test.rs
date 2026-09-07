@@ -469,6 +469,73 @@ async fn a_line_that_asks_nobody_refers_nothing() {
     );
 }
 
+/// **A question put to a seat on this desk is not a question of another desk.**
+///
+/// `reach` widens strictly (`local` → `channels` → `desks`), so a desk that
+/// opted in to referral may legitimately put a question to one of its own
+/// seats. The close used to describe every recorded question as being "of
+/// another desk" regardless, and a live six-day `companies/vending_machine_co`
+/// run reported "The room asked 2 questions of another desk (@fleet_tech on
+/// ops, @field_realist on ops)" — on the ops desk, naming two ops seats. An
+/// operator reading that has been told the room reached outside when it did
+/// not, which is exactly the kind of claim the close exists to make reliably.
+#[test]
+fn the_close_tells_a_local_question_from_a_crossing_one() {
+    use crate::hivemind::referral::{AskedQuestion, ReferralLedger};
+
+    let outcome = |asked: Vec<AskedQuestion>| EpisodeOutcome {
+        ending: EpisodeEnding::Exhausted,
+        turns: 4,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: ReferralLedger {
+            asked,
+            over_cap: 0,
+            failed: 0,
+        },
+    };
+    let question = |target: &str, desk: &str, crossed: bool| AskedQuestion {
+        asker: "route_planner".to_owned(),
+        target: target.to_owned(),
+        desk: desk.to_owned(),
+        returned: false,
+        crossed,
+    };
+
+    let local = outcome(vec![question("field_realist", "ops", false)]).referral_summary();
+    assert!(
+        local.contains("put 1 question to a seat on this desk (@field_realist)"),
+        "{local}"
+    );
+    assert!(
+        !local.contains("another desk"),
+        "a question that never left the desk must not be reported as crossing: {local}"
+    );
+
+    let crossing =
+        outcome(vec![question("account_manager", "commercial", true)]).referral_summary();
+    assert!(
+        crossing.contains("asked 1 question of another desk (@account_manager on commercial)"),
+        "{crossing}"
+    );
+
+    // Both in one episode: each is counted under its own heading, and the
+    // crossing one still names the desk it reached.
+    let both = outcome(vec![
+        question("account_manager", "commercial", true),
+        question("field_realist", "ops", false),
+    ])
+    .referral_summary();
+    assert!(both.contains("asked 1 question of another desk"), "{both}");
+    assert!(
+        both.contains("put 1 question to a seat on this desk"),
+        "{both}"
+    );
+}
+
 /// **A barred move demoted for its grammar violation must not still trigger a
 /// referral.**
 ///

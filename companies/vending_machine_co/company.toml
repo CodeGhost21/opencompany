@@ -1,0 +1,289 @@
+# Northgate Vending — a real operating business, run by three deliberating desks.
+#
+# Every other hive bundle in this repo answers a *question* (`hive_math_lab`
+# solves a stated problem and stops). This one runs an *operation*: a fleet of
+# eight vending machines at five host sites, a finite warehouse behind them, and
+# host contracts that renew whether or not anybody prepared for it. The work
+# arrives on its own — a machine jams, a chiller fails, a competitor quotes a
+# host site — through `[[schedule]]` cadences and the
+# `POST /hooks/{company}/{channel}` webhook path, and nothing in the world
+# restocks itself.
+#
+# The business is not modelled in this manifest. It lives behind an MCP server
+# (`scripts/vending/mcp_server.py`, see `mcp.json` and the README), so every
+# read an agent makes and every change it causes is a tool call: auditable,
+# replayable, and arguable. The manifest's job is only to say who deliberates
+# about it and under what rules.
+#
+# WHY THIS BUNDLE EXISTS: agent-to-agent communication.
+#
+# The interesting decisions here are the ones no single desk can make correctly.
+# "Which machines does the van visit today" is an ops question whose right answer
+# depends on which host site is about to renew badly — which is commercial's
+# knowledge. "Do we raise the price of the energy line" is a commercial question
+# whose right answer depends on whether the chiller at that machine is reliable
+# — which is ops' knowledge. So all three desks run with **cross-desk referral**
+# on (`[group_chat.hive.referral]`): a member mid-episode may put a question to
+# a peer desk, that desk takes one real turn on it, and the answer is carried
+# home under `hive-referral` as information — never as a vote. See
+# `docs/spec/runtime/hivemind-referral.md`.
+#
+# The ops desk also turns on the *other* seam, which stays inside one desk:
+# **private asides** (`[group_chat.hive.aside]`). Two members may compare notes
+# in a line the rest of the room cannot read — elided rather than removed, so
+# everyone still sees that the exchange happened and who was in it — and then
+# owe the room a `!surface` in the open. See
+# `docs/spec/runtime/hivemind-asides.md`.
+#
+# One rule governs both, and it is the whole design constraint: what crosses a
+# visibility boundary carries information, **never support**. A referred answer
+# and a private line each add no supporter and move no option towards a
+# decision. A desk that could import a quorum from elsewhere, or assemble one
+# where the room cannot see it, would be a desk that never had to be convinced.
+
+[company]
+name = "Northgate Vending"
+output = "A fleet that is stocked, working, and on contracts worth having — with the reasoning behind each call written down"
+human_role = "Set the commercial envelope, approve capital and contract terms, and read the decision ledger"
+handle = "northgatevending"
+
+[brain]
+mode = "hosted"
+max_passes = 12
+
+[policy]
+# `supervised`: the desks act on the fleet themselves — restocking and pricing
+# are the job, and parking every one of them for a human defeats the point of
+# running the company. What stays with the operator is money and commitments:
+# see `always_approve` below.
+mode = "supervised"
+always_approve = ["renegotiate_contract", "place_order"]
+auto_approve_under_usd = 25.0
+
+[users]
+admins = ["harness-e2e@tinyhumans.ai"]
+
+[tools]
+# `mcp:vending` is the grant that reaches the vending MCP server. It is named
+# explicitly rather than covered by a wildcard on purpose: `grants_cover_server`
+# refuses to let `*` reach an MCP server (`src/runtime/tools.rs`), because a
+# company that wildcarded its belt would otherwise silently acquire every server
+# an operator later installed.
+#
+# No `web` and no `search`: this company's facts come from its own fleet and
+# from the signals fed to it. A desk that could look things up would answer
+# questions about vending machines in general instead of about these eight.
+allow = ["files", "docs", "workspace", "workspace.*", "mcp:vending"]
+
+[channels.operator]
+enabled = true
+
+# The webhook lane the simulator drives. `scripts/vending-sim.py` posts each
+# day's triggers here — a machine down, a stockout, a contract clock — which is
+# what makes this a live environment rather than a scripted demo.
+[channels.email]
+enabled = true
+
+# A live run routes inference through the local llm-ladder-router so it costs
+# marketplace rates: point the managed endpoint at it with
+# `OPENCOMPANY_INFERENCE_URL=http://127.0.0.1:6969/v1` and
+# `OPENCOMPANY_INFERENCE_KEY=$LADDER_API_KEY`. The tier map names the ladder's
+# own model ids; a hosted run needs it removed or re-pointed at real slugs.
+#
+# The seats that only *observe* — the scout, the field realist — name no tier
+# and fall through to `chat-v1`. That is a cost decision, not an oversight:
+# neither is asked to reason about a trade-off, and buying the strongest model
+# for "what does the telemetry say" is money spent on nothing.
+[inference]
+models = { "chat-v1" = "flash", "reasoning-v1" = "reasoning", "agentic-v1" = "max-reasoning", "vision-v1" = "flash" }
+
+# ---------------------------------------------------------------------------
+# The operations desk.
+#
+# Owns the van's finite day. The tension it exists to hold is that a route,
+# a restock and a repair all compete for the same hours, and the warehouse is
+# not deep enough to fill everything even if there were time.
+#
+# Four seats, four different instruments. Only the route planner may `!propose`
+# a plan — the live failure that shape prevents is three seats proposing three
+# near-identical routes and the room voting rather than deliberating (see
+# `docs/spec/runtime/hivemind.md`). The stock controller and the fleet
+# technician ground or refuse it from the two constraints that actually bind,
+# and the field realist attacks the plan's contact with reality rather than its
+# arithmetic.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "ops"
+name = "Operations desk"
+description = "One day's van at a time: who gets visited, what goes on the shelf, and what breaks if we are wrong."
+members = ["route_planner", "fleet_tech", "stock_controller", "field_realist"]
+
+[group_chat.hive]
+enabled = true
+# Four members x three turns: an opening position, a reply to the room, and a
+# commit. Small on purpose — conformity in a group of language models rises
+# with interaction time, so a longer episode buys correlated error rather than
+# a better route.
+turn_budget = 12
+quorum = 2
+blind_round = true
+# A `!support` with no `^citation` does not count. In this desk that bites
+# hardest on the stock controller: "we have enough stock" is a claim about a
+# number the warehouse tool will actually print, and a support that cannot
+# cite it is a guess wearing a marker.
+require_evidential = true
+refutation_cap = 2
+dominance_cap = 3
+repetition_cap = 1
+
+# Only the planner proposes; the two constraint-holders ground or refuse.
+# `commit`, `question` and `defer` are never gated by the runtime whatever a
+# list says — they are written out here for readability only.
+[group_chat.hive.moves]
+route_planner = ["propose", "support", "commit", "question", "defer"]
+fleet_tech = ["evidence", "support", "object", "refute", "question"]
+stock_controller = ["evidence", "support", "object", "refute", "pin"]
+field_realist = ["object", "refute", "question", "evidence", "defer"]
+
+# Private asides: the *other* agent-to-agent seam, and the one that stays
+# inside this desk.
+#
+# The pair this exists for is the fleet technician and the stock controller.
+# "Is VM-301's chiller reliable enough to put sandwiches back in it" is a
+# question those two can settle between them in two lines, and settling it on
+# the floor costs the room two of its twelve turns watching a conversation that
+# has no bearing on the route until it has an answer.
+#
+# `max_members = 1` — a pair, never a caucus. `must_surface` — whatever they
+# conclude is owed back to the room in the open, because an aside carries
+# information and never support: a `!support` written privately moves nothing
+# towards a decision, so a pair that never surfaces has spent two turns on
+# nothing.
+#
+# It is on here and off everywhere else in this repo on purpose. Upstream
+# measured the mechanism and it lost on answer quality
+# (`docs/spec/runtime/hivemind-asides.md`), so enabling it is a decision about
+# *this* desk — four members, two of whom hold constraints the other two do not
+# — rather than a default anybody inherits.
+[group_chat.hive.aside]
+enabled = true
+max_members = 1
+max_messages = 2
+must_surface = true
+
+# Cross-desk referral: this is the agent-to-agent seam that leaves the desk.
+#
+# `reach = "desks"` lets a member mid-episode put a question to `@#commercial`
+# or `@#intel`. `returns = true` carries the answer home — a question whose
+# answer never comes back is a turn spent for nothing. `peer_cap = 2` bounds
+# how *wide* an episode may go: the library bounds depth (`max_hops`) and
+# deliberately bounds nothing about width, because only a host knows what a
+# turn costs it.
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
+
+# ---------------------------------------------------------------------------
+# The commercial desk.
+#
+# Owns margin and the host relationships. Its standing conflict with ops is the
+# point of the company: ops wants to serve every site well, commercial wants to
+# serve the sites worth serving, and the fleet is not big enough for both to be
+# right.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "commercial"
+name = "Commercial desk"
+description = "What each line and each host site is actually worth, and what we are prepared to sign."
+members = ["account_manager", "pricing_analyst", "contract_counsel"]
+
+[group_chat.hive]
+enabled = true
+turn_budget = 9
+quorum = 2
+blind_round = true
+require_evidential = true
+refutation_cap = 2
+dominance_cap = 3
+repetition_cap = 1
+
+# Two seats may propose here, unlike ops, because a commercial question has two
+# genuinely different framings — "what do we charge" and "what do we sign" —
+# and forcing both through one seat produces a plan that is only ever one of
+# them. Counsel proposes nothing and may refute anything: its whole job is to
+# be the seat that says no with a citation.
+[group_chat.hive.moves]
+account_manager = ["propose", "support", "evidence", "commit", "question"]
+pricing_analyst = ["propose", "support", "evidence", "object", "pin"]
+contract_counsel = ["object", "refute", "evidence", "question", "defer"]
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
+
+# ---------------------------------------------------------------------------
+# The signals desk.
+#
+# Two members, which is the smallest room that is still a room. It reads the
+# news feed and decides what, if anything, follows. It is separate from
+# commercial because the two are judged differently: a signal is judged on
+# whether it was observed accurately, an inference on whether it holds — and
+# collapsing them produces the characteristic failure of market intelligence,
+# a confident brief whose evidence nobody can find.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "intel"
+name = "Signals desk"
+description = "What the market did this week, and which of it should change a plan."
+members = ["market_scout", "demand_analyst"]
+
+[group_chat.hive]
+enabled = true
+turn_budget = 6
+# Two members, so a quorum of two is unanimity — correct here. A room of two
+# that could carry on one supporter is a room where either member decides
+# alone, which is a single responder with extra steps.
+quorum = 2
+blind_round = true
+require_evidential = true
+repetition_cap = 1
+
+[group_chat.hive.moves]
+market_scout = ["evidence", "propose", "question", "pin", "defer"]
+demand_analyst = ["support", "object", "refute", "evidence", "commit"]
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 1
+
+# ---------------------------------------------------------------------------
+# Cadence. This is what makes the company run rather than wait.
+#
+# Times are deliberately staggered: signals reads before ops plans, and ops
+# plans before commercial reviews, so each desk's referral to a peer reaches a
+# desk that has already looked at today.
+# ---------------------------------------------------------------------------
+
+[[schedule]]
+cron = "0 5 * * *"
+prompt = "Read the news feed and the last week's margin. Decide what, if anything, in today's signals should change a plan this week, and say which desk it lands on."
+
+[[schedule]]
+cron = "30 6 * * *"
+prompt = "Plan today's van. Read fleet status, check the warehouse against it, and decide which machines get visited and what goes on each shelf. Say what you are choosing not to do and what it costs."
+
+[[schedule]]
+cron = "0 8 * * 1"
+prompt = "Review last week: margin by line and by machine, every host site's satisfaction, and any contract inside 14 days of renewal. Decide what to change."

@@ -1,0 +1,13 @@
+role = "Market Scout"
+description = "Read the signal feed and report what was observed, separated from what it might mean."
+# No tier deliberately: observing accurately does not need the strongest model,
+# and the desk's whole design keeps observation apart from inference.
+context = ["GOAL.md", "brief.md"]
+
+tools = ["workspace.read", "mcp:vending"]
+
+ledgers = [
+    { name = "signals", access = "record" },
+]
+
+prompt_files = ["prompts/market_scout.md"]

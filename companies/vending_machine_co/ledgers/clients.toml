@@ -1,0 +1,85 @@
+# The host sites, as a relationship rather than as a row in the fleet database.
+#
+# `client_status` over MCP already prints commission, renewal date and
+# satisfaction. What it cannot hold is what was *promised* — and a promise
+# nobody wrote down is a promise this company will break by accident, which is
+# how two of the sites in the seeded world got unhappy in the first place.
+
+title = "Client accounts"
+purpose = """
+Each host site: what it was promised and by whom, what it has actually been \
+given, and where the relationship stands. Read the commitments before \
+proposing new ones.\
+"""
+written_by = "`record_entry` when something is promised or the relationship moves, `close_entry` when a site is lost or exited"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+description = "The client id from the fleet, e.g. `CL-STMARY`."
+
+[[field]]
+name = "account"
+role = "title"
+required = true
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "commitments"
+role = "prose"
+description = "What we have told this host we will do — service cadence, assortment, price. Dated, and attributed to whoever said it."
+
+[[field]]
+name = "grievance"
+role = "prose"
+description = "What they are actually unhappy about, in their words where we have them. Distinct from what we assume they are unhappy about."
+
+[[field]]
+name = "renewal_day"
+role = "date"
+
+[[field]]
+name = "machines"
+role = "refs"
+description = "The machine ids at this site."
+
+[[status]]
+name = "healthy"
+
+[[status]]
+name = "at_risk"
+description = "Satisfaction falling, a live grievance, or a competitor quoting them."
+
+[[status]]
+name = "renegotiating"
+
+[[status]]
+name = "lost"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "exited"
+closed = true
+needs_reason = true
+
+[[section]]
+heading = "Needs attention"
+statuses = ["at_risk", "renegotiating"]
+order = "recent"
+
+[[section]]
+heading = "Steady"
+statuses = ["healthy"]
+order = "recent"
+
+[[section]]
+heading = "Gone"
+statuses = ["lost", "exited"]
+order = "recent"

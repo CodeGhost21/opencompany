@@ -46,6 +46,26 @@ impl MemoryLog {
             })
             .collect()
     }
+
+    /// Every reply on `chat` with the audience it was journaled under.
+    ///
+    /// Separate from [`Self::replies`] rather than a widening of it: most tests
+    /// are not about audience and reading a three-tuple would make them say so.
+    pub(super) fn addressed_replies(&self, chat: &str) -> Vec<(String, String, Vec<String>)> {
+        self.rows()
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                CompanyEvent::AgentReply {
+                    chat_id,
+                    agent_id,
+                    text,
+                    audience,
+                    ..
+                } if chat_id == chat => Some((agent_id, text, audience)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -103,13 +123,13 @@ impl EventLog for MemoryLog {
 /// so a test that scripted a flat sequence would be asserting the bid order by
 /// accident and would break for reasons that have nothing to do with what it
 /// meant to check.
-struct ScriptedRunner {
+pub(super) struct ScriptedRunner {
     lines: Mutex<Vec<(String, String)>>,
     asked: Mutex<Vec<(String, String)>>,
 }
 
 impl ScriptedRunner {
-    fn new(lines: &[(&str, &str)]) -> Self {
+    pub(super) fn new(lines: &[(&str, &str)]) -> Self {
         Self {
             lines: Mutex::new(
                 lines
@@ -122,7 +142,7 @@ impl ScriptedRunner {
     }
 
     /// Every `(agent, prompt)` the episode asked for, in order.
-    fn asked(&self) -> Vec<(String, String)> {
+    pub(super) fn asked(&self) -> Vec<(String, String)> {
         self.asked.lock().expect("script poisoned").clone()
     }
 }
@@ -434,7 +454,7 @@ fn the_derived_policy_scales_with_the_room() {
 // The log adapter
 // ---------------------------------------------------------------------------
 
-async fn seed_desk(log: &MemoryLog) -> EventSeq {
+pub(super) async fn seed_desk(log: &MemoryLog) -> EventSeq {
     let company = MemoryLog::company();
     // Rows the desk must not see, interleaved so the adapter has to filter
     // rather than merely truncate.
@@ -508,6 +528,7 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
     log.append(
         &company,
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "eng".into(),
             agent_id: "planner".into(),
             text: "!propose #stage Stage the rollout.".into(),
@@ -523,6 +544,7 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
     log.append(
         &company,
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "eng".into(),
             agent_id: HIVE_REPORT_AUTHOR.into(),
             text: "An earlier episode ended.".into(),
@@ -541,6 +563,7 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
         &adapter,
         &SessionQuery {
             conversation: conversation(),
+            viewer: tinyhivemind_hive::aside::Viewer::Operator,
             before: None,
             window: SESSION_WINDOW,
         },
@@ -722,6 +745,8 @@ fn message(sequence: u64, author: &str, content: &str) -> tinyhivemind_hive::Ses
             label: author.to_owned(),
         },
         content: content.to_owned(),
+        audience: tinyhivemind_hive::aside::Audience::Desk,
+        elided: None,
     }
 }
 
@@ -760,12 +785,11 @@ fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
         message(3, "planner", "!propose #euler301 New guess."),
         message(4, "critic", "!support #euler301 ^3 Because it holds."),
     ];
-    let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
 
     let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
     let prompt = EpisodePrompt::new(&member, &desk, "Decide the answer.", quorum, &[])
         .with_trigger(Sequence(2))
-        .render(&turn, &visible_refs);
+        .render(&turn, &visible);
 
     let prior_end = prompt.find("[2] scout").expect("prior row 2 is rendered");
     let divider_at = prompt
@@ -789,15 +813,14 @@ fn a_transcript_entirely_after_the_trigger_renders_with_no_divider() {
     let member = desk.member("planner").expect("planner is seated").clone();
     let quorum = desk.policy().quorum;
     let visible = [message(3, "planner", "!propose #stage Stage it.")];
-    let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
     let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
 
     let without_trigger = EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
-        .render(&turn, &visible_refs);
+        .render(&turn, &visible);
     let with_trigger_below_everything =
         EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
             .with_trigger(Sequence(1))
-            .render(&turn, &visible_refs);
+            .render(&turn, &visible);
 
     assert_eq!(
         without_trigger, with_trigger_below_everything,

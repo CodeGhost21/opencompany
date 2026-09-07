@@ -4610,6 +4610,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to this task — admitted.
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -4621,6 +4622,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // An ordinary chat reply — excluded.
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -4632,6 +4634,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to a different task — excluded.
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -5476,6 +5479,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             run_id: None,
         },
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,

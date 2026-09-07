@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use tinyhivemind_hive::aside::Audience;
 use tinyhivemind_hive::{
     LogMessage, Sequence, SessionAuthor, SessionFuture, SessionLog, SessionPage,
 };
@@ -148,12 +149,14 @@ impl EventLogSessionLog {
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: SessionAuthor::Operator,
                 content: text,
+                audience: Audience::Desk,
             }),
             CompanyEvent::AgentReply {
                 chat_id,
                 agent_id,
                 text,
                 parent,
+                audience,
                 ..
             } if self.addresses_desk(Some(&chat_id)) => Some(LogMessage {
                 sequence,
@@ -161,6 +164,16 @@ impl EventLogSessionLog {
                 parent: parent.map(|seq| Sequence(seq.value())),
                 author: author_of(&agent_id),
                 content: text,
+                // Empty is desk-visible, which is what every row written before
+                // asides existed means and what every ordinary turn means now.
+                // The stored list is the addressees only; the author's own
+                // admission to its row is the library's rule, not a member of
+                // the set (`Audience::admits`).
+                audience: if audience.is_empty() {
+                    Audience::Desk
+                } else {
+                    Audience::Aside { members: audience }
+                },
             }),
             _ => None,
         }

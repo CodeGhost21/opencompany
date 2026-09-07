@@ -279,7 +279,7 @@ pub struct ReferralLedger {
     pub failed: u32,
 }
 
-/// One question an episode asked of another desk.
+/// One question an episode asked of a named teammate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AskedQuestion {
     /// The seat that asked.
@@ -290,6 +290,18 @@ pub struct AskedQuestion {
     pub desk: String,
     /// Whether the answer was carried back to the asking desk.
     pub returned: bool,
+    /// Whether the question actually left this desk.
+    ///
+    /// `reach` widens strictly (`local` → `channels` → `desks`), so a desk that
+    /// opted in to referral can put a question to a peer **on its own desk**,
+    /// and that is a legitimate use rather than a misroute. What it is not is a
+    /// question of *another* desk, and the close used to call it one
+    /// unconditionally: a live six-day `companies/vending_machine_co` run
+    /// reported "The room asked 2 questions of another desk (@fleet_tech on
+    /// ops, @field_realist on ops)" on the ops desk itself, naming two of its
+    /// own seats. An operator reading that has been told the room reached
+    /// outside when it did not.
+    pub crossed: bool,
 }
 
 /// The prompt a referred teammate is given.
@@ -460,6 +472,7 @@ impl<'a> EpisodeReferrals<'a> {
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: conversation.desk_id.clone(),
                     agent_id: author.to_owned(),
                     text,
@@ -542,6 +555,7 @@ impl<'a> EpisodeReferrals<'a> {
             target: referral.target_id.clone(),
             desk: referral.to.desk_id.clone(),
             returned: false,
+            crossed: referral.to.desk_id != self.home.desk_id,
         });
         state.last_answer = Some((referral.clone(), answer));
         EnqueueOutcome::Enqueued

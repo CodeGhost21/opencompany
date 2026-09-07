@@ -73,6 +73,16 @@ pub struct HiveConfig {
     /// desk quietly goes on voting.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub moves: BTreeMap<String, Vec<String>>,
+    /// Whether two members of this desk may say something the rest of it
+    /// cannot read, and under what bounds.
+    ///
+    /// Off unless a desk says otherwise, and off for a reason that was
+    /// measured rather than assumed: upstream found a private pairwise check
+    /// buys no answer quality and costs some. What it does buy is bounded
+    /// independence and an auditable record of it — see
+    /// [`aside`](super::aside) for the whole argument.
+    #[serde(default, skip_serializing_if = "super::aside::AsideConfig::is_default")]
+    pub aside: super::aside::AsideConfig,
     /// Whether support must trace back to a stated fact rather than to another
     /// opinion.
     ///
@@ -373,16 +383,34 @@ impl EpisodeOutcome {
             return String::new();
         }
         let mut parts = Vec::new();
-        if !ledger.asked.is_empty() {
-            let named = ledger
-                .asked
-                .iter()
-                .map(|question| format!("@{} on {}", question.target, question.desk))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let count = ledger.asked.len();
+        // Split by whether the question actually left this desk. `reach` widens
+        // strictly, so a desk that opted in to referral may legitimately put a
+        // question to one of its own seats — but calling that "another desk"
+        // tells an operator the room reached outside when it did not. A live
+        // run of `companies/vending_machine_co` reported two questions "of
+        // another desk" on the ops desk, naming two ops seats.
+        let (crossed, local): (Vec<_>, Vec<_>) =
+            ledger.asked.iter().partition(|question| question.crossed);
+        let name = |question: &&super::referral::AskedQuestion| {
+            format!("@{} on {}", question.target, question.desk)
+        };
+        if !crossed.is_empty() {
+            let named = crossed.iter().map(name).collect::<Vec<_>>().join(", ");
+            let count = crossed.len();
             let plural = if count == 1 { "question" } else { "questions" };
             parts.push(format!("asked {count} {plural} of another desk ({named})"));
+        }
+        if !local.is_empty() {
+            let named = local
+                .iter()
+                .map(|question| format!("@{}", question.target))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = local.len();
+            let plural = if count == 1 { "question" } else { "questions" };
+            parts.push(format!(
+                "put {count} {plural} to a seat on this desk ({named})"
+            ));
         }
         if ledger.failed > 0 {
             parts.push(format!("{} went unanswered", ledger.failed));

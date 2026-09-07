@@ -18,6 +18,7 @@ the module's own shape and the reasoning behind its boundaries.
 | `prompt.rs` | `EpisodePrompt` (what one authorized turn is shown) and `marker_line` (what its answer contributes) |
 | `episode.rs` | `EpisodeDriver` (the host loop) and `HiveTurnRunner` (the one-function turn seam) |
 | `referral.rs` | cross-desk referral: `ReferralConfig`, `HiveFederation` (the peer snapshot), `HiveReferralRunner` (the far-turn seam), `EpisodeReferrals` (the `ReferralQueue` impl) and `consider` |
+| `aside.rs` | private asides: `AsideConfig` (the `hive.aside` block), the `!aside` / `!surface` grammar, and the per-pair budget-and-settlement fold — see [`hivemind-asides.md`](../../spec/runtime/hivemind-asides.md) |
 | `test.rs` | the module's unit tests |
 | `moves_test.rs` | the move grammar, the quorum knobs, desk memory, speaker diversity, and turn failure |
 | `referral_test.rs` | what crosses, what does not, and what validation refuses |
