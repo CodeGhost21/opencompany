@@ -199,12 +199,32 @@ class NewsItem:
 # common way this business loses margin.
 LEAD_TIME_DAYS = 4
 
-# What a stockout costs, in satisfaction, at the host site. Small per event and
-# cumulative, so one bad day is noise and a bad fortnight is a lost contract.
-STOCKOUT_SATISFACTION_HIT = 0.035
-STALE_INCIDENT_SATISFACTION_HIT = 0.02
+# What a bad day costs a host site, in satisfaction.
+#
+# Charged **once per machine per day**, not once per empty spiral. Per-spiral was
+# the first cut and it made satisfaction a countdown rather than a signal: eight
+# machines with four empty lines each is thirty-two charges a day, so every site
+# in the fleet sat at 0.00 within a fortnight and the number could no longer
+# distinguish a badly-run site from a catastrophically-run one — which is the
+# only thing it is for.
+STOCKOUT_SATISFACTION_HIT = 0.02
+STALE_INCIDENT_SATISFACTION_HIT = 0.015
 # An incident is "stale" once it has been open this long.
 INCIDENT_STALE_DAYS = 3
+
+# What a *good* day is worth. A site whose machines all sold without running dry,
+# and that is carrying no stale incident, recovers a little.
+#
+# Recovery is what makes satisfaction a feedback loop instead of a ratchet: a
+# desk that fixes a site should be able to see it come back, and a contract
+# renewal negotiated after a good fortnight should be a different conversation
+# from one negotiated after a bad one. It is deliberately slower than the
+# damage — goodwill is easier to lose than to earn, and a fleet cannot neglect a
+# site for a month and repair it in a week.
+SATISFACTION_RECOVERY = 0.008
+# Recovery never carries a site past this on its own. Getting above it takes
+# something a host notices — a renegotiation, or a commitment kept.
+SATISFACTION_RECOVERY_CEILING = 0.85
 
 
 class World:
