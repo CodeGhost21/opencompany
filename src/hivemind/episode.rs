@@ -717,7 +717,9 @@ impl<'a> EpisodeDriver<'a> {
         violations: &mut Vec<MoveViolation>,
         aside: &mut Option<String>,
     ) -> Result<String> {
-        let line = self.grounded(agent_id, prompt, visible, line, aside).await?;
+        let line = self
+            .grounded(agent_id, prompt, visible, line, aside)
+            .await?;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return Ok(line);
         };

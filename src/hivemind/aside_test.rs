@@ -135,7 +135,11 @@ async fn an_aside_costs_no_turn_and_the_desk_still_gets_the_move() {
         "{:?}",
         desk_lines(&log),
     );
-    assert_eq!(aside_audiences(&log).len(), 1, "and the private row rode with it");
+    assert_eq!(
+        aside_audiences(&log).len(),
+        1,
+        "and the private row rode with it"
+    );
     // Turns are counted, rows are not: the aside must not have been charged.
     assert!(outcome.turns >= 1);
     let rows = log.addressed_replies("eng").len();
@@ -184,7 +188,10 @@ async fn only_the_aside_row_is_narrowed() {
 #[tokio::test]
 async fn a_support_written_inside_an_aside_carries_nothing() {
     let script: &[(&str, &str)] = &[
-        ("planner", "!propose #stage Stage the rollout behind a flag."),
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
         (
             "critic",
             "!evidence #stage ^3 The last full rollout broke checkout.",
@@ -235,12 +242,16 @@ async fn an_aside_naming_a_stranger_is_dropped() {
         "`auditor` is on no desk here, so nothing should have been made private",
     );
     assert!(
-        !desk_lines(&log).iter().any(|line| line.contains("@auditor")),
+        !desk_lines(&log)
+            .iter()
+            .any(|line| line.contains("@auditor")),
         "a refused aside is dropped, not published: {:?}",
         desk_lines(&log),
     );
     assert!(
-        desk_lines(&log).iter().any(|line| line.starts_with("!propose #stage Stage it.")),
+        desk_lines(&log)
+            .iter()
+            .any(|line| line.starts_with("!propose #stage Stage it.")),
         "the turn's own contribution still reaches the room",
     );
 }
@@ -253,8 +264,14 @@ async fn a_pair_that_owes_the_room_a_settlement_cannot_open_another_aside() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!propose #stage Stage it.\n!aside @scout first question"),
-            ("planner", "!support #stage ^3 Still staging.\n!aside @scout second, still owing"),
+            (
+                "planner",
+                "!propose #stage Stage it.\n!aside @scout first question",
+            ),
+            (
+                "planner",
+                "!support #stage ^3 Still staging.\n!aside @scout second, still owing",
+            ),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
@@ -275,9 +292,15 @@ async fn a_settlement_lets_the_pair_open_another_aside() {
     let (log, _) = run(
         &aside_manifest(),
         &[
-            ("planner", "!propose #stage Stage it.\n!aside @scout first question"),
+            (
+                "planner",
+                "!propose #stage Stage it.\n!aside @scout first question",
+            ),
             ("planner", "!surface scout confirms the metric is theirs"),
-            ("planner", "!support #stage ^3 Confirmed.\n!aside @scout second question"),
+            (
+                "planner",
+                "!support #stage ^3 Confirmed.\n!aside @scout second question",
+            ),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
@@ -307,8 +330,14 @@ async fn a_pair_that_spends_max_messages_is_dropped() {
         manifest,
         &[
             ("planner", "!propose #stage Stage it.\n!aside @scout first"),
-            ("planner", "!support #stage ^3 Yes.\n!aside @scout second, last within budget"),
-            ("planner", "!support #stage ^3 Still yes.\n!aside @scout third, over budget"),
+            (
+                "planner",
+                "!support #stage ^3 Yes.\n!aside @scout second, last within budget",
+            ),
+            (
+                "planner",
+                "!support #stage ^3 Still yes.\n!aside @scout third, over budget",
+            ),
             ("scout", "!propose #ship Ship it."),
             ("critic", "!propose #stage Stage it."),
         ],
