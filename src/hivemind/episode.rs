@@ -556,7 +556,7 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         agent_id: &str,
         prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
+        visible: &[tinyhivemind_hive::SessionMessage],
         violations: &mut Vec<MoveViolation>,
     ) -> Result<String> {
         let allowed = self.desk.config.moves_for(agent_id);
@@ -607,7 +607,7 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         agent_id: &str,
         prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
+        visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
         allowed: &[&'static str],
         violations: &mut Vec<MoveViolation>,
@@ -649,7 +649,7 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         agent_id: &str,
         prompt: &str,
-        visible: &[&tinyhivemind_hive::SessionMessage],
+        visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
     ) -> Result<String> {
         if self.desk.config.require_evidential != Some(true)

@@ -47,7 +47,7 @@ fn traces_of(line: &str, agent_id: &str, at: Sequence) -> Vec<Trace> {
 }
 
 /// Every trace in the visible transcript, indexed by the sequence carrying it.
-fn by_sequence(visible: &[&SessionMessage]) -> BTreeMap<Sequence, Vec<Trace>> {
+fn by_sequence(visible: &[SessionMessage]) -> BTreeMap<Sequence, Vec<Trace>> {
     let mut indexed: BTreeMap<Sequence, Vec<Trace>> = BTreeMap::new();
     for message in visible {
         for trace in resolve(&message.content, None, &message.author, message.sequence) {
@@ -87,7 +87,7 @@ fn reaches_evidence(cites: &[Sequence], indexed: &BTreeMap<Sequence, Vec<Trace>>
 
 /// The sequences carrying an `!evidence` line, in transcript order.
 #[must_use]
-pub fn evidence_sequences(visible: &[&SessionMessage]) -> Vec<u64> {
+pub fn evidence_sequences(visible: &[SessionMessage]) -> Vec<u64> {
     let mut sequences: Vec<u64> = Vec::new();
     for message in visible {
         let carries_evidence = resolve(&message.content, None, &message.author, message.sequence)
@@ -106,7 +106,7 @@ pub fn evidence_sequences(visible: &[&SessionMessage]) -> Vec<u64> {
 /// already lands on a fact — the check exists to catch the one shape that
 /// silently counts for nothing.
 #[must_use]
-pub fn support_misses_evidence(line: &str, agent_id: &str, visible: &[&SessionMessage]) -> bool {
+pub fn support_misses_evidence(line: &str, agent_id: &str, visible: &[SessionMessage]) -> bool {
     let at = Sequence(
         visible
             .iter()

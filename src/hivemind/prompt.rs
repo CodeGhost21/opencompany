@@ -256,7 +256,7 @@ impl<'a> EpisodePrompt<'a> {
 
     /// Render exactly what this turn is allowed to see.
     #[must_use]
-    pub fn render(&self, turn: &HiveTurn, visible: &[&SessionMessage]) -> String {
+    pub fn render(&self, turn: &HiveTurn, visible: &[SessionMessage]) -> String {
         let sight = match turn.visibility {
             Visibility::Blind => "You cannot yet see your peers' positions. Form your own first.",
             Visibility::Full => "You can see the whole room.",
@@ -480,7 +480,7 @@ impl<'a> EpisodePrompt<'a> {
     /// An unfoldable transcript yields nothing rather than an error: the floor
     /// block and the carried topic both degrade to their "nothing yet" shapes,
     /// which is a worse prompt and not a failed turn.
-    fn standings(&self, visible: &[&SessionMessage]) -> Vec<TopicStanding> {
+    fn standings(&self, visible: &[SessionMessage]) -> Vec<TopicStanding> {
         let traces: Vec<_> = visible
             .iter()
             .flat_map(|message| resolve(&message.content, None, &message.author, message.sequence))
@@ -525,7 +525,7 @@ impl<'a> EpisodePrompt<'a> {
     }
 
     /// The line this member last authored, if any.
-    fn last_line(&self, visible: &[&SessionMessage]) -> String {
+    fn last_line(&self, visible: &[SessionMessage]) -> String {
         visible
             .iter()
             .rev()
@@ -680,7 +680,7 @@ const EPISODE_DIVIDER: &str = "--- Above: earlier conversation on this desk, fro
 /// parameter existed) renders exactly as it always has, and a caller that
 /// never learned a trigger passes `None` and gets the same guarantee.
 #[must_use]
-pub fn render_transcript(visible: &[&SessionMessage], trigger: Option<Sequence>) -> String {
+pub fn render_transcript(visible: &[SessionMessage], trigger: Option<Sequence>) -> String {
     let split = trigger
         .map(|trigger| visible.partition_point(|message| message.sequence <= trigger))
         .filter(|&split| split > 0 && split < visible.len());
