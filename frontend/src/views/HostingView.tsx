@@ -11,6 +11,8 @@ import {
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
+import { cn } from "@/lib/utils";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
@@ -176,7 +178,7 @@ export function HostingView({ client, company }: Props) {
   const header = (
     <PageHeader
       title="Hosting"
-      width="5xl"
+      width="full"
       description={
         <>
           Connect a hosting provider so your teammates can put a site from this
@@ -191,7 +193,7 @@ export function HostingView({ client, company }: Props) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
-        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+        <div className="w-full px-4 py-6">
           <Alert variant="destructive" data-testid="hosting-load-error">
             <TriangleAlert className="size-4" />
             <AlertDescription>Could not load hosting settings: {loadError}</AlertDescription>
@@ -217,7 +219,7 @@ export function HostingView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="hosting-view">
       {header}
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}
@@ -264,7 +266,7 @@ export function HostingView({ client, company }: Props) {
               ) : null}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
               <div className="space-y-2">
                 <Label htmlFor="hosting-key">API token</Label>
                 <Input
