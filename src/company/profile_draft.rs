@@ -341,6 +341,39 @@ pub fn clamp_role(text: &str) -> String {
     collapsed.chars().take(MAX_ROLE).collect::<String>()
 }
 
+/// Whether any two of a design's three fields are the same text.
+///
+/// Compared on a normal form — whitespace collapsed, case folded, trailing
+/// punctuation and the clamp's own `…` dropped — because the failure this
+/// catches is a model echoing one sentence into two slots, and it does not stop
+/// being that when one copy gained a full stop or a capital letter. An exact
+/// `==` would miss `"Owns stockists"` against `"Owns stockists."`, which is the
+/// same record with a keystroke of difference.
+///
+/// All three pairs, not just mandate-against-persona. A role equal to the
+/// mandate is the original defect exactly — the sentence stored as a job title
+/// — and a role equal to the persona is the same answer arrived at from the
+/// other end.
+fn repeats_a_field(role: &str, description: &str, instructions: &str) -> bool {
+    fn normal(text: &str) -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+            .trim_end_matches(['.', '!', '?', ';', ':', ',', '…'])
+            .to_string()
+    }
+    let role = normal(role);
+    let description = normal(description);
+    let instructions = normal(instructions);
+    // A field that normalizes away to nothing is punctuation, and two of those
+    // matching says nothing — the emptiness checks above already refused it.
+    if role.is_empty() || description.is_empty() || instructions.is_empty() {
+        return false;
+    }
+    role == description || role == instructions || description == instructions
+}
+
 /// A whole teammate as one design pass wrote it (issue #1989).
 ///
 /// ## Why a role may be drafted here, when `ProfileField` deliberately excludes one
@@ -388,6 +421,31 @@ impl TeammateDesign {
     ///
     /// A role needing truncation is refused rather than cut, for the reason
     /// given on [`clamp_role`].
+    ///
+    /// ## Why "three non-empty strings" was never the bar
+    ///
+    /// Two answers clear every length and emptiness check above and are still
+    /// the exact record this route exists to stop shipping:
+    ///
+    /// - **A role the model truncated itself.** The brief tells it never to,
+    ///   but a brief is not a validator, and `"Runs wholesale outreach to
+    ///   boutique retailers and keeps the…"` is precisely the stored job title
+    ///   that motivated the whole change — it does not stop being that because
+    ///   a model wrote the `…` rather than a `String::truncate`. The console's
+    ///   `designedTeammateFields` already refuses one; this is the half that
+    ///   holds when the console is not the caller, and refusing here is what
+    ///   turns a silent hand-over into a `DraftRefusal` the operator is shown.
+    /// - **The same text in more than one field.** The operator's original
+    ///   complaint was one sentence appearing as role, mandate and persona at
+    ///   once. A model that echoes the sentence into two of the three has not
+    ///   designed a teammate, it has restated the input in valid JSON, and
+    ///   every length check passes. `design_system_prompt` says "this must NOT
+    ///   restate the mandate" for the same reason; this enforces it.
+    ///
+    /// Both are refusals rather than repairs, for the reason the whole type is
+    /// all-or-nothing: the operator gets the full form carrying what they
+    /// typed, which is honest, where a salvaged two-thirds of a design looks
+    /// finished on screen and is not.
     pub fn from_parts(role: &str, description: &str, instructions: &str) -> Option<Self> {
         let role = role.split_whitespace().collect::<Vec<_>>().join(" ");
         let description = description.trim();
@@ -400,6 +458,19 @@ impl TeammateDesign {
         }
         // Not a job title anyone could read: punctuation, emoji, whitespace.
         if !role.chars().any(char::is_alphanumeric) {
+            return None;
+        }
+        // A job title of one to four words has no ellipsis in it in either
+        // spelling; one that does is an answer the model cut short. Checked on
+        // the role alone — a *mandate* may legitimately end in `…`, because
+        // that is the mark `clamp_description` itself leaves.
+        if role.contains('…') || role.contains("...") {
+            return None;
+        }
+        // Compared before the clamps, so a description cut to the card bound
+        // cannot come out looking different from the persona it was copied
+        // from and pass.
+        if repeats_a_field(&role, description, instructions) {
             return None;
         }
         Some(Self {
@@ -665,6 +736,84 @@ mod tests {
                 "{role:?} is not a job title"
             );
         }
+    }
+
+    /// A role the *model* truncated is refused, exactly like one that was too
+    /// long to fit.
+    ///
+    /// The length check above cannot catch this: `"Growth Marketer…"` is
+    /// sixteen characters and every one of them passes. But it is the same
+    /// stored record the whole change exists to stop — a job title with its end
+    /// sliced off, read into every prompt this teammate ever runs — and the
+    /// brief telling the model never to write one is a brief, not a validator.
+    ///
+    /// Refusing here rather than only in the console is what makes the answer
+    /// legible. `designedTeammateFields` drops such a design too, but a design
+    /// that arrived whole carries no `reason`, so the console's hand-over says
+    /// `"unknown"` — it can tell the operator the dialog changed and not why.
+    /// A refusal from this side arrives as `Unreadable` and says it.
+    #[test]
+    fn a_role_the_model_truncated_is_refused() {
+        for role in [
+            "Growth Marketer…",
+            "Runs wholesale outreach to boutique retailers and keeps the…",
+            "Growth Marketer...",
+            "Wholesale … Manager",
+        ] {
+            assert!(
+                TeammateDesign::from_parts(role, "Owns stockists.", "Be terse.").is_none(),
+                "{role:?} is a cut-off job title, not a job title"
+            );
+        }
+        // The mandate's own clamp mark is not a truncated role, and a design
+        // whose description ends in `…` is still a design.
+        let design = TeammateDesign::from_parts("Growth Marketer", "Owns stockists…", "Be terse.")
+            .expect("an ellipsis in the mandate is the clamp's own mark");
+        assert_eq!(design.role, "Growth Marketer");
+    }
+
+    /// Three non-empty fields that are the same sentence are not a design.
+    ///
+    /// This is the operator's original complaint, restated as an invariant: one
+    /// sentence appearing as role, mandate and persona at once. Every length
+    /// and emptiness check passes, the JSON is valid, and the console would
+    /// store it — so nothing but this refuses it.
+    #[test]
+    fn a_design_that_repeats_itself_is_refused() {
+        let sentence = "Runs wholesale outreach to boutique retailers.";
+        assert!(TeammateDesign::from_parts(sentence, sentence, sentence).is_none());
+        // Any pair of the three, not only all three.
+        assert!(
+            TeammateDesign::from_parts("Growth Marketer", sentence, sentence).is_none(),
+            "a persona that restates the mandate is the wrong field, not a design"
+        );
+        assert!(
+            TeammateDesign::from_parts("Growth Marketer", "Growth Marketer", "Be terse.").is_none(),
+            "a mandate that is only the job title says nothing the role did not"
+        );
+        assert!(
+            TeammateDesign::from_parts("Growth Marketer", "Owns stockists.", "Growth Marketer")
+                .is_none(),
+            "a persona that is only the job title is the same defect from the other end"
+        );
+        // Normalized, so a full stop or a capital is not a way past it.
+        assert!(
+            TeammateDesign::from_parts("Manager", "Owns stockists", "owns stockists.").is_none(),
+            "the same sentence with a keystroke of difference is still the same sentence"
+        );
+        assert!(
+            TeammateDesign::from_parts("Manager", "Owns  stockists.", "Owns\nstockists.").is_none(),
+            "whitespace is not a distinction between two fields"
+        );
+        // Three genuinely different fields still design.
+        assert!(
+            TeammateDesign::from_parts(
+                "Wholesale Account Manager",
+                "Owns the stockist relationships and the reorder cadence.",
+                "Check stock before promising a date. Escalate a missed reorder."
+            )
+            .is_some()
+        );
     }
 
     /// The mandate and the persona are bounded by the same clamps the fields
