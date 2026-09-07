@@ -80,12 +80,30 @@ async function dismissOnboarding(page: Page) {
  * The rule is `addTeammateSurface`'s, restated deliberately: a spec that asked
  * the component which surface it had chosen would agree with itself no matter
  * what either of them did.
+ *
+ * A restatement has to be kept **complete**, which is the cost of the choice
+ * above and one this helper has already paid once. It read `cognition` alone,
+ * because that was the whole rule when it was written; the rule then grew a
+ * second input — `designsProfiles`, the host's own answer about whether a
+ * design pass can run — and a `hosted` or `sidecar` company reports a non-`echo`
+ * cognition with no drafter behind it. Production renders the full form there
+ * and this said `describe`, so the spec would have waited for a box that was
+ * never going to appear. Both inputs, in the same order the component takes
+ * them.
  */
 async function addTeammateSurface(page: Page): Promise<"describe" | "form"> {
   const status = await page.request.get("/api/v1/company/inference");
   if (!status.ok()) return "describe";
-  const { cognition } = (await status.json()) as { cognition?: string };
-  return cognition === "echo" ? "form" : "describe";
+  const { cognition, designsProfiles } = (await status.json()) as {
+    cognition?: string;
+    designsProfiles?: boolean;
+  };
+  if (cognition === "echo") return "form";
+  // Only an explicit `false`. A host too old to report the capability says
+  // nothing, and the component reads that as "unknown" and offers the reduced
+  // dialog — so this must too.
+  if (designsProfiles === false) return "form";
+  return "describe";
 }
 
 async function goToTeam(page: Page) {

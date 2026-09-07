@@ -377,6 +377,13 @@ async function mockApi(page: Page) {
         usageMetering: cognition === "echo" ? "none" : "perTurn",
         restartRequired: false,
         harnessReachable: cognition !== "echo",
+        // The host builds a profile drafter only on the embedded-harness path
+        // (`workflow_harness_deps`), so this is `cognition === "harness"` and
+        // NOT `!== "echo"` — `hosted`, `sidecar` and `custom` companies report
+        // a non-echo cognition with no drafter behind them. Modelled here
+        // because the dialog reads it: a mock that omitted it would exercise
+        // the older-host fallback rather than the contract that ships.
+        designsProfiles: cognition === "harness",
       });
     if (path.endsWith("/activation"))
       return json({
