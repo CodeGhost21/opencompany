@@ -388,6 +388,28 @@ pub fn clamp_role(text: &str) -> String {
     collapsed.chars().take(MAX_ROLE).collect::<String>()
 }
 
+/// One field's normal form: whitespace collapsed, case folded, trailing
+/// punctuation and the clamp's own `…` dropped.
+///
+/// Shared by the two sameness rules so they cannot come to disagree about what
+/// "the same text" means — the failure they catch is one sentence wearing two
+/// hats, and it does not stop being that when one copy gained a full stop.
+fn normal(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .trim_end_matches(['.', '!', '?', ';', ':', ',', '…'])
+        .to_string()
+}
+
+/// Whether two pieces of text are the same once normalized, both non-empty.
+fn same_text(left: &str, right: &str) -> bool {
+    let left = normal(left);
+    let right = normal(right);
+    !left.is_empty() && left == right
+}
+
 /// Whether any two of a design's three fields are the same text.
 ///
 /// Compared on a normal form — whitespace collapsed, case folded, trailing
@@ -402,14 +424,6 @@ pub fn clamp_role(text: &str) -> String {
 /// — and a role equal to the persona is the same answer arrived at from the
 /// other end.
 fn repeats_a_field(role: &str, description: &str, instructions: &str) -> bool {
-    fn normal(text: &str) -> String {
-        text.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-            .trim_end_matches(['.', '!', '?', ';', ':', ',', '…'])
-            .to_string()
-    }
     let role = normal(role);
     let description = normal(description);
     let instructions = normal(instructions);
@@ -469,6 +483,9 @@ impl TeammateDesign {
     /// A role needing truncation is refused rather than cut, for the reason
     /// given on [`clamp_role`].
     ///
+    /// `brief` is the operator's own sentence, passed so the role can be
+    /// checked against it — see the third bullet below.
+    ///
     /// ## Why "three non-empty strings" was never the bar
     ///
     /// Two answers clear every length and emptiness check above and are still
@@ -488,12 +505,23 @@ impl TeammateDesign {
     ///   designed a teammate, it has restated the input in valid JSON, and
     ///   every length check passes. `design_system_prompt` says "this must NOT
     ///   restate the mandate" for the same reason; this enforces it.
+    /// - **A role that is the operator's brief.** The rule above compares the
+    ///   three answers to each other and so misses the shape that matters most:
+    ///   a brief of `"Handles payroll"` answered with role `"Handles payroll"`,
+    ///   a real mandate and real instructions passes everything. That is the
+    ///   original defect exactly — the sentence stored as the job title — and
+    ///   only a comparison against the input catches it.
     ///
     /// Both are refusals rather than repairs, for the reason the whole type is
     /// all-or-nothing: the operator gets the full form carrying what they
     /// typed, which is honest, where a salvaged two-thirds of a design looks
     /// finished on screen and is not.
-    pub fn from_parts(role: &str, description: &str, instructions: &str) -> Option<Self> {
+    pub fn from_parts(
+        role: &str,
+        description: &str,
+        instructions: &str,
+        brief: &str,
+    ) -> Option<Self> {
         let role = role.split_whitespace().collect::<Vec<_>>().join(" ");
         let description = description.trim();
         let instructions = instructions.trim();
@@ -518,6 +546,21 @@ impl TeammateDesign {
         // cannot come out looking different from the persona it was copied
         // from and pass.
         if repeats_a_field(&role, description, instructions) {
+            return None;
+        }
+        // The operator's own sentence, handed back as the job title. Checking
+        // the three answers against each other does not catch it: a brief of
+        // "Handles payroll" with a real mandate and real instructions beside it
+        // passes every rule above, and is exactly the record this route
+        // replaced — the sentence stored as the role, read into every prompt
+        // that teammate ever runs.
+        //
+        // Blunt on purpose, and the false positive is the good kind. An
+        // operator whose whole brief IS a job title has answered a different
+        // question from the one the box asks ("What should they do?"), and the
+        // right response to that is the full form — where Role is its own
+        // field — carrying what they typed, rather than a design built on it.
+        if !brief.trim().is_empty() && same_text(&role, brief) {
             return None;
         }
         Some(Self {
@@ -722,8 +765,13 @@ mod tests {
     #[test]
     fn a_design_needs_all_three_fields() {
         assert!(
-            TeammateDesign::from_parts("Wholesale Account Manager", "Owns stockists.", "Be terse.")
-                .is_some()
+            TeammateDesign::from_parts(
+                "Wholesale Account Manager",
+                "Owns stockists.",
+                "Be terse.",
+                "Runs the stockist channel end to end."
+            )
+            .is_some()
         );
         for (role, description, instructions) in [
             ("", "Owns stockists.", "Be terse."),
@@ -734,7 +782,13 @@ mod tests {
             ("Manager", "Owns stockists.", "  \n "),
         ] {
             assert!(
-                TeammateDesign::from_parts(role, description, instructions).is_none(),
+                TeammateDesign::from_parts(
+                    role,
+                    description,
+                    instructions,
+                    "Runs the stockist channel end to end."
+                )
+                .is_none(),
                 "({role:?}, {description:?}, {instructions:?}) must not become a teammate"
             );
         }
@@ -752,11 +806,24 @@ mod tests {
     #[test]
     fn a_role_that_would_need_cutting_is_refused() {
         let long = "a".repeat(MAX_ROLE + 1);
-        assert!(TeammateDesign::from_parts(&long, "Owns stockists.", "Be terse.").is_none());
+        assert!(
+            TeammateDesign::from_parts(
+                &long,
+                "Owns stockists.",
+                "Be terse.",
+                "Runs the stockist channel end to end."
+            )
+            .is_none()
+        );
         // The bound itself is a bound, not a cut point.
         let exact = "b".repeat(MAX_ROLE);
-        let design = TeammateDesign::from_parts(&exact, "Owns stockists.", "Be terse.")
-            .expect("a role exactly at the bound is fine");
+        let design = TeammateDesign::from_parts(
+            &exact,
+            "Owns stockists.",
+            "Be terse.",
+            "Runs the stockist channel end to end.",
+        )
+        .expect("a role exactly at the bound is fine");
         assert_eq!(design.role, exact);
         assert!(!design.role.contains('…'));
     }
@@ -766,9 +833,13 @@ mod tests {
     /// in the middle of it — that reaches the persona line verbatim.
     #[test]
     fn a_designed_role_is_one_line() {
-        let design =
-            TeammateDesign::from_parts("  Wholesale\n  Account   Manager  ", "Owns.", "Be terse.")
-                .expect("a multi-line answer is still a role");
+        let design = TeammateDesign::from_parts(
+            "  Wholesale\n  Account   Manager  ",
+            "Owns.",
+            "Be terse.",
+            "Runs the stockist channel end to end.",
+        )
+        .expect("a multi-line answer is still a role");
         assert_eq!(design.role, "Wholesale Account Manager");
     }
 
@@ -779,7 +850,13 @@ mod tests {
     fn a_role_with_nothing_readable_in_it_is_refused() {
         for role in ["🎉🎉", "...", "!?!", "— —"] {
             assert!(
-                TeammateDesign::from_parts(role, "Owns stockists.", "Be terse.").is_none(),
+                TeammateDesign::from_parts(
+                    role,
+                    "Owns stockists.",
+                    "Be terse.",
+                    "Runs the stockist channel end to end."
+                )
+                .is_none(),
                 "{role:?} is not a job title"
             );
         }
@@ -808,14 +885,25 @@ mod tests {
             "Wholesale … Manager",
         ] {
             assert!(
-                TeammateDesign::from_parts(role, "Owns stockists.", "Be terse.").is_none(),
+                TeammateDesign::from_parts(
+                    role,
+                    "Owns stockists.",
+                    "Be terse.",
+                    "Runs the stockist channel end to end."
+                )
+                .is_none(),
                 "{role:?} is a cut-off job title, not a job title"
             );
         }
         // The mandate's own clamp mark is not a truncated role, and a design
         // whose description ends in `…` is still a design.
-        let design = TeammateDesign::from_parts("Growth Marketer", "Owns stockists…", "Be terse.")
-            .expect("an ellipsis in the mandate is the clamp's own mark");
+        let design = TeammateDesign::from_parts(
+            "Growth Marketer",
+            "Owns stockists…",
+            "Be terse.",
+            "Runs the stockist channel end to end.",
+        )
+        .expect("an ellipsis in the mandate is the clamp's own mark");
         assert_eq!(design.role, "Growth Marketer");
     }
 
@@ -828,28 +916,65 @@ mod tests {
     #[test]
     fn a_design_that_repeats_itself_is_refused() {
         let sentence = "Runs wholesale outreach to boutique retailers.";
-        assert!(TeammateDesign::from_parts(sentence, sentence, sentence).is_none());
+        assert!(
+            TeammateDesign::from_parts(
+                sentence,
+                sentence,
+                sentence,
+                "Runs the stockist channel end to end."
+            )
+            .is_none()
+        );
         // Any pair of the three, not only all three.
         assert!(
-            TeammateDesign::from_parts("Growth Marketer", sentence, sentence).is_none(),
+            TeammateDesign::from_parts(
+                "Growth Marketer",
+                sentence,
+                sentence,
+                "Runs the stockist channel end to end."
+            )
+            .is_none(),
             "a persona that restates the mandate is the wrong field, not a design"
         );
         assert!(
-            TeammateDesign::from_parts("Growth Marketer", "Growth Marketer", "Be terse.").is_none(),
+            TeammateDesign::from_parts(
+                "Growth Marketer",
+                "Growth Marketer",
+                "Be terse.",
+                "Runs the stockist channel end to end."
+            )
+            .is_none(),
             "a mandate that is only the job title says nothing the role did not"
         );
         assert!(
-            TeammateDesign::from_parts("Growth Marketer", "Owns stockists.", "Growth Marketer")
-                .is_none(),
+            TeammateDesign::from_parts(
+                "Growth Marketer",
+                "Owns stockists.",
+                "Growth Marketer",
+                "Runs the stockist channel end to end."
+            )
+            .is_none(),
             "a persona that is only the job title is the same defect from the other end"
         );
         // Normalized, so a full stop or a capital is not a way past it.
         assert!(
-            TeammateDesign::from_parts("Manager", "Owns stockists", "owns stockists.").is_none(),
+            TeammateDesign::from_parts(
+                "Manager",
+                "Owns stockists",
+                "owns stockists.",
+                "Runs the stockist channel end to end."
+            )
+            .is_none(),
             "the same sentence with a keystroke of difference is still the same sentence"
         );
         assert!(
-            TeammateDesign::from_parts("Manager", "Owns  stockists.", "Owns\nstockists.").is_none(),
+            TeammateDesign::from_parts(
+                "Manager",
+                "Owns  stockists.",
+                "Owns\nstockists.",
+                "Runs the stockist channel end to end."
+            )
+            .is_none(),
             "whitespace is not a distinction between two fields"
         );
         // Three genuinely different fields still design.
@@ -857,9 +982,72 @@ mod tests {
             TeammateDesign::from_parts(
                 "Wholesale Account Manager",
                 "Owns the stockist relationships and the reorder cadence.",
-                "Check stock before promising a date. Escalate a missed reorder."
+                "Check stock before promising a date. Escalate a missed reorder.",
+                "Runs the stockist channel end to end."
             )
             .is_some()
+        );
+    }
+
+    /// The operator's own sentence handed back as the job title is refused.
+    ///
+    /// The shape the three-fields-against-each-other rule cannot see, and the
+    /// one that matters most: a brief of `"Handles payroll"` answered with role
+    /// `"Handles payroll"`, a real mandate and real instructions passes every
+    /// other check in `from_parts`. It is the original defect exactly — the
+    /// operator's sentence stored as a permanent role, interpolated into every
+    /// prompt that teammate ever runs — and only a comparison against the input
+    /// catches it.
+    #[test]
+    fn a_role_that_is_only_the_brief_is_refused() {
+        let brief = "Handles payroll";
+        assert!(
+            TeammateDesign::from_parts(
+                "Handles payroll",
+                "Owns payroll accuracy and the monthly deadlines.",
+                "Run the payroll cycle on the 25th. Escalate a mismatch before paying.",
+                brief,
+            )
+            .is_none(),
+            "the brief handed back as the role is the defect, whatever sits beside it"
+        );
+        // Normalized, so punctuation and case are not a way past it.
+        assert!(
+            TeammateDesign::from_parts(
+                "handles payroll.",
+                "Owns payroll accuracy and the monthly deadlines.",
+                "Run the payroll cycle on the 25th.",
+                "Handles Payroll",
+            )
+            .is_none()
+        );
+        // And whitespace is not a distinction either.
+        assert!(
+            TeammateDesign::from_parts(
+                "Handles   payroll",
+                "Owns payroll accuracy.",
+                "Run the cycle on the 25th.",
+                "Handles\npayroll",
+            )
+            .is_none()
+        );
+
+        // A role the model actually wrote still designs, from the same brief.
+        let design = TeammateDesign::from_parts(
+            "Payroll Administrator",
+            "Owns payroll accuracy and the monthly deadlines.",
+            "Run the payroll cycle on the 25th. Escalate a mismatch before paying.",
+            brief,
+        )
+        .expect("a designed role beside the same brief is the good case");
+        assert_eq!(design.role, "Payroll Administrator");
+
+        // No brief to compare against is not a refusal — the rule needs an
+        // input, and a caller without one still gets every other check.
+        assert!(
+            TeammateDesign::from_parts("Handles payroll", "Owns payroll.", "Be terse.", "")
+                .is_some(),
+            "an empty brief cannot make a role a duplicate of anything"
         );
     }
 
@@ -875,9 +1063,13 @@ mod tests {
     /// and half of one is not a shorter job title, it is a broken one.
     #[test]
     fn a_design_is_bounded_by_the_fields_it_fills() {
-        let design =
-            TeammateDesign::from_parts("Manager", &"m ".repeat(MAX_DESCRIPTION), &"p".repeat(200))
-                .expect("a long answer is still a design");
+        let design = TeammateDesign::from_parts(
+            "Manager",
+            &"m ".repeat(MAX_DESCRIPTION),
+            &"p".repeat(200),
+            "Runs the stockist channel end to end.",
+        )
+        .expect("a long answer is still a design");
         // The clamp's own ellipsis is the one character over the layout bound.
         assert!(design.description.chars().count() <= MAX_DESCRIPTION + 1);
         assert!(design.description.ends_with('…'));

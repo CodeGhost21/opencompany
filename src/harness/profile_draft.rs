@@ -329,7 +329,11 @@ impl ProfileDrafter {
 
         let usage = usage_from(&response);
         let raw = response.text();
-        let Some(design) = parse_design(&raw) else {
+        // The operator's own sentence goes in with the answer: a role that is
+        // just the brief handed back is the defect this route replaced, and
+        // only a comparison against the input can see it.
+        let brief = subject.description.as_deref().unwrap_or("");
+        let Some(design) = parse_design(&raw, brief) else {
             tracing::info!(
                 // The model's own words about a teammate the operator just
                 // described, truncated — nothing here they cannot already see
@@ -441,7 +445,7 @@ struct DesignAnswer {
 /// tolerance [`parse_answer`] has, for the same reason. There is no prose
 /// fallback here, unlike a draft turn: a design has three named fields and
 /// prose is not a partial answer to that, it is an unreadable one.
-fn parse_design(text: &str) -> Option<TeammateDesign> {
+fn parse_design(text: &str, brief: &str) -> Option<TeammateDesign> {
     let trimmed = text.trim();
     let body = match trimmed.find("```") {
         Some(open) => {
@@ -462,7 +466,12 @@ fn parse_design(text: &str) -> Option<TeammateDesign> {
         return None;
     }
     let answer: DesignAnswer = serde_json::from_str(&body[start..=end]).ok()?;
-    TeammateDesign::from_parts(&answer.role, &answer.description, &answer.instructions)
+    TeammateDesign::from_parts(
+        &answer.role,
+        &answer.description,
+        &answer.instructions,
+        brief,
+    )
 }
 
 /// What one field is, what it is for, and how to write it.
@@ -1217,7 +1226,8 @@ mod test {
             // has and for the same reason.
             format!("```json\n{object}"),
         ] {
-            let design = parse_design(&answer).unwrap_or_else(|| panic!("unreadable: {answer}"));
+            let design = parse_design(&answer, "Runs the stockist channel end to end.")
+                .unwrap_or_else(|| panic!("unreadable: {answer}"));
             assert_eq!(design.role, "Wholesale Account Manager");
             assert_eq!(design.description, "Owns stockists.");
             assert_eq!(design.instructions, "Be terse.");
@@ -1238,7 +1248,10 @@ mod test {
             r#"{"role": "Manager"}"#,
             r#"{"role": "Manager", "description": "Owns stockists."}"#,
         ] {
-            assert!(parse_design(answer).is_none(), "{answer:?} is not a design");
+            assert!(
+                parse_design(answer, "Runs the stockist channel end to end.").is_none(),
+                "{answer:?} is not a design"
+            );
         }
     }
 
@@ -1253,7 +1266,7 @@ mod test {
             r#"{{"role": "{long}", "description": "Owns stockists.", "instructions": "Be terse."}}"#
         );
         assert!(
-            parse_design(&answer).is_none(),
+            parse_design(&answer, "Runs the stockist channel end to end.").is_none(),
             "a sentence-shaped role is refused, not cut — that cut is the whole defect"
         );
     }

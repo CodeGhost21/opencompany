@@ -51,6 +51,8 @@ let open: boolean;
 
 /** What the client reports for `cancelsInFlightRequests`; `false` is the desktop app. */
 let cancelsInFlight = true;
+/** The company the dialog is mounted against; changed mid-test to switch scope. */
+let company = "acme";
 const client = {
   scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,
   get cancelsInFlightRequests() {
@@ -67,6 +69,7 @@ beforeEach(() => {
   addLands = true;
   addRejects = null;
   cancelsInFlight = true;
+  company = "acme";
   openChanges = [];
   open = false;
   vi.clearAllMocks();
@@ -102,7 +105,7 @@ async function render() {
           return addLands;
         },
         client: client as unknown as OpenCompanyClient,
-        company: "acme",
+        company,
       }),
     );
   });
@@ -489,5 +492,45 @@ describe("chat's dialog: a parent whose write rejects instead of answering", () 
 
     await pressCancel();
     expect(document.querySelector(box), "and it actually closes").toBeNull();
+  });
+});
+
+describe("chat's dialog: the company changing under it", () => {
+  // The console can switch hosts with this dialog mounted, and its state does
+  // not follow. `cognition` and `designsProfiles` are the previous company's
+  // answers and they decide which form is on screen — so a company that could
+  // not design kept showing the full form until the new read landed, and the
+  // flip to the reduced one took whatever had been typed into it. The carry
+  // runs the other way and could not sensibly run this way: a half-written
+  // teammate is addressed to the company it was written for.
+  it("drops the previous company's capability and what was typed against it", async () => {
+    api.getInferenceStatus.mockResolvedValue({ cognition: "hosted", designsProfiles: false });
+    await openDialog();
+    expect(document.querySelector(roleField), "acme cannot design, so the full form").not.toBeNull();
+    const nameEl = document.querySelector<HTMLInputElement>("#member-name")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        nameEl,
+        "Sable",
+      );
+      nameEl.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.querySelector<HTMLInputElement>("#member-name")!.value).toBe("Sable");
+
+    // Switch hosts. globex can design.
+    api.getInferenceStatus.mockResolvedValue({ cognition: "harness", designsProfiles: true });
+    company = "globex";
+    await render();
+    await act(async () => {});
+
+    expect(
+      document.querySelector(box),
+      "the new company's own answer decides the surface",
+    ).not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.value,
+      "and nothing from the previous company is carried into it",
+    ).toBe("");
+    expect(added, "nothing was written to either company").toHaveLength(0);
   });
 });

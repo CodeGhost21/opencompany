@@ -155,6 +155,31 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
    */
   const [designsProfiles, setDesignsProfiles] = useState<boolean | null>(null);
 
+  /**
+   * Everything the dialog holds belongs to one company. Dropped when the scope
+   * changes under it.
+   *
+   * The console can switch hosts with this dialog mounted, and its state does
+   * not follow: `cognition` and `designsProfiles` are the previous company's
+   * answers, and they decide which of the two forms is on screen. So a company
+   * that could not design would keep showing the full form until the new read
+   * landed, and the flip to the reduced one would take whatever had been typed
+   * into it with it — the carry runs the other way, and could not sensibly run
+   * this way in any case.
+   *
+   * Cleared rather than carried, deliberately. A half-written teammate is
+   * addressed to the company it was written for; carrying it across a host
+   * switch would offer to create it somewhere the operator did not describe it,
+   * which is a worse answer than an empty box.
+   */
+  useEffect(() => {
+    setCognition(null);
+    setDesignsProfiles(null);
+    reset();
+    // `reset` is stable enough for this: it only closes over setters and refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, company]);
+
   useEffect(() => {
     if (!open) return;
     let live = true;

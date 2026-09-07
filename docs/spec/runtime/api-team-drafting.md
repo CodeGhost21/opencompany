@@ -83,6 +83,14 @@ refuses two answers that pass every length and emptiness check:
   Compared on a normal form — whitespace collapsed, case folded, trailing
   punctuation dropped — and before the clamps, so a description cut to the card
   bound cannot come out looking different from the persona it was copied from.
+- **A role that is the operator's brief.** The rule above compares the three
+  answers to each other, and so misses the shape that matters most: a brief of
+  `"Handles payroll"` answered with role `"Handles payroll"`, a real mandate and
+  real instructions passes everything else. That is the original defect exactly,
+  and only a comparison against the *input* catches it — so `from_parts` takes
+  the brief. An operator whose whole brief is a job title has answered a
+  different question from the one the box asks, and gets the full form carrying
+  what they typed, where Role is its own field.
 
 Both are refusals rather than repairs, for the same reason the type is
 all-or-nothing: the operator gets the full form carrying what they typed, where
