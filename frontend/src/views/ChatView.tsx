@@ -939,6 +939,13 @@ export function ChatView({
    */
   const restoredFor = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    // Never off Room. This view is mounted on every route since #2130, and a
+    // route that names no second segment — `#/workflows`, `#/connections` —
+    // reaches this effect with a bare `sub` and no channel in the hash. Writing
+    // the remembered channel into the hash there does not restore anything: it
+    // navigates the operator OUT of the section they just opened, which is what
+    // clicking Flows did before this guard (it landed on `#/chat/main`).
+    if (!routeOpen) return;
     if (sub) {
       // A channel is named, so the next bare `#/chat` is a fresh re-entry.
       restoredFor.current = undefined;
@@ -952,7 +959,7 @@ export function ChatView({
     restoredFor.current = scopeKey;
     const remembered = readLastChannel(scope);
     if (remembered) onNavigate(remembered);
-  }, [company, scope, sub, onNavigate]);
+  }, [company, routeOpen, scope, sub, onNavigate]);
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.

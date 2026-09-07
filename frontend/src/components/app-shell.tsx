@@ -646,6 +646,23 @@ export function AppShell({
   // after a walk to Approvals — that must keep using the last channel even
   // while the rail is what's on screen (#1768 codex review).
   const chatPaneVisibleRef = useRef(true);
+  /**
+   * The chat segment, remembered across a trip to another section (#2130).
+   *
+   * `ChatView` is mounted on every route now, and `sub` is whatever the CURRENT
+   * view's second segment is — `mcp` on `#/connections/mcp`, `goals` on
+   * `#/ledgers/goals`. Handing that straight to chat would have it resolve
+   * `mcp` as a channel id and raise the unknown-channel notice for a segment
+   * that was never addressed to it. Handing it nothing instead would drop the
+   * pinned rail's highlight back to the first desk the moment an operator
+   * stepped into Company.
+   *
+   * So the shell keeps the last chat segment and replays it while the address
+   * belongs to another section: the rail keeps naming the channel Room will
+   * return to. State rather than a ref, because the rail has to re-render when
+   * it changes.
+   */
+  const [chatSub, setChatSub] = useState<string | null>(null);
   // Which thread panel is open in that channel, or `null` for none (#1890 B).
   //
   // A third condition on "is this completion's marker actually on screen",
@@ -657,6 +674,9 @@ export function AppShell({
   // nowhere: the exact "suppressed a toast for a marker the operator cannot
   // see" defect #1768's review established the rule against.
   const openThreadRootRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (view === "chat") setChatSub(sub);
+  }, [view, sub]);
   const onChatPaneVisibilityChange = useCallback((visible: boolean) => {
     chatPaneVisibleRef.current = visible;
   }, []);
@@ -3585,7 +3605,8 @@ export function AppShell({
           <ChatView
               client={client}
               company={company}
-              sub={sub}
+              // The chat segment, not the current view's — see `chatSub`.
+              sub={view === "chat" ? sub : chatSub}
               routeOpen={view === "chat"}
               presence={presence.peers}
               companyPeople={companyPeople}
