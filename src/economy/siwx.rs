@@ -161,7 +161,7 @@ pub fn verify(
         &parsed.signature_b58,
     )?;
 
-    if !seen.check_and_insert(&parsed.signature_b58, now)? {
+    if !seen.check_and_insert(&parsed.signature_b58, now, parsed.timestamp)? {
         return Err(OpenCompanyError::InvalidRequest(
             "authorization signature has already been used (replay)".into(),
         ));
@@ -209,7 +209,20 @@ impl NonceCache {
         }
     }
 
-    /// Records `key` as spent at `now`, pruning stale entries first.
+    /// Records `key` as spent, pruning stale entries first.
+    ///
+    /// `now` is the verifier's current clock, used only to decide which
+    /// existing entries have aged out. `record_ts` is the timestamp the entry
+    /// is remembered under — the claimed timestamp of the thing being spent
+    /// (an authorization's `timestamp`, a SIWX header's signing time), not
+    /// `now`. Storing `record_ts` rather than `now` matters because a caller's
+    /// own freshness check already tolerates skew between the two: if the
+    /// entry were stamped with `now`, a replay landing just past the caller's
+    /// freshness window could still land inside the prune window, since the
+    /// two windows would be measured from different origins. Stamping with
+    /// `record_ts` instead ties both checks to the same origin, so the entry
+    /// is forgotten at the same moment the freshness check would refuse it
+    /// again — never before, never after.
     ///
     /// `Ok(true)` if it was previously unseen (accept), `Ok(false)` on a replay
     /// (reject), `Err` if the cache cannot answer (reject). The guarded section
@@ -217,7 +230,7 @@ impl NonceCache {
     /// unwound through it and the record of what has been spent can no longer
     /// be trusted — the caller must refuse rather than recover, because a cache
     /// that cannot answer admits every replay.
-    pub fn check_and_insert(&self, key: &str, now: i64) -> Result<bool> {
+    pub fn check_and_insert(&self, key: &str, now: i64, record_ts: i64) -> Result<bool> {
         let mut guard = self
             .seen
             .lock()
@@ -226,7 +239,7 @@ impl NonceCache {
         match guard.entry(key.to_string()) {
             Entry::Occupied(_) => Ok(false),
             Entry::Vacant(slot) => {
-                slot.insert(now);
+                slot.insert(record_ts);
                 Ok(true)
             }
         }
@@ -326,11 +339,11 @@ mod test {
     #[test]
     fn nonce_cache_prunes_stale_entries() {
         let cache = NonceCache::new();
-        assert!(cache.check_and_insert("sig-a", 1_000).unwrap());
+        assert!(cache.check_and_insert("sig-a", 1_000, 1_000).unwrap());
         // Far in the future: the stale entry is pruned, so re-inserting is fine.
         assert!(
             cache
-                .check_and_insert("sig-a", 1_000 + SKEW_SECS * 4)
+                .check_and_insert("sig-a", 1_000 + SKEW_SECS * 4, 1_000 + SKEW_SECS * 4)
                 .unwrap()
         );
     }
@@ -338,12 +351,37 @@ mod test {
     #[test]
     fn nonce_cache_honours_a_custom_ttl() {
         let cache = NonceCache::with_ttl(SKEW_SECS * 4);
-        assert!(cache.check_and_insert("sig-a", 1_000).unwrap());
+        assert!(cache.check_and_insert("sig-a", 1_000, 1_000).unwrap());
         // Still inside the wider window, so still remembered as spent.
         assert!(
             !cache
-                .check_and_insert("sig-a", 1_000 + SKEW_SECS * 3)
+                .check_and_insert("sig-a", 1_000 + SKEW_SECS * 3, 1_000 + SKEW_SECS * 3)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn nonce_cache_prunes_by_record_timestamp_not_insertion_time() {
+        // A signature stamped at the far edge of tolerated skew (future-dated,
+        // but still within the freshness window when first checked) must stay
+        // remembered for as long as *its own claimed timestamp* would still
+        // pass a freshness check — not merely for `ttl_secs` past the moment
+        // it happened to be verified. Keying the stored entry off the
+        // verifier's clock instead of the claimed timestamp would prune it
+        // early, reopening the slot for a replay of the same signature while
+        // the claimed timestamp is still "fresh" by the caller's own check.
+        let cache = NonceCache::with_ttl(SKEW_SECS);
+        let claimed_ts = 1_000 + SKEW_SECS; // maximally future-dated, still fresh at now=1_000
+        assert!(cache.check_and_insert("sig-a", 1_000, claimed_ts).unwrap());
+        // Past the point at which keying off insertion time (1_000) would have
+        // pruned the entry, but still within `ttl_secs` of `claimed_ts`.
+        let replay_now = 1_000 + SKEW_SECS + 1;
+        assert!(
+            !cache
+                .check_and_insert("sig-a", replay_now, claimed_ts)
+                .unwrap(),
+            "entry must still be remembered because its claimed timestamp is \
+             still within the freshness window, even though insertion time is not"
         );
     }
 
@@ -352,7 +390,7 @@ mod test {
         let cache = NonceCache::new();
         cache.poison_for_tests();
         assert!(
-            cache.check_and_insert("sig-a", 1_000).is_err(),
+            cache.check_and_insert("sig-a", 1_000, 1_000).is_err(),
             "a cache that cannot answer must not report a value as fresh"
         );
     }

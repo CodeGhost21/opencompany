@@ -254,7 +254,7 @@ pub fn verify(auth: &X402Authorization, spent: &NonceCache, now: i64) -> Result<
         )));
     }
 
-    if !spent.check_and_insert(&auth.nonce, now)? {
+    if !spent.check_and_insert(&auth.nonce, now, auth.timestamp)? {
         return Err(OpenCompanyError::InvalidRequest(
             "x402 authorization nonce has already been spent (replay)".into(),
         ));
@@ -496,6 +496,33 @@ mod test {
         // Late enough for the prune to drop the nonce — and late enough for the
         // age check to refuse the authorization anyway.
         assert!(verify(&auth, &spent, signed_at + MAX_AGE_SECS * 2).is_err());
+    }
+
+    #[test]
+    fn a_future_dated_authorization_cannot_outlive_its_own_nonce() {
+        // A future-dated authorization is accepted (the age check is
+        // symmetric), but its nonce must be remembered for as long as the
+        // authorization itself would still be considered fresh — not merely
+        // for MAX_AGE_SECS past the moment it happened to be verified. A
+        // nonce recorded under the verification time rather than the
+        // authorization's own timestamp would be forgotten while a replay of
+        // the same future-dated authorization still passes the age check.
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        // Maximally future-dated: still exactly inside the ±MAX_AGE_SECS window.
+        let auth = authorize(&signer, &sample_challenge(), now + MAX_AGE_SECS);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        verify(&auth, &spent, now).expect("future-dated but within tolerance");
+        // Past the point at which keying the nonce off verification time
+        // (`now`) would have pruned it, but the authorization's own claimed
+        // timestamp is still within MAX_AGE_SECS of this later clock.
+        let replay_at = now + MAX_AGE_SECS + 1;
+        assert!(
+            verify(&auth, &spent, replay_at).is_err(),
+            "a future-dated authorization's nonce must not be forgotten while \
+             the authorization is still within its own age window"
+        );
     }
 
     #[test]
