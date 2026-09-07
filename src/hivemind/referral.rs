@@ -339,7 +339,10 @@ pub fn returned_note(target: &str, desk: &str, answer: &str) -> String {
     // happened to begin with `!` would fold as a trace on *this* desk, which is
     // precisely the vote this row exists not to carry.
     let answer = answer.trim_start_matches('!').trim();
-    format!("@{target} on {} answered the question: {answer}", named_desk(desk))
+    format!(
+        "@{target} on {} answered the question: {answer}",
+        named_desk(desk)
+    )
 }
 
 /// A desk named for a sentence: "the Operations desk", "the eng desk".
@@ -364,7 +367,10 @@ fn named_desk(desk: &str) -> String {
 /// The line an unanswered question leaves on the asking desk.
 #[must_use]
 pub fn unanswered_note(target: &str, desk: &str) -> String {
-    format!("@{target} on {} did not answer the question.", named_desk(desk))
+    format!(
+        "@{target} on {} did not answer the question.",
+        named_desk(desk)
+    )
 }
 
 /// The episode-scoped adapter between the library's referral fold and this

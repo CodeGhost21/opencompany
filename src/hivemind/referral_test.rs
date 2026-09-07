@@ -582,19 +582,22 @@ fn the_close_reads_as_english_for_every_combination_of_referral_facts() {
 
     // Plural agreement on the same clause.
     let two_failed = outcome(Vec::new(), 2, 0).referral_summary();
-    assert!(two_failed.contains("2 questions went unanswered."), "{two_failed}");
+    assert!(
+        two_failed.contains("2 questions went unanswered."),
+        "{two_failed}"
+    );
 
     // And it still composes with a question the room did ask.
     let both = outcome(asked(), 1, 0).referral_summary();
-    assert!(both.contains("The room asked 1 question of another desk"), "{both}");
+    assert!(
+        both.contains("The room asked 1 question of another desk"),
+        "{both}"
+    );
     assert!(both.contains("1 question went unanswered."), "{both}");
 
     // A cap refusal alone, likewise.
     let capped = outcome(Vec::new(), 0, 2).referral_summary();
-    assert!(
-        capped.starts_with(" 2 more were declined"),
-        "{capped}"
-    );
+    assert!(capped.starts_with(" 2 more were declined"), "{capped}");
 }
 
 /// **A desk whose name already ends in "desk" does not get a second one.**
