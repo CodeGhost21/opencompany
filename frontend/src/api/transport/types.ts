@@ -89,6 +89,15 @@ export interface Transport {
    * request runs to completion inside the app's Rust core no matter what the
    * caller does.
    *
+   * **`true` means the host stops early, not that nothing was spent.** A
+   * provider call already in flight when the disconnect arrives may have been
+   * billed for what it had generated, and the host's metering runs *after* that
+   * call returns — so a cancelled design pass leaves work the company is not
+   * charged for in its own ledger. That gap is logged host-side
+   * (`DesignSeam` in `server::ops::team_agent`) rather than papered over, and
+   * what a cancelled pass should cost is an open decision. Read this flag as
+   * "cancelling does something" and never as "cancelling is free".
+   *
    * Exposed because for most callers the difference is invisible — the promise
    * rejects either way — but for one it is the whole point. `POST
    * {scope}/team/design` runs a model for up to ninety seconds and is metered

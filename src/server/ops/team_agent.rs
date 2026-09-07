@@ -1704,13 +1704,53 @@ pub(super) async fn design_teammate(
         conversation: Vec::new(),
     };
 
+    // Armed across the one await a disconnect can land inside. See `DesignSeam`.
+    let mut seam = DesignSeam {
+        company: company.id().to_string(),
+        finished: false,
+    };
     let designed = build_design(&company, &record, &subject).await;
+    seam.finished = true;
     tracing::info!(
         company = %company.id(),
         outcome = designed.refusal().map(|r| r.as_str()).unwrap_or("designed"),
         "[design] answered a teammate design request"
     );
     Ok(Json(DesignDto::from_designed(designed)))
+}
+
+/// Makes an abandoned design pass loud instead of silent.
+///
+/// A design pass is the one place in this file where the caller can walk away
+/// mid-flight: the console's Add-teammate dialog aborts the request when it is
+/// shut, and `axum` drops this handler's future when the socket closes. That
+/// drop lands **between** the provider call and `record_profile_draft_usage`,
+/// so the `DraftBudget` reservation is released and nothing is recorded — while
+/// whatever the provider had already generated may still have been billed.
+///
+/// This does not fix that; it makes it countable. Deciding what a cancelled
+/// pass *should* cost is a product question with two defensible answers — let
+/// the pass finish so real usage is recorded (and abandoning it saves nothing),
+/// or charge a conservative estimate on the way out (and over-charge a pass
+/// cancelled after 200ms) — and neither should be picked silently inside a
+/// review cycle. Issue #2138 carries that decision; until it is made, a grep
+/// for this line is how the size of the gap gets measured rather than guessed
+/// at.
+struct DesignSeam {
+    company: String,
+    finished: bool,
+}
+
+impl Drop for DesignSeam {
+    fn drop(&mut self) {
+        if !self.finished {
+            tracing::warn!(
+                company = %self.company,
+                "[design] the caller went away before the pass finished — the budget \
+                 reservation is released and any provider work already done is not metered"
+            );
+        }
+    }
 }
 
 /// Runs the design pass, reserving its ceiling first.

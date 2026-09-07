@@ -385,7 +385,13 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
             idPrefix="member-chat"
             name={described.name}
             description={described.description}
-            disabled={designing}
+            // Both waits, not just the design one. `submit` captured these
+            // values when Create was pressed, so an edit made while the button
+            // says "Adding…" is already not in the request — and a write that
+            // lands then resets or navigates and takes the edit with it. Held
+            // for the same reason the exits are: the dialog should not accept
+            // input it is going to discard.
+            disabled={designing || creating}
             onNameChange={(next) => setDescribed((d) => ({ ...d, name: next }))}
             onDescriptionChange={(next) =>
               setDescribed((d) => ({ ...d, description: next }))

@@ -299,10 +299,18 @@ export interface TeammateDesign {
  * seconds this can take leaves the pass running to completion on the host, its
  * tokens metered against the company's plan, and its answer dropped on the
  * floor by the dialog's `attempt` guard — spend with nothing at either end of
- * it. Dropping the connection drops the handler future with it, before
- * `record_profile_draft_usage` runs; the route holds no write lock and returns
- * text (see `design_teammate`), so there is nothing half-done for an abandoned
- * request to leave behind.
+ * it. Dropping the connection drops the handler future with it; the route holds
+ * no write lock and returns text (see `design_teammate`), so there is nothing
+ * half-done for an abandoned request to leave behind.
+ *
+ * ## What cancelling does not do
+ *
+ * It does not make the pass free. The drop lands between the provider call and
+ * `record_profile_draft_usage`, so what the provider had already generated is
+ * billed upstream and recorded in no ledger of ours. The host logs that seam
+ * (`DesignSeam`) rather than hiding it, and what a cancelled pass should be
+ * charged is an open decision. Cancelling stops the host early; it is not a
+ * refund.
  */
 export function designTeammate(
   client: OpenCompanyClient,

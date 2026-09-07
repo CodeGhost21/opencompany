@@ -479,9 +479,13 @@ export class OpenCompanyClient {
    *
    * The one caller that must ask is the Add-teammate dialog. It lets the
    * operator walk away from a running design pass *because* closing tears the
-   * request down and the host stops paying for it; where that is not true, the
-   * gesture would spend the tokens and throw away the answer, so the dialog
+   * request down and the host stops early; where that is not true, the gesture
+   * would run the pass to completion and throw the answer away, so the dialog
    * holds itself open and says it is working instead.
+   *
+   * "Stops early" is the whole claim. Work a provider had already done when the
+   * disconnect arrived is not accounted for either way — see
+   * `Transport.cancelsInFlight`.
    */
   get cancelsInFlightRequests(): boolean {
     return this.transport.cancelsInFlight;

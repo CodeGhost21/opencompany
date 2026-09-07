@@ -752,6 +752,45 @@ describe("holding the dialog open while leaving would not stop anything", () => 
     expect(signals[0].aborted).toBe(true);
   });
 
+  it("stops taking input while the write is running", async () => {
+    // The request captured the name and the sentence when Create was pressed,
+    // so an edit made while the button says "Adding…" is already not in it —
+    // and a write that lands then resets or navigates and takes the edit with
+    // it. The dialog should not accept input it is going to discard.
+    let release: () => void = () => {};
+    api.designTeammate.mockResolvedValue({
+      source: "model",
+      role: "Growth Marketer",
+      description: "Owns paid acquisition.",
+      instructions: "Report ROAS every Monday.",
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    stallAdd = gate;
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition.");
+    await pressCreate();
+
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.disabled,
+      "the name is held while the write it is not part of runs",
+    ).toBe(true);
+    expect(
+      document.querySelector<HTMLTextAreaElement>('[data-testid="team-describe-box"]')!.disabled,
+      "and so is the sentence",
+    ).toBe(true);
+
+    stallAdd = null;
+    await act(async () => {
+      release();
+      await gate;
+    });
+    await act(async () => {});
+  });
+
   it("holds itself open while the write is running, on any transport", async () => {
     // `POST {scope}/team` is not cancellable at all. Closing during it left the
     // create running: on success the parent still navigated to the new
