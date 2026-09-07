@@ -339,13 +339,38 @@ pub fn returned_note(target: &str, desk: &str, answer: &str) -> String {
     // happened to begin with `!` would fold as a trace on *this* desk, which is
     // precisely the vote this row exists not to carry.
     let answer = answer.trim_start_matches('!').trim();
-    format!("@{target} on the {desk} desk answered the question: {answer}")
+    format!(
+        "@{target} on {} answered the question: {answer}",
+        named_desk(desk)
+    )
+}
+
+/// A desk named for a sentence: "the Operations desk", "the eng desk".
+///
+/// The template used to append " desk" unconditionally, and every desk in this
+/// repo is *named* "… desk", so a live run printed "@route_planner on the
+/// Operations desk desk did not answer the question." A name that already ends
+/// in the word carries it; one that does not gets it.
+fn named_desk(desk: &str) -> String {
+    let trimmed = desk.trim();
+    if trimmed
+        .rsplit(|c: char| c.is_whitespace())
+        .next()
+        .is_some_and(|last| last.eq_ignore_ascii_case("desk"))
+    {
+        format!("the {trimmed}")
+    } else {
+        format!("the {trimmed} desk")
+    }
 }
 
 /// The line an unanswered question leaves on the asking desk.
 #[must_use]
 pub fn unanswered_note(target: &str, desk: &str) -> String {
-    format!("@{target} on the {desk} desk did not answer the question.")
+    format!(
+        "@{target} on {} did not answer the question.",
+        named_desk(desk)
+    )
 }
 
 /// The episode-scoped adapter between the library's referral fold and this

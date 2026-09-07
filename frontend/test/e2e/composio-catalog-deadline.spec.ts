@@ -220,7 +220,20 @@ test("a host that never answers at all still gets the honest warning", async ({ 
   await expect(page.getByTestId(PROBE_FAILED)).toBeVisible({ timeout: 60_000 });
 });
 
-test("rotating the credential re-reads the catalog instead of warning about it", async ({
+// Skipped, not deleted: the console behaviour is still worth pinning, but the
+// control this drives is gone. It fills the legacy managed-route token card,
+// which `showManagedTokenCard` gates on `mode === "managed"` — and with
+// `COMPOSIO_MANAGED_HIDDEN` set, `MODE_ORDER` holds only `byok`, so
+// `formModeFor` can never answer `managed` and the card never renders. That is
+// the `locator.fill` timeout on the field below, not a regression in the
+// re-read.
+//
+// Every other case in this file sets the token through the API; only this one
+// needed the UI, because a *rotation through the form* is what it is about.
+// Retargeting it at the BYOK `composio-api-key` field would be a different
+// credential with different eviction semantics, so it is left for whoever owns
+// the managed route to redirect or retire.
+test.skip("rotating the credential re-reads the catalog instead of warning about it", async ({
   page,
 }) => {
   test.setTimeout(120_000);

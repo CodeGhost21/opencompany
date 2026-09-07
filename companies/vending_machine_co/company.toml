@@ -134,8 +134,18 @@ blind_round = true
 # cite it is a guess wearing a marker.
 require_evidential = true
 refutation_cap = 2
-dominance_cap = 3
-repetition_cap = 1
+# `dominance_cap` is a **percent of the room's grounded share**, not a turn
+# count: the library damps a member when `share * 100 > total * cap`. 40 is the
+# lower of the two values the benchmark sweeps and the one its best policy for a
+# four-seat desk uses; the library's own default is 50.
+#
+# This said `3` until the sweep caught it, copied from `hive_math_lab` along
+# with a comment describing a supporter count. Three *percent* means every
+# member that has said anything grounded exceeds the cap and takes the
+# dominance penalty on every later bid — which damps the whole room instead of
+# its loudest seat, the exact opposite of the knob's purpose.
+dominance_cap = 40
+repetition_cap = 2
 
 # Only the planner proposes; the two constraint-holders ground or refuse.
 # `commit`, `question` and `defer` are never gated by the runtime whatever a
@@ -209,8 +219,9 @@ quorum = 2
 blind_round = true
 require_evidential = true
 refutation_cap = 2
-dominance_cap = 3
-repetition_cap = 1
+# A share, not a count — see the operations desk above.
+dominance_cap = 40
+repetition_cap = 2
 
 # Two seats may propose here, unlike ops, because a commercial question has two
 # genuinely different framings — "what do we charge" and "what do we sign" —
@@ -248,14 +259,32 @@ members = ["market_scout", "demand_analyst"]
 
 [group_chat.hive]
 enabled = true
-turn_budget = 6
+# Eight, not six. See the evidential note below: this desk was the most
+# constrained in the company and spent its budget without deciding in almost
+# every live run.
+turn_budget = 8
 # Two members, so a quorum of two is unanimity — correct here. A room of two
 # that could carry on one supporter is a room where either member decides
 # alone, which is a single responder with extra steps.
 quorum = 2
 blind_round = true
-require_evidential = true
-repetition_cap = 1
+# **No `require_evidential` here, unlike the other two desks**, and this is the
+# one knob in the bundle set from measurement rather than from argument.
+#
+# Stacking it on a two-member desk whose quorum is already unanimity means a
+# decision needs *both* seats to file a citation that chains to a stated fact.
+# The deliberation benchmark
+# (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`) puts numbers
+# on it: at `--agents 2`, `require_evidential` takes the decided rate from
+# 91.6% to **36.2%** and correctness from 63.6% to 30.7% over 2000 seeded
+# rooms. Live runs of this company agreed — the signals desk spent its budget
+# without reaching a decision in nearly every episode it opened.
+#
+# The other two desks keep it. They are larger, and their seats read hard
+# figures off the `vending` MCP on almost every turn, so a citation that
+# reaches a fact is cheap there in a way it is not here: this desk's whole job
+# is to weigh a signal nobody has measured yet.
+repetition_cap = 2
 
 [group_chat.hive.moves]
 market_scout = ["evidence", "propose", "question", "pin", "defer"]

@@ -56,7 +56,7 @@ cannot see it, would be a desk that never had to be convinced. See
 | --- | --- | --- | --- |
 | `ops` | `route_planner`, `fleet_tech`, `stock_controller`, `field_realist` | 2 of 4, 12 turns | The van's finite day: route, shelves, faults |
 | `commercial` | `account_manager`, `pricing_analyst`, `contract_counsel` | 2 of 3, 9 turns | Margin, prices, host sites, contracts |
-| `intel` | `market_scout`, `demand_analyst` | 2 of 2, 6 turns | What the market did, and whether it changes a plan |
+| `intel` | `market_scout`, `demand_analyst` | 2 of 2, 8 turns | What the market did, and whether it changes a plan |
 
 Each desk restricts its seats' moves (`[group_chat.hive.moves]`), and the
 restrictions carry the design:
@@ -78,10 +78,24 @@ restrictions carry the design:
   of two — unanimity. A room of two that could carry on one supporter is a
   single responder with extra steps.
 
-`require_evidential` is on for all three, so a `!support` with no `^citation`
-adds nothing to quorum. In this company that bites hardest on the stock
-controller: "we have enough stock" is a claim about a number
+`require_evidential` is on for **`ops` and `commercial`**, so a `!support` with
+no `^citation` adds nothing to quorum. In this company that bites hardest on the
+stock controller: "we have enough stock" is a claim about a number
 `warehouse_status` will actually print.
+
+`intel` deliberately does **not** have it, and that is the one setting here
+chosen from measurement rather than argument. Stacking `require_evidential` on a
+two-member desk whose quorum is already unanimity means a decision needs both
+seats to file a citation that chains to a stated fact. The deliberation
+benchmark (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`) puts
+numbers on it — at `--agents 2` it takes the decided rate from **91.6% to
+36.2%** and correctness from 63.6% to 30.7% over 2000 seeded rooms — and live
+runs agreed: the signals desk spent its budget without deciding in nearly every
+episode it opened. Its budget went from 6 turns to 8 for the same reason. The
+larger desks keep the rule, because their seats read hard figures off the
+`vending` MCP on almost every turn, so a citation that reaches a fact is cheap
+there in a way it is not on a desk whose job is to weigh a signal nobody has
+measured yet.
 
 ## Tool servers
 
