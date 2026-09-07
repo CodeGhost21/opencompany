@@ -103,11 +103,24 @@ pub struct HiveConfig {
     /// member firing it on a noisy read removes an option for the whole room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refutation_cap: Option<u32>,
-    /// Turns one member may take before the attention market damps its bids.
+    /// **Percent** of the room's grounded share above which a member's bids are
+    /// damped — not a count of turns.
     ///
-    /// Defaults to `EpisodePolicy::DEFAULT` (50), which is effectively off for
-    /// any budget a desk would actually run. Lower it on a desk where one
-    /// member reliably takes the floor.
+    /// The library compares `share * 100 > total * cap`
+    /// (`tinyhivemind_hive::attention::exceeds`), so `50` — the default — means
+    /// "damp a member holding more than half the grounded share", and it is
+    /// effectively off for any desk that is actually sharing the floor.
+    ///
+    /// The units matter and this comment used to get them wrong, which is how
+    /// shipped manifests came to set `dominance_cap = 3` believing it meant
+    /// three turns. It means **three percent**: with a handful of grounded
+    /// contributions on the floor, every member that has said anything at all
+    /// exceeds it and takes the dominance penalty on every subsequent bid,
+    /// which damps the whole room rather than its loudest seat.
+    ///
+    /// Lower it below 50 on a desk where one member reliably takes the floor,
+    /// but keep it a share: the benchmark sweeps this at 40 and 60
+    /// (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench/sweep.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dominance_cap: Option<u32>,
     /// Distinct supporters after which restating a topic scores nothing.
