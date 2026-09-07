@@ -375,6 +375,26 @@ impl ProfileDraft {
 /// a bound that ends up in a system prompt.
 pub const MAX_ROLE: usize = 60;
 
+/// The most words a designed role may be.
+///
+/// [`MAX_ROLE`] bounds the *characters*, and a sentence fits inside it:
+/// `"Handles payroll and reconciles the books weekly"` is 46 characters, has
+/// alphanumerics, no ellipsis, and matches no other field — so every other rule
+/// here passes it, and it is then stored and read as the teammate's identity in
+/// every prompt it runs.
+///
+/// `design_system_prompt` already asks for "a noun phrase of one to four
+/// words". A brief is not a validator — that is the lesson of every other rule
+/// in this file — so the contract is enforced rather than hoped for.
+///
+/// **Five, not four**, deliberately: one word of slack above what the prompt
+/// asks, so a real title that runs slightly long ("VP of Brand and
+/// Communications") is not thrown away, while a sentence — which is what the
+/// failure actually looks like — still is. Refusing is loud and recoverable:
+/// the operator gets the full form carrying what they typed, with Role as its
+/// own field.
+pub const MAX_ROLE_WORDS: usize = 5;
+
 /// Brings a designed role inside [`MAX_ROLE`], collapsing whitespace.
 ///
 /// Truncation here is a **last** resort and is not how a long answer is
@@ -505,6 +525,10 @@ impl TeammateDesign {
     ///   designed a teammate, it has restated the input in valid JSON, and
     ///   every length check passes. `design_system_prompt` says "this must NOT
     ///   restate the mandate" for the same reason; this enforces it.
+    /// - **A role that is a sentence.** `MAX_ROLE` bounds characters, and a
+    ///   sentence fits: `"Handles payroll and reconciles the books weekly"` is
+    ///   46 of the 60 allowed. [`MAX_ROLE_WORDS`] enforces the shape the brief
+    ///   asks for instead of hoping the model obeys it.
     /// - **A role that is the operator's brief.** The rule above compares the
     ///   three answers to each other and so misses the shape that matters most:
     ///   a brief of `"Handles payroll"` answered with role `"Handles payroll"`,
@@ -540,6 +564,10 @@ impl TeammateDesign {
         // the role alone — a *mandate* may legitimately end in `…`, because
         // that is the mark `clamp_description` itself leaves.
         if role.contains('…') || role.contains("...") {
+            return None;
+        }
+        // A sentence fits inside MAX_ROLE. See MAX_ROLE_WORDS.
+        if role.split_whitespace().count() > MAX_ROLE_WORDS {
             return None;
         }
         // Compared before the clamps, so a description cut to the card bound
@@ -987,6 +1015,54 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    /// A role that is a sentence is refused, even when it fits the char bound.
+    ///
+    /// `MAX_ROLE` bounds characters and a sentence fits inside it — the
+    /// reported case, `"Handles payroll and reconciles the books weekly"`, is
+    /// 46 of the 60 allowed, has alphanumerics, no ellipsis, and matches no
+    /// other field. Every rule but this one passes it, and it would then be
+    /// stored and read as the teammate's identity in every prompt it runs.
+    #[test]
+    fn a_role_that_is_a_sentence_is_refused() {
+        let sentence = "Handles payroll and reconciles the books weekly";
+        assert!(
+            sentence.chars().count() < MAX_ROLE,
+            "the char bound does not catch it"
+        );
+        assert!(
+            TeammateDesign::from_parts(
+                sentence,
+                "Owns payroll accuracy and the monthly close.",
+                "Run the cycle on the 25th. Escalate a mismatch before paying.",
+                "Sorts out the money side of things.",
+            )
+            .is_none(),
+            "a role of {} words is a sentence, not a job title",
+            sentence.split_whitespace().count()
+        );
+
+        // Real titles, including ones that run past what the brief asks for,
+        // still design. The slack is the whole reason the bound is five.
+        for role in [
+            "Manager",
+            "Growth Marketer",
+            "Wholesale Account Manager",
+            "Senior Wholesale Account Manager",
+            "VP of Brand and Communications",
+        ] {
+            assert!(
+                TeammateDesign::from_parts(
+                    role,
+                    "Owns the stockist pipeline and the terms behind it.",
+                    "Check terms against the price list before quoting.",
+                    "Sorts out the money side of things.",
+                )
+                .is_some(),
+                "{role:?} is a job title and must design"
+            );
+        }
     }
 
     /// The operator's own sentence handed back as the job title is refused.

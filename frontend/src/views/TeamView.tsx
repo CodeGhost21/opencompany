@@ -1187,6 +1187,17 @@ function AddMemberDialog({
    */
   useEffect(() => {
     if (describing) return;
+    // A design belongs to the reduced dialog. Once the full form is on screen
+    // the operator is writing the fields by hand, so an answer still in flight
+    // can only create a teammate nobody is waiting for — and, worse, a *second*
+    // one beside the manual create they are about to make. Retired here rather
+    // than guarded at the far end, because the guard is what was missing:
+    // `submit`'s full-form branch never looked at `designing`, so both writes
+    // could be in flight at once.
+    attempt.current += 1;
+    designAbort.current?.abort();
+    designAbort.current = null;
+    setDesigning(false);
     setDraft((d) => {
       const carried = carriedDescribe(described, d);
       return carried ? { ...d, ...carried } : d;
@@ -1270,7 +1281,7 @@ function AddMemberDialog({
   }
 
   async function submit() {
-    if (creating) return;
+    if (creating || designing) return;
     if (describing) {
       if (blockedReason(described)) return;
       const mine = attempt.current;
@@ -1406,7 +1417,7 @@ function AddMemberDialog({
               draft={draft}
               // The write has already captured these; an edit made while the
               // button says "Adding…" is one the form is about to discard.
-              busy={creating}
+              busy={creating || designing}
               onChange={(key: AgentFieldKey, value) =>
                 setDraft((d) => ({ ...d, [key]: value }))
               }
@@ -1454,7 +1465,7 @@ function AddMemberDialog({
                   inputMode="decimal"
                   value={budget}
                   onChange={(e) => setBudget(e.target.value)}
-                  disabled={creating}
+                  disabled={creating || designing}
                   placeholder="e.g. 5.00 — leave blank for no cap"
                   data-testid="team-add-budget"
                 />
@@ -1467,7 +1478,7 @@ function AddMemberDialog({
               <Switch
                 checked={inbox}
                 onCheckedChange={setInbox}
-                disabled={creating}
+                disabled={creating || designing}
                 aria-label="Give this teammate an inbox"
               />
             </label>
@@ -1513,7 +1524,7 @@ function AddMemberDialog({
             disabled={
               describing
                 ? Boolean(describeBlocked) || designing || creating
-                : missing.length > 0 || budgetInvalid || creating
+                : missing.length > 0 || budgetInvalid || creating || designing
             }
           >
             {/* Says what is happening, because both halves take time: the host

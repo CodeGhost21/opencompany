@@ -866,3 +866,67 @@ describe("holding the dialog open while leaving would not stop anything", () => 
   });
 });
 
+describe("a design still in flight when the surface becomes the full form", () => {
+  // The race: `/inference` is slow, so the reduced dialog renders and Create
+  // starts a design. The answer comes back `echo` and swaps in the full form,
+  // whose submit guard never looked at `designing`. The operator fills in a
+  // role and creates by hand — and when the design lands, the first `submit`
+  // call creates a second teammate from it. Two teammates from one Create.
+  it("never creates twice", async () => {
+    let settleInference: (status: { cognition: string }) => void = () => {};
+    api.getInferenceStatus.mockReturnValue(
+      new Promise((resolve) => {
+        settleInference = resolve;
+      }),
+    );
+    let settleDesign: (d: unknown) => void = () => {};
+    const designSignals: AbortSignal[] = [];
+    api.designTeammate.mockImplementation(
+      (_c: unknown, _co: unknown, _t: unknown, signal?: AbortSignal) =>
+        new Promise((resolve, reject) => {
+          settleDesign = resolve;
+          if (signal) {
+            designSignals.push(signal);
+            signal.addEventListener("abort", () => reject(new DOMException("", "AbortError")));
+          }
+        }),
+    );
+
+    await mount();
+    await openDialog();
+    expect(document.querySelector(box), "the unsettled check shows the reduced dialog").not.toBeNull();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition.");
+    await pressCreate();
+    expect(api.designTeammate, "a design is in flight").toHaveBeenCalledTimes(1);
+
+    // The check lands, and this company cannot design after all.
+    await act(async () => {
+      settleInference({ cognition: "echo" });
+    });
+    await act(async () => {});
+    expect(document.querySelector(roleField), "the full form has taken over").not.toBeNull();
+    expect(
+      designSignals[0].aborted,
+      "the design belongs to a dialog shape that is gone, so it is torn down",
+    ).toBe(true);
+
+    // The operator finishes by hand.
+    type("agent-field-role", "Growth Marketer");
+    await pressCreate();
+    expect(added, "the manual create is the only one").toHaveLength(1);
+    expect(added[0].role).toBe("Growth Marketer");
+
+    // And the abandoned design cannot add a second teammate behind it.
+    await act(async () => {
+      settleDesign({
+        source: "model",
+        role: "Paid Acquisition Manager",
+        description: "Owns paid acquisition.",
+        instructions: "Report ROAS every Monday.",
+      });
+    });
+    await act(async () => {});
+    expect(added, "still one — the design was retired when the surface changed").toHaveLength(1);
+  });
+});

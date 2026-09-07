@@ -239,6 +239,15 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
    */
   useEffect(() => {
     if (describing) return;
+    // A design belongs to the reduced dialog. Once the full form is on screen
+    // the operator is writing the fields by hand, so an answer still in flight
+    // can only create a teammate nobody is waiting for — and a *second* one
+    // beside the manual create they are about to make. Retired here rather than
+    // guarded at the far end, because the guard is what was missing.
+    attempt.current += 1;
+    designAbort.current?.abort();
+    designAbort.current = null;
+    setDesigning(false);
     const carried = carriedDescribe(described, { name, description });
     if (!carried) return;
     setName(carried.name);
@@ -316,7 +325,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
   }
 
   async function submit() {
-    if (creating) return;
+    if (creating || designing) return;
     if (describing) {
       if (blockedReason(described)) return;
       const mine = attempt.current;
@@ -441,7 +450,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               <Input
                 id="member-name"
                 value={name}
-                disabled={creating}
+                disabled={creating || designing}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Nova"
               />
@@ -451,7 +460,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               <Input
                 id="member-role"
                 value={role}
-                disabled={creating}
+                disabled={creating || designing}
                 onChange={(e) => setRole(e.target.value)}
                 placeholder="e.g. Growth Marketer"
               />
@@ -462,7 +471,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
                 id="member-desc"
                 rows={3}
                 value={description}
-                disabled={creating}
+                disabled={creating || designing}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="e.g. Runs paid acquisition and reports on ROAS."
               />
@@ -474,7 +483,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               <Switch
                 checked={inbox}
                 onCheckedChange={setInbox}
-                disabled={creating}
+                disabled={creating || designing}
                 aria-label="Give this teammate an inbox"
               />
             </label>
@@ -501,7 +510,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
             disabled={
               describing
                 ? Boolean(describeBlocked) || designing || creating
-                : !name.trim() || !role.trim() || creating
+                : !name.trim() || !role.trim() || creating || designing
             }
           >
             {/* Says what is happening, because both halves take time: the host

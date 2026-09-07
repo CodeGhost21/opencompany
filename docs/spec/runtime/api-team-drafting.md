@@ -83,6 +83,12 @@ refuses two answers that pass every length and emptiness check:
   Compared on a normal form — whitespace collapsed, case folded, trailing
   punctuation dropped — and before the clamps, so a description cut to the card
   bound cannot come out looking different from the persona it was copied from.
+- **A role that is a sentence.** `MAX_ROLE` bounds characters and a sentence
+  fits inside it: `"Handles payroll and reconciles the books weekly"` is 46 of
+  the 60 allowed. The brief asks for "a noun phrase of one to four words", and
+  `MAX_ROLE_WORDS` enforces that at five — one word of slack, so a real title
+  that runs long ("VP of Brand and Communications") is not thrown away while a
+  sentence still is.
 - **A role that is the operator's brief.** The rule above compares the three
   answers to each other, and so misses the shape that matters most: a brief of
   `"Handles payroll"` answered with role `"Handles payroll"`, a real mandate and
