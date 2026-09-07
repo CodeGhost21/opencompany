@@ -763,12 +763,11 @@ fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
         message(3, "planner", "!propose #euler301 New guess."),
         message(4, "critic", "!support #euler301 ^3 Because it holds."),
     ];
-    let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
 
     let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
     let prompt = EpisodePrompt::new(&member, &desk, "Decide the answer.", quorum, &[])
         .with_trigger(Sequence(2))
-        .render(&turn, &visible_refs);
+        .render(&turn, &visible);
 
     let prior_end = prompt.find("[2] scout").expect("prior row 2 is rendered");
     let divider_at = prompt
@@ -792,15 +791,14 @@ fn a_transcript_entirely_after_the_trigger_renders_with_no_divider() {
     let member = desk.member("planner").expect("planner is seated").clone();
     let quorum = desk.policy().quorum;
     let visible = [message(3, "planner", "!propose #stage Stage it.")];
-    let visible_refs: Vec<&tinyhivemind_hive::SessionMessage> = visible.iter().collect();
     let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
 
     let without_trigger = EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
-        .render(&turn, &visible_refs);
+        .render(&turn, &visible);
     let with_trigger_below_everything =
         EpisodePrompt::new(&member, &desk, "Decide the rollout.", quorum, &[])
             .with_trigger(Sequence(1))
-            .render(&turn, &visible_refs);
+            .render(&turn, &visible);
 
     assert_eq!(
         without_trigger, with_trigger_below_everything,
