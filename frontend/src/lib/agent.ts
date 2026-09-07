@@ -384,6 +384,11 @@ export function companyCovers(allow: string[], glob: string): boolean {
   if (literal === "media" || literal.startsWith("media.")) {
     return grantsExplicit(allow, "media") && grantsExplicit([glob], "media");
   }
+  if (literal === "mcp_registry" || literal.startsWith("mcp_registry.")) {
+    return (
+      grantsExplicit(allow, "mcp_registry") && grantsExplicit([glob], "mcp_registry")
+    );
+  }
   if (literal === "composio" || literal.startsWith("composio.")) {
     return grantsExplicit(allow, "composio") && grantsExplicit([glob], "composio");
   }
