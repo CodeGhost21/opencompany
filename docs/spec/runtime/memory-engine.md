@@ -330,7 +330,9 @@ comes first.
    seam and is refused by name — for those, `opencompany export` reads the
    live engine (base backend plus memory overlay, operator facts included)
    and is the capture tool. Target drivers are the hosted engines
-   `supermemory`, `mem0`, `cognee` and `cortexdb`.
+   `supermemory`, `mem0`, `cognee`, `cortexdb` and `cortex`. Hosted tenants run
+   **`cortex`** — the manager injects that id at provision — so a migration onto
+   a provisioned engine names `cortex`, not `cortexdb`.
 
    Two hosted-deployment cautions. The copy is **engine-level**: every
    namespace the source credential can see crosses, which is exactly right
