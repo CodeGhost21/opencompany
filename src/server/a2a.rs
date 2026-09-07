@@ -17,8 +17,10 @@
 //! order: resolve a **discoverable** company, verify the SIWX `Authorization`
 //! (skew + single-use replay protection via the host-global
 //! [`NonceCache`](crate::economy::NonceCache)) before anything reaches cognition,
-//! answer a `402` challenge for a priced skill lacking a valid
-//! [`X402Authorization`](crate::economy::X402Authorization), sanitize the
+//! answer a `402` challenge for a priced skill lacking a valid, unspent
+//! [`X402Authorization`](crate::economy::X402Authorization) — refusing outright
+//! a skill id the Agent Card never advertised, which is a different thing from
+//! one it advertises for nothing — sanitize the
 //! counterparty payload (a minimal promptguard pass), and only then append an
 //! [`A2aTaskReceived`](crate::ports::types::CompanyEvent::A2aTaskReceived) event
 //! and run one cycle. A paying customer runs under the same approval gates as any
@@ -251,17 +253,18 @@ async fn a2a_task(
         Err(err) => return err.into_response(),
     };
 
-    // 4. If the requested skill is priced above zero, require a valid x402
-    // authorization. A `0.00` (or unparsable) price is served for free.
-    if let Some(pay) = card.payment_requirements.iter().find(|p| {
-        p.skill_id == skill
-            && p.price
-                .trim()
-                .parse::<f64>()
-                .map(|v| v > 0.0)
-                .unwrap_or(false)
-    }) {
-        match extract_payment(&rpc.params) {
+    // 4. Charge for the requested skill. See `classify_skill` for why an
+    // unadvertised id is not the same answer as a free one.
+    match classify_skill(&card, &skill) {
+        SkillCharge::Unknown => {
+            return ApiError(OpenCompanyError::NotFound(format!(
+                "@{handle} does not offer skill `{}`",
+                sanitize_text(&skill)
+            )))
+            .into_response();
+        }
+        SkillCharge::Free => {}
+        SkillCharge::Priced(pay) => match extract_payment(&rpc.params) {
             None => return payment_required(&state, &runtime, pay).await,
             Some(auth) => {
                 if let Err(err) = x402::verify(&auth, state.x402_nonce(), now_secs()) {
@@ -295,7 +298,7 @@ async fn a2a_task(
                     return ApiError(err).into_response();
                 }
             }
-        }
+        },
     }
 
     // 5. Promptguard: sanitize the counterparty payload before it becomes an
@@ -333,6 +336,54 @@ fn unauthorized(err: &OpenCompanyError) -> Response {
         Json(json!({ "error": err.to_string(), "code": err.code() })),
     )
         .into_response()
+}
+
+/// What a company's Agent Card says about a requested skill id.
+enum SkillCharge<'a> {
+    /// Advertised above zero: the task needs a valid, unspent authorization.
+    Priced(&'a CardPayment),
+    /// Advertised at `0.00`, or at a price this build cannot parse. Served.
+    Free,
+    /// Not advertised at all, by a company that charges for its work. Refused.
+    Unknown,
+}
+
+/// Classifies `skill` against the card's advertised prices.
+///
+/// The three answers are genuinely different and collapsing any two of them
+/// gives work away. `payment_requirements` is a one-to-one projection of the
+/// manifest's `[place].skills`, so an id missing from it is an id the company
+/// never offered — not an id it offers for nothing. Reading "no price found" as
+/// "free" let any unadvertised string buy the whole `tasks/send` path on a
+/// company that prices every skill it does advertise.
+///
+/// An unparsable price stays free deliberately: a company that has misdeclared
+/// its own price has not thereby declared a task unavailable, and the manifest
+/// validator already names the mistake.
+///
+/// A card advertising nothing above zero charges for nothing, so every id on it
+/// is free — including one it does not list. Refusing there would take A2A away
+/// from companies that never opted into pricing.
+fn classify_skill<'a>(card: &'a AgentCard, skill: &str) -> SkillCharge<'a> {
+    match card
+        .payment_requirements
+        .iter()
+        .find(|pay| pay.skill_id == skill)
+    {
+        Some(pay) if priced_above_zero(pay) => SkillCharge::Priced(pay),
+        Some(_) => SkillCharge::Free,
+        None if card.payment_requirements.iter().any(priced_above_zero) => SkillCharge::Unknown,
+        None => SkillCharge::Free,
+    }
+}
+
+/// Whether this requirement names a price the company actually charges.
+fn priced_above_zero(pay: &CardPayment) -> bool {
+    pay.price
+        .trim()
+        .parse::<f64>()
+        .map(|price| price > 0.0)
+        .unwrap_or(false)
 }
 
 /// Builds the `402` challenge naming the price and the company's own address.
@@ -795,6 +846,73 @@ mod test {
         // The identical signature is rejected on replay.
         let second = app.oneshot(build()).await.unwrap();
         assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn card_pricing(skills: &[(&str, &str)]) -> AgentCard {
+        AgentCard {
+            payment_requirements: skills
+                .iter()
+                .map(|(id, price)| CardPayment {
+                    skill_id: (*id).to_string(),
+                    price: (*price).to_string(),
+                    asset: "USDC".into(),
+                    network: "solana".into(),
+                })
+                .collect(),
+            ..AgentCard::default()
+        }
+    }
+
+    #[test]
+    fn a_priced_skill_is_charged_for() {
+        let card = card_pricing(&[("seo.audit", "25.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.audit"),
+            SkillCharge::Priced(_)
+        ));
+    }
+
+    #[test]
+    fn a_zero_price_is_deliberately_free() {
+        let card = card_pricing(&[("seo.audit", "25.00"), ("seo.free", "0.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.free"),
+            SkillCharge::Free
+        ));
+    }
+
+    #[test]
+    fn an_unparsable_price_is_still_free() {
+        let card = card_pricing(&[("seo.audit", "25.00"), ("seo.odd", "gratis")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.odd"),
+            SkillCharge::Free
+        ));
+    }
+
+    #[test]
+    fn an_unadvertised_skill_is_unknown_not_free() {
+        let card = card_pricing(&[("seo.audit", "25.00"), ("seo.free", "0.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.ghost"),
+            SkillCharge::Unknown
+        ));
+    }
+
+    #[test]
+    fn a_card_that_prices_nothing_charges_for_nothing() {
+        // A company that never opted into pricing keeps serving every id,
+        // including one it does not list — refusing here would take A2A away
+        // from it.
+        let card = card_pricing(&[("seo.free", "0.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.ghost"),
+            SkillCharge::Free
+        ));
+        assert!(matches!(
+            classify_skill(&AgentCard::default(), "seo.ghost"),
+            SkillCharge::Free
+        ));
     }
 
     /// The spent-nonce set is the only thing that makes an authorization
