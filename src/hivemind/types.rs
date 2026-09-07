@@ -408,7 +408,9 @@ impl EpisodeOutcome {
                 .join(", ");
             let count = local.len();
             let plural = if count == 1 { "question" } else { "questions" };
-            parts.push(format!("put {count} {plural} to a seat on this desk ({named})"));
+            parts.push(format!(
+                "put {count} {plural} to a seat on this desk ({named})"
+            ));
         }
         if ledger.failed > 0 {
             parts.push(format!("{} went unanswered", ledger.failed));

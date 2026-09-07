@@ -515,7 +515,8 @@ fn the_close_tells_a_local_question_from_a_crossing_one() {
         "a question that never left the desk must not be reported as crossing: {local}"
     );
 
-    let crossing = outcome(vec![question("account_manager", "commercial", true)]).referral_summary();
+    let crossing =
+        outcome(vec![question("account_manager", "commercial", true)]).referral_summary();
     assert!(
         crossing.contains("asked 1 question of another desk (@account_manager on commercial)"),
         "{crossing}"
@@ -529,7 +530,10 @@ fn the_close_tells_a_local_question_from_a_crossing_one() {
     ])
     .referral_summary();
     assert!(both.contains("asked 1 question of another desk"), "{both}");
-    assert!(both.contains("put 1 question to a seat on this desk"), "{both}");
+    assert!(
+        both.contains("put 1 question to a seat on this desk"),
+        "{both}"
+    );
 }
 
 /// **A barred move demoted for its grammar violation must not still trigger a
