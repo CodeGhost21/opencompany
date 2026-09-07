@@ -280,7 +280,18 @@ pub async fn start_with(
     // below is already stopped, rather than plumbing a second shutdown path
     // through a struct that otherwise has none.
     let sweeper = state.spawn_acp_session_sweeper(std::sync::Arc::new(tokio::sync::Notify::new()));
-    let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
+    let (address, serving) = match opencompany::server::bind("127.0.0.1:0", state).await {
+        Ok(bound) => bound,
+        Err(error) => {
+            // The sweeper was already running (an infinite loop with no other
+            // shutdown path here), so a failed bind must abort it explicitly
+            // or it outlives this whole attempt — one more sweeper leaked per
+            // retry a caller makes after a busy-port failure (coderabbit
+            // review).
+            sweeper.abort();
+            return Err(error);
+        }
+    };
     let server = tokio::spawn(async move {
         if let Err(error) = serving.run().await {
             tracing::error!(%error, "the embedded host stopped");
