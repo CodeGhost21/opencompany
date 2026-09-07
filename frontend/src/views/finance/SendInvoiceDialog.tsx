@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { deriveInvoiceIdempotencyKey } from "@/views/finance/invoiceKey";
 import { fromMinorUnits, toMinorUnits } from "@/views/finance/money";
 
 interface Props {
@@ -74,11 +75,15 @@ function parseDueDays(raw: string): number | null | undefined {
  *
  * # Idempotency
  *
- * The key is minted **once when the dialog opens** and reused for every attempt
- * from it. A double-clicked Send is therefore one invoice. Chargebee replays
- * the original for a repeated key and the reply is byte-identical to a fresh
- * one, so `replayed_earlier_invoice` is the only way to tell — and the toast
- * says "already sent" rather than "sent" when it is set.
+ * The key is derived from the invoice's own content — see
+ * `deriveInvoiceIdempotencyKey` — not from when the dialog opened. A
+ * double-clicked Send is one invoice, and so is a failed send followed by a
+ * close-reopen-resend of the *same* invoice, because the fields that identify
+ * it hash the same either way. Chargebee replays the original for a repeated
+ * key and the reply is byte-identical to a fresh one, so
+ * `replayed_earlier_invoice` is the only way to tell — and the toast says
+ * "already sent" rather than "sent" when it is set. `invoice-force-new`
+ * mints a fresh nonce into the hash for the rare deliberate duplicate.
  *
  * # Naming the money
  *
@@ -101,14 +106,14 @@ export function SendInvoiceDialog({
   const [amount, setAmount] = useState("");
   const [dueDays, setDueDays] = useState("");
   const [busy, setBusy] = useState(false);
+  const [forceNew, setForceNew] = useState(false);
 
-  // One key per opening of the dialog — not per click, which would bill twice,
-  // and not per mount, which would survive a close and silently replay an
-  // earlier invoice the next time the dialog was used.
-  const idempotencyKey = useMemo(
-    () => (open ? `console-${crypto.randomUUID()}` : ""),
-    [open],
-  );
+  // Reset on every open, so the operator has to re-assert "this is a
+  // deliberate duplicate" each time rather than it silently staying on from a
+  // previous send.
+  useEffect(() => {
+    if (open) setForceNew(false);
+  }, [open]);
 
   const minor = toMinorUnits(amount, currency);
   const live = looksLive(site);
@@ -124,6 +129,15 @@ export function SendInvoiceDialog({
     if (minor === null || minor <= 0 || due === null) return;
     setBusy(true);
     try {
+      const idempotencyKey = deriveInvoiceIdempotencyKey(
+        {
+          customerEmail: email,
+          currencyCode: currency,
+          dueDays: due,
+          lineItems: [{ description, amountInMinorUnits: minor }],
+        },
+        forceNew ? crypto.randomUUID() : undefined,
+      );
       const invoice = await sendInvoice(client, company, {
         customer_email: email.trim(),
         customer_name: name.trim() || undefined,
@@ -146,6 +160,7 @@ export function SendInvoiceDialog({
       setDescription("");
       setAmount("");
       setDueDays("");
+      setForceNew(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not raise the invoice.");
     } finally {
@@ -243,6 +258,20 @@ export function SendInvoiceDialog({
               onChange={(e) => setDueDays(e.target.value)}
             />
           </div>
+
+          <label className="flex items-start gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              data-testid="invoice-force-new"
+              checked={forceNew}
+              onChange={(e) => setForceNew(e.target.checked)}
+            />
+            <span>
+              This is a deliberate duplicate — send it as a new invoice, not a retry of an earlier
+              one for the same customer and amount.
+            </span>
+          </label>
 
           {live ? (
             <Alert variant="destructive" data-testid="invoice-live-warning">
