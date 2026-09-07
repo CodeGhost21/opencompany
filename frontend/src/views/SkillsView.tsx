@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpen, Check, Download, Loader2, Plus, Search, Sparkles, Trash2 } from "lucide-react";
+import {
+  BookOpen,
+  Check,
+  Download,
+  Info,
+  Loader2,
+  Plus,
+  Search,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { me as fetchMe } from "@/api/auth";
 import {
   createSkill,
   installSkill,
@@ -14,7 +25,7 @@ import {
 } from "@/api/skills";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -83,6 +94,26 @@ export function SkillsView({ client, company }: Props) {
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
   const gen = useRef(0);
+  // Whether this viewer may enable, install, uninstall or add a skill. The four
+  // writes are admin-only on the host; an unresolved role must not render an
+  // enabled control, so this defaults closed the way `HostingView` does.
+  const [canManage, setCanManage] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let admin = false;
+      try {
+        admin = (await fetchMe(client, company)).role === "admin";
+      } catch {
+        // No user plane on this host, or not signed in — treat as non-admin.
+      }
+      if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
 
   const refresh = useCallback(async () => {
     const mine = ++gen.current;
@@ -187,14 +218,27 @@ export function SkillsView({ client, company }: Props) {
           </>
         }
         actions={
-          <>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="size-4" /> Add skill
-          </Button>
-          </>
+          canManage ? (
+            <Button onClick={() => setAddOpen(true)}>
+              <Plus className="size-4" /> Add skill
+            </Button>
+          ) : undefined
         }
       />
       <div className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6">
+        {!canManage && (
+          <Alert data-testid="skills-admin-only">
+            <Info className="size-4" />
+            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
+            <AlertDescription>
+              Enabling, installing, uninstalling and adding a skill change what every teammate is
+              told to do, so an admin makes those calls. You can see what is installed and browse
+              the registry.
+            </AlertDescription>
+          </Alert>
+        )}
+
+
         {/* Issue #569: what install / enable actually buy. A desk agent can list,
             describe and read a skill and can never run one — deliberate, and
             pinned by `dispatched_belt_excludes_every_deferred_family` — but this
@@ -234,6 +278,7 @@ export function SkillsView({ client, company }: Props) {
                     <InstalledCard
                       key={s.id}
                       skill={s}
+                      canManage={canManage}
                       onToggle={() => void toggle(s)}
                       onUninstall={() => void uninstall(s)}
                     />
@@ -271,6 +316,7 @@ export function SkillsView({ client, company }: Props) {
                     key={s.id}
                     skill={s}
                     installed={installedIds.has(s.id)}
+                    canManage={canManage}
                     onInstall={() => void install(s)}
                   />
                 ))}
@@ -300,10 +346,14 @@ export function SkillsView({ client, company }: Props) {
 
 function InstalledCard({
   skill,
+  canManage,
   onToggle,
   onUninstall,
 }: {
   skill: Skill;
+  /** Whether this viewer may flip the switch or uninstall. Read-only content —
+   *  the name, description, category and enabled state — renders either way. */
+  canManage: boolean;
   onToggle: () => void;
   onUninstall: () => void;
 }) {
@@ -315,7 +365,14 @@ function InstalledCard({
             <Sparkles className="size-4 text-muted-foreground" />
             <p className="font-medium">{skill.name}</p>
           </div>
-          <Switch checked={skill.enabled} onCheckedChange={onToggle} aria-label="Enable skill" />
+          {/* Disabled, not hidden: its position is itself the enabled/disabled
+              fact a member still needs to read. */}
+          <Switch
+            checked={skill.enabled}
+            disabled={!canManage}
+            onCheckedChange={canManage ? onToggle : undefined}
+            aria-label="Enable skill"
+          />
         </div>
         <p className="text-sm text-muted-foreground">{skill.description}</p>
         <div className="flex items-center justify-between pt-1">
@@ -330,7 +387,7 @@ function InstalledCard({
               · {skillReachLabel(skill.enabled)}
             </span>
           </div>
-          {skill.source !== "company" && (
+          {canManage && skill.source !== "company" && (
             <Button
               variant="ghost"
               size="icon"
@@ -350,10 +407,13 @@ function InstalledCard({
 function RegistryCard({
   skill,
   installed,
+  canManage,
   onInstall,
 }: {
   skill: RegistrySkill;
   installed: boolean;
+  /** Whether this viewer may install from the registry. */
+  canManage: boolean;
   onInstall: () => void;
 }) {
   return (
@@ -379,9 +439,11 @@ function RegistryCard({
               <Check className="size-3.5" /> Installed
             </span>
           ) : (
-            <Button variant="outline" size="sm" onClick={onInstall}>
-              <Download className="size-4" /> Install
-            </Button>
+            canManage && (
+              <Button variant="outline" size="sm" onClick={onInstall}>
+                <Download className="size-4" /> Install
+              </Button>
+            )
           )}
         </div>
       </CardContent>
