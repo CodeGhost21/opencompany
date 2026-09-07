@@ -534,3 +534,43 @@ describe("chat's dialog: the company changing under it", () => {
     expect(added, "nothing was written to either company").toHaveLength(0);
   });
 });
+
+describe("chat's dialog: the full form during a write", () => {
+  it("stops taking input", async () => {
+    // Same gap as the Team dialog's, in the other one: the reduced branch was
+    // held and the full form was not, so an echo host left name, role,
+    // description and the inbox switch editable against a request that had
+    // already captured them.
+    api.getInferenceStatus.mockResolvedValue({ cognition: "echo" });
+    let settle: (landed: boolean) => void = () => {};
+    addLands = new Promise<boolean>((r) => {
+      settle = r;
+    });
+    await openDialog();
+    const set = (sel: string, v: string) => {
+      const el = document.querySelector<HTMLInputElement>(sel)!;
+      const proto =
+        el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      act(() => {
+        Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(el, v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    set("#member-name", "Sable");
+    set("#member-role", "Wholesale Account Manager");
+    await pressCreate();
+
+    for (const sel of ["#member-name", "#member-role", "#member-desc"]) {
+      expect(
+        document.querySelector<HTMLInputElement>(sel)!.disabled,
+        `${sel} must be held while the write runs`,
+      ).toBe(true);
+    }
+
+    await act(async () => {
+      settle(true);
+    });
+    await act(async () => {});
+    expect(added).toHaveLength(1);
+  });
+});

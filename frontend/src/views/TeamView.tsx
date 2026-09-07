@@ -1404,6 +1404,9 @@ function AddMemberDialog({
             <AgentFields
               idPrefix="member"
               draft={draft}
+              // The write has already captured these; an edit made while the
+              // button says "Adding…" is one the form is about to discard.
+              busy={creating}
               onChange={(key: AgentFieldKey, value) =>
                 setDraft((d) => ({ ...d, [key]: value }))
               }
@@ -1451,6 +1454,7 @@ function AddMemberDialog({
                   inputMode="decimal"
                   value={budget}
                   onChange={(e) => setBudget(e.target.value)}
+                  disabled={creating}
                   placeholder="e.g. 5.00 — leave blank for no cap"
                   data-testid="team-add-budget"
                 />
@@ -1463,6 +1467,7 @@ function AddMemberDialog({
               <Switch
                 checked={inbox}
                 onCheckedChange={setInbox}
+                disabled={creating}
                 aria-label="Give this teammate an inbox"
               />
             </label>

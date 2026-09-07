@@ -72,6 +72,9 @@ fn get(path: &str) -> ProxyRequest {
         path: path.to_string(),
         headers: HashMap::new(),
         body: None,
+        // Parity is about bytes on the wire, not deadlines; the core's default
+        // is what an ordinary request gets.
+        timeout_ms: None,
     }
 }
 

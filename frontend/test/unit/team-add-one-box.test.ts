@@ -791,6 +791,42 @@ describe("holding the dialog open while leaving would not stop anything", () => 
     await act(async () => {});
   });
 
+  it("stops taking input on the full form too", async () => {
+    // The reduced branch was held and the full form was not, so an echo host —
+    // or a hand-over after a refusal — left every field editable while the
+    // button said "Adding…", against a request that had already captured them.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    api.getInferenceStatus.mockResolvedValue({ cognition: "echo" });
+    stallAdd = gate;
+    await mount();
+    await openDialog();
+    type("agent-field-name", "Nova");
+    type("agent-field-role", "Growth Marketer");
+    await pressCreate();
+
+    for (const field of ["name", "role", "description", "instructions"]) {
+      expect(
+        document.querySelector<HTMLInputElement>(`[data-testid="agent-field-${field}"]`)!.disabled,
+        `${field} must be held while the write runs`,
+      ).toBe(true);
+    }
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-add-budget"]')!.disabled,
+      "and so must the budget",
+    ).toBe(true);
+
+    stallAdd = null;
+    await act(async () => {
+      release();
+      await gate;
+    });
+    await act(async () => {});
+    expect(added).toHaveLength(1);
+  });
+
   it("holds itself open while the write is running, on any transport", async () => {
     // `POST {scope}/team` is not cancellable at all. Closing during it left the
     // create running: on success the parent still navigated to the new

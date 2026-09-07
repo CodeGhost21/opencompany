@@ -441,6 +441,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               <Input
                 id="member-name"
                 value={name}
+                disabled={creating}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Nova"
               />
@@ -450,6 +451,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               <Input
                 id="member-role"
                 value={role}
+                disabled={creating}
                 onChange={(e) => setRole(e.target.value)}
                 placeholder="e.g. Growth Marketer"
               />
@@ -460,6 +462,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
                 id="member-desc"
                 rows={3}
                 value={description}
+                disabled={creating}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="e.g. Runs paid acquisition and reports on ROAS."
               />
@@ -471,6 +474,7 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               <Switch
                 checked={inbox}
                 onCheckedChange={setInbox}
+                disabled={creating}
                 aria-label="Give this teammate an inbox"
               />
             </label>

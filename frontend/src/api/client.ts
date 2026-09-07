@@ -200,6 +200,11 @@ export class OpenCompanyClient {
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal,
+          // Carried so a transport with a deadline of its own can honour this
+          // one. `null` here means "no bound", which no transport can express,
+          // so it is sent as `undefined` and each transport falls back to its
+          // own default — see `TransportRequest.timeoutMs`.
+          timeoutMs: timeoutMs ?? undefined,
         }),
         controller.signal,
       );

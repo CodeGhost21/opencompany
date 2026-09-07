@@ -96,6 +96,22 @@ Both are refusals rather than repairs, for the same reason the type is
 all-or-nothing: the operator gets the full form carrying what they typed, where
 a salvaged two-thirds looks finished on screen and is not.
 
+### The desktop app has to be told the deadline
+
+The pass runs a model for up to 90 seconds (`PERSONA_TIMEOUT`), and on the
+desktop app every request goes through the Tauri core's `oc_request`, which
+applied a flat 30-second `reqwest` timeout the console could not see. So a
+slow-but-valid design on desktop came back as a transport failure and handed
+the operator the full form — a refusal for a pass that was working, and one
+carrying no reason because there was none to carry.
+
+`ProxyRequest` now takes an optional `timeoutMs`, clamped in the core to a
+ceiling above the host's longest deliberate deadline, and `designTeammate` names
+the host's 90 seconds plus the round trip. Only the caller knows which route it
+is asking for, so the deadline crosses the bridge with the request rather than
+being special-cased in Rust. A browser is unaffected: `BrowserTransport` has no
+deadline of its own, and the client already races its own timer.
+
 ### Who can run this pass, and how the console knows
 
 `build_design` needs `runtime.profile_drafter()`, which is built from

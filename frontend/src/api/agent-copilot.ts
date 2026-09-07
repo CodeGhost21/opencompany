@@ -268,6 +268,16 @@ export interface TeammateDesign {
 }
 
 /**
+ * How long a design pass may take, end to end.
+ *
+ * The host's own `PERSONA_TIMEOUT` is 90 seconds; this is that plus room for
+ * the round trip, so the console never gives up on a pass the host is still
+ * willing to finish. Only the desktop transport reads it — see the note on
+ * {@link designTeammate}.
+ */
+const DESIGN_TIMEOUT_MS = 105_000;
+
+/**
  * Ask the host to design a whole teammate — role, mandate and persona — from
  * the name and the sentence the reduced Add-teammate dialog collected.
  *
@@ -303,6 +313,22 @@ export interface TeammateDesign {
  * no write lock and returns text (see `design_teammate`), so there is nothing
  * half-done for an abandoned request to leave behind.
  *
+ * ## Why it names a deadline when no other mutation does
+ *
+ * A mutation's duration is normally the host's to decide, and `client.post`
+ * leaves it unbounded for exactly that reason. This one has to say a number
+ * anyway, because the **desktop** app imposes a deadline the console cannot
+ * see: `ProxyTransport` goes through the core's `oc_request`, which applied a
+ * flat 30-second `reqwest` timeout. The host deliberately allows this pass 90
+ * seconds (`PERSONA_TIMEOUT`), and a measured persona response has taken 40, so
+ * every slow-but-valid design on desktop came back as a transport failure and
+ * handed the operator the full form — a refusal for a pass that was working.
+ *
+ * The number is the host's deadline plus room for the round trip, and it is
+ * carried across the bridge rather than hard-coded in the core, because only
+ * the caller knows which route it is asking for. In a browser it changes
+ * nothing: `BrowserTransport` has no deadline of its own.
+ *
  * ## What cancelling does not do
  *
  * It does not make the pass free. The drop lands between the provider call and
@@ -324,6 +350,6 @@ export function designTeammate(
       name: teammate.name?.trim() || undefined,
       description: teammate.description.trim(),
     },
-    { signal },
+    { signal, timeoutMs: DESIGN_TIMEOUT_MS },
   );
 }

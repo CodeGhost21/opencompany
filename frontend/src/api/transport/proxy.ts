@@ -85,6 +85,10 @@ export class ProxyTransport implements Transport {
         path: pathOf(req.url),
         headers: req.headers,
         body: req.body,
+        // The core applies its own `reqwest` timeout and the console cannot
+        // see it, so a route the host deliberately allows longer than the
+        // core's default has to say so. Omitted means "use the default".
+        timeoutMs: req.timeoutMs,
       },
     });
 

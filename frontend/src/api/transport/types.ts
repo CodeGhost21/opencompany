@@ -47,6 +47,19 @@ export interface TransportRequest {
    * that cannot honour the signal still stops the caller waiting.
    */
   signal?: AbortSignal;
+  /**
+   * How long this request may take, in milliseconds, for a transport that
+   * imposes a deadline of its own. `undefined` means "the transport's default".
+   *
+   * `BrowserTransport` ignores it — the client already races its own timer and
+   * `fetch` has no deadline to set. `ProxyTransport` needs it, because the
+   * desktop core applies a fixed 30-second `reqwest` timeout that the console
+   * cannot see: a route the host deliberately allows longer than that (the
+   * teammate design pass runs to 90s, `PERSONA_TIMEOUT`) failed on the desktop
+   * app after 30 seconds and read to the operator as a refusal. The deadline
+   * has to cross the bridge, because only the caller knows which route it is.
+   */
+  timeoutMs?: number;
 }
 
 export interface TransportResponse {
