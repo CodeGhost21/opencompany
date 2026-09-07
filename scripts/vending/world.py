@@ -298,7 +298,21 @@ class World:
             ][:2]
             slots = []
             for sku in chosen[:8]:
-                cap = 12 if CATALOGUE[sku]["perishable"] else 20
+                # Capacity is sized to this site's own demand for this line —
+                # roughly three days of cover when full — rather than being one
+                # number for the whole fleet.
+                #
+                # A flat capacity made the busiest machine structurally
+                # impossible: VM-301 draws ~12 sandwiches a day against a
+                # 12-slot spiral, so it stocked out on 17 days in 21 even when
+                # refilled to the brim every single morning. That turns its host
+                # site's satisfaction into a doom clock no decision can affect,
+                # which is the opposite of what this simulation is for. The
+                # constraint worth modelling is that the van cannot visit
+                # everything today — not that one machine can never be right.
+                rate = footfall * 0.012 * SITE_PROFILES[profile].get(sku, 0.5)
+                cover = 2 if CATALOGUE[sku]["perishable"] else 3
+                cap = max(10, int(rate * cover + 0.5))
                 slots.append(
                     Slot(
                         sku=sku,
