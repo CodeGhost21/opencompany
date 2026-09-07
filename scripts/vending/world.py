@@ -379,19 +379,23 @@ class World:
                     client.satisfaction = max(
                         0.0, client.satisfaction - STOCKOUT_SATISFACTION_HIT
                     )
-                    out.append({
-                        "kind": "stockout",
-                        "day": self.day,
-                        "machine_id": m.id,
-                        "sku": slot.sku,
-                        "lost_units": lost,
-                        "lost_revenue_cents": lost * slot.price,
-                        "detail": (
-                            f"{m.id} ({m.site}) sold out of {slot.sku}: "
-                            f"{lost} units of demand turned away, "
-                            f"{lost * slot.price}c of revenue lost."
-                        ),
-                    })
+                    starved.append((slot.sku, lost, lost * slot.price))
+            if starved:
+                lost_cents = sum(c for _, _, c in starved)
+                lines = ", ".join(f"{sku} ({units} units)" for sku, units, _ in starved)
+                out.append({
+                    "kind": "stockout",
+                    "day": self.day,
+                    "machine_id": m.id,
+                    "client_id": m.client_id,
+                    "skus": [sku for sku, _, _ in starved],
+                    "lost_units": sum(u for _, u, _ in starved),
+                    "lost_revenue_cents": lost_cents,
+                    "detail": (
+                        f"{m.id} ({m.site}) turned demand away today on {lines} — "
+                        f"{lost_cents}c of revenue lost."
+                    ),
+                })
         return out
 
     def _spoil(self) -> list[dict[str, Any]]:
