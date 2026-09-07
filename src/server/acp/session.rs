@@ -247,7 +247,10 @@ impl SessionRegistry {
     }
 
     /// Looks up a session for `owner`, refusing a connection id it does not
-    /// hold. Renews the session's idle TTL on a hit.
+    /// hold. Renews the session's idle TTL on a hit; evicts and refuses one
+    /// already past [`SESSION_TTL_MILLIS`] instead — otherwise a lookup that
+    /// lands in the gap between two [`SessionSweeper`] ticks would revive an
+    /// already-expired session merely by touching it.
     pub fn get(
         &self,
         connection: &str,
@@ -263,13 +266,27 @@ impl SessionRegistry {
         if conn.owner != owner {
             return None;
         }
+        if conn
+            .sessions
+            .get(id)
+            .is_some_and(|e| Self::expired(e, now_millis))
+        {
+            conn.sessions.remove(id);
+            if conn.sessions.is_empty() {
+                by_connection.remove(connection);
+            }
+            return None;
+        }
         let entry = conn.sessions.get_mut(id)?;
         entry.last_used_millis = now_millis;
         Some(Arc::clone(&entry.session))
     }
 
     /// Looks up a session for `owner` without renewing its idle TTL, refusing
-    /// a connection id it does not hold.
+    /// a connection id it does not hold. Evicts and refuses one already past
+    /// [`SESSION_TTL_MILLIS`], for the same reason [`Self::get`] does — a
+    /// caller cannot authorize itself to act on a session that has already
+    /// aged out, no matter which lookup finds it.
     ///
     /// For a caller that still has to run `authorize_address` on the
     /// session's company before it may act on it — the ACP transport's
@@ -278,16 +295,38 @@ impl SessionRegistry {
     /// access to one company under it was revoked keep a session's cap slot
     /// alive indefinitely, by repeatedly presenting it and losing the
     /// authorization check every time.
-    pub fn peek(&self, connection: &str, owner: &str, id: &str) -> Option<Arc<AcpSession>> {
-        let by_connection = self
+    pub fn peek(
+        &self,
+        connection: &str,
+        owner: &str,
+        id: &str,
+        now_millis: u64,
+    ) -> Option<Arc<AcpSession>> {
+        let mut by_connection = self
             .by_connection
             .lock()
             .expect("session registry poisoned");
-        let conn = by_connection.get(connection)?;
+        let conn = by_connection.get_mut(connection)?;
         if conn.owner != owner {
             return None;
         }
+        if conn
+            .sessions
+            .get(id)
+            .is_some_and(|e| Self::expired(e, now_millis))
+        {
+            conn.sessions.remove(id);
+            if conn.sessions.is_empty() {
+                by_connection.remove(connection);
+            }
+            return None;
+        }
         Some(Arc::clone(&conn.sessions.get(id)?.session))
+    }
+
+    /// Whether `entry` has sat idle longer than [`SESSION_TTL_MILLIS`].
+    fn expired(entry: &SessionEntry, now_millis: u64) -> bool {
+        now_millis.saturating_sub(entry.last_used_millis) > SESSION_TTL_MILLIS
     }
 
     /// Renews a session's idle TTL, once the caller's authorization to act on
@@ -356,23 +395,49 @@ impl SessionRegistry {
         removed
     }
 
-    /// Drops every session a connection `owner` holds, and reports their ids.
-    /// A connection `owner` does not hold is left untouched — reports none.
-    pub fn close_connection(&self, connection: &str, owner: &str) -> Vec<String> {
+    /// Drops every session a connection `owner` holds that `authorized`
+    /// approves, under one lock, and reports the ids actually removed. A
+    /// connection `owner` does not hold is left untouched — reports none.
+    ///
+    /// `authorized` is a per-session check, not a blanket one, because
+    /// `owner` names a tenant rather than an authorization scope: two
+    /// platform credentials for the same tenant can carry different company
+    /// allow-lists (`PlatformClaims::companies`), and a connection can hold
+    /// sessions opened under either. Removing every session on the
+    /// connection unconditionally would let a narrowly-scoped credential
+    /// close sessions for companies outside its own allow-list, just because
+    /// it shares an owner string with whichever credential opened them.
+    /// Checked under the same lock as the removal so a concurrent
+    /// `session/new` cannot land in a gap between the check and the removal.
+    pub fn close_connection(
+        &self,
+        connection: &str,
+        owner: &str,
+        mut authorized: impl FnMut(&CompanyId) -> bool,
+    ) -> Vec<String> {
         let mut by_connection = self
             .by_connection
             .lock()
             .expect("session registry poisoned");
-        let owned = by_connection
-            .get(connection)
-            .is_some_and(|conn| conn.owner == owner);
-        if !owned {
+        let Some(conn) = by_connection.get_mut(connection) else {
+            return Vec::new();
+        };
+        if conn.owner != owner {
             return Vec::new();
         }
-        by_connection
-            .remove(connection)
-            .map(|conn| conn.sessions.into_keys().collect())
-            .unwrap_or_default()
+        let mut removed = Vec::new();
+        conn.sessions.retain(|id, entry| {
+            if authorized(&entry.session.company) {
+                removed.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if conn.sessions.is_empty() {
+            by_connection.remove(connection);
+        }
+        removed
     }
 
     /// Forgets every session idle past [`SESSION_TTL_MILLIS`], and every
@@ -531,7 +596,11 @@ mod test {
         assert!(registry.get("conn-a", "mallory", "s1", 0).is_none());
         assert!(registry.list("conn-a", "mallory").is_none());
         assert!(!registry.remove("conn-a", "mallory", "s1"));
-        assert!(registry.close_connection("conn-a", "mallory").is_empty());
+        assert!(
+            registry
+                .close_connection("conn-a", "mallory", |_| true)
+                .is_empty()
+        );
         // None of mallory's attempts touched alice's session.
         assert!(registry.get("conn-a", "alice", "s1", 0).is_some());
     }
@@ -626,7 +695,11 @@ mod test {
             .unwrap();
         // A `peek` at half the TTL — a pre-authorization check — must not
         // extend the clock the way `get` does.
-        assert!(registry.peek("conn-a", "alice", "s1").is_some());
+        assert!(
+            registry
+                .peek("conn-a", "alice", "s1", SESSION_TTL_MILLIS / 2)
+                .is_some()
+        );
         assert_eq!(
             registry.sweep_expired(SESSION_TTL_MILLIS + 1),
             1,
@@ -640,9 +713,9 @@ mod test {
         registry
             .open("conn-a", "alice", session("s1", "acme"), 0)
             .unwrap();
-        assert!(registry.peek("conn-b", "alice", "s1").is_none());
-        assert!(registry.peek("conn-a", "mallory", "s1").is_none());
-        assert!(registry.peek("conn-a", "alice", "s1").is_some());
+        assert!(registry.peek("conn-b", "alice", "s1", 0).is_none());
+        assert!(registry.peek("conn-a", "mallory", "s1", 0).is_none());
+        assert!(registry.peek("conn-a", "alice", "s1", 0).is_some());
     }
 
     #[test]
@@ -651,12 +724,45 @@ mod test {
         registry
             .open("conn-a", "alice", session("s1", "acme"), 0)
             .unwrap();
-        assert!(registry.peek("conn-a", "alice", "s1").is_some());
+        assert!(registry.peek("conn-a", "alice", "s1", 0).is_some());
         registry.touch("conn-a", "alice", "s1", SESSION_TTL_MILLIS / 2);
         assert_eq!(
             registry.sweep_expired(SESSION_TTL_MILLIS),
             0,
             "touch renewed at TTL/2, so a full TTL later it is not yet idle that long"
+        );
+    }
+
+    #[test]
+    fn peek_cannot_revive_a_session_already_past_its_ttl() {
+        // Landing in the gap between two sweeper ticks must not let a lookup
+        // (and the touch a caller runs after it authorizes) revive a session
+        // that is already stale — the sweep is a cleanup convenience, not the
+        // only place staleness is enforced (codex review).
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        assert!(
+            registry
+                .peek("conn-a", "alice", "s1", SESSION_TTL_MILLIS + 1)
+                .is_none(),
+            "a peek past the TTL must refuse, not hand back a session to authorize and touch"
+        );
+        // And it evicted the stale entry rather than merely refusing this call.
+        assert!(registry.list("conn-a", "alice").is_none());
+    }
+
+    #[test]
+    fn get_cannot_revive_a_session_already_past_its_ttl() {
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "alice", session("s1", "acme"), 0)
+            .unwrap();
+        assert!(
+            registry
+                .get("conn-a", "alice", "s1", SESSION_TTL_MILLIS + 1)
+                .is_none()
         );
     }
 
@@ -698,12 +804,43 @@ mod test {
             .open("conn-b", "bob", session("s2", "acme"), 0)
             .unwrap();
 
-        let closed = registry.close_connection("conn-a", "alice");
+        let closed = registry.close_connection("conn-a", "alice", |_| true);
         assert_eq!(closed, vec!["s1".to_string()]);
         assert!(registry.get("conn-a", "alice", "s1", 0).is_none());
         assert!(
             registry.get("conn-b", "bob", "s2", 0).is_some(),
             "other connections survive"
+        );
+    }
+
+    #[test]
+    fn close_connection_leaves_a_session_the_caller_is_not_authorized_for() {
+        // `owner` names a tenant, not an authorization scope: two platform
+        // credentials for the same tenant can carry different company
+        // allow-lists, so a connection can hold sessions the *presented*
+        // credential is not itself authorized to act on (coderabbit review).
+        let registry = SessionRegistry::new();
+        registry
+            .open("conn-a", "platform:acme", session("s-allowed", "acme"), 0)
+            .unwrap();
+        registry
+            .open(
+                "conn-a",
+                "platform:acme",
+                session("s-restricted", "globex"),
+                0,
+            )
+            .unwrap();
+
+        let closed = registry.close_connection("conn-a", "platform:acme", |company| {
+            company.as_ref() == "acme"
+        });
+        assert_eq!(closed, vec!["s-allowed".to_string()]);
+        assert!(
+            registry
+                .get("conn-a", "platform:acme", "s-restricted", 0)
+                .is_some(),
+            "a session for a company outside the caller's own allow-list must survive its disconnect"
         );
     }
 
@@ -715,7 +852,7 @@ mod test {
                 .open("conn-a", "alice", session(&format!("s{i}"), "acme"), 0)
                 .unwrap();
         }
-        let closed = registry.close_connection("conn-a", "alice");
+        let closed = registry.close_connection("conn-a", "alice", |_| true);
         assert_eq!(closed.len(), 5);
         for i in 0..5 {
             assert!(

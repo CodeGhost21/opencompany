@@ -254,7 +254,7 @@ fn delete_session(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Va
     // had that" leaks nothing useful either way. `peek`, not `get`: deleting
     // renews nothing, so there is no reason to touch the idle TTL of a
     // session this call may yet refuse to act on.
-    if let Some(session) = registry.peek(conn, &owner, session_id)
+    if let Some(session) = registry.peek(conn, &owner, session_id, crate::ports::now_millis())
         && authorize_address(state, auth, &session.company).is_some()
     {
         return Err("not authorized for this company".to_string());
@@ -263,22 +263,36 @@ fn delete_session(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Va
     Ok(json!({}))
 }
 
-/// Closes the caller's connection: every session it opened, in one stroke.
+/// Closes the caller's connection: every session it opened whose company the
+/// caller may still address, in one stroke.
 ///
 /// The HTTP edge has no socket whose closure sweeps a connection, so the
 /// client ends its connection explicitly. `SessionRegistry::close_connection`
-/// checks ownership and removes every session under the same lock, so there
-/// is no snapshot for a concurrent `session/new` to land in after the check
-/// and survive the disconnect, and no session left counted against either cap
-/// pending a sweep because its company's authorization happened to lapse
-/// first. Closing bookkeeping for a session is not reading or writing that
-/// company's content, so unlike `session/list`, `session/delete` and
-/// `session/prompt`, there is no per-session `authorize_address` re-check
-/// here to skip a session over.
+/// checks ownership, runs `authorized` per session, and removes what passes
+/// under the same lock — so there is no snapshot for a concurrent
+/// `session/new` to land in after the check and survive the disconnect,
+/// unlike the list-then-remove loop this replaced. The per-session check
+/// stays (coderabbit review): `owner` names a tenant, not an authorization
+/// scope, and two platform credentials for the same tenant can carry
+/// different company allow-lists — closing every session unconditionally
+/// would let a narrowly-scoped credential remove sessions for companies
+/// outside its own allow-list merely by sharing an owner string with
+/// whichever credential opened them. A session whose authorization has since
+/// lapsed is left for the periodic sweep instead — an hourly cadence
+/// ([`SESSION_SWEEP_INTERVAL_MILLIS`](super::session::SESSION_SWEEP_INTERVAL_MILLIS)),
+/// not the day-long gap a blanket removal would have closed.
 fn disconnect(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Value, String> {
     let conn = connection(params)?;
     let owner = owner(auth);
-    state.acp_sessions().close_connection(conn, &owner);
+    // Per-session, not blanket: `owner` names a tenant, and two platform
+    // credentials for the same tenant can carry different company
+    // allow-lists, so a connection's sessions may span companies the
+    // presented credential is not itself authorized for.
+    state
+        .acp_sessions()
+        .close_connection(conn, &owner, |company| {
+            authorize_address(state, auth, company).is_none()
+        });
     Ok(json!({}))
 }
 
@@ -294,13 +308,14 @@ async fn prompt(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Valu
     // renewing the idle TTL ahead of that would let a caller whose access to
     // this session's company was revoked keep the session's cap slot alive
     // indefinitely by repeatedly presenting it and losing the check.
+    let now_millis = crate::ports::now_millis();
     let session = registry
-        .peek(conn, &owner, session_id)
+        .peek(conn, &owner, session_id, now_millis)
         .ok_or_else(|| "unknown ACP session".to_string())?;
     if authorize_address(state, auth, &session.company).is_some() {
         return Err("not authorized for this company".to_string());
     }
-    registry.touch(conn, &owner, session_id, crate::ports::now_millis());
+    registry.touch(conn, &owner, session_id, now_millis);
     let text = prompt_text(params)?;
     let runtime = state
         .registry()
