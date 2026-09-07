@@ -137,7 +137,33 @@ fleet_tech = ["evidence", "support", "object", "refute", "question"]
 stock_controller = ["evidence", "support", "object", "refute", "pin"]
 field_realist = ["object", "refute", "question", "evidence", "defer"]
 
-# Cross-desk referral: this is the agent-to-agent seam.
+# Private asides: the *other* agent-to-agent seam, and the one that stays
+# inside this desk.
+#
+# The pair this exists for is the fleet technician and the stock controller.
+# "Is VM-301's chiller reliable enough to put sandwiches back in it" is a
+# question those two can settle between them in two lines, and settling it on
+# the floor costs the room two of its twelve turns watching a conversation that
+# has no bearing on the route until it has an answer.
+#
+# `max_members = 1` — a pair, never a caucus. `must_surface` — whatever they
+# conclude is owed back to the room in the open, because an aside carries
+# information and never support: a `!support` written privately moves nothing
+# towards a decision, so a pair that never surfaces has spent two turns on
+# nothing.
+#
+# It is on here and off everywhere else in this repo on purpose. Upstream
+# measured the mechanism and it lost on answer quality
+# (`docs/spec/runtime/hivemind-asides.md`), so enabling it is a decision about
+# *this* desk — four members, two of whom hold constraints the other two do not
+# — rather than a default anybody inherits.
+[group_chat.hive.aside]
+enabled = true
+max_members = 1
+max_messages = 2
+must_surface = true
+
+# Cross-desk referral: this is the agent-to-agent seam that leaves the desk.
 #
 # `reach = "desks"` lets a member mid-episode put a question to `@#commercial`
 # or `@#intel`. `returns = true` carries the answer home — a question whose
