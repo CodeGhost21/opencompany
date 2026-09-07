@@ -101,6 +101,9 @@ export function draftCapabilityGap(err: unknown): string | null {
  *
  * So it is keyed on what the host actually **asked for**:
  *
+ * - the answer came from the host's own `{error, code}` envelope (`fromHost`,
+ *   issue #380) — without that, the status is the client's own synthesis of
+ *   whatever hop gave up;
  * - a `409` names an id that is taken — "pick a different id" is an instruction,
  *   and the id field is the only way to obey it;
  * - `problems` are per-node complaints (`workflow_invalid`), each of which wants
@@ -109,9 +112,24 @@ export function draftCapabilityGap(err: unknown): string | null {
  * Everything else — a network blip, a 500, a 400 with no problems, a thrown
  * `TypeError` — leaves the box up and the banner showing. The operator presses
  * Create again.
+ *
+ * ## Why `fromHost` is checked first
+ *
+ * `httpError` sets it from whether the body parsed as the host's envelope
+ * (`src/api/client.ts`), so a proxy or gateway answering `409` with an HTML
+ * page — or with an empty body over HTTP/2, where there is not even a reason
+ * phrase — arrives here as a `409` the host never said. Handing over the form
+ * for one retires the box over an intermediary's opinion about a request the
+ * host may never have seen: the same failure this function exists to prevent
+ * for `500`s, one status along.
+ *
+ * The `problems` branch needs no separate guard — `problems` is populated only
+ * off a parsed envelope — but it sits behind the same gate rather than relying
+ * on that staying true.
  */
 export function writeRefusalHandsOverForm(err: unknown): boolean {
   if (!(err instanceof ApiError)) return false;
+  if (!err.fromHost) return false;
   if (err.status === 409) return true;
   return (err.problems?.length ?? 0) > 0;
 }

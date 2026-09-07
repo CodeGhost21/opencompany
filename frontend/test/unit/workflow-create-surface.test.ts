@@ -163,7 +163,10 @@ describe("writeRefusalHandsOverForm", () => {
   it("hands over for a taken id, which is an instruction with a field to obey it", () => {
     expect(
       writeRefusalHandsOverForm(
-        new ApiError(409, "conflict", "A workflow with id `x` already exists."),
+        // `fromHost` — the fourth argument — is the whole point: this is the
+        // host's own `{error, code}` envelope, which is what makes "pick a
+        // different id" an instruction rather than a hop's opinion.
+        new ApiError(409, "conflict", "A workflow with id `x` already exists.", true),
       ),
     ).toBe(true);
   });
@@ -174,15 +177,36 @@ describe("writeRefusalHandsOverForm", () => {
     expect(writeRefusalHandsOverForm(err)).toBe(true);
   });
 
+  it("keeps the box for a 409 the host never said", () => {
+    // `httpError` synthesises the code from the status line when the body is
+    // not the host's envelope — an HTML error page from a proxy, or the empty
+    // body an HTTP/2 gateway sends with no reason phrase. Retiring the one-box
+    // dialog over that is the same bug as retiring it over a 500: an
+    // intermediary said it, about a request the host may never have seen.
+    expect(
+      writeRefusalHandsOverForm(new ApiError(409, "http_409", "HTTP 409")),
+    ).toBe(false);
+    // Belt and braces: even a `problems` array cannot smuggle a non-host error
+    // through, though the client never populates one off an unparsed body.
+    const forged = new ApiError(409, "http_409", "HTTP 409");
+    forged.problems = [{ node_id: "write", message: "no such teammate" }];
+    expect(writeRefusalHandsOverForm(forged)).toBe(false);
+  });
+
   it("keeps the box for a failure that says nothing about what to do", () => {
-    expect(writeRefusalHandsOverForm(new ApiError(500, "internal", "it fell over"))).toBe(
-      false,
-    );
-    expect(writeRefusalHandsOverForm(new ApiError(503, "quiescing", "try later"))).toBe(
-      false,
-    );
+    // Every one of these is `fromHost`, deliberately: they have to fail the
+    // STATUS test, not the origin test added above, or this stops proving that
+    // a host's own 500 leaves the box up.
+    expect(
+      writeRefusalHandsOverForm(new ApiError(500, "internal", "it fell over", true)),
+    ).toBe(false);
+    expect(
+      writeRefusalHandsOverForm(new ApiError(503, "quiescing", "try later", true)),
+    ).toBe(false);
     // A 400 with no breakdown names no node and no field.
-    expect(writeRefusalHandsOverForm(new ApiError(400, "bad_request", "no"))).toBe(false);
+    expect(writeRefusalHandsOverForm(new ApiError(400, "bad_request", "no", true))).toBe(
+      false,
+    );
     // An empty `problems` array is "a breakdown with nothing in it".
     const empty = new ApiError(400, "workflow_invalid", "refused", true);
     empty.problems = [];

@@ -336,6 +336,10 @@ describe("the New-workflow dialog when the copilot can draft", () => {
               409,
               "conflict",
               "A workflow with id `weekly-digest` already exists. Pick a different id.",
+              // The host's own envelope. A 409 the client synthesised from a
+              // proxy's status line is not an instruction and must not hand
+              // over the form — see the `writeRefusalHandsOverForm` unit tests.
+              true,
             ),
           ),
       }),
