@@ -58,6 +58,12 @@ agent calls request_approval ─▶ park (ApprovalId)
                      requesting agent continues
 ```
 
+- **Deciding one needs authority over the company, not membership in it.**
+  `POST {scope}/approvals/{aid}` — both the `/api/v1/companies/{id}` form and
+  the `/api/v1/company` alias — requires an admin, or the hosting control
+  plane's machine principal. A member is `403`. The rule follows the one that
+  already governs *reading* an approval: a member is refused its payload and
+  its `amountUsd`, and a decision nobody may see is not one they may make.
 - **Default-deny on silence**: parked approvals expire to `deny` after a
   deadline — **24 hours** by default, set per company with
   `[policy].approval_ttl_hours`. Nothing irreversible ever happens because the
@@ -87,10 +93,11 @@ agent calls request_approval ─▶ park (ApprovalId)
   `/api/v1/company/approvals/{aid}/extend` alias) re-anchors a parked
   approval's TTL window to *now*, giving it a fresh full deadline, and answers
   with the new `expiresAtMillis` so the card redraws its countdown without a
-  reload. It is guarded by the same company auth as resolve — keeping a stalled
-  run alive is not an admin-only action — and 404s when nothing is parked under
-  that id, so extending an approval that has since resolved or expired is told,
-  not silently accepted. **A full fresh window, not "+N hours"**: the sweeper
+  reload. It is guarded by the same authority as resolve — an approval nobody
+  decides default-denies when its window runs out, so pushing that window out is
+  a decision about the effect and not a member's to make — and 404s when nothing
+  is parked under that id, so extending an approval that has since resolved or
+  expired is told, not silently accepted. **A full fresh window, not "+N hours"**: the sweeper
   and the console both read `parked_at + ttl`, so moving that one instant is the
   whole of an extension and there is no second offset for a projection to
   disagree on. **It survives a redeploy**: the move is journaled as
@@ -117,7 +124,11 @@ agent calls request_approval ─▶ park (ApprovalId)
 `POST /api/v1/companies/{id}/emergency-pause` denies **every** new effect
 outside the `Other` group, ahead of every policy rule including
 `always_approve`. `POST .../emergency-resume` releases it. Both are
-owner-scoped and both take a confirmation phrase in the body. Normative:
+admin-scoped — a human must administer the company, not merely belong to it —
+and both take a confirmation phrase in the body. The hosting control plane's
+machine principal is the one exception: it already owns or holds platform scope
+over the company by the time it reaches these routes, so it is not asked to be
+an admin on top of that. Normative:
 
 - **It denies, it does not park.** Parking would make the approval queue an
   escape hatch from the switch: an operator could approve the very effects they
