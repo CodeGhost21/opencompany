@@ -1423,6 +1423,28 @@ export function ChatView({
     onChatPaneVisibilityChange?.(chatPaneVisible);
   }, [chatPaneVisible, onChatPaneVisibilityChange]);
 
+  /**
+   * Close the dialogs that belong to the Room *route* when the operator leaves
+   * it (Codex P2 review on #2130).
+   *
+   * Both of these open from the members pane, which is inside the `routeOpen`
+   * gate — but the dialogs themselves are deliberately outside it, because two
+   * of their siblings have triggers painted in the sidebar and must open from
+   * any section. That is right for those two and wrong for these: leaving Room
+   * on Back, Forward or a typed hash used to unmount this whole view, and now
+   * leaves an "Add teammate" sheet standing over Company. `BudgetDialog` is
+   * worse than untidy — it holds the member it was opened for, so it would come
+   * back later still pointing at them.
+   *
+   * Closed rather than unmounted, so returning to Room does not find them
+   * reopened by state nobody cleared.
+   */
+  useEffect(() => {
+    if (routeOpen) return;
+    setAddOpen(false);
+    setBudgetFor(null);
+  }, [routeOpen]);
+
   // Upload one attachment's bytes for the composer (issue #1682). Bound to the
   // active connection's client/company so the composer stays agnostic of both.
   // Must live above the early returns: a hook after them is skipped on the
@@ -2330,6 +2352,12 @@ export function ChatView({
             onAddChannel={onAddChannel}
             collapsed={channelsCollapsed}
             onExpand={toggleChannels}
+            // Off Room the marked channel is where Room will take you back to,
+            // not the page being read — so it stops claiming to be the current
+            // page. Without this, `#/finances/wallet` had two nodes answering
+            // `aria-current="page"`: this rail's open channel and the section
+            // rail's open sub-page.
+            currentPage={routeOpen}
             // In the sidebar the rail IS the column: it drops its own width,
             // its own border and its own fill, and lets the sidebar's scroll
             // container handle a long list.

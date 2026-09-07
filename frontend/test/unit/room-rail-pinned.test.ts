@@ -97,6 +97,41 @@ describe("ChatView, mounted off its own route", () => {
     expect(read("views/chat/ChannelRail.tsx")).toMatch(/<NewMessageDialog[\s/>]/);
   });
 
+  it("closes the Room-only dialogs on the way out, and only those", () => {
+    // Codex P2 on this PR. `AddMemberDialog` and `BudgetDialog` open from the
+    // members pane, which is inside the `routeOpen` gate — but every dialog in
+    // this file sits OUTSIDE that gate, because two of them have triggers
+    // painted in the sidebar. Right for those two, wrong for these: leaving Room
+    // on Back used to unmount the view, and left an "Add teammate" sheet
+    // standing over Company once it stopped doing so. `BudgetDialog` also holds
+    // the member it was opened for, so it would come back still pointing at
+    // them.
+    const effect = chatView.slice(chatView.indexOf("if (routeOpen) return;"));
+    expect(chatView).toContain("if (routeOpen) return;");
+    expect(effect.slice(0, 200)).toContain("setAddOpen(false)");
+    expect(effect.slice(0, 200)).toContain("setBudgetFor(null)");
+    // And NOT the two the sidebar opens — closing those on the way out is the
+    // whole thing this PR had to keep working from another section.
+    expect(effect.slice(0, 200)).not.toContain("setChannelCreateOpen(false)");
+  });
+
+  it("stops the pinned rail claiming to be the current page off Room", () => {
+    // Two nodes answering `aria-current="page"` is a page a screen reader
+    // cannot locate you on. On `#/finances/wallet` there were exactly that: the
+    // channel rail's open channel and the section rail's open sub-page. Off
+    // Room the rail's mark is "where Room will take you back to", which is
+    // `aria-current="true"` — a current item within a set, not a current page.
+    expect(chatView).toContain("currentPage={routeOpen}");
+    const rail = read("views/chat/ChannelRail.tsx");
+    expect(rail).toContain('const activeAria: "page" | "true" = currentPage ? "page" : "true";');
+    // Every row shape reads the resolved value, so none of the three can drift.
+    expect(rail.match(/aria-current=\{active \? activeAria : undefined\}/g) ?? []).toHaveLength(3);
+    expect(rail).not.toContain('aria-current={active ? "page" : undefined}');
+    // And a standalone rail — the unit tests, a rail beside its own transcript —
+    // keeps saying `page` with nothing configured.
+    expect(rail).toContain("currentPage = true,");
+  });
+
   it("is mounted by the shell unconditionally, with routeOpen as the only gate", () => {
     const shell = read("components/app-shell.tsx");
     // The regression this replaces: `{view === "chat" && <ChatView …/>}`, which
