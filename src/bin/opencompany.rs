@@ -1860,6 +1860,40 @@ fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
     }
 }
 
+/// Resolves a base-URL env var (`TINYHUMANS_API_URL`, `TINYPLACE_API_URL`)
+/// for `serve`'s manual `AppConfig` build. Mirrors
+/// `opencompany::app::config::resolve_base_url`'s hosted-tenant gate — kept as
+/// a small local twin because `serve` builds `AppConfig` field-by-field
+/// rather than through `app::config::resolve`, and reads only the process
+/// environment (`config.toml` is not part of this manual build's precedence).
+///
+/// A hosted tenant is handed its whole environment by the platform that
+/// provisions it, so an unset value there refuses to boot instead of
+/// silently applying `default_val` — which for both callers is a production
+/// base URL. Every other deployment kind keeps the default: the operator
+/// running it owns the choice, and no-override *is* that choice.
+fn resolve_serve_base_url(
+    var_name: &str,
+    deployment: opencompany::app::deployment::Deployment,
+    default_val: String,
+) -> Result<String> {
+    if let Some(value) = std::env::var(var_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(value);
+    }
+    if deployment == opencompany::app::deployment::Deployment::HostedTenant {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "{var_name} is not set. This is a hosted-tenant deployment, which is handed its \
+             whole environment by the platform that provisions it — so this refuses to boot \
+             rather than silently default to production. Set {var_name} explicitly (the \
+             production hub, or the staging hub for a staging tenant)."
+        )));
+    }
+    Ok(default_val)
+}
+
 async fn async_main() -> Result<()> {
     // Crash reporting first, before the subscriber and before any other work.
     // The panic hook is installed inside `init`, so anything that panics ahead
@@ -2020,13 +2054,19 @@ async fn async_main() -> Result<()> {
                     );
                 }
             }
+            // Which kind of install this process is — a hosted tenant gets its
+            // whole environment from the platform that provisions it, so the
+            // production defaults below are refused rather than silently
+            // applied for that kind alone. See `resolve_serve_base_url`.
+            let deployment = opencompany::app::deployment::Deployment::from_env(&ProcessEnv);
             // tiny.place economy + public-card configuration resolved from the
             // environment (with built-in defaults); the a2a routes and boot
             // going-public flow read these off `AppConfig`.
-            let tinyplace_api_url = std::env::var("TINYPLACE_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| opencompany::app::config::DEFAULT_TINYPLACE_API_URL.to_string());
+            let tinyplace_api_url = resolve_serve_base_url(
+                "TINYPLACE_API_URL",
+                deployment,
+                opencompany::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
+            )?;
             let public_url = std::env::var("OPENCOMPANY_PUBLIC_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
@@ -2075,10 +2115,11 @@ async fn async_main() -> Result<()> {
             // Honor TINYHUMANS_API_URL (e.g. staging) — the config layer reads
             // it, but this manual AppConfig build otherwise falls to the prod
             // default, so a staging credential could never reach staging.
-            let api_url = std::env::var("TINYHUMANS_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| AppConfig::default().api_url);
+            let api_url = resolve_serve_base_url(
+                "TINYHUMANS_API_URL",
+                deployment,
+                AppConfig::default().api_url,
+            )?;
             // The listener address, across every layer that may name it. Until
             // issue #425 only the flag reached this struct, so the manager's
             // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
