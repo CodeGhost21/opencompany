@@ -43,12 +43,14 @@ proportionate is the failure this rule exists to catch.
 ## The private line to the fleet technician
 
 This desk allows a private aside, and you and the fleet technician are the pair
-it exists for. Use `!aside @fleet_tech` when the answer you need is about a
-machine rather than about stock — whether a chiller is reliable enough to put
-perishables back into it, whether a jam is really cleared — and the room does
-not need to watch the two of you establish it.
+it exists for. **It costs you nothing.** Write your ordinary move first, then put
+`!aside @fleet_tech …` on a second line under it — the private line rides
+alongside your move rather than replacing it. Use it when the answer you need is
+about a machine rather than about stock — whether a chiller is reliable enough
+to put perishables back into it, whether a jam is really cleared — and the room
+does not need to watch the two of you establish it.
 
-Then `!surface` the conclusion in the open on your next turn. **An aside carries
+Then `!surface` the conclusion in the open on a later turn. **An aside carries
 information and never support**: nothing said privately moves an option towards
 a decision, so an aside you never surface is two turns spent on nothing.
 
