@@ -51,15 +51,14 @@ ent_tinymemory_cortex_driver folds    "newest-per-key on read"     conf 1.0
 So the commercial argument against Cortex — that it offers nothing the
 incumbents do not — does not hold. It offers this.
 
-**What replaces it is narrower and sharper: beliefs build but never revise.**
-Three events establishing "Priya Raman owns billing", then two handing it to
-Marcus Webb, leaves *both* owners live at `confidence: 1.0` with `valid_to:
-null`, and `/v1/recall` returns them undifferentiated. The section below was
-right about the consequence and wrong about the cause (its heading is now
-corrected too): a `FactStore` consumer
-reads live and superseded claims with nothing marking which is which. Filed as
-[#2089](https://github.com/tinyhumansai/opencompany/issues/2089). Understanding
-stays empty and concepts stay broken.
+**Nothing replaces it.** A follow-up claim that beliefs never revise was filed as
+[#2089](https://github.com/tinyhumansai/opencompany/issues/2089) and withdrawn:
+`/docs/api-reference/facts` supersedes on the same `(subject, predicate)`, and
+the two claims we compared had different subjects. Details on the
+[evidence page](memory-engine-cortex-evidence.md#belief-revision--finding-withdrawn).
+Understanding stays empty, and the concepts lane still reports no LLM router with
+both routers verifiably started — the one defect here that has survived
+checking.
 
 Finding 2 is untouched, and it *forces* instance-per-tenant rather than blocking
 it: it removes the shared-instance-with-per-tenant-credentials row from the
@@ -78,19 +77,21 @@ question, and the recommendation follows from them.
    **closed-source**, distributed only as prebuilt artifacts (`cortexdbai/cortexdb-releases`,
    Docker Hub `cortexdb/cortexdb`). Whatever we build treats it as an opaque
    upstream binary we cannot patch.
-2. **The one token minter a self-hosted operator can reach does not confine a
-   token to its scope.** `POST /v1/auth/tokens` answers `NOT_CONFIGURED` by
-   default, but `CORTEX_V1_MINTER_ENABLE=1` turns it on and it mints correctly
-   — `subject`, `scope`, TTL, capability narrowing, and working revocation. The
-   scope does not hold. A token minted *for* scope A, pointed at scope B: `POST
-   /v1/recall` is refused `403 POLICY_DENIED`, but `GET /v1/events?scope=B`
-   returns B's records and `POST /v1/experience` into B is accepted. Reproduced
-   three times, including with narrowed `capabilities`. The vendor documents
-   this minter as dev-only (a minted token reports `tenant: dev`) and says
-   production presets expect an external OIDC provider or the separate
-   `cortex-auth-ref` issuer — which is absent from the v0.9.8 assets, has no
-   public repository, and no published contract. So the reachable minter does
-   not isolate, and the isolating one is not reachable.
+2. **The isolating configuration is not reachable self-hosted — and what we
+   measured is policy, not a broken boundary.** `CORTEX_V1_MINTER_ENABLE=1`
+   turns on `POST /v1/auth/tokens`, which mints correctly. A token minted *for*
+   scope A, pointed at scope B: `/v1/recall` is refused `403 POLICY_DENIED`,
+   but `GET /v1/events?scope=B` returns B's records and `POST /v1/experience`
+   into B is accepted. **That is the deployment tier behaving as configured**:
+   `GET /v1/policy/effective` lists `scope.read.holistic`, `scope.read.descend`
+   and `scope.write.about_other` among the actor's *allowed* capabilities. The
+   documented way to narrow it, `PUT /v1/policy/{tier}`, is experimental and
+   `404`s here, though the read endpoints are present. The minter is itself
+   documented as "a dev convenience, not a production issuer"; production
+   presets expect OIDC or `cortex-auth-ref`, which is in no release asset and no
+   doc page. So we cannot configure the isolation, nor test whether the
+   production path enforces it — weaker than calling it a defect, and the same
+   conclusion: nothing here may rest on Cortex's scopes.
 3. ~~**The derived fact and belief tier does not work.**~~ **Overturned — see
    [Correction](#correction-2026-09-04).** The run below had enrichment off and
    no way to report it; configured, and on a funded provider account, Facts and
@@ -117,7 +118,7 @@ removes the middle option:
 |---|---|---|
 | One shared instance, one bootstrap credential | Namespace-only — the **weak** tier | Yes |
 | **One instance per tenant**, own key and own data dir | Credential *and* storage isolation | **Yes** |
-| Shared instance, real per-tenant credentials | Strong | **No** — the reachable minter does not confine a token to its scope (finding 2) |
+| Shared instance, real per-tenant credentials | Strong | **No** — the production issuer and the policy-narrowing API are both unavailable in this build (finding 2) |
 
 `memory-engine.md` is unambiguous about why the weak tier is not acceptable as a
 default: with a hosted engine "the namespace string is the only thing separating
@@ -166,55 +167,11 @@ outage costs a tenant its knowledge ports, not its company records.
 
 ## Layers are not capability families
 
-The empty layers are real, but they are **not** a capability-audit finding, and
-it is worth separating the two because conflating them points a driver plan at
-the wrong thing.
-
-Measured on the deployment, with the LLM lanes believed configured and the
-server reporting healthy — see [Correction](#correction-2026-09-04) for why that
-belief was wrong:
-
-| Cortex layer | Endpoint | Contents |
-|---|---|---|
-| Events | `/v1/events` | populated |
-| Episodes | `/v1/episodes` | populated |
-| Facts | `/v1/facts` | **empty** |
-| Beliefs | `/v1/beliefs` | **empty** |
-| Understanding | `/v1/understanding` | **empty**; errors every scheduler tick |
-
-The contract's `Capability` enum is a closed set — deliberately not
-`#[non_exhaustive]`, so adding a variant is a compile error rather than a config
-change — and it contains **no** Facts, Beliefs or Understanding variant. Cortex's
-five layers are an engine-internal model, not families a driver advertises, so
-`audit_provider` cannot fire on them however empty they are. If a hosted Cortex
-driver carries an over-claim risk it lives in `Ingest`, `Entities`, `Tree` or
-`Retrieval`, and a driver plan should name which of those it intends to
-advertise and on what evidence.
-
-What the empty layers *would* mean is commercial rather than structural: the
-derived fact/belief tier is the reason to prefer Cortex over
-`supermemory`/`mem0`/`cognee` at all. Whether it works is now open — the
-measurement above did not test it.
-
-### The audit gap that is real, and is not about Cortex
-
-Separately — and this one holds regardless of engine — `audit_provider` compares
-`capabilities()` against `provides()`, and **both are properties of the
-adapter**. `provides()` is a defaulted trait method with a fixed body:
-`Core | Recall | Portability` hardcoded `true`, everything else
-`self.as_x().is_some()`. It is a structural Rust-type question, and its own doc
-calls it "the implementation-side truth". Neither side asks whether the engine
-answers.
-
-So the three **mandatory** families can never fail the audit. Two of them,
-`Core` and `Recall`, are what this host's knowledge ports are built on;
-`Portability` is mandatory to the *contract* without being exercised by them. The lever is a live
-probe or a conformance case, **not** `provides()` — asking `provides()` to
-consult the engine would make the audit compare two runtime opinions instead of a
-claim against a structure. Tracked as
-[#1968](https://github.com/tinyhumansai/opencompany/issues/1968); a boot-time
-probe of the mandatory families is proposed in
-[#1973](https://github.com/tinyhumansai/opencompany/pull/1973).
+Moved to [the evidence page](memory-engine-cortex-evidence.md#layers-are-not-capability-families).
+The short version: Cortex's five layers are an engine-internal model, not
+families a driver advertises, so `audit_provider` cannot fire on them however
+empty they are. The audit gap that is real, and is not about Cortex, is
+[#1968](https://github.com/tinyhumansai/opencompany/issues/1968).
 
 ## The upsert gap, and the driver mechanics
 
@@ -232,72 +189,12 @@ alone would not make Cortex cheap**: keyed reads would still scan and writes
 would still wait, because those need a metadata filter and a readiness signal
 that are separate asks.
 
-## Belief revision is reachable, and silently wrong
+## Belief revision, and what does work
 
-Worth stating separately because it is much of what would justify preferring
-Cortex over the drivers we already have. Tested directly: three events
-establishing an owner, then two contradicting them.
-
-```text
-POST /v1/beliefs/build
-{"built":0,"facts_scanned":0,"events_scanned":5,"belief_events_found":0,
- "reasons":{"no_belief_shaped_events":1,"no_facts_in_scope":1}}
-```
-
-`no_facts_in_scope` is exactly what an enrichment-off server reports, so this run
-tested the [misconfiguration](#correction-2026-09-04), not belief revision. Re-run
-correctly, beliefs **do** build — and still do not revise: the contradicted owner
-stays live at equal confidence beside the correction, `valid_to: null` on both.
-The conclusion below therefore stands, and is worse than "not reachable": it is
-reachable, silently wrong, and filed as #2089.
-
-What recall does with the contradiction is adequate *by accident*: the correction
-ranks first on semantic similarity, while the superseded claim is still returned
-with nothing marking it stale. A `FactStore` consumer would be reading a pack
-mixing live and superseded claims with no provenance distinction between them.
-
-## What does work
-
-Ranked retrieval is genuinely good, and it is available from embeddings alone.
-In a fresh scope, twelve events, queried twelve seconds after writing and before
-any derived layer had built:
-
-- *"who runs mobile releases?"* → `Mobile releases ship every second Wednesday`,
-  then `Kai Tanaka manages the mobile release train`
-- *"how long do contract reviews take?"* → `Contract reviews take about five
-  business days`
-
-Tenant separation also holds *within Cortex*: writes to one scope never
-surfaced in another across every test run.
-
-**But the namespace formats are incompatible, and a driver must translate.**
-Cortex scopes are slash-delimited `type:id` segments
-(`^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}(/[a-z][a-z0-9_]{0,31}:[A-Za-z0-9_-]{1,128}){0,31}$`).
-Host namespaces are nothing of the sort: `Namespace::company_root` emits
-`oc/<slug>-<32 hex>`, children append a plain segment (`…/context`, `…/facts`,
-`…/agent/<member>`), and `sanitize_segment` maps every character outside
-`[A-Za-z0-9-_]` to `_` — so a colon can never appear and no segment is ever
-`type:id`. Passed through unchanged, every store and recall would be rejected.
-
-A `cortex` driver therefore needs an explicit and **reversible** translation.
-Reversible is not a nicety: `Bound::recall` re-checks every returned entry with
-`Namespace::contains` and drops mismatches, so a return the driver failed to map
-back yields zero hits *silently* rather than an error.
-
-So Cortex can back all three knowledge ports today — including `FactStore`.
-That needs saying precisely, because the obvious reading is wrong.
-`MemoryStore`, `ContextStore` and `FactStore` are **host ports**, not driver
-families; a driver can neither advertise nor withhold them. All three are
-facades over the same `Bound` helper using only `store`/`get`/`list`/`forget`/
-`recall` — `Core` plus `Recall`, both mandatory supertraits.
-`FactStore::upsert` is `self.bound.put(company, &fact.id, fact, "fact")`, which
-writes operator-curated records into `oc/<slug>-<32 hex>/facts` — the full host
-namespace derived from the `CompanyId` — through `MemoryCore::store`. It never
-reads a derived facts layer, so Cortex's empty `/v1/facts` does not touch it.
-
-The true statement is narrower, and still supports the conclusion: Cortex cannot
-deliver the *derived* fact and belief tier. That is a reason it offers nothing
-over `supermemory`/`mem0`/`cognee`, not a reason a port fails.
+Both moved to [the evidence page](memory-engine-cortex-evidence.md). Retrieval
+quality is real and comes from embeddings alone; the belief-revision finding was
+**withdrawn** — see the correction there and
+[#2089](https://github.com/tinyhumansai/opencompany/issues/2089).
 
 ## Fitting the seam's invariants
 
@@ -465,12 +362,13 @@ offer something the incumbent drivers do not.
 
 - Does CortexDB agree with our reading of clause 2? Worth confirming in writing
   when we contact them, though the text is not ambiguous.
-- Is the v1 minter's `scope` advisory rather than enforcing, or is the gap in
-  finding 2 a defect? And what should a self-hosted multi-tenant deployment use
-  instead — is `cortex-auth-ref` published, or is an external OIDC provider
-  expected, against what contract? This decides whether a *shared* instance can
-  ever reach the strong tier; instance-per-tenant reaches it without the minter.
-  Adoption was decided by the derived-layer finding, which is now withdrawn.
+- What should a self-hosted multi-tenant deployment bind actors with? The
+  cross-scope behaviour in finding 2 is *granted* by the deployment tier, so the
+  open question is not whether it is a defect but how to narrow it: is
+  `cortex-auth-ref` published, or is an external OIDC provider expected, against
+  what contract, and will `PUT /v1/policy/{tier}` leave experimental? This
+  decides whether a *shared* instance can ever reach the strong tier;
+  instance-per-tenant reaches it without any of them.
 - What is the true per-instance memory floor, from Cortex rather than the lint?
 - Will the two filed defects be accepted? The release tracker is scoped to
   binary/packaging issues, with source bugs directed to Cortex Cloud support —
