@@ -102,14 +102,16 @@ before or after the single marker line.";
 /// a reader that meets an elided row needs to know it may ask, not merely that
 /// it cannot read.
 const ASIDE_RULES: &str = "\
-This desk also allows a private line. !aside @peer <what you need from them> \
-reaches only that peer; !surface <what the room needs to know> reports back to \
-everyone. An aside carries information and never support: a !support written \
-privately moves nothing towards a decision, for you or for anybody. To make an \
-aside count, spend a desk-visible turn saying so with !surface. Some rows in \
-the transcript show only that an aside happened, with its author and who was \
-in it — you cannot read those, and if one matters, ask its author here on the \
-desk.";
+This desk also allows a private line, and it costs you nothing. After your one \
+marker line you may add ONE more line, !aside @peer <what you need from them>, \
+which only that peer can read. It is not a turn and does not replace your move: \
+write your move first, then the aside under it. Your peer answers on its own \
+next turn. !surface <what the room needs to know> reports back to everyone and \
+is an ordinary move. An aside carries information and never support: a !support \
+written privately moves nothing towards a decision, for you or for anybody, so \
+an aside you never surface bought the room nothing. Some rows in the transcript \
+show only that an aside happened, with its author and who was in it — you \
+cannot read those, and if one matters, ask its author here on the desk.";
 
 /// The extra sentence a room under `require_evidential` is given.
 ///
