@@ -70,113 +70,127 @@ TRIGGER_DESK = {
 MAX_TRIGGERS_PER_MESSAGE = 12
 
 
-class Client:
-    """The company's REST surface, with the dev-code sign-in the harness needs."""
+class Host:
+    """A cookie-carrying HTTP client for one OpenCompany host.
 
-    def __init__(self, base: str, timeout: float = 30.0) -> None:
+    The surfaces and their exact shapes are the ones ``scripts/hive-euler.py``
+    already drives against a live host — the auth flow, the approvals verdict
+    body and the desk transcript read are copied rather than re-derived,
+    because each of them is a place a plausible-looking guess fails only at
+    run time against a real server.
+    """
+
+    def __init__(self, base: str) -> None:
         self.base = base.rstrip("/")
-        self.timeout = timeout
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor()
-        )
+        self.jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
 
-    def _call(self, method: str, path: str, body: Any = None) -> Any:
-        url = f"{self.base}{path}"
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+    def call(self, method: str, path: str, body: Any = None, timeout: float = 120):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(self.base + path, data=data, method=method)
         req.add_header("accept", "application/json")
-        if data:
+        if data is not None:
             req.add_header("content-type", "application/json")
         try:
-            with self.opener.open(req, timeout=self.timeout) as resp:
+            with self.opener.open(req, timeout=timeout) as resp:
                 raw = resp.read()
-                return json.loads(raw) if raw else None
+                return resp.status, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as err:
-            detail = err.read().decode(errors="replace")[:400]
-            raise RuntimeError(f"{method} {path} -> {err.code}: {detail}") from err
+            raw = err.read()
+            try:
+                return err.code, json.loads(raw)
+            except ValueError:
+                return err.code, raw.decode(errors="replace")
 
-    def get(self, path: str) -> Any:
-        return self._call("GET", path)
-
-    def post(self, path: str, body: Any = None) -> Any:
-        return self._call("POST", path, body)
-
-    # -- auth -------------------------------------------------------------
-
-    def sign_in_if_needed(self) -> None:
-        """No-op under `OPENCOMPANY_AUTH_MODE=none`; dev-code flow otherwise.
-
-        The host echoes a dev code on loopback with no public URL, which is the
-        only reason this can be unattended. If neither path works, the run
-        fails here rather than a hundred confusing 401s later.
-        """
-        try:
-            self.get(f"{SCOPE}/health")
+    def sign_in(self) -> None:
+        """No-op when auth is `none`; otherwise the loopback dev-code flow."""
+        status, _ = self.call("GET", f"{SCOPE}/chat/history?limit=1")
+        if status == 200:
             return
-        except RuntimeError:
-            pass
-        started = self.post("/api/v1/auth/dev/start", {"email": ADMIN_EMAIL})
-        code = (started or {}).get("code")
+        status, body = self.call("POST", f"{SCOPE}/auth/request", {"email": ADMIN_EMAIL})
+        code = (body or {}).get("dev_code") if isinstance(body, dict) else None
         if not code:
-            raise RuntimeError(
-                "the host did not echo a dev sign-in code; run it with "
-                "OPENCOMPANY_AUTH_MODE=none or on loopback with no public URL"
-            )
-        self.post("/api/v1/auth/dev/verify", {"email": ADMIN_EMAIL, "code": code})
+            raise SystemExit(f"sign-in: no dev_code from auth/request ({status}: {body})")
+        status, body = self.call("POST", f"{SCOPE}/auth/verify", {"code": code})
+        if status >= 300:
+            raise SystemExit(f"sign-in: verify refused ({status}: {body})")
 
-    # -- the surfaces this driver uses ------------------------------------
-
-    def register_mcp(self, name: str, endpoint: str) -> Any:
+    def register_mcp(self, name: str, endpoint: str) -> tuple[int, Any]:
         """Add the simulator as a *runtime* MCP server.
 
-        Runtime is the only layer that accepts an `http://` endpoint — a server
-        declared in a bundle's `mcp.json` must be `https` (`content_test`).
-        That is why the bundle ships `vending` disabled and this registers the
-        loopback one instead of enabling it.
+        Runtime is the only layer that accepts an ``http://`` endpoint — a
+        server declared in a bundle's ``mcp.json`` must be ``https``
+        (`content_test`). That is why the bundle ships `vending` disabled and
+        this registers the loopback one instead of enabling it.
         """
-        return self.post(f"{SCOPE}/mcp/servers", {"name": name, "endpoint": endpoint})
-
-    def say(self, desk: str, text: str) -> Any:
-        return self.post(f"{SCOPE}/chat", {"chat": desk, "text": text})
-
-    def events(self, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
-        got = self.get(f"{SCOPE}/events?after={after}&limit={limit}")
-        if isinstance(got, dict):
-            return got.get("events") or got.get("items") or []
-        return got or []
-
-    def approvals(self) -> list[dict[str, Any]]:
-        got = self.get(f"{SCOPE}/approvals")
-        if isinstance(got, dict):
-            return got.get("approvals") or got.get("items") or []
-        return got or []
-
-    def decide(self, approval_id: str, approve: bool = True) -> Any:
-        return self.post(
-            f"{SCOPE}/approvals/{approval_id}",
-            {"decision": "approve" if approve else "deny", "reason": "vending-sim: unattended run"},
+        return self.call(
+            "POST", f"{SCOPE}/mcp/servers", {"name": name, "endpoint": endpoint}
         )
 
+    def say(self, desk: str, text: str, timeout: float = 3600) -> None:
+        """Put one message to `desk`, holding the POST open for the episode.
 
-def pump_approvals(client: Client, stop: threading.Event, log: list[str]) -> None:
-    """Answer the approvals queue for as long as the run lasts.
+        The cycle runs the whole episode synchronously inside this request, so
+        this blocks for as long as the room deliberates. The caller has to run
+        it on a thread and pump approvals meanwhile — see `run_day`.
+        """
+        status, body = self.call(
+            "POST", f"{SCOPE}/chat", {"text": text, "chat": desk}, timeout=timeout
+        )
+        if status >= 300:
+            raise RuntimeError(f"chat POST to `{desk}` failed ({status}): {body}")
 
-    `place_order` and `renegotiate_contract` are on the bundle's
-    `always_approve` list, so an unattended run deadlocks without this — the
-    desk commits, reaches for the tool, and parks forever. Approving everything
-    is right for a simulation and wrong for anything else.
+    def approve_all(self) -> list[str]:
+        """Answer everything parked.
+
+        `place_order` and `renegotiate_contract` are on this bundle's
+        `always_approve` list, so an unattended run deadlocks without this: the
+        desk commits, reaches for the tool, and parks inside the still-open
+        chat POST. Approving everything is right for a simulation and wrong for
+        anything else.
+        """
+        status, body = self.call("GET", f"{SCOPE}/approvals")
+        if status != 200 or not isinstance(body, list):
+            return []
+        approved = []
+        for approval in body:
+            aid = approval.get("id")
+            status, _ = self.call(
+                "POST", f"{SCOPE}/approvals/{aid}", {"verdict": "approve", "detach": True}
+            )
+            if status < 300:
+                approved.append(approval.get("kind", "?"))
+        return approved
+
+    def history(self, desk: str, limit: int = 200) -> list[dict]:
+        query = urllib.parse.urlencode({"desk": desk, "limit": limit})
+        status, body = self.call("GET", f"{SCOPE}/chat/history?{query}")
+        if status != 200 or not isinstance(body, list):
+            return []
+        return body
+
+
+def last_id(host: Host, desk: str) -> int:
+    rows = host.history(desk, limit=1)
+    return int(rows[-1]["id"]) if rows else 0
+
+
+def closing_report(messages: list[dict]) -> dict | None:
+    """The episode's close, which is not every `hive-report` row.
+
+    A failed turn is journaled under the same author and begins `@someone's
+    turn did not finish` — the room continues after one, so treating it as the
+    close would report an episode as over while it was still running.
     """
-    while not stop.is_set():
-        try:
-            for card in client.approvals():
-                ident = card.get("id") or card.get("approval_id")
-                if not ident:
-                    continue
-                client.decide(str(ident), True)
-                log.append(f"approved {card.get('tool') or card.get('title') or ident}")
-        except Exception as err:  # a transient read must not kill the pump
-            log.append(f"approval pump: {err}")
-        stop.wait(3.0)
+    return next(
+        (
+            m
+            for m in reversed(messages)
+            if m.get("author") == HIVE_REPORT_AUTHOR
+            and not m.get("text", "").lstrip().startswith("@")
+        ),
+        None,
+    )
 
 
 def describe(triggers: list[dict[str, Any]], day: int) -> str:
