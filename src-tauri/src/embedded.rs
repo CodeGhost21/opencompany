@@ -266,23 +266,26 @@ pub async fn start_with(
             .collect::<Vec<_>>(),
     };
 
-    // Captured before `state` moves into `bind`: the standalone binary spawns
+    // Called before `state` moves into `bind`: the standalone binary spawns
     // this sweeper from its own `async_main`, which the embedded host never
     // runs, so nothing here ever reclaimed an idle ACP session — they and
     // their per-connection and host-wide cap slots piled up for the life of
-    // the process (codex review).
-    let acp_sessions = state.acp_sessions();
+    // the process (codex review). `AppState::spawn_acp_session_sweeper` is a
+    // no-op in a build without the `acp` feature — this crate's own default
+    // dependency features don't include it (`Cargo.toml`), only the
+    // release/CI feature set does, and this call site has to compile and do
+    // the right thing either way (codex review, round two).
+    //
+    // Never notified: `Drop` aborts the task directly, matching how `server`
+    // below is already stopped, rather than plumbing a second shutdown path
+    // through a struct that otherwise has none.
+    let sweeper = state.spawn_acp_session_sweeper(std::sync::Arc::new(tokio::sync::Notify::new()));
     let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
     let server = tokio::spawn(async move {
         if let Err(error) = serving.run().await {
             tracing::error!(%error, "the embedded host stopped");
         }
     });
-    // Never notified: `Drop` aborts the task directly, matching how `server`
-    // above is already stopped, rather than plumbing a second shutdown path
-    // through a struct that otherwise has none.
-    let sweeper = opencompany::server::acp::SessionSweeper::new(acp_sessions)
-        .spawn(std::sync::Arc::new(tokio::sync::Notify::new()));
 
     tracing::info!(
         %address,

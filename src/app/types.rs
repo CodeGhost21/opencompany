@@ -654,6 +654,40 @@ impl AppState {
         Arc::clone(&self.acp_sessions)
     }
 
+    /// Starts the process-wide ACP-session sweeper, reclaiming sessions idle
+    /// past their TTL. A no-op join handle when this build lacks the `acp`
+    /// feature.
+    ///
+    /// Always compiled and always callable, unlike [`Self::acp_sessions`] —
+    /// so an embedder linking this crate as a library (the desktop host,
+    /// `src-tauri/src/embedded.rs`) can call this the same way whether or not
+    /// its own default dependency features happen to include `acp`, rather
+    /// than needing `#[cfg(feature = "acp")]` of its own — which would need a
+    /// same-named feature declared on that crate purely to gate a `cfg`, and
+    /// this crate's own `acp`/`composio` are deliberately *not* forwarded
+    /// that way (see `src-tauri/Cargo.toml`'s comment on why: keeping its
+    /// `Cargo.lock` byte-identical between the default and release feature
+    /// sets is what lets a release still build `--locked`). The standalone
+    /// binary's own `spawn_acp_session_sweeper` mirrors this one line for
+    /// line; it stays `#[cfg(feature = "acp")]` there because it is not
+    /// compiled by anything but this crate itself.
+    #[cfg(feature = "acp")]
+    pub fn spawn_acp_session_sweeper(
+        &self,
+        shutdown: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        crate::server::acp::SessionSweeper::new(self.acp_sessions()).spawn(shutdown)
+    }
+
+    /// See the feature-enabled [`Self::spawn_acp_session_sweeper`] above.
+    #[cfg(not(feature = "acp"))]
+    pub fn spawn_acp_session_sweeper(
+        &self,
+        _shutdown: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
+    }
+
     /// This host's in-place runtime rebuilder, when one is wired.
     pub fn rebuilder(&self) -> Option<Arc<dyn crate::runtime::RuntimeRebuilder>> {
         self.rebuilder.clone()
@@ -1280,6 +1314,30 @@ mod tests {
     #[test]
     fn workspace_git_checkpoints_default_off() {
         assert!(!AppConfig::default().workspace_git_enabled);
+    }
+
+    /// Callable and finite in every build, `acp` feature or not — the whole
+    /// point of the facade: an embedder linking this crate as a library
+    /// (`src-tauri/src/embedded.rs`) cannot know at its own compile time
+    /// whether this crate's default dependency features happened to include
+    /// `acp` (codex review), so the call site must never need a `cfg` of its
+    /// own to stay buildable.
+    #[tokio::test]
+    async fn spawn_acp_session_sweeper_is_always_callable_and_stoppable() {
+        let state = AppState::new(AppConfig::default());
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = state.spawn_acp_session_sweeper(Arc::clone(&shutdown));
+        // Give the spawned task its first poll before notifying: `notify_waiters`
+        // wakes only a task already registered as waiting, not one still
+        // pending its first `.await` — the same race declined as out of scope
+        // for the sweeper itself (coderabbit review), worked around here so
+        // this test does not depend on it.
+        tokio::task::yield_now().await;
+        shutdown.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the sweeper task must stop once notified, in every build")
+            .expect("the sweeper task must not panic");
     }
 
     fn bound_to(bind: &str) -> AppConfig {
