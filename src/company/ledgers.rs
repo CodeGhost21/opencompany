@@ -382,6 +382,24 @@ pub async fn record(
     id: &str,
     fields: BTreeMap<String, Option<String>>,
 ) -> Result<engine::Entry> {
+    record_amending(ctx, spec, author, id, fields, false).await
+}
+
+/// [`record`], with the existence check [`close`] needs folded into the same
+/// locked section as the append it guards. A check made before the lock is
+/// acquired and an append made after it are two separate looks at the store;
+/// a [`delete_entry`] landing between them would purge the row the check saw
+/// and let the append that follows recreate it, closed and empty. Requiring
+/// `require_existing` here instead means the row that answers the check is
+/// the same row the append amends.
+async fn record_amending(
+    ctx: &Ledgers,
+    spec: &LedgerSpec,
+    author: &LedgerAuthor,
+    id: &str,
+    fields: BTreeMap<String, Option<String>>,
+    require_existing: bool,
+) -> Result<engine::Entry> {
     let id = guard_write(spec, author, id)?;
 
     let lock = ledger_lock(&ctx.company, &spec.slug);
@@ -392,6 +410,13 @@ pub async fn record(
     // produces it: a ledger write is a merge, so an event supplying only the
     // fields that changed is complete whenever the row already holds the rest.
     let existing = entries(ctx, spec).await?;
+    if require_existing && existing.find(id).is_none() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "there is no `{id}` on `{}` to close. Check the id — closing a row that does not \
+             exist would open one, closed and empty.",
+            spec.slug
+        )));
+    }
     let prospective = existing.preview(id, &fields);
 
     if let Some(field) = spec.status_field()
@@ -517,22 +542,17 @@ pub async fn close(
             spec.slug
         )));
     };
-    // Closing is an amendment to a row that exists: an id naming none would
-    // otherwise open one, carrying nothing but the status that closed it.
-    if entries(ctx, spec).await?.find(id).is_none() {
-        return Err(OpenCompanyError::InvalidRequest(format!(
-            "there is no `{id}` on `{}` to close. Check the id — closing a row that does not \
-             exist would open one, closed and empty.",
-            spec.slug
-        )));
-    }
 
     let mut fields = BTreeMap::new();
     fields.insert(field.name.clone(), Some(status.trim().to_string()));
     if !reason.trim().is_empty() {
         fields.insert(REASON_FIELD.to_string(), Some(reason.trim().to_string()));
     }
-    record(ctx, spec, author, id, fields).await
+    // Closing is an amendment to a row that exists: an id naming none would
+    // otherwise open one, carrying nothing but the status that closed it. The
+    // check runs inside `record_amending`'s locked section, alongside the
+    // append it guards.
+    record_amending(ctx, spec, author, id, fields, true).await
 }
 
 /// Declares a new ledger.
