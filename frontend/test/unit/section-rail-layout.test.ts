@@ -130,6 +130,27 @@ describe("never two rails at once", () => {
     expect(railRows()).not.toContain("Wallet");
   });
 
+  it("marks the resolved page for a segment that names none of them", () => {
+    // The rendered half of the `grandchildActive` case below: the rail and the
+    // chip row both have to say Overview, because Overview is what the page
+    // resolver put on screen.
+    render("finances", "old-page");
+    const current = [...container.querySelectorAll('nav [aria-current="page"]')].map((el) =>
+      (el.textContent ?? "").trim(),
+    );
+    expect(current).toEqual(["Overview"]);
+    const chips = container.querySelector(".lg\\:hidden")!;
+    expect(chips.textContent).toContain("Balance, budget and spend from the ledger");
+
+    // And the same one level up: `#/connections/not-a-page` renders Apps.
+    render("connections", "not-a-page");
+    expect(
+      [...container.querySelectorAll('nav [aria-current="page"]')].map((el) =>
+        (el.textContent ?? "").trim(),
+      ),
+    ).toEqual(["Apps"]);
+  });
+
   it("marks exactly one row current, and it is the leaf", () => {
     render("finances", "invoicing");
     const current = [...container.querySelectorAll('nav [aria-current="page"]')].map((el) =>
@@ -274,5 +295,16 @@ describe("grandchildActive", () => {
 
   it("lights nothing outside its own view", () => {
     expect(grandchildActive(finance, page("Overview"), "brain", null)).toBe(false);
+  });
+
+  it("lights the first page for a segment none of them names", () => {
+    // Codex P2 on this PR. `resolveFinancePage` falls back to Overview for an
+    // unknown segment, so `#/finances/old-page` — a stale bookmark, a typo, a
+    // renamed page — *renders Overview*. Matching on the segment alone left the
+    // rail marking only the Finance ancestor and the chip row naming the parent
+    // while Overview was on screen. The resolver decides what renders and this
+    // decides what is marked; they have to be one rule.
+    expect(grandchildActive(finance, page("Overview"), "finances", "old-page")).toBe(true);
+    expect(grandchildActive(finance, page("Wallet"), "finances", "old-page")).toBe(false);
   });
 });

@@ -298,7 +298,22 @@ export function grandchildActive(
   return rowActive(child.children ?? [], grandchild, view, sub);
 }
 
-/** Which of a list of sibling rows an address lights, if any. */
+/**
+ * Which of a list of sibling rows an address lights, if any.
+ *
+ * A row that names no `sub` owns its whole view. A row that names one owns
+ * exactly that segment — **and the first of the set additionally owns every
+ * segment none of them names**, not only the bare address.
+ *
+ * That second half is the part worth stating, because it is not a nicety: it is
+ * what keeps this table agreeing with the page. `resolveFinancePage`,
+ * `resolveConnectionPage` and `resolveSettingsPage` all fall back to their first
+ * page for an unknown segment, so `#/finances/old-page` — a stale bookmark, a
+ * typo, a renamed page — *renders Overview*. Matching on the segment alone left
+ * the rail marking only the Finance ancestor and the chip row naming the parent
+ * while Overview was on screen (Codex P2 review on #2130). The resolver decides
+ * what renders; this decides what is marked; they have to be the same rule.
+ */
 function rowActive(
   siblings: readonly NavChild[],
   row: NavChild,
@@ -307,7 +322,8 @@ function rowActive(
 ): boolean {
   if (!isNavigationActive(row.view, view)) return false;
   if (row.sub === undefined) return true;
-  if (sub === null) return siblings[0] === row;
+  const named = siblings.some((sibling) => sibling.sub === sub);
+  if (sub === null || !named) return siblings[0] === row;
   return row.sub === sub;
 }
 
