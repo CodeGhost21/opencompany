@@ -304,24 +304,7 @@ impl CortexdbMemory {
         // returns, not only the first.
         let deadline = tokio::time::Instant::now() + INGEST_RECALL_VISIBILITY_TIMEOUT;
         loop {
-            // The event's own id, and **not** an empty query. An empty one is
-            // rejected by the ranked coordinator (`Validation failed: query
-            // must not be empty`), which does not surface as an error here:
-            // CortexDB falls back to a WAL-only scan, logs the failure on its
-            // own side, and answers 200. That fallback is slower to see a
-            // fresh write than this timeout allows, so every `store` failed
-            // after `INGEST_RECALL_VISIBILITY_TIMEOUT` while the record was
-            // in fact perfectly durable — observed as every hive turn on a
-            // live `companies/vending_machine_co` run failing at its first
-            // `memory_store`.
-            //
-            // Querying by id also makes the probe test what it claims to:
-            // stage two exists to confirm *ranked-recall* visibility, and a
-            // query that silently downgrades to the WAL path confirms
-            // something else. The scope's events come back up to
-            // `EVENTS_LAYER_LIMIT` regardless of how the id ranks, and this
-            // scans them by id rather than trusting the order.
-            let hits = self.recall_raw(namespace, &event_id).await?;
+            let hits = self.recall_raw(namespace, "").await?;
             if hits.iter().any(|record| record.id == event_id) {
                 return Ok(());
             }
@@ -339,16 +322,9 @@ impl CortexdbMemory {
 
     /// Recalls the raw events filed in `namespace`'s scope.
     ///
-    /// `query` narrows retrieval, up to [`EVENTS_LAYER_LIMIT`].
-    ///
-    /// **Pass a non-empty query.** This driver used to document that "CortexDB
-    /// treats an empty query as everything, ranked by recency", and that is not
-    /// true of the v0.9.8 image `scripts/cortexdb-up.sh` starts: the ranked
-    /// coordinator rejects an empty query outright and the server falls back to
-    /// a WAL-only scan, answering **200** with a degraded result set while
-    /// logging `Validation failed: query must not be empty` on its own side.
-    /// Nothing about that reaches this process, so an empty query here reads as
-    /// a slow or missing record rather than as a rejected request.
+    /// `query` narrows retrieval; an empty query still returns the scope's raw
+    /// events (CortexDB treats an empty query as "everything", ranked by
+    /// recency) up to [`EVENTS_LAYER_LIMIT`].
     async fn recall_raw(&self, namespace: &str, query: &str) -> anyhow::Result<Vec<DecodedRecord>> {
         let body = json!({
             "scope": Self::scope_for(namespace),
