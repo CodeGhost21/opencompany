@@ -210,6 +210,20 @@ function PreviewButton({ label, className }: { label: string; className?: string
   );
 }
 
+/**
+ * The shape of {@link DomainCard} with nothing in it that works.
+ *
+ * It mirrors the real card's three parts — the domain entry row, the "Add
+ * these DNS records" heading, and the TXT/CNAME table — because a preview that
+ * does not resemble what is coming tells the operator nothing about what
+ * switching it on would get them. The record values are bare bars rather than
+ * plausible-looking hostnames: an invented `_oc-verify.example.com` sitting
+ * under a blur is the kind of thing someone squints at and copies into their
+ * DNS.
+ *
+ * Every node here is a `div` or a `span`. See {@link ComingSoon} for why that
+ * is the gate rather than `disabled`.
+ */
 function DomainPreview() {
   return (
     <div className="space-y-4">
@@ -238,6 +252,16 @@ function DomainPreview() {
   );
 }
 
+/**
+ * The shape of {@link SmtpCard} with nothing in it that works.
+ *
+ * The six field labels are the real ones in the real order, so an operator can
+ * tell at a glance whether they will have what the form is going to ask for.
+ * The "Password" row is a {@link PreviewField} like the other five — a
+ * labelled bar, not an `<input type="password">` — which is the whole point of
+ * {@link ComingSoon}: there is no field here for a password manager to fill,
+ * and no Save to put what it filled into the host's secret store.
+ */
 function SmtpPreview() {
   return (
     <div className="space-y-4">
@@ -260,6 +284,17 @@ function SmtpPreview() {
   );
 }
 
+/**
+ * The real custom-domain card: add a domain, read back the DNS records the
+ * host wants, and ask it to verify them.
+ *
+ * Not mounted anywhere while #2131's gate stands — {@link DomainSettings}
+ * renders {@link DomainPreview} in its place. It is exported rather than
+ * deleted so that switching the feature on is putting one element back, and so
+ * that `test/unit/domain-settings-host-backed.test.ts` can go on rendering it
+ * directly and pinning the guarantee that matters here: every field is read
+ * from and written to the host, and none of it is cached in the browser.
+ */
 export function DomainCard({ client, company }: Props) {
   const [status, setStatus] = useState<DomainStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -554,6 +589,16 @@ function CopyCell({ value }: { value: string }) {
   );
 }
 
+/**
+ * The real outbound-mail card: point the company at an SMTP server, save the
+ * credentials into the host's secret store, and send a test message.
+ *
+ * Not mounted anywhere while #2131's gate stands — {@link DomainSettings}
+ * renders {@link SmtpPreview} in its place. Exported for the same two reasons
+ * as {@link DomainCard}, and one more that is specific to it: the password is
+ * write-only three ways, and `test/unit/domain-settings-host-backed.test.ts`
+ * is what holds that property while nothing renders the card.
+ */
 export function SmtpCard({ client, company }: Props) {
   const [status, setStatus] = useState<SmtpStatus | null>(null);
   const [loading, setLoading] = useState(true);
