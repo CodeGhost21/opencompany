@@ -254,26 +254,22 @@ fn delete_session(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Va
     Ok(json!({}))
 }
 
-/// Closes the caller's connection: every session it opened whose company the
-/// caller may still address.
+/// Closes the caller's connection: every session it opened, in one stroke.
 ///
 /// The HTTP edge has no socket whose closure sweeps a connection, so the
-/// client ends its connection explicitly. `SessionRegistry::list` already
-/// refuses a connection this caller did not open; the per-session
-/// `authorize_address` re-check on top of that is defense in depth for
-/// authorization revoked between the session's open and now.
+/// client ends its connection explicitly. `SessionRegistry::close_connection`
+/// checks ownership and removes every session under the same lock, so there
+/// is no snapshot for a concurrent `session/new` to land in after the check
+/// and survive the disconnect, and no session left counted against either cap
+/// pending a sweep because its company's authorization happened to lapse
+/// first. Closing bookkeeping for a session is not reading or writing that
+/// company's content, so unlike `session/list`, `session/delete` and
+/// `session/prompt`, there is no per-session `authorize_address` re-check
+/// here to skip a session over.
 fn disconnect(state: &AppState, auth: &GqlAuth, params: &Value) -> Result<Value, String> {
     let conn = connection(params)?;
     let owner = owner(auth);
-    let registry = state.acp_sessions();
-    let Some(sessions) = registry.list(conn, &owner) else {
-        return Ok(json!({}));
-    };
-    for session in sessions {
-        if authorize_address(state, auth, &session.company).is_none() {
-            registry.remove(conn, &owner, &session.id);
-        }
-    }
+    state.acp_sessions().close_connection(conn, &owner);
     Ok(json!({}))
 }
 
@@ -951,6 +947,42 @@ mode = "full"
         }
         let refusal = open_session(&state, &auth, &params).await;
         assert!(refusal.is_err(), "the cap must refuse the next open");
+    }
+
+    #[tokio::test]
+    async fn disconnect_closes_every_session_on_the_connection_at_once() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-acp-disconnect-")
+            .tempdir()
+            .expect("tempdir");
+        let state = acp_state(home.path()).await;
+        let company = CompanyId::new("acme");
+        let admin = seed_user(&state, &company, "u-admin", "Admin Person").await;
+        let auth = admin_auth(&company, admin, "hash");
+        let params = json!({
+            "_meta": {
+                "opencompany": { "company": "acme" },
+                "opencompany/connectionId": "conn-close",
+            }
+        });
+
+        open_session(&state, &auth, &params)
+            .await
+            .expect("first session");
+        open_session(&state, &auth, &params)
+            .await
+            .expect("second session");
+
+        let closed = disconnect(&state, &auth, &params);
+        assert!(closed.is_ok());
+
+        // The whole connection is gone, not merely emptied of sessions:
+        // `list_sessions` on an unknown connection is the same refusal as one
+        // this caller never owned.
+        assert!(
+            list_sessions(&state, &auth, &params).is_err(),
+            "the connection must not survive its own disconnect"
+        );
     }
 
     #[test]
