@@ -818,6 +818,18 @@ describe("holding the dialog open while leaving would not stop anything", () => 
       "and so must the budget",
     ).toBe(true);
 
+    // The copilot lives beside those fields and outlives whatever opened it,
+    // so it is held too: a draft accepted now is one the request did not carry
+    // and the reset after a successful write throws away.
+    for (const field of ["description", "instructions"]) {
+      const copilot = document.querySelector<HTMLButtonElement>(
+        `[data-testid="agent-copilot-open-${field}"]`,
+      );
+      if (copilot) {
+        expect(copilot.disabled, `the ${field} copilot must be held too`).toBe(true);
+      }
+    }
+
     stallAdd = null;
     await act(async () => {
       release();

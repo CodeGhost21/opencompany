@@ -423,11 +423,38 @@ fn normal(text: &str) -> String {
         .to_string()
 }
 
-/// Whether two pieces of text are the same once normalized, both non-empty.
-fn same_text(left: &str, right: &str) -> bool {
-    let left = normal(left);
-    let right = normal(right);
-    !left.is_empty() && left == right
+/// Whether the role is the brief, or the front of it.
+///
+/// The rule both halves of the original defect reduce to: a job title is
+/// something a model *wrote*, and a leading fragment of the operator's sentence
+/// is something it *cut*. `roleFromDescription` — the split this route replaced
+/// — produced exactly these, and an ellipsis is the only thing that made them
+/// obvious. Without one they pass every other rule here.
+///
+/// Compared at a word boundary on the normal form, so "Runs wholesale outreach"
+/// is caught against "Runs wholesale outreach to boutique retailers" while
+/// "Wholesale Account Manager" is not caught against "Runs wholesale outreach…"
+/// — it is not at the front of it.
+///
+/// ## Why not "reject verb-led roles", which is what the brief actually says
+///
+/// Because it cannot be done here without being wrong somewhere. The same
+/// prompt says "Write in the same language the operator wrote in", so a list of
+/// English verbs would refuse valid titles in every other language and pass
+/// invalid ones — a validator that works for one language and silently degrades
+/// for the rest is worse than the narrower rule. This catches the shape that
+/// actually harms: the operator's own words stored back as an identity. A
+/// verb-led title the model *invented* ("Payroll Manager" against a brief about
+/// bookkeeping) is not a fragment of anything and is left alone.
+fn leads_the_brief(role: &str, brief: &str) -> bool {
+    let role = normal(role);
+    let brief = normal(brief);
+    if role.is_empty() || brief.is_empty() {
+        return false;
+    }
+    // The whole brief handed back, and the front of it. The word boundary is
+    // what keeps "Ops" from matching a brief that opens "Opsware migration".
+    role == brief || brief.starts_with(&format!("{role} "))
 }
 
 /// Whether any two of a design's three fields are the same text.
@@ -529,12 +556,14 @@ impl TeammateDesign {
     ///   sentence fits: `"Handles payroll and reconciles the books weekly"` is
     ///   46 of the 60 allowed. [`MAX_ROLE_WORDS`] enforces the shape the brief
     ///   asks for instead of hoping the model obeys it.
-    /// - **A role that is the operator's brief.** The rule above compares the
-    ///   three answers to each other and so misses the shape that matters most:
-    ///   a brief of `"Handles payroll"` answered with role `"Handles payroll"`,
-    ///   a real mandate and real instructions passes everything. That is the
-    ///   original defect exactly — the sentence stored as the job title — and
-    ///   only a comparison against the input catches it.
+    /// - **A role that is the operator's brief, or the front of it.** The rule
+    ///   above compares the three answers to each other and so misses the shape
+    ///   that matters most: a brief of `"Runs wholesale outreach to boutique
+    ///   retailers"` answered with role `"Runs wholesale outreach"`, a real
+    ///   mandate and real instructions beside it, passes everything. That is
+    ///   the clause split this route replaced, arriving without the ellipsis
+    ///   that used to make it obvious, and only a comparison against the input
+    ///   catches it. See [`leads_the_brief`].
     ///
     /// Both are refusals rather than repairs, for the reason the whole type is
     /// all-or-nothing: the operator gets the full form carrying what they
@@ -576,19 +605,21 @@ impl TeammateDesign {
         if repeats_a_field(&role, description, instructions) {
             return None;
         }
-        // The operator's own sentence, handed back as the job title. Checking
-        // the three answers against each other does not catch it: a brief of
-        // "Handles payroll" with a real mandate and real instructions beside it
-        // passes every rule above, and is exactly the record this route
-        // replaced — the sentence stored as the role, read into every prompt
-        // that teammate ever runs.
+        // The operator's own sentence, or the front of it, handed back as the
+        // job title. Checking the three answers against each other does not
+        // catch it, and neither does whole-brief equality alone: a brief of
+        // "Runs wholesale outreach to boutique retailers" answered with
+        // "Runs wholesale outreach" clears the length, word-count, ellipsis,
+        // duplicate-field and equality rules, and is exactly the record this
+        // route replaced — the clause split, arriving without its ellipsis.
         //
         // Blunt on purpose, and the false positive is the good kind. An
-        // operator whose whole brief IS a job title has answered a different
-        // question from the one the box asks ("What should they do?"), and the
-        // right response to that is the full form — where Role is its own
-        // field — carrying what they typed, rather than a design built on it.
-        if !brief.trim().is_empty() && same_text(&role, brief) {
+        // operator whose brief opens with the job title has answered a
+        // different question from the one the box asks ("What should they
+        // do?"), and the right response to that is the full form — where Role
+        // is its own field — carrying what they typed, rather than a design
+        // built on it.
+        if leads_the_brief(&role, brief) {
             return None;
         }
         Some(Self {
@@ -1074,6 +1105,58 @@ mod tests {
     /// operator's sentence stored as a permanent role, interpolated into every
     /// prompt that teammate ever runs — and only a comparison against the input
     /// catches it.
+    #[test]
+    fn a_role_that_is_the_front_of_the_brief_is_refused() {
+        // The shape whole-brief equality misses, and the one both reviewers
+        // found independently: a clause split, arriving without the ellipsis
+        // that used to make it obvious. Every other rule passes it — it is 23
+        // characters, three words, no ellipsis, distinct from the mandate and
+        // the persona, and not equal to the brief.
+        let brief = "Runs wholesale outreach to boutique retailers";
+        assert!(
+            TeammateDesign::from_parts(
+                "Runs wholesale outreach",
+                "Owns the stockist pipeline and the terms behind it.",
+                "Check terms against the price list before quoting.",
+                brief,
+            )
+            .is_none(),
+            "the front of the operator's sentence is a cut, not a job title"
+        );
+        // Normalized, so case and punctuation are not a way past it.
+        assert!(
+            TeammateDesign::from_parts(
+                "runs wholesale outreach.",
+                "Owns the stockist pipeline.",
+                "Check terms before quoting.",
+                "Runs Wholesale Outreach to boutique retailers",
+            )
+            .is_none()
+        );
+        // The word boundary matters: a role must not match a longer first word.
+        assert!(
+            TeammateDesign::from_parts(
+                "Ops",
+                "Owns the Opsware migration and its cutover plan.",
+                "Stage the cutover behind a flag. Escalate a failed migration.",
+                "Opsware migration and cutover",
+            )
+            .is_some(),
+            "\"Ops\" is not the front of \"Opsware migration\""
+        );
+        // A title the model wrote, against the same brief, still designs — the
+        // rule catches fragments of the input, not verbs in general.
+        assert!(
+            TeammateDesign::from_parts(
+                "Wholesale Account Manager",
+                "Owns the stockist pipeline and the terms behind it.",
+                "Check terms against the price list before quoting.",
+                brief,
+            )
+            .is_some()
+        );
+    }
+
     #[test]
     fn a_role_that_is_only_the_brief_is_refused() {
         let brief = "Handles payroll";

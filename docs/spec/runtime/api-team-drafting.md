@@ -89,14 +89,22 @@ refuses two answers that pass every length and emptiness check:
   `MAX_ROLE_WORDS` enforces that at five — one word of slack, so a real title
   that runs long ("VP of Brand and Communications") is not thrown away while a
   sentence still is.
-- **A role that is the operator's brief.** The rule above compares the three
-  answers to each other, and so misses the shape that matters most: a brief of
-  `"Handles payroll"` answered with role `"Handles payroll"`, a real mandate and
-  real instructions passes everything else. That is the original defect exactly,
-  and only a comparison against the *input* catches it — so `from_parts` takes
-  the brief. An operator whose whole brief is a job title has answered a
+- **A role that is the operator's brief, or the front of it.** The rule above
+  compares the three answers to each other, and so misses the shape that matters
+  most: a brief of `"Runs wholesale outreach to boutique retailers"` answered
+  with role `"Runs wholesale outreach"`, a real mandate and real instructions
+  beside it, passes everything else. That is the clause split this route
+  replaced, arriving without the ellipsis that used to make it obvious, and only
+  a comparison against the *input* catches it — so `from_parts` takes the brief
+  and refuses a role that is the whole of it or a leading fragment at a word
+  boundary. An operator whose brief opens with the job title has answered a
   different question from the one the box asks, and gets the full form carrying
   what they typed, where Role is its own field.
+
+  Not "reject verb-led roles", which is what the brief itself asks for: the same
+  prompt says to answer in the operator's language, so a list of English verbs
+  would refuse valid titles in every other one. The rule catches fragments of
+  the input, which is the shape that actually harms.
 
 Both are refusals rather than repairs, for the same reason the type is
 all-or-nothing: the operator gets the full form carrying what they typed, where

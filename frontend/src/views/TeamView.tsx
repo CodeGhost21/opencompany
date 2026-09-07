@@ -1445,7 +1445,15 @@ function AddMemberDialog({
                     // write one from until it is filled in — the same rule the
                     // host enforces, said here before the operator meets it as
                     // a refusal.
-                    disabled={!draft.role.trim() || cognition === "echo"}
+                    // `creating`/`designing` beside the two standing
+                    // reasons: a form mid-submit has already captured its
+                    // payload, so a draft accepted now is one the request did
+                    // not carry and the reset after a successful write
+                    // discards. No notice for that case — the button says
+                    // "Adding…" a few pixels away, which is the explanation.
+                    disabled={
+                      !draft.role.trim() || cognition === "echo" || creating || designing
+                    }
                     disabledNotice={
                       cognition === "echo"
                         ? "No model is configured, so the copilot can't draft yet."
