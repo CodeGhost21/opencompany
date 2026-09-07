@@ -2588,7 +2588,7 @@ async fn a_member_may_not_engage_the_emergency_stop() {
         .oneshot(json_post_req_as(
             "/api/v1/companies/acme/emergency-pause",
             &cookie,
-            serde_json::json!({ "confirm": PAUSE_CONFIRMATION }),
+            serde_json::json!({ "confirm": super::PAUSE_CONFIRMATION }),
         ))
         .await
         .unwrap();
@@ -2610,7 +2610,7 @@ async fn a_member_may_not_release_the_emergency_stop() {
         .oneshot(json_post_req(
             "/api/v1/companies/acme/emergency-pause",
             Some(PLATFORM_SECRET),
-            serde_json::json!({ "confirm": PAUSE_CONFIRMATION }),
+            serde_json::json!({ "confirm": super::PAUSE_CONFIRMATION }),
         ))
         .await
         .unwrap();
@@ -2667,7 +2667,7 @@ async fn an_admin_may_still_work_the_emergency_stop() {
         .oneshot(json_post_req_as(
             "/api/v1/companies/acme/emergency-pause",
             &cookie,
-            serde_json::json!({ "confirm": PAUSE_CONFIRMATION }),
+            serde_json::json!({ "confirm": super::PAUSE_CONFIRMATION }),
         ))
         .await
         .unwrap();
