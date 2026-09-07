@@ -728,7 +728,7 @@ impl<'a> EpisodeDriver<'a> {
         scratch: &mut TurnScratch,
     ) -> Result<String> {
         let line = self
-            .grounded(agent_id, prompt, visible, line, aside)
+            .grounded(agent_id, prompt, visible, line, scratch)
             .await?;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return Ok(line);
@@ -1016,21 +1016,21 @@ impl<'a> EpisodeDriver<'a> {
                     desk = %self.desk.id,
                     agent = %agent_id,
                     reason = ?reason,
-                    "[hive] no aside was authorized; the line stays desk-visible"
+                    "[hive] no aside was authorized; the private row is dropped"
                 );
                 Vec::new()
             }
             Err(error) => {
-                // A malformed snapshot is this host's bug, not the room's, and
-                // it must not cost the episode: the line is journaled where
-                // everyone can read it, which is what would have happened
-                // before asides existed.
+                // A malformed snapshot is this host's bug, not the room's,
+                // and it must not cost the episode. The private row is dropped
+                // rather than published: the turn's own contribution is already
+                // journaled where everyone can read it.
                 tracing::warn!(
                     company = %self.company,
                     desk = %self.desk.id,
                     agent = %agent_id,
                     error = %error,
-                    "[hive] the aside gate could not decide; the line stays desk-visible"
+                    "[hive] the aside gate could not decide; the private row is dropped"
                 );
                 Vec::new()
             }
