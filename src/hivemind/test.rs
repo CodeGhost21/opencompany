@@ -46,6 +46,26 @@ impl MemoryLog {
             })
             .collect()
     }
+
+    /// Every reply on `chat` with the audience it was journaled under.
+    ///
+    /// Separate from [`Self::replies`] rather than a widening of it: most tests
+    /// are not about audience and reading a three-tuple would make them say so.
+    pub(super) fn addressed_replies(&self, chat: &str) -> Vec<(String, String, Vec<String>)> {
+        self.rows()
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                CompanyEvent::AgentReply {
+                    chat_id,
+                    agent_id,
+                    text,
+                    audience,
+                    ..
+                } if chat_id == chat => Some((agent_id, text, audience)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
