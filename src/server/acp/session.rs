@@ -159,12 +159,14 @@ impl OpenSessionRefusal {
     }
 }
 
+#[derive(Debug)]
 struct SessionEntry {
     session: Arc<AcpSession>,
     last_used_millis: u64,
 }
 
 /// One connection's sessions, plus who is allowed to address it.
+#[derive(Debug)]
 struct Connection {
     owner: String,
     sessions: HashMap<String, SessionEntry>,
