@@ -32,7 +32,7 @@ use super::evidential;
 use super::log::EventLogSessionLog;
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory, RECALL_LIMIT};
 use super::moves::{self, MoveViolation};
-use super::prompt::{EpisodePrompt, marker_line, split_reply};
+use super::prompt::{EpisodePrompt, split_reply};
 use super::referral::{EpisodeReferrals, HiveFederation, HiveReferralRunner, ReferralLedger};
 use super::scope::EpisodeScope;
 use super::types::{EpisodeEnding, EpisodeOutcome, HiveDesk};
@@ -396,8 +396,17 @@ impl<'a> EpisodeDriver<'a> {
                 .with_trigger(Sequence(trigger.value()))
                 .render(&turn, &visible);
 
+            // The private row this turn's reply carried, if any. Set by
+            // `line_from` from whichever attempt produced the final desk line.
+            let mut rode: Option<String> = None;
             let line = match self
-                .line_from(&turn.agent_id, &prompt, &visible, &mut violations)
+                .line_from(
+                    &turn.agent_id,
+                    &prompt,
+                    &visible,
+                    &mut violations,
+                    &mut rode,
+                )
                 .await
             {
                 Ok(line) => {
