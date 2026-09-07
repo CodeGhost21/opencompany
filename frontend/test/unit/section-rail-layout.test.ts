@@ -49,9 +49,7 @@ function render(view: View, sub: string | null = null, onNavigate = () => {}) {
 function railRows(): string[] {
   const nav = container.querySelector("nav");
   if (!nav) return [];
-  return [...nav.querySelectorAll("button")].map((el) =>
-    (el.querySelector("span > span")?.textContent ?? "").trim(),
-  );
+  return [...nav.querySelectorAll("button")].map((el) => (el.textContent ?? "").trim());
 }
 
 beforeEach(() => {
@@ -135,12 +133,37 @@ describe("never two rails at once", () => {
   it("marks exactly one row current, at whichever depth it is", () => {
     render("finances", "invoicing");
     const current = [...container.querySelectorAll('nav [aria-current="page"]')].map((el) =>
-      (el.querySelector("span > span")?.textContent ?? "").trim(),
+      (el.textContent ?? "").trim(),
     );
     // Finance is the section row you are in AND Invoicing is the page — both
     // light, which is the same two-register marking the sidebar used to do with
     // its section row and its child row.
     expect(current).toEqual(["Finance", "Invoicing"]);
+  });
+});
+
+describe("one line per row, with the gloss on hover", () => {
+  it("prints the label alone and hangs the hint off `title` (issue #2131)", () => {
+    // The rail matches what PR #2133 did to Settings, because the two sit side
+    // by side: a second line under every label wrapped at `w-60` and turned a
+    // five-row rail into fifteen lines of prose. The hint is kept as data — it
+    // is the row's `title` here and the line under the active chip below `lg` —
+    // so this asserts where it is shown, not that it went away.
+    render("company");
+    const agents = container.querySelector<HTMLButtonElement>("nav button")!;
+    expect(agents.textContent?.trim()).toBe("Agents");
+    expect(agents.getAttribute("title")).toBe("Who is in this company");
+    expect(agents.className).toContain("items-center");
+    expect(agents.className).not.toContain("items-start");
+    expect(agents.querySelector("svg")?.getAttribute("class")).not.toContain("mt-0.5");
+  });
+
+  it("still names the active page once, below lg, where a chip has no room for it", () => {
+    render("connections", "mcp");
+    const chips = container.querySelector(".lg\\:hidden")!;
+    expect(chips.textContent).toContain("Tool servers and their tools");
+    // And exactly once — not under every chip.
+    expect(chips.textContent?.match(/Tool servers and their tools/g)).toHaveLength(1);
   });
 });
 
@@ -156,8 +179,8 @@ describe("the tour anchors travelled with the rows", () => {
     // And it is a button inside the anchor, the shape every selector in the
     // e2e suite is written as (`[data-tour="nav-x"] >> role=button`).
     expect(
-      container.querySelector('[data-tour="nav-ledgers"] button')?.textContent,
-    ).toContain("Work");
+      container.querySelector('[data-tour="nav-ledgers"] button')?.textContent?.trim(),
+    ).toBe("Work");
   });
 
   it("gives the row that shares its section's address no anchor of its own", () => {
@@ -192,8 +215,8 @@ describe("clicking a row", () => {
   it("navigates a nested page to its own segment", () => {
     const onNavigate = vi.fn();
     render("finances", null, onNavigate);
-    const wallet = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find((el) =>
-      el.textContent?.includes("Wallet"),
+    const wallet = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
+      (el) => el.textContent?.trim() === "Wallet",
     )!;
     act(() => wallet.click());
     expect(onNavigate).toHaveBeenCalledWith("finances", "wallet");

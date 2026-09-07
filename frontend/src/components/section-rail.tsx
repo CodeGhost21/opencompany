@@ -25,7 +25,11 @@ import { cn } from "@/lib/utils";
 export interface SectionRailRow {
   key: string;
   label: string;
-  /** What the row prints under its label — what the page is for, in a phrase. */
+  /**
+   * What the page is for, in a phrase. The row's `title` and, below `lg`, the
+   * line under the chip row — not a second line under the label. See `RailRow`
+   * for why (issue #2131).
+   */
   hint: string;
   icon: LucideIcon;
   active: boolean;
@@ -132,6 +136,11 @@ export function SectionRail({
               </button>
             ))}
           </div>
+          {/* The hint survives here, and #2131 did not touch the equivalent row
+              in Settings for the same reason: a chip carries the label alone,
+              so this line is the only gloss it has — and it describes the
+              *active* page rather than repeating itself under all of them.
+              That is not a second line per row, which is what was removed. */}
           {open && <p className="px-3 pb-2 text-xs text-muted-foreground">{open.hint}</p>}
         </div>
 
@@ -142,7 +151,15 @@ export function SectionRail({
 }
 
 /**
- * One rail row.
+ * One rail row: one line, with the gloss on `title`.
+ *
+ * The hint was a second line under every label, and at `w-60` most of them
+ * wrapped — so a five-row rail was fifteen lines of prose and had stopped being
+ * a list you can scan. The labels are the navigation; the hint is a gloss, and a
+ * gloss that triples the height of the thing it explains has stopped helping.
+ * PR #2133 made exactly this change to the Settings rail (issue #2131) and this
+ * copies it deliberately: the two layouts sit side by side and must not
+ * diverge — same `items-center`, same iconless `mt-0.5` removal, same `title`.
  *
  * The `data-tour` anchor sits on the wrapper, not the button — the same shape
  * the sidebar's rows have, so every selector written as
@@ -153,22 +170,19 @@ function RailRow({ row, nested = false }: { row: SectionRailRow; nested?: boolea
     <div data-tour={row.anchor}>
       <button
         type="button"
+        title={row.hint}
         onClick={row.onSelect}
         aria-current={row.active ? "page" : undefined}
         className={cn(
-          "flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left transition-colors",
-          // Indented and label-only. Depth is what the indent says; a second
-          // line of hint under a nested row makes the rail taller than the list
-          // it is navigating.
+          "flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors",
+          // Depth is what the indent says. Every row is one line now, so this is
+          // the only thing distinguishing a sub-page from its parent.
           nested && "pl-8",
           row.active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
         )}
       >
-        <row.icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0">
-          <span className="block text-sm font-medium">{row.label}</span>
-          {!nested && <span className="block text-xs text-muted-foreground">{row.hint}</span>}
-        </span>
+        <row.icon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 truncate text-sm font-medium">{row.label}</span>
       </button>
     </div>
   );

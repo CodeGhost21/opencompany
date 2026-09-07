@@ -41,10 +41,13 @@ export interface NavChild {
   label: string;
   icon: LucideIcon;
   /**
-   * What the rail prints under the label: what the page is for, in a phrase.
-   * Every other rail in the console carries one — `SETTINGS_PAGES`,
-   * `CONNECTION_PAGES` and `FINANCE_PAGES` each require it — and a row without
-   * one is a word an operator has to click to understand.
+   * What the page is for, in a phrase.
+   *
+   * Not a second line under the label — that was removed from every rail in the
+   * console by issue #2131, because at `w-60` most of them wrapped and a rail
+   * of them was a wall rather than a list. It is the row's `title`, and below
+   * `lg` it is the line under the chip row naming the active page. Kept as data
+   * for exactly that reason, the way `SETTINGS_PAGES` keeps its own.
    */
   hint: string;
   /**

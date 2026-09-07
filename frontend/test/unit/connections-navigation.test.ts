@@ -68,8 +68,10 @@ describe("the Connections section", () => {
     for (const page of CONNECTION_PAGES) {
       expect(page.label, page.id).toBeTruthy();
       expect(page.hint, page.id).toBeTruthy();
-      // A hint is what the rail shows under the label; repeating the label
-      // there tells an operator nothing they cannot already see.
+      // The hint is the row's `title` and, below `lg`, the line naming the
+      // active chip — it stopped being a second line under the label with
+      // issue #2131. Repeating the label in it tells an operator nothing they
+      // cannot already see, wherever it is shown.
       expect(page.hint, page.id).not.toBe(page.label);
     }
   });
