@@ -113,6 +113,52 @@ an aside you never surface bought the room nothing. Some rows in the transcript 
 show only that an aside happened, with its author and who was in it — you \
 cannot read those, and if one matters, ask its author here on the desk.";
 
+/// What a member is told on a turn it cannot see its peers on.
+///
+/// **Deposit what you know, do not advocate what you want.** This sentence used
+/// to read "Form your own first", and that instruction is the single biggest
+/// measured defect in the deliberation protocol.
+///
+/// The blind round exists so members form positions independently. But on any
+/// question where members hold *correlated* priors and one member holds the
+/// decisive fact — the shape the literature calls a hidden profile, and the
+/// shape this company's desks actually have, since the fleet technician holds
+/// machine facts nobody else does — independence is exactly what makes it
+/// fatal. Every member opens by advocating what its own reading favours, a
+/// proposal counts as its own author's support in `tinyhivemind`, and the
+/// option the shared prior favours therefore reaches quorum *inside the blind
+/// round*, before the one informed member has been able to say anything. A
+/// traced episode shows it happening in five turns: four seats propose the
+/// decoy, the fifth proposes the truth, the room enters the Commit phase, and
+/// the dissenting fact arrives one turn too late to count.
+///
+/// The room is not converging there. It is amplifying a shared error and
+/// calling the result agreement.
+///
+/// Depositing instead is measured, on the deliberation benchmark over 2000
+/// seeded rooms (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`,
+/// `--blind-evidence`):
+///
+/// | profile | advocate first | deposit first |
+/// | --- | --- | --- |
+/// | hidden (one member holds the fact) | 16.2% | **66.6%** |
+/// | uniform (everyone holds a noisy copy) | 78.8% | 75.1% |
+///
+/// It costs 3.7 points where every member's reading is equally good, and buys
+/// **fifty** where one member knows something the others do not. A desk of
+/// specialists is the second case by construction, which is why this host takes
+/// the trade for every desk rather than making it a knob.
+///
+/// Raising `quorum` was tried first and does not work: at unanimity the room
+/// simply stops deciding (31% of episodes reach a decision, and accuracy falls
+/// to 10.1%). The bar is not the problem; what the bar is counting is.
+const BLIND_SIGHT: &str = "\
+You cannot yet see your peers' positions. Put what you *know* on the floor — \
+the fact, figure or reading you hold that the others may not — rather than the \
+option you already favour. If your seat may deposit evidence, deposit it: the \
+room can weigh a fact it has been shown, and cannot weigh one you kept while \
+arguing from it.";
+
 /// The extra sentence a room under `require_evidential` is given.
 ///
 /// Rendered only when the desk actually requires it, because on a desk that
@@ -280,7 +326,7 @@ impl<'a> EpisodePrompt<'a> {
     #[must_use]
     pub fn render(&self, turn: &HiveTurn, visible: &[SessionMessage]) -> String {
         let sight = match turn.visibility {
-            Visibility::Blind => "You cannot yet see your peers' positions. Form your own first.",
+            Visibility::Blind => BLIND_SIGHT,
             Visibility::Full => "You can see the whole room.",
         };
         // Folded once and read twice: the block a member reads its standings
