@@ -124,7 +124,6 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
     "agentic_venture_capital",
     "agentic_venture_studio",
     "signals_opportunity_studio",
-    "vending_machine_co",
     "startup_accelerator",
 ];
 
@@ -1351,6 +1350,7 @@ const SETUP_SEEDED_COMPANIES: [&str; 24] = [
     "hive_math_lab",
     "signals_opportunity_studio",
     "startup_accelerator",
+    "vending_machine_co",
 ];
 
 /// The bundles that deliberately ship neither, because they are fixtures.
