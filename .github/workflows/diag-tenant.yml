@@ -35,7 +35,9 @@ jobs:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Add server to known hosts
-        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
       - name: Dump tenant diagnostics (redacted)
         env:
@@ -43,9 +45,15 @@ jobs:
           NS: ${{ inputs.namespace }}
           WAKE: ${{ inputs.wake }}
         run: |
-          ssh root@${SSH_HOST} "NS='${NS}' WAKE='${WAKE}' bash -s" <<'REMOTE' \
-            | sed -E 's#(mongodb(\+srv)?://[^:]+:)[^@]+@#\1***@#g; s#(Bearer )[A-Za-z0-9._-]{6,}#\1***#g; s#sntryu_[A-Za-z0-9]+#sntryu_***#g; s#((password|passwd|secret|token|apikey|api_key)[\"'"'"'=: ]+)[A-Za-z0-9._/+-]{8,}#\1***#gI'
+          NS_B64=$(printf '%s' "$NS" | base64 | tr -d '\n')
+          WAKE_B64=$(printf '%s' "$WAKE" | base64 | tr -d '\n')
+          {
+            printf 'NS_B64=%s\n' "$NS_B64"
+            printf 'WAKE_B64=%s\n' "$WAKE_B64"
+            cat <<'REMOTE'
           set -uo pipefail
+          NS=$(printf '%s' "$NS_B64" | base64 -d)
+          WAKE=$(printf '%s' "$WAKE_B64" | base64 -d)
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           echo "===== CLUSTER OIDC issuer (for OPENCOMPANY_CLUSTER_ISSUER) ====="
           kubectl get --raw /.well-known/openid-configuration 2>&1 \
@@ -79,3 +87,5 @@ jobs:
           fi
           echo "===== done ====="
           REMOTE
+          } | ssh root@"${SSH_HOST}" bash -s \
+            | sed -E 's#(mongodb(\+srv)?://[^:]+:)[^@]+@#\1***@#g; s#(Bearer )[A-Za-z0-9._-]{6,}#\1***#g; s#sntryu_[A-Za-z0-9]+#sntryu_***#g; s#((password|passwd|secret|token|apikey|api_key)[\"'"'"'=: ]+)[A-Za-z0-9._/+-]{8,}#\1***#gI'
