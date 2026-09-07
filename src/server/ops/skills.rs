@@ -792,6 +792,7 @@ mod tests {
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
         use crate::runtime::RuntimeBuilder;
+        use crate::server::ops::skills::MAX_SKILL_DOC_BYTES;
         use crate::server::router;
         use crate::server::test_support::{
             fixed_cookie, member_cookie, seed_fixed_admin, seed_fixed_member,
