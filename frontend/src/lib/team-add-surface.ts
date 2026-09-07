@@ -148,24 +148,27 @@ export function addTeammateSurface(args: {
    */
   designRefused: boolean;
 }): AddTeammateSurface {
-  // Issue #753: `echo` is the offline brain, and the reduced dialog is a
-  // handoff — it collects a name and a sentence and sends the operator to
-  // `#/team/<id>?edit` for everything else. On `echo` there is nothing at the
-  // other end of that handoff. No draft-a-whole-teammate route exists to fill
-  // the dialog in before the write (see the module header: `draftAgentField`
-  // drafts ONE field, and `name`/`role` are excluded on purpose), and the
-  // detail page's copilot switches itself off on this path outright —
-  // `disabled={saving || cognition === "echo" || !draft.role.trim()}` in
-  // `AgentDetailView.tsx`. Reducing the dialog here would therefore land the
-  // operator on a page whose drafting is dead, having already stopped asking
-  // for the fields that page can no longer write. The full form asks for what
-  // nothing on this path can supply, which is the only honest answer.
+  // Issue #753: `echo` is the offline brain — there is no model on this path at
+  // all. The reduced dialog's Create IS a model call: it sends the sentence to
+  // `POST {scope}/team/design` and writes what comes back. On `echo` that pass
+  // can only ever refuse, so every create through the reduced dialog would end
+  // in the hand-over below — the full form, one wasted round trip later. And
+  // the page it would otherwise land on has its own copilot switched off on
+  // this path outright (`disabled={saving || cognition === "echo" ||
+  // !draft.role.trim()}` in `AgentDetailView.tsx`), so there is nothing at
+  // either end of the handoff. Showing the form up front is the same answer
+  // arrived at honestly.
+  //
+  // Deciding it here rather than leaving it to the refusal is what keeps that
+  // honest. `designRefused` is the *unexpected* failure — a provider that did
+  // not answer, an unreadable reply — and dressing a company that structurally
+  // cannot draft as one that tried and failed would tell the operator to retry
+  // something that has no model behind it.
   //
   // This is NOT the argument #1988 settled, and citing that issue here would be
   // wrong: its dialog reduced to one box on EVERY company (commit `a318c92ad`,
   // not an ancestor of this branch), so "the can't-draft path keeps today's
-  // form" is not a decision to inherit. #1988's dialog had a whole-thing draft
-  // route behind it; this one does not. The reason above is this dialog's own.
+  // form" is not a decision to inherit. The reason above is this dialog's own.
   if (args.cognition === "echo") return "form";
   if (args.designRefused) return "form";
   return "describe";
