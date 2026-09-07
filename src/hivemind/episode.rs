@@ -457,22 +457,6 @@ impl<'a> EpisodeDriver<'a> {
                     continue;
                 }
             };
-            // Considered *before* the row is appended, because an audience is
-            // fixed at append time: widening one afterwards could never be
-            // redelivered, and would invalidate every citation naming it.
-            //
-            // A refusal is not an error. Every rung of the library's decision
-            // has a name, and every one of them means "this line is an ordinary
-            // desk row" — which is the safe direction: a line the room can read
-            // is never a leak, and the member has said what it meant to say.
-            let audience = self.aside_audience(
-                &turn.agent_id,
-                &line,
-                &transcript,
-                &members,
-                &desks,
-                &retired,
-            );
             let seq = self
                 .events
                 .append(
@@ -481,7 +465,10 @@ impl<'a> EpisodeDriver<'a> {
                         chat_id: self.desk.id.clone(),
                         agent_id: turn.agent_id.clone(),
                         text: line.clone(),
-                        audience: audience.clone(),
+                        // The turn's own contribution is always the room's. An
+                        // aside is a *second* row riding alongside it, appended
+                        // below.
+                        audience: Vec::new(),
                         // The episode's own turns carry no step timeline: the
                         // room is reading one line per turn, and a tool trace
                         // belongs to the turn's own bubble, which this path
@@ -501,6 +488,61 @@ impl<'a> EpisodeDriver<'a> {
             scope.record(seq);
             first_seq.get_or_insert(seq);
             last_seq = Some(seq);
+            // The aside rides alongside the turn that authored it and is not
+            // charged as one (ADR 0011): one authorized turn produces the
+            // member's ordinary contribution *and*, optionally, one private
+            // row. `EpisodeState::spent` counts turns rather than rows, and
+            // `step` drops a non-desk row before it reaches any trace or
+            // standing, so this adds nothing the episode can vote.
+            //
+            // Under the old rule an aside *was* the turn, and a live six-day
+            // run of `companies/vending_machine_co` used the move zero times:
+            // asking a peer meant not depositing, not objecting and not
+            // refuting, while the rest of the room went on accumulating support
+            // for the option the member had stepped away to ask about.
+            //
+            // A refused audience is **dropped, not published**. Falling back to
+            // the desk would put a second desk-visible contribution on one
+            // turn, which is the one thing a turn may not produce — and the
+            // member has already said its piece in the row above.
+            if let Some(aside_line) = rode {
+                let audience = self.aside_audience(
+                    &turn.agent_id,
+                    &aside_line,
+                    &transcript,
+                    &members,
+                    &desks,
+                    &retired,
+                );
+                if audience.is_empty() {
+                    tracing::debug!(
+                        company = %self.company,
+                        desk = %self.desk.id,
+                        agent = %turn.agent_id,
+                        "[hive] an aside was not authorized; the row was dropped"
+                    );
+                } else {
+                    let aside_seq = self
+                        .events
+                        .append(
+                            &self.company,
+                            CompanyEvent::AgentReply {
+                                chat_id: self.desk.id.clone(),
+                                agent_id: turn.agent_id.clone(),
+                                text: aside_line,
+                                audience,
+                                steps: Vec::new(),
+                                task_id: None,
+                                parent: self.thread_root,
+                                mentions: Vec::new(),
+                                mention_depth: 0,
+                            },
+                        )
+                        .await?;
+                    scope.record(aside_seq);
+                    last_seq = Some(aside_seq);
+                }
+            }
             // Considered *after* the line is durable and *before* the next
             // speaker is chosen, which is the whole of the timing. The wiki
             // measures this as the single largest effect in the mechanism: a
