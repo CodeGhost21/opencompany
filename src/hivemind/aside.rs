@@ -46,7 +46,7 @@
 //! asides says so.
 
 use serde::{Deserialize, Serialize};
-use tinyhivemind_hive::aside::{Audience, AsidePolicy};
+use tinyhivemind_hive::aside::{AsidePolicy, Audience};
 
 /// The marker a member opens a private line with.
 pub const ASIDE_MARKER: &str = "!aside";
@@ -227,9 +227,7 @@ pub fn spent_and_unsettled(
         // *classified*. In practice the transcript folded here is the operator
         // projection, so nothing is elided — going through the accessor is what
         // keeps that true if a caller ever passes a narrowed one.
-        if party.contains(&author)
-            && message.readable().is_some_and(surfaces)
-        {
+        if party.contains(&author) && message.readable().is_some_and(surfaces) {
             unsettled = false;
         }
     }
@@ -239,7 +237,7 @@ pub fn spent_and_unsettled(
 #[cfg(test)]
 mod test {
     use super::*;
-    use tinyhivemind_hive::{SessionAuthor, SessionMessage, Sequence};
+    use tinyhivemind_hive::{Sequence, SessionAuthor, SessionMessage};
 
     fn row(seq: u64, author: &str, content: &str, audience: Audience) -> SessionMessage {
         SessionMessage {
@@ -308,7 +306,9 @@ mod test {
         assert!(!opens_aside("I would !aside but cannot"));
         assert!(!opens_aside("!propose #stage"));
 
-        assert!(surfaces("!surface the auditor and I agree the figure holds"));
+        assert!(surfaces(
+            "!surface the auditor and I agree the figure holds"
+        ));
         assert!(!surfaces("!surfaced it already"));
     }
 
@@ -320,17 +320,35 @@ mod test {
         let other = party("auditor", &aside_to(&["planner"])).expect("an aside");
         assert_eq!(one, other);
         assert_eq!(one, vec!["auditor".to_owned(), "planner".to_owned()]);
-        assert!(party("planner", &Audience::Desk).is_none(), "a desk row is in no party");
+        assert!(
+            party("planner", &Audience::Desk).is_none(),
+            "a desk row is in no party"
+        );
     }
 
     #[test]
     fn spending_counts_only_this_partys_rows() {
         let party_key = party("planner", &aside_to(&["auditor"])).expect("an aside");
         let transcript = vec![
-            row(1, "planner", "!aside @auditor check this", aside_to(&["auditor"])),
-            row(2, "auditor", "!aside @planner it holds", aside_to(&["planner"])),
+            row(
+                1,
+                "planner",
+                "!aside @auditor check this",
+                aside_to(&["auditor"]),
+            ),
+            row(
+                2,
+                "auditor",
+                "!aside @planner it holds",
+                aside_to(&["planner"]),
+            ),
             // A different pair entirely: must not spend this party's budget.
-            row(3, "planner", "!aside @scout and this?", aside_to(&["scout"])),
+            row(
+                3,
+                "planner",
+                "!aside @scout and this?",
+                aside_to(&["scout"]),
+            ),
             row(4, "critic", "!propose #stage", Audience::Desk),
         ];
         let (spent, unsettled) = spent_and_unsettled(&transcript, &party_key);
@@ -351,7 +369,12 @@ mod test {
 
         // The *other* member pays it back, which is enough: the room is owed
         // one settlement, not one per participant.
-        transcript.push(row(2, "auditor", "!surface the figure holds", Audience::Desk));
+        transcript.push(row(
+            2,
+            "auditor",
+            "!surface the figure holds",
+            Audience::Desk,
+        ));
         let (spent, unsettled) = spent_and_unsettled(&transcript, &party_key);
         assert_eq!(spent, 1, "a settlement is a desk row, not an aside row");
         assert!(!unsettled);
@@ -364,7 +387,12 @@ mod test {
     fn an_ordinary_desk_turn_does_not_settle_an_aside() {
         let party_key = party("planner", &aside_to(&["auditor"])).expect("an aside");
         let transcript = vec![
-            row(1, "planner", "!aside @auditor check this", aside_to(&["auditor"])),
+            row(
+                1,
+                "planner",
+                "!aside @auditor check this",
+                aside_to(&["auditor"]),
+            ),
             row(2, "planner", "!propose #stage Stage it.", Audience::Desk),
         ];
         assert!(
@@ -379,7 +407,12 @@ mod test {
     fn a_surface_by_a_non_member_settles_nothing() {
         let party_key = party("planner", &aside_to(&["auditor"])).expect("an aside");
         let transcript = vec![
-            row(1, "planner", "!aside @auditor check this", aside_to(&["auditor"])),
+            row(
+                1,
+                "planner",
+                "!aside @auditor check this",
+                aside_to(&["auditor"]),
+            ),
             row(2, "critic", "!surface they seemed to agree", Audience::Desk),
         ];
         assert!(spent_and_unsettled(&transcript, &party_key).1);
@@ -391,9 +424,19 @@ mod test {
     fn reopening_after_a_settlement_owes_the_room_again() {
         let party_key = party("planner", &aside_to(&["auditor"])).expect("an aside");
         let transcript = vec![
-            row(1, "planner", "!aside @auditor check this", aside_to(&["auditor"])),
+            row(
+                1,
+                "planner",
+                "!aside @auditor check this",
+                aside_to(&["auditor"]),
+            ),
             row(2, "auditor", "!surface the figure holds", Audience::Desk),
-            row(3, "planner", "!aside @auditor and the other one?", aside_to(&["auditor"])),
+            row(
+                3,
+                "planner",
+                "!aside @auditor and the other one?",
+                aside_to(&["auditor"]),
+            ),
         ];
         let (spent, unsettled) = spent_and_unsettled(&transcript, &party_key);
         assert_eq!(spent, 2);
@@ -413,7 +456,12 @@ mod test {
                 audience: Audience::Desk,
                 elided: None,
             },
-            row(2, "planner", "!aside @auditor check this", aside_to(&["auditor"])),
+            row(
+                2,
+                "planner",
+                "!aside @auditor check this",
+                aside_to(&["auditor"]),
+            ),
         ];
         let (spent, unsettled) = spent_and_unsettled(&transcript, &party_key);
         assert_eq!(spent, 1);

@@ -81,10 +81,7 @@ pub struct HiveConfig {
     /// buys no answer quality and costs some. What it does buy is bounded
     /// independence and an auditable record of it — see
     /// [`aside`](super::aside) for the whole argument.
-    #[serde(
-        default,
-        skip_serializing_if = "super::aside::AsideConfig::is_default"
-    )]
+    #[serde(default, skip_serializing_if = "super::aside::AsideConfig::is_default")]
     pub aside: super::aside::AsideConfig,
     /// Whether support must trace back to a stated fact rather than to another
     /// opinion.

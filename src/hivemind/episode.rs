@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use tinyhivemind_hive::{
     Conversation, EpisodeState, HiveStep, SESSION_WINDOW, Sequence, SessionQuery,
     aside::{AsideDecision, AsideInput, Viewer},
-    dispatch::DispatchConversation,
     desk::{Desk, DeskSet, ResponderMode},
+    dispatch::DispatchConversation,
     mention::{MentionAuthor, MentionTarget},
     pins::{PIN_LIMIT, read_pinboard},
     project_for,
@@ -355,7 +355,8 @@ impl<'a> EpisodeDriver<'a> {
                 PIN_LIMIT,
                 None,
             )
-            .await {
+            .await
+            {
                 Ok(pins) => pins,
                 Err(error) => {
                     tracing::warn!(
@@ -464,7 +465,14 @@ impl<'a> EpisodeDriver<'a> {
             // has a name, and every one of them means "this line is an ordinary
             // desk row" — which is the safe direction: a line the room can read
             // is never a leak, and the member has said what it meant to say.
-            let audience = self.aside_audience(&turn.agent_id, &line, &transcript, &members, &desks, &retired);
+            let audience = self.aside_audience(
+                &turn.agent_id,
+                &line,
+                &transcript,
+                &members,
+                &desks,
+                &retired,
+            );
             let seq = self
                 .events
                 .append(
