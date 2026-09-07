@@ -508,6 +508,7 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
     log.append(
         &company,
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "eng".into(),
             agent_id: "planner".into(),
             text: "!propose #stage Stage the rollout.".into(),
@@ -523,6 +524,7 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
     log.append(
         &company,
         CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "eng".into(),
             agent_id: HIVE_REPORT_AUTHOR.into(),
             text: "An earlier episode ended.".into(),

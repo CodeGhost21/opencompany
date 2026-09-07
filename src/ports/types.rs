@@ -5870,6 +5870,7 @@ mod test {
     #[test]
     fn a_reply_with_no_mentions_serializes_as_it_did_before_the_fields() {
         let event = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             chat_id: "general".to_string(),
             agent_id: "ceo".to_string(),
             text: "hi".to_string(),
@@ -6168,6 +6169,7 @@ mod test {
 
         // A tool-less reply serializes without the `steps` key.
         let tool_less = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6182,6 +6184,7 @@ mod test {
 
         // A reply with a timeline round-trips it.
         let with_steps = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6223,6 +6226,7 @@ mod test {
 
         // An untagged reply keeps the legacy wire shape exactly.
         let untagged = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6239,6 +6243,7 @@ mod test {
 
         // A dispatch-produced reply carries the key and round-trips.
         let tagged = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -6477,6 +6482,7 @@ mod test {
         );
 
         let answered = CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(41)),

@@ -3389,6 +3389,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // bubble. `err.0` is the inner error (it carries `Display`);
                 // the `ApiError` newtype does not.
                 let notice = CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Issue #1890 D: threaded on exactly the terms a successful
                     // reply is. This notice IS the answer when there is no
                     // other one, and `reply_thread`'s whole argument is that
@@ -3534,6 +3535,7 @@ pub(crate) async fn journal_chat_replies(
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
@@ -8399,6 +8401,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8416,6 +8419,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8474,6 +8478,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8574,6 +8579,7 @@ mode = "full"
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        audience: Vec::new(),
                         mentions: Vec::new(),
                         mention_depth: 0,
                         parent: None,
@@ -8669,6 +8675,7 @@ mode = "full"
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            audience: Vec::new(),
                             mentions: Vec::new(),
                             mention_depth: 0,
                             parent: None,
@@ -8720,6 +8727,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -9300,6 +9308,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -11840,6 +11849,7 @@ mode = "full"
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -11874,6 +11884,7 @@ mode = "full"
     fn projects_agent_reply_with_viewer_mention_metadata() {
         use crate::ports::types::{Mention, MentionTarget};
         let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: vec![
                 Mention {
                     target: MentionTarget::User { id: "u-1".into() },
@@ -11916,6 +11927,7 @@ mode = "full"
     #[test]
     fn drops_owner_fallback_report_from_a_non_admin_viewer() {
         let event = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -11964,6 +11976,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(4)),
@@ -12143,6 +12156,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -12167,6 +12181,7 @@ mode = "full"
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -14536,6 +14551,7 @@ mode = "full"
             .unwrap();
 
         let owner_fallback_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -14553,6 +14569,7 @@ mode = "full"
         );
 
         let ordinary_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -14863,6 +14880,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: "strategy".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "Here is the draft.".to_string(),

@@ -460,6 +460,7 @@ impl<'a> EpisodeReferrals<'a> {
             .append(
                 &self.company,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: conversation.desk_id.clone(),
                     agent_id: author.to_owned(),
                     text,

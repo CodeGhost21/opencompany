@@ -523,6 +523,7 @@ pub struct CompanyRuntime {
 /// overwrote.
 fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> CompanyEvent {
     CompanyEvent::AgentReply {
+        audience: Vec::new(),
         parent,
         chat_id: thread,
         agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
@@ -4282,6 +4283,7 @@ impl CompanyRuntime {
                 .append(
                     &self.id,
                     CompanyEvent::AgentReply {
+                        audience: Vec::new(),
                         parent,
                         chat_id: chat_id.to_string(),
                         // Issue #885: the author, falling back to the
@@ -4730,6 +4732,7 @@ impl CompanyRuntime {
                 .append(
                     &self.id,
                     CompanyEvent::AgentReply {
+                        audience: Vec::new(),
                         parent,
                         chat_id: chat_id.clone(),
                         // Issue #885: the author, not the destination. Same
@@ -6498,6 +6501,7 @@ impl CompanyRuntime {
             .append(
                 &self.id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     parent: None,
                     chat_id: thread.to_string(),
                     agent_id,
@@ -7593,6 +7597,7 @@ mod tests {
         use crate::server::chat_history::owns;
 
         let reply = |chat_id: String| CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -10839,6 +10844,7 @@ mod tests {
 
         fn relay_bubble(origin: &str) -> CompanyEvent {
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 chat_id: origin.to_string(),
                 agent_id: "ceo".to_string(),
                 text: "Here is the draft.".to_string(),
