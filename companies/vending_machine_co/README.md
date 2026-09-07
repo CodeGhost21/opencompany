@@ -107,9 +107,9 @@ operator later installs.
 ## Running it
 
 ```bash
-# 1. Memory. CortexDB is a standalone service, not the removed in-pod engine;
-#    the script prints the OPENCOMPANY_MEMORY_* exports to use.
-./scripts/cortexdb-up.sh
+# 1. Memory. CortexDB is a standalone service on :3141, not the removed in-pod
+#    tinycortex engine. The script starts (or reuses) it and prints the exports.
+eval "$(./scripts/cortexdb-up.sh)"
 
 # 2. The company.
 OPENCOMPANY_INFERENCE_URL=http://127.0.0.1:6969/v1 \
@@ -119,14 +119,23 @@ OPENCOMPANY_AUTH_MODE=none \
     serve --company companies/vending_machine_co
 
 # 3. The world, the MCP server, and the trigger loop — one command.
-python3 scripts/vending-sim.py --days 14
+python3 scripts/vending-sim.py --days 14 --out /tmp/vending-run.json
 ```
 
+Memory matters more here than in a one-shot bundle. A desk carries what it
+learned between episodes (`hive/<desk>/…`), and this company runs for simulated
+weeks — so "we already decided not to visit Vulcan on Tuesdays, and why" is
+knowledge day 9 needs and day 2 produced. Without a durable store behind it
+every morning starts from nothing, and the desks re-litigate the same route.
+
 `vending-sim.py` starts the simulator, registers it as a runtime MCP server,
-then advances the clock a day at a time, posting each day's triggers into the
-company and waiting for the desks to answer. It reports what each episode
-decided, which desks asked each other questions, and what the fleet was worth
-at the end.
+then advances the clock a day at a time. For each desk it posts the day's
+triggers and waits for the room to close, pumping the approvals queue
+meanwhile — the chat POST holds open for the whole episode and a parked
+`place_order` would otherwise deadlock it. It prints each episode's turns,
+its private asides and how many were surfaced, the text of every cross-desk
+referral, and the close. Exit status is the number of days on which no desk
+decided anything, so zero means the company was awake throughout.
 
 ## The ledgers
 
