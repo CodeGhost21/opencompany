@@ -87,5 +87,5 @@ jobs:
           fi
           echo "===== done ====="
           REMOTE
-          } | ssh root@"${SSH_HOST}" bash -s \
+          } | ssh root@"${SSH_HOST}" bash -s 2>&1 \
             | sed -E 's#(mongodb(\+srv)?://[^:]+:)[^@]+@#\1***@#g; s#(Bearer )[A-Za-z0-9._-]{6,}#\1***#g; s#sntryu_[A-Za-z0-9]+#sntryu_***#g; s#((password|passwd|secret|token|apikey|api_key)[\"'"'"'=: ]+)[A-Za-z0-9._/+-]{8,}#\1***#gI'
