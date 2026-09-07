@@ -536,6 +536,92 @@ fn the_close_tells_a_local_question_from_a_crossing_one() {
     );
 }
 
+/// **Every close is a sentence, whatever the episode's referral facts were.**
+///
+/// The summary used to hang every clause off one "The room …" prefix, so an
+/// episode whose only referral fact was a failure printed "The room 1 went
+/// unanswered." — which a live `companies/vending_machine_co` run duly did.
+#[test]
+fn the_close_reads_as_english_for_every_combination_of_referral_facts() {
+    use crate::hivemind::referral::{AskedQuestion, ReferralLedger};
+
+    let outcome = |asked: Vec<AskedQuestion>, failed: u32, over_cap: u32| EpisodeOutcome {
+        ending: EpisodeEnding::Exhausted,
+        turns: 4,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: ReferralLedger {
+            asked,
+            over_cap,
+            failed,
+        },
+    };
+    let asked = || {
+        vec![AskedQuestion {
+            asker: "route_planner".to_owned(),
+            target: "account_manager".to_owned(),
+            desk: "commercial".to_owned(),
+            returned: false,
+            crossed: true,
+        }]
+    };
+
+    // A failure on its own is its own sentence, with its own subject.
+    let only_failed = outcome(Vec::new(), 1, 0).referral_summary();
+    assert!(
+        only_failed.contains("1 question went unanswered."),
+        "{only_failed}"
+    );
+    assert!(
+        !only_failed.contains("The room 1"),
+        "the failure clause was hung off a prefix it does not continue: {only_failed}"
+    );
+
+    // Plural agreement on the same clause.
+    let two_failed = outcome(Vec::new(), 2, 0).referral_summary();
+    assert!(two_failed.contains("2 questions went unanswered."), "{two_failed}");
+
+    // And it still composes with a question the room did ask.
+    let both = outcome(asked(), 1, 0).referral_summary();
+    assert!(both.contains("The room asked 1 question of another desk"), "{both}");
+    assert!(both.contains("1 question went unanswered."), "{both}");
+
+    // A cap refusal alone, likewise.
+    let capped = outcome(Vec::new(), 0, 2).referral_summary();
+    assert!(
+        capped.starts_with(" 2 more were declined"),
+        "{capped}"
+    );
+}
+
+/// **A desk whose name already ends in "desk" does not get a second one.**
+///
+/// Every desk in this repo is named "… desk", and the referral note appended
+/// the word unconditionally: a live run printed "@route_planner on the
+/// Operations desk desk did not answer the question."
+#[test]
+fn a_referral_note_names_a_desk_once() {
+    use crate::hivemind::referral::{answered_note, unanswered_note};
+
+    let named = answered_note("account_manager", "Commercial desk", "no idea");
+    assert!(named.contains("on the Commercial desk answered"), "{named}");
+    assert!(!named.contains("desk desk"), "{named}");
+
+    let missing = unanswered_note("route_planner", "Operations desk");
+    assert!(
+        missing.contains("on the Operations desk did not answer"),
+        "{missing}"
+    );
+    assert!(!missing.contains("desk desk"), "{missing}");
+
+    // A name that does not carry the word still gets it.
+    let bare = unanswered_note("planner", "eng");
+    assert!(bare.contains("on the eng desk did not answer"), "{bare}");
+}
+
 /// **A barred move demoted for its grammar violation must not still trigger a
 /// referral.**
 ///
