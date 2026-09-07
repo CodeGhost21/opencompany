@@ -19,8 +19,8 @@ Stdlib only, so it runs wherever ``python3`` does. Talks to a running
     # the whole thing, defaults
     python3 scripts/vending-sim.py --days 14
 
-    # against an already-running simulator, and a different company
-    python3 scripts/vending-sim.py --mcp-url http://127.0.0.1:7801/mcp --no-spawn-mcp
+    # a longer run, persisting the world so it can be resumed
+    python3 scripts/vending-sim.py --days 30 --state /tmp/vending.json --out run.json
 
 Exit status is the number of days on which no desk produced a decision, so a
 CI-style caller can treat zero as "the company was awake the whole time".
@@ -29,12 +29,14 @@ CI-style caller can treat zero as "the company was awake the whole time".
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import re
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -208,25 +210,80 @@ def describe(triggers: list[dict[str, Any]], day: int) -> str:
     )
 
 
-def episode_rows(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Split journal rows into the three things this run reports on."""
-    out: dict[str, list[dict[str, Any]]] = {"reports": [], "referrals": [], "turns": []}
-    for ev in events:
-        body = ev.get("event") if isinstance(ev.get("event"), dict) else ev
-        kind = body.get("kind") or body.get("type") or ""
-        if "AgentReply" not in str(kind) and "agent_reply" not in str(kind):
-            continue
-        author = body.get("agent_id") or body.get("agentId") or ""
-        if author == HIVE_REPORT_AUTHOR:
-            out["reports"].append(body)
-        elif author == HIVE_REFERRAL_AUTHOR:
-            out["referrals"].append(body)
-        else:
-            out["turns"].append(body)
-    return out
+_CARRIED = re.compile(r"carried|converged|committed", re.I)
 
 
-_DECIDED = re.compile(r"carried|converged|committed", re.I)
+def run_desk(host: Host, desk: str, text: str, settle: float, log) -> dict[str, Any]:
+    """State one day's triggers in one desk and wait for the room to close.
+
+    The chat POST holds open for the whole episode, and an approval parks
+    *inside* it, so the operator's two jobs have to run concurrently: state the
+    message on a thread, and pump approvals from here while it runs. This is the
+    same shape `hive-euler.py` uses, for the same reason — a driver that posted
+    synchronously would deadlock on its own approval the first time a desk
+    reached for `place_order`.
+    """
+    after = last_id(host, desk)
+    failure: list[BaseException] = []
+
+    def state() -> None:
+        try:
+            # A little past the reader's own deadline, so the POST outlives the
+            # wait rather than racing it.
+            host.say(desk, text, timeout=settle + 60)
+        except BaseException as err:  # noqa: BLE001 — surfaced below
+            failure.append(err)
+
+    poster = threading.Thread(target=state, daemon=True)
+    poster.start()
+
+    deadline = time.time() + settle
+    approved: list[str] = []
+    messages: list[dict] = []
+    report = None
+    while time.time() < deadline:
+        if failure:
+            log(f"[sim]     !! chat POST failed: {failure[0]}")
+            break
+        approved.extend(host.approve_all())
+        messages = [m for m in host.history(desk) if int(m.get("id", "0")) > after]
+        report = closing_report(messages)
+        if report:
+            break
+        time.sleep(3)
+
+    # `poster` is a daemon thread and never otherwise joined, so without this
+    # the next desk's POST could start while this one is still in flight and
+    # both would touch the same company concurrently. Bounded, not indefinite:
+    # a tool still parked could keep the POST open well past our own deadline.
+    poster.join(timeout=30)
+    if poster.is_alive():
+        log(f"[sim]     !! the POST is still in flight past the settle window")
+
+    referrals = [m for m in messages if m.get("author") == HIVE_REFERRAL_AUTHOR]
+    turns = [
+        m
+        for m in messages
+        if m.get("author") not in (HIVE_REPORT_AUTHOR, HIVE_REFERRAL_AUTHOR)
+        and not m.get("mine")
+    ]
+    # An aside is journaled as an ordinary desk turn carrying a narrower
+    # audience, and the transcript renders its marker — which is what these
+    # count. An operator is admitted to every aside, so this reader sees them
+    # all; a peer agent's own projection would have elided the ones it is not in.
+    asides = [m for m in turns if m.get("text", "").lstrip().startswith("!aside")]
+    surfaced = [m for m in turns if m.get("text", "").lstrip().startswith("!surface")]
+
+    return {
+        "desk": desk,
+        "turns": len(turns),
+        "referrals": [m.get("text", "") for m in referrals],
+        "asides": len(asides),
+        "surfaced": len(surfaced),
+        "approved": approved,
+        "report": (report or {}).get("text"),
+        "carried": bool(report and _CARRIED.search(report.get("text", ""))),
+    }
 
 
 def main() -> int:
@@ -239,54 +296,40 @@ def main() -> int:
     ap.add_argument("--mcp-host", default="127.0.0.1")
     ap.add_argument("--mcp-port", type=int, default=7801)
     ap.add_argument("--mcp-url", default=None, help="override the URL registered with the company")
-    ap.add_argument("--no-spawn-mcp", action="store_true", help="use an already-running simulator")
     ap.add_argument("--state", type=Path, default=None, help="persist the world here")
     ap.add_argument(
         "--settle",
         type=float,
-        default=90.0,
-        help="seconds to wait for a day's episodes before moving the clock",
+        default=600.0,
+        help="seconds to wait for one desk's episode before moving on",
     )
     ap.add_argument("--out", type=Path, default=None, help="write a JSON transcript here")
     args = ap.parse_args()
 
-    server = None
-    world = None
-    if not args.no_spawn_mcp:
-        server = build_server(args.mcp_host, args.mcp_port, args.state, args.seed)
-        world = server.ops.world
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        print(f"[sim] vending MCP on http://{args.mcp_host}:{args.mcp_port}/mcp", flush=True)
+    def log(line: str) -> None:
+        print(line, flush=True)
+
+    server = build_server(args.mcp_host, args.mcp_port, args.state, args.seed)
+    world = server.ops.world
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(f"[sim] vending MCP on http://{args.mcp_host}:{args.mcp_port}/mcp — day {world.day}")
 
     mcp_url = args.mcp_url or f"http://{args.mcp_host}:{args.mcp_port}/mcp"
-
-    client = Client(args.base)
-    client.sign_in_if_needed()
-    try:
-        client.register_mcp("vending", mcp_url)
-        print(f"[sim] registered `vending` -> {mcp_url}", flush=True)
-    except RuntimeError as err:
-        # Already registered from a previous run is fine and common.
-        print(f"[sim] register `vending`: {err}", flush=True)
-
-    stop = threading.Event()
-    approval_log: list[str] = []
-    pump = threading.Thread(target=pump_approvals, args=(client, stop, approval_log), daemon=True)
-    pump.start()
-
-    cursor = 0
-    try:
-        cursor = max((e.get("seq") or 0) for e in client.events(0, 1000)) if True else 0
-    except Exception:
-        cursor = 0
+    host = Host(args.base)
+    host.sign_in()
+    status, body = host.register_mcp("vending", mcp_url)
+    if status >= 300:
+        # Already registered from a previous run is fine and common; anything
+        # else is worth seeing, because the desks have no tools at all without
+        # it and would otherwise deliberate confidently about nothing.
+        log(f"[sim] register `vending` -> {mcp_url}: {status} {body}")
+    else:
+        log(f"[sim] registered `vending` -> {mcp_url}")
 
     transcript: list[dict[str, Any]] = []
     silent_days = 0
 
     for _ in range(args.days):
-        if world is None:
-            print("[sim] --no-spawn-mcp: this driver cannot advance somebody else's clock")
-            break
         day_triggers = world.advance(1)
         by_desk: dict[str, list[dict[str, Any]]] = {}
         for t in day_triggers:
@@ -294,83 +337,65 @@ def main() -> int:
             if desk:
                 by_desk.setdefault(desk, []).append(t)
 
-        print(f"\n[sim] === day {world.day} — {len(day_triggers)} triggers ===", flush=True)
+        log(f"\n[sim] === day {world.day} — {len(day_triggers)} triggers ===")
+        outcomes = []
         for desk, items in by_desk.items():
             kinds = ", ".join(sorted({t["kind"] for t in items}))
-            print(f"[sim]   -> {desk}: {len(items)} ({kinds})", flush=True)
-            try:
-                client.say(desk, describe(items, world.day))
-            except RuntimeError as err:
-                print(f"[sim]   !! {desk}: {err}", flush=True)
+            log(f"[sim]  -> {desk}: {len(items)} ({kinds})")
+            outcome = run_desk(host, desk, describe(items, world.day), args.settle, log)
+            outcomes.append(outcome)
+            log(
+                f"[sim]     {outcome['turns']} turns, {outcome['asides']} asides "
+                f"({outcome['surfaced']} surfaced), {len(outcome['referrals'])} referrals, "
+                f"{len(outcome['approved'])} approvals"
+            )
+            for text in outcome["referrals"]:
+                log(f"[sim]     ~~ referral: {text[:150]}")
+            if outcome["report"]:
+                log(f"[sim]     == {outcome['report'][:150]}")
+            else:
+                log("[sim]     == no close within the settle window")
 
-        deadline = time.time() + args.settle
-        seen_reports = 0
-        rows: dict[str, list[dict[str, Any]]] = {"reports": [], "referrals": [], "turns": []}
-        while time.time() < deadline:
-            try:
-                fresh = client.events(cursor, 500)
-            except RuntimeError:
-                time.sleep(2.0)
-                continue
-            if fresh:
-                cursor = max(cursor, max((e.get("seq") or 0) for e in fresh))
-                split = episode_rows(fresh)
-                for key in rows:
-                    rows[key].extend(split[key])
-            # Every desk that was asked has closed its episode.
-            if len(rows["reports"]) >= len(by_desk) and by_desk:
-                break
-            time.sleep(2.0)
-
-        decided = [r for r in rows["reports"] if _DECIDED.search(str(r.get("text", "")))]
-        if not decided:
+        if not any(o["carried"] for o in outcomes):
             silent_days += 1
-        print(
-            f"[sim]   {len(rows['turns'])} turns, {len(rows['referrals'])} cross-desk referrals, "
-            f"{len(rows['reports'])} episodes closed ({len(decided)} carried)",
-            flush=True,
+        transcript.append(
+            {
+                "day": world.day,
+                "triggers": day_triggers,
+                "routed": {k: len(v) for k, v in by_desk.items()},
+                "outcomes": outcomes,
+            }
         )
-        for ref in rows["referrals"]:
-            print(f"[sim]   ~~ referral: {str(ref.get('text', ''))[:160]}", flush=True)
-        for rep in rows["reports"]:
-            print(f"[sim]   == {str(rep.get('text', ''))[:160]}", flush=True)
 
-        transcript.append({
-            "day": world.day,
-            "triggers": day_triggers,
-            "routed": {k: len(v) for k, v in by_desk.items()},
-            "turns": len(rows["turns"]),
-            "referrals": [r.get("text") for r in rows["referrals"]],
-            "reports": [r.get("text") for r in rows["reports"]],
-        })
+    report = world.sales_report(max(0, world.day - args.days))
+    referrals = sum(len(o["referrals"]) for t in transcript for o in t["outcomes"])
+    asides = sum(o["asides"] for t in transcript for o in t["outcomes"])
+    surfaced = sum(o["surfaced"] for t in transcript for o in t["outcomes"])
+    approvals = sum(len(o["approved"]) for t in transcript for o in t["outcomes"])
 
-    stop.set()
-
-    if world is not None:
-        report = world.sales_report(max(0, world.day - args.days))
-        open_incidents = [i for i in world.incidents if i.open]
-        print("\n[sim] ===== the run =====")
-        print(f"[sim] days simulated      {args.days}")
-        print(f"[sim] revenue             {report['revenue_cents'] / 100:.2f}")
-        print(f"[sim] margin              {report['margin_cents'] / 100:.2f}")
-        print(f"[sim] units               {report['units']}")
-        print(f"[sim] incidents still open {len(open_incidents)}")
-        print(f"[sim] approvals answered  {len(approval_log)}")
-        print(f"[sim] cross-desk referrals {sum(len(d['referrals']) for d in transcript)}")
-        print(f"[sim] days with no decision {silent_days}")
-        for c in world.clients.values():
-            print(f"[sim]   {c.name:<26} satisfaction {c.satisfaction:.2f}  "
-                  f"renews day {c.contract_renews_day}")
+    log("\n[sim] ===== the run =====")
+    log(f"[sim] days simulated        {args.days}")
+    log(f"[sim] revenue               {report['revenue_cents'] / 100:.2f}")
+    log(f"[sim] margin                {report['margin_cents'] / 100:.2f}")
+    log(f"[sim] units                 {report['units']}")
+    log(f"[sim] incidents still open  {sum(1 for i in world.incidents if i.open)}")
+    log(f"[sim] cross-desk referrals  {referrals}")
+    log(f"[sim] private asides        {asides} ({surfaced} surfaced)")
+    log(f"[sim] approvals answered    {approvals}")
+    log(f"[sim] days with no decision {silent_days}")
+    for c in world.clients.values():
+        log(
+            f"[sim]   {c.name:<26} satisfaction {c.satisfaction:.2f}  "
+            f"renews day {c.contract_renews_day}"
+        )
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(transcript, indent=2, default=str))
-        print(f"[sim] transcript -> {args.out}")
+        log(f"[sim] transcript -> {args.out}")
 
-    if server is not None:
-        server.shutdown()
-        server.server_close()
-
+    server.shutdown()
+    server.server_close()
     return silent_days
 
 
