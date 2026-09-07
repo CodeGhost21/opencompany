@@ -287,15 +287,35 @@ export interface TeammateDesign {
  *
  * Never throws for a *design* reason: all four refusals come back as a `200`
  * carrying `source: "unavailable"`, because none of them is a failure of the
- * request. A rejection here is a genuine transport, auth or not-found failure.
+ * request. A rejection here is a genuine transport, auth or not-found failure —
+ * or the caller's own `signal`, which rejects with an `AbortError`.
+ *
+ * ## Why this one takes a signal when the draft routes do not
+ *
+ * It is the only copilot call the operator can walk away from mid-flight. A
+ * field draft is asked for by a control inside a panel that stays open; this is
+ * asked for by **Create**, and the dialog it belongs to has an Escape key, a
+ * backdrop and a close icon. Without a signal, closing during the ninety
+ * seconds this can take leaves the pass running to completion on the host, its
+ * tokens metered against the company's plan, and its answer dropped on the
+ * floor by the dialog's `attempt` guard — spend with nothing at either end of
+ * it. Dropping the connection drops the handler future with it, before
+ * `record_profile_draft_usage` runs; the route holds no write lock and returns
+ * text (see `design_teammate`), so there is nothing half-done for an abandoned
+ * request to leave behind.
  */
 export function designTeammate(
   client: OpenCompanyClient,
   company: string | null,
   teammate: { name?: string; description: string },
+  signal?: AbortSignal,
 ): Promise<TeammateDesign> {
-  return client.post<TeammateDesign>(`${client.scopeFor(company)}/team/design`, {
-    name: teammate.name?.trim() || undefined,
-    description: teammate.description.trim(),
-  });
+  return client.post<TeammateDesign>(
+    `${client.scopeFor(company)}/team/design`,
+    {
+      name: teammate.name?.trim() || undefined,
+      description: teammate.description.trim(),
+    },
+    { signal },
+  );
 }

@@ -202,6 +202,49 @@ export function describeBlocked(described: DescribedTeammate): string | null {
 }
 
 /**
+ * What the full form should start from when it takes over from the reduced one,
+ * or `null` when there is nothing to carry.
+ *
+ * ## The bug this exists for
+ *
+ * The two dialogs are two separate sets of state. The reduced one writes
+ * `described`; the full one writes its own name and description fields. Nothing
+ * moves between them on its own, and there are **two** ways the surface flips:
+ *
+ * - **A hand-over after a refused design.** Already carried — `handOver` was
+ *   written for exactly this and copies the two values across.
+ * - **A cognition read that lands late.** Not carried, and it was the silent
+ *   one. `cognition` is `null` while `/inference` is in flight, and
+ *   `addTeammateSurface` deliberately reads that as `describe` (see above), so
+ *   on an `echo` company with a slow `/inference` the operator gets the reduced
+ *   dialog, starts typing, and the answer arrives and swaps the form under
+ *   them. Everything typed vanished, with no error and nothing to retry: it
+ *   reads as the console eating your input, which is the loudest kind of wrong
+ *   this dialog can be.
+ *
+ * Carrying is the fix rather than holding the form back until the check
+ * settles, because on a host without the route `cognition` stays `null`
+ * forever (issue #753) — deferring there is a spinner that never resolves.
+ *
+ * ## Why it refuses to overwrite
+ *
+ * It answers `null` when the full form already holds anything, so a re-render,
+ * or a second flip, cannot put the sentence back over a description the
+ * operator has since edited. The reduced values are a *starting point* for a
+ * form nobody has touched, never a correction to one they have.
+ */
+export function carriedDescribe(
+  described: DescribedTeammate,
+  current: { name: string; description: string },
+): { name: string; description: string } | null {
+  const name = described.name.trim();
+  const description = described.description.trim();
+  if (!name && !description) return null;
+  if (current.name.trim() || current.description.trim()) return null;
+  return { name, description };
+}
+
+/**
  * What `POST {scope}/team` is sent, given what the operator typed and what the
  * host designed — or `null` when the design cannot be written.
  *

@@ -19,6 +19,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { designTeammate, refusalNotice, type DraftRefusal } from "@/api/agent-copilot";
 import {
   addTeammateSurface,
+  carriedDescribe,
   describeBlocked as blockedReason,
   designedTeammateFields,
 } from "@/lib/team-add-surface";
@@ -103,6 +104,18 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
    */
   const attempt = useRef(0);
   /**
+   * The design request currently in flight, so shutting the dialog can tear it
+   * down rather than only ignoring its answer.
+   *
+   * `attempt` alone was half the job: it makes a late answer harmless and does
+   * nothing about the cost. A design pass runs a model for up to ninety seconds
+   * and is metered against the company's plan, and `close()` is reachable from
+   * Cancel, Escape, the backdrop and the header's close icon. See
+   * `designTeammate` for why this route is the one copilot call that takes a
+   * signal.
+   */
+  const designAbort = useRef<AbortController | null>(null);
+  /**
    * The cognition path this company booted onto, read while the dialog is open.
    * `null` until the check settles and on a host without the route, which the
    * surface function reads as "can draft" — see `addTeammateSurface` for why
@@ -131,6 +144,38 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
   /** Why the reduced dialog's Create is dead, or `null` when it is not. */
   const describeBlocked = blockedReason(described);
 
+  /**
+   * Moves the reduced dialog's two values into the full form when the surface
+   * flips under the operator.
+   *
+   * The flip nobody accounted for is a *late* cognition read: `/inference` is
+   * slow, `cognition` is `null`, the reduced dialog renders, the operator
+   * starts typing, and the answer comes back `echo` and swaps the form. The two
+   * shapes hold separate state, so without this the name and the sentence are
+   * simply gone. `carriedDescribe` refuses to overwrite anything already in the
+   * form, which makes this idempotent and harmless on the hand-over path, where
+   * `handOver` has already carried the same two values.
+   */
+  useEffect(() => {
+    if (describing) return;
+    const carried = carriedDescribe(described, { name, description });
+    if (!carried) return;
+    setName(carried.name);
+    setDescription(carried.description);
+  }, [describing, described, name, description]);
+
+  /**
+   * A design in flight when this unmounts is one nobody can be shown, so it is
+   * torn down here as well as in `reset` — leaving the chat closes the dialog
+   * without going through either.
+   */
+  useEffect(() => {
+    return () => {
+      designAbort.current?.abort();
+      designAbort.current = null;
+    };
+  }, []);
+
   function reset() {
     setName("");
     setRole("");
@@ -142,8 +187,11 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     setDesignRefused(null);
     setDesigning(false);
     // Abandons any design still in flight, so its answer cannot create a
-    // teammate into a dialog that has been reset under it.
+    // teammate into a dialog that has been reset under it — and tears the
+    // request down, so the host stops paying for one nobody is waiting for.
     attempt.current += 1;
+    designAbort.current?.abort();
+    designAbort.current = null;
   }
 
   /**
@@ -185,10 +233,12 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     if (describing) {
       if (blockedReason(described)) return;
       const mine = attempt.current;
+      const controller = new AbortController();
+      designAbort.current = controller;
       setDesigning(true);
       let design;
       try {
-        design = await designTeammate(client, company, described);
+        design = await designTeammate(client, company, described, controller.signal);
       } catch {
         // A transport, auth or not-found failure — not one of the four design
         // refusals, which arrive as a 200. Treated the same way by the dialog
@@ -299,7 +349,12 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
               {describeBlocked}
             </p>
           )}
-          <Button variant="ghost" onClick={close} disabled={designing}>
+          {/* Live during a design, not dead. It was disabled while `designing`
+              and the three other ways out of a dialog — Escape, the backdrop,
+              the header's close icon — were not, so the one control that said
+              what it would do was the one that would not do it. All four now
+              take the same exit, and that exit aborts the request. */}
+          <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
           <Button

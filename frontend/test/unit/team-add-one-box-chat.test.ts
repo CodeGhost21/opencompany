@@ -245,3 +245,92 @@ describe("chat's full Add-teammate form on a company that cannot draft", () => {
     expect(byText("span", "Give this teammate an inbox")).not.toBeUndefined();
   });
 });
+
+describe("chat's dialog: a design the operator walks away from", () => {
+  // The same defect, in the same shape, in the other dialog — which is exactly
+  // why this file exists. Cancel was disabled while `designing` and Escape, the
+  // backdrop and the header's close icon were not, so every silent exit left
+  // the host running a ninety-second model pass, metered against the company's
+  // plan, whose answer the `attempt` guard then drops.
+
+  function hangingDesign(): { signals: AbortSignal[] } {
+    const signals: AbortSignal[] = [];
+    api.designTeammate.mockImplementation(
+      (_client: unknown, _company: unknown, _teammate: unknown, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          if (signal) {
+            signals.push(signal);
+            signal.addEventListener("abort", () => reject(new DOMException("", "AbortError")));
+          }
+        }),
+    );
+    return { signals };
+  }
+
+  async function startDesigning() {
+    await openDialog();
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach.");
+    await pressCreate();
+  }
+
+  it("Cancel is live while a design is running, and aborts it", async () => {
+    const { signals } = hangingDesign();
+    await startDesigning();
+
+    const cancel = byText("button", "Cancel") as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+
+    await pressCancel();
+
+    expect(signals[0].aborted, "closing must tear the design down, not just ignore it").toBe(true);
+    expect(added, "and nothing is written").toHaveLength(0);
+  });
+
+  it("Escape aborts the design too", async () => {
+    const { signals } = hangingDesign();
+    await startDesigning();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+
+    expect(signals[0].aborted).toBe(true);
+    expect(added).toHaveLength(0);
+  });
+});
+
+describe("chat's dialog: a cognition read that lands after the operator types", () => {
+  it("carries the typed name and sentence into the form it swaps to", async () => {
+    let settle: (status: { cognition: string }) => void = () => {};
+    api.getInferenceStatus.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+
+    await openDialog();
+    expect(document.querySelector(box), "an unsettled check shows the reduced dialog").not.toBeNull();
+
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach.");
+
+    await act(async () => {
+      settle({ cognition: "echo" });
+    });
+    await act(async () => {});
+
+    expect(document.querySelector(roleField), "the full form must have taken over").not.toBeNull();
+    expect(document.querySelector<HTMLInputElement>("#member-name")!.value).toBe("Sable");
+    expect(document.querySelector<HTMLTextAreaElement>("#member-desc")!.value).toBe(
+      "Runs wholesale outreach.",
+    );
+    expect(
+      document.querySelector('[data-testid="chat-add-handover"]'),
+      "nothing failed, so there is no hand-over to explain",
+    ).toBeNull();
+  });
+});

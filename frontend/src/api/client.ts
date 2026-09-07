@@ -453,9 +453,19 @@ export class OpenCompanyClient {
     );
   }
 
-  /** A typed POST, for surfaces that live outside this class (e.g. auth). */
-  post<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>("POST", path, body);
+  /**
+   * A typed POST, for surfaces that live outside this class (e.g. auth).
+   *
+   * `options` carries the same per-call deadline and cancellation every other
+   * method takes. A mutation is not normally cancellable — the host has already
+   * been told to do the thing — but a POST that only *computes* is, and one of
+   * them runs a model for up to ninety seconds: `POST {scope}/team/design`.
+   * Dropping that connection drops the handler future with it, so the pass is
+   * abandoned before `record_profile_draft_usage` ever runs and the company is
+   * not charged for a design nobody is waiting for.
+   */
+  post<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", path, body, undefined, options);
   }
 
   /**

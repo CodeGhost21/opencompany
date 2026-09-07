@@ -391,3 +391,168 @@ describe("the full Add-teammate form on a company that cannot draft", () => {
     expect(opened).toHaveLength(0);
   });
 });
+
+describe("a design the operator walks away from (issue #1989)", () => {
+  // `attempt` already made a late answer harmless. It did nothing about the
+  // cost: a design pass runs a model for up to ninety seconds and is metered
+  // against the company's plan, and the dialog has four ways out — Cancel,
+  // Escape, the backdrop and the header's close icon. Three of them reached
+  // `close()` while Cancel was disabled, so the control that said what it would
+  // do was the only one that would not do it, and every one of them left the
+  // host running a pass whose answer is thrown away.
+
+  /** A design that never answers, so the dialog is still waiting when it shuts. */
+  function hangingDesign(): { signals: AbortSignal[] } {
+    const signals: AbortSignal[] = [];
+    api.designTeammate.mockImplementation(
+      (
+        _client: unknown,
+        _company: unknown,
+        _teammate: unknown,
+        signal?: AbortSignal,
+      ) =>
+        new Promise((_resolve, reject) => {
+          if (signal) {
+            signals.push(signal);
+            signal.addEventListener("abort", () => reject(new DOMException("", "AbortError")));
+          }
+        }),
+    );
+    return { signals };
+  }
+
+  async function startDesigning() {
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition.");
+    await pressCreate();
+  }
+
+  it("Cancel is live while a design is running, and aborts it", async () => {
+    const { signals } = hangingDesign();
+    await startDesigning();
+
+    const cancel = byText("button", "Cancel") as HTMLButtonElement;
+    expect(cancel, "Cancel must still be on screen").toBeDefined();
+    expect(
+      cancel.disabled,
+      "a disabled Cancel beside a live Escape is the inconsistency, not the fix",
+    ).toBe(false);
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted, "nothing is aborted while the operator is waiting").toBe(false);
+
+    await act(async () => {
+      cancel.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {});
+
+    expect(signals[0].aborted, "closing must tear the design down, not just ignore it").toBe(true);
+    expect(added, "and nothing is written").toHaveLength(0);
+  });
+
+  it("Escape aborts the design too, so no exit spends tokens silently", async () => {
+    const { signals } = hangingDesign();
+    await startDesigning();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+
+    expect(signals[0].aborted).toBe(true);
+    expect(added).toHaveLength(0);
+  });
+
+  it("an aborted design never hands over, because its dialog is already gone", async () => {
+    // The abort rejects the same promise a transport failure rejects. Without
+    // the `attempt` guard in front of it, closing mid-design would reopen onto
+    // the full form carrying a hand-over notice for a refusal that never
+    // happened.
+    const { signals } = hangingDesign();
+    await startDesigning();
+
+    await act(async () => {
+      (byText("button", "Cancel") as HTMLButtonElement).dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    await act(async () => {});
+    expect(signals[0].aborted).toBe(true);
+
+    await openDialog();
+    expect(document.querySelector(box), "the next add starts reduced again").not.toBeNull();
+    expect(document.querySelector('[data-testid="team-add-handover"]')).toBeNull();
+  });
+});
+
+describe("a cognition read that lands after the operator starts typing", () => {
+  // The reduced dialog renders while `/inference` is in flight, because
+  // `cognition` is `null` and `addTeammateSurface` deliberately reads that as
+  // "can draft". On an `echo` company the answer then arrives and swaps the
+  // form. The two shapes hold separate state, so the name and the sentence were
+  // simply gone: no error, nothing to retry, and it reads as the console eating
+  // the input.
+
+  it("carries the typed name and sentence into the form it swaps to", async () => {
+    let settle: (status: { cognition: string }) => void = () => {};
+    api.getInferenceStatus.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+
+    await mount();
+    await openDialog();
+    expect(
+      document.querySelector(box),
+      "an unsettled check shows the reduced dialog — that is the documented choice",
+    ).not.toBeNull();
+
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition.");
+
+    await act(async () => {
+      settle({ cognition: "echo" });
+    });
+    await act(async () => {});
+
+    expect(document.querySelector(roleField), "the full form must have taken over").not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="agent-field-name"]')!.value,
+      "the name the operator typed must survive the swap",
+    ).toBe("Nova");
+    expect(
+      document.querySelector<HTMLTextAreaElement>('[data-testid="agent-field-description"]')!.value,
+      "and so must the sentence",
+    ).toBe("Runs paid acquisition.");
+    // Nothing failed, so there is no hand-over to explain.
+    expect(document.querySelector('[data-testid="team-add-handover"]')).toBeNull();
+  });
+
+  it("does not overwrite the form once the operator has edited it", async () => {
+    // Guards the carry against re-running over a later edit: it is a starting
+    // point for a form nobody has touched, never a correction to one they have.
+    let settle: (status: { cognition: string }) => void = () => {};
+    api.getInferenceStatus.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    await act(async () => {
+      settle({ cognition: "echo" });
+    });
+    await act(async () => {});
+
+    type("agent-field-name", "Atlas");
+    await act(async () => {});
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="agent-field-name"]')!.value,
+    ).toBe("Atlas");
+  });
+});

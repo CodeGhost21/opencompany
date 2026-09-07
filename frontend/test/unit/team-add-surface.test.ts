@@ -22,6 +22,7 @@ import type { TeammateDesign } from "@/api/agent-copilot";
 import type { CognitionPath } from "@/api/inference";
 import {
   addTeammateSurface,
+  carriedDescribe,
   describeBlocked,
   designedTeammateFields,
 } from "@/lib/team-add-surface";
@@ -165,5 +166,57 @@ describe("designedTeammateFields", () => {
         expect(fields.role).not.toContain("…");
       }
     }
+  });
+});
+
+describe("carriedDescribe", () => {
+  const described = { name: "Nova", description: "Runs wholesale outreach." };
+  const empty = { name: "", description: "" };
+
+  it("carries the reduced dialog's two values into an untouched form", () => {
+    // The bug: `/inference` answers `echo` after the operator has already
+    // started typing into the reduced dialog, the surface flips, and the full
+    // form's separate state is empty. Nothing errored and nothing can be
+    // retried — it reads as the console eating the input.
+    expect(carriedDescribe(described, empty)).toEqual({
+      name: "Nova",
+      description: "Runs wholesale outreach.",
+    });
+  });
+
+  it("trims what it carries, the way the form's own writes are trimmed", () => {
+    expect(carriedDescribe({ name: "  Nova  ", description: " Runs ads. " }, empty)).toEqual({
+      name: "Nova",
+      description: "Runs ads.",
+    });
+  });
+
+  it("carries whichever half was typed", () => {
+    expect(carriedDescribe({ name: "Nova", description: "" }, empty)).toEqual({
+      name: "Nova",
+      description: "",
+    });
+    expect(carriedDescribe({ name: "", description: "Runs ads." }, empty)).toEqual({
+      name: "",
+      description: "Runs ads.",
+    });
+  });
+
+  it("carries nothing when nothing was typed", () => {
+    // The ordinary `echo` open: the full form is simply what the dialog is, and
+    // there is no earlier shape to carry from.
+    expect(carriedDescribe(empty, empty)).toBeNull();
+    expect(carriedDescribe({ name: "  ", description: "\n " }, empty)).toBeNull();
+  });
+
+  it("never overwrites a form the operator has touched", () => {
+    // This is what makes it safe to run on every render rather than once, and
+    // safe on the hand-over path where `handOver` has already carried the same
+    // two values. A second flip must not put the sentence back over an edit.
+    expect(carriedDescribe(described, { name: "Atlas", description: "" })).toBeNull();
+    expect(carriedDescribe(described, { name: "", description: "Owns stockists." })).toBeNull();
+    expect(
+      carriedDescribe(described, { name: "Atlas", description: "Owns stockists." }),
+    ).toBeNull();
   });
 });
