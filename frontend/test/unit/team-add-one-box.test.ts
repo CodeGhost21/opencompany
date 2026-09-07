@@ -77,6 +77,11 @@ const ROSTER: TeamMemberDto[] = [
 let container: HTMLDivElement;
 let root: Root;
 let added: Array<Record<string, unknown>>;
+/**
+ * What `addTeamMember` throws, or `null` to let it succeed. The failed-write
+ * suite at the end sets it to the transient case the dialog must survive.
+ */
+let addThrows: unknown | null;
 let opened: Array<[string | null, { edit?: boolean } | undefined]>;
 
 function fakeClient(): OpenCompanyClient {
@@ -85,6 +90,7 @@ function fakeClient(): OpenCompanyClient {
     listTeam: async () => ROSTER,
     addTeamMember: async (input: Record<string, unknown>) => {
       added.push(input);
+      if (addThrows) throw addThrows;
       return { id: "nova", name: "Nova", role: "Runs paid acquisition" } as TeamMemberDto;
     },
   } as unknown as OpenCompanyClient;
@@ -96,6 +102,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   added = [];
+  addThrows = null;
   opened = [];
   vi.clearAllMocks();
   api.listTasks.mockResolvedValue([]);
@@ -554,5 +561,110 @@ describe("a cognition read that lands after the operator starts typing", () => {
     expect(
       document.querySelector<HTMLInputElement>('[data-testid="agent-field-name"]')!.value,
     ).toBe("Atlas");
+  });
+});
+
+describe("a write that does not land (issue #1989)", () => {
+  // `onAdd` used to be `void` and called fire-and-forget: the dialog called it
+  // and cleared itself on the very next line, while `POST {scope}/team` was
+  // still in flight. A 5xx or a dropped connection then left the dialog open,
+  // blank and enabled, having thrown away three things at once — the name, the
+  // sentence, and a design the company had already been billed a model call
+  // for. Pressing Create again bought the same design a second time.
+
+  async function createTeammate() {
+    await mount();
+    await openDialog();
+    type("team-describe-name", "Nova");
+    type("team-describe-box", "Runs paid acquisition, and reports on ROAS weekly.");
+    await pressCreate();
+  }
+
+  it("keeps the name and the sentence when the create fails", async () => {
+    addThrows = new Error("the company host is unreachable");
+    await createTeammate();
+
+    expect(added, "the write was attempted").toHaveLength(1);
+    expect(opened, "and it did not land, so nobody is redirected").toHaveLength(0);
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.value,
+      "the name must survive a failed write",
+    ).toBe("Nova");
+    expect(
+      document.querySelector<HTMLTextAreaElement>('[data-testid="team-describe-box"]')!.value,
+      "and so must the sentence",
+    ).toBe("Runs paid acquisition, and reports on ROAS weekly.");
+    // Not a hand-over: the design worked. Saying "no model is configured" over
+    // a write that 5xx'd would send the operator after the wrong problem.
+    expect(document.querySelector('[data-testid="team-add-handover"]')).toBeNull();
+  });
+
+  it("retries without paying for a second design pass", async () => {
+    addThrows = new Error("the company host is unreachable");
+    await createTeammate();
+    expect(api.designTeammate).toHaveBeenCalledTimes(1);
+
+    addThrows = null;
+    await pressCreate();
+
+    expect(
+      api.designTeammate,
+      "the held design still answers this exact sentence, so no second model call",
+    ).toHaveBeenCalledTimes(1);
+    expect(added).toHaveLength(2);
+    expect(added[1].role).toBe("Growth Marketer");
+    expect(opened).toEqual([["nova", { edit: true }]]);
+  });
+
+  it("designs again once the sentence has been edited", async () => {
+    // A design belongs to the sentence it was written from, so an edited box
+    // must not be written from the answer to the old one.
+    addThrows = new Error("nope");
+    await createTeammate();
+    expect(api.designTeammate).toHaveBeenCalledTimes(1);
+
+    addThrows = null;
+    type("team-describe-box", "Runs wholesale outreach to boutique retailers.");
+    await pressCreate();
+
+    expect(api.designTeammate).toHaveBeenCalledTimes(2);
+    expect(added).toHaveLength(2);
+  });
+
+  it("clears the dialog once the write lands", async () => {
+    await createTeammate();
+    expect(added).toHaveLength(1);
+    expect(opened).toEqual([["nova", { edit: true }]]);
+
+    await openDialog();
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.value,
+      "a landed write clears the box for the next add",
+    ).toBe("");
+  });
+});
+
+describe("a host that says it cannot design a teammate", () => {
+  // The console used to answer this itself, as `cognition !== "echo"`. The host
+  // reports the capability now, and this is the path the guess got wrong: a
+  // `hosted` company has no profile drafter either, so the reduced dialog could
+  // only ever spend a Create on a `no_model` refusal.
+  it("renders the full form up front on a non-echo path with no drafter", async () => {
+    api.getInferenceStatus.mockResolvedValue({ cognition: "hosted", designsProfiles: false });
+    await mount();
+    await openDialog();
+
+    expect(document.querySelector(box), "the reduced dialog must NOT be offered").toBeNull();
+    expect(document.querySelector(roleField), "the full form is what this company gets").not.toBeNull();
+    // Not a hand-over — nothing was attempted and nothing refused.
+    expect(document.querySelector('[data-testid="team-add-handover"]')).toBeNull();
+    expect(api.designTeammate, "and no design pass is ever asked for").not.toHaveBeenCalled();
+  });
+
+  it("still offers it when the host says a design pass can run", async () => {
+    api.getInferenceStatus.mockResolvedValue({ cognition: "hosted", designsProfiles: true });
+    await mount();
+    await openDialog();
+    expect(document.querySelector(box)).not.toBeNull();
   });
 });

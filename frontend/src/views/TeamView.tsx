@@ -53,6 +53,8 @@ import {
   carriedDescribe,
   describeBlocked as blockedReason,
   designedTeammateFields,
+  heldFields,
+  type DesignedTeammateFields,
 } from "@/lib/team-add-surface";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { personName } from "@/lib/person";
@@ -342,7 +344,16 @@ export function TeamView({
   // above only to attribute the cap it still *displays* on the card via
   // `DailyBudgetLine`.
 
-  async function addMember(fields: AddMemberFields) {
+  /**
+   * Writes the teammate and answers whether the write landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when this fails — it used to be called
+   * fire-and-forget and the dialog cleared itself regardless. `true` also
+   * covers the console-only fallback below: nothing reached a host, but the
+   * add is as complete as it is going to get and there is nothing to retry.
+   */
+  async function addMember(fields: AddMemberFields): Promise<boolean> {
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
@@ -370,10 +381,12 @@ export function TeamView({
           note: fields.inbox ? "No inbox was created." : undefined,
         });
         setAddOpen(false);
-        return;
+        return true;
       }
       reportAddMember(addMemberFailure(error));
-      return;
+      // The dialog keeps what it holds: this is the transient case, and a
+      // retry must not cost a second design pass.
+      return false;
     }
 
     const missed: MissedStep[] = [];
@@ -405,7 +418,7 @@ export function TeamView({
       reportAddMember(addOutcome(fields.name, missed));
       // Still re-read, so the roster is current when Back returns to it.
       void boot();
-      return;
+      return true;
     }
     // Persisted on the host — refetch so the card reflects the real record
     // (id, merge order, inbox state) rather than a locally-guessed one.
@@ -421,6 +434,7 @@ export function TeamView({
     // is the one being claimed about, so a read that could not confirm the
     // write must not be toasted over as though it had.
     reportAddMember(addOutcome(fields.name, missed));
+    return true;
   }
 
   async function removeMember(member: TeamMember) {
@@ -981,7 +995,18 @@ function AddMemberDialog({
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
-  onAdd: (fields: AddMemberFields) => void;
+  /**
+   * Writes the teammate, answering whether the write landed.
+   *
+   * Awaited, and the dialog is cleared only on `true`. It used to be `void`
+   * and called fire-and-forget: `onAdd(...)` then `reset()` on the next line,
+   * while `POST {scope}/team` was still in flight. A 5xx or a dropped
+   * connection then left the dialog open, blank and enabled, having thrown
+   * away the operator's name, their sentence, and a design the company had
+   * already been charged a model call for. `false` keeps all three so Create
+   * can simply be pressed again.
+   */
+  onAdd: (fields: AddMemberFields) => boolean | Promise<boolean>;
   /** Whether to offer the cap field — setting one is admin-only on the host. */
   canSetBudget: boolean;
   /** For the copilot's draft call (issue #1776) — this dialog writes nothing. */
@@ -1004,6 +1029,22 @@ function AddMemberDialog({
   const [designRefused, setDesignRefused] = useState<DraftRefusal | "unknown" | null>(null);
   /** A design pass is in flight; the box is held and the button says so. */
   const [designing, setDesigning] = useState(false);
+  /** The write is in flight. Create is held so one press cannot become two. */
+  const [creating, setCreating] = useState(false);
+  /**
+   * A design the host already returned for exactly what is in the box now.
+   *
+   * Kept so that a write which failed after a successful design can be retried
+   * without paying for a second model call. Cleared by `reset`, and ignored the
+   * moment the operator edits either field — a design belongs to the sentence
+   * it was written from, and reusing it against a different one would store an
+   * answer to a question nobody asked.
+   */
+  const heldDesign = useRef<{
+    name: string;
+    description: string;
+    fields: DesignedTeammateFields;
+  } | null>(null);
   /**
    * Which design request the operator is still waiting for. Bumped on every
    * close and reset, so an answer for a dialog that has been shut cannot create
@@ -1033,6 +1074,12 @@ function AddMemberDialog({
    */
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   /**
+   * Whether the host says a design pass can run for this company. `null` until
+   * the check settles, and on a host that does not report the capability —
+   * both read as "unknown", which the surface function treats as "offer it".
+   */
+  const [designsProfiles, setDesignsProfiles] = useState<boolean | null>(null);
+  /**
    * The required fields still blank (issue #1776).
    *
    * Read from `AGENT_FIELDS` rather than re-spelled as
@@ -1049,7 +1096,11 @@ function AddMemberDialog({
    * always did, so nothing reports that the reduction never shipped.
    */
   const describing =
-    addTeammateSurface({ cognition, designRefused: designRefused !== null }) === "describe";
+    addTeammateSurface({
+      cognition,
+      designsProfiles,
+      designRefused: designRefused !== null,
+    }) === "describe";
   /** Why the reduced dialog's Create is dead, or `null` when it is not. */
   const describeBlocked = blockedReason(described);
 
@@ -1059,9 +1110,15 @@ function AddMemberDialog({
     (async () => {
       try {
         const status = await getInferenceStatus(client, company);
-        if (live) setCognition(status.cognition);
+        if (live) {
+          setCognition(status.cognition);
+          setDesignsProfiles(status.designsProfiles ?? null);
+        }
       } catch {
-        if (live) setCognition(null);
+        if (live) {
+          setCognition(null);
+          setDesignsProfiles(null);
+        }
       }
     })();
     return () => {
@@ -1112,6 +1169,8 @@ function AddMemberDialog({
     // not design from is gone with it.
     setDesignRefused(null);
     setDesigning(false);
+    setCreating(false);
+    heldDesign.current = null;
     // Abandons any design still in flight, so its answer cannot create a
     // teammate into a dialog that has been reset under it — and tears the
     // request down, so the host stops paying for one nobody is waiting for.
@@ -1162,35 +1221,54 @@ function AddMemberDialog({
   }
 
   async function submit() {
+    if (creating) return;
     if (describing) {
       if (blockedReason(described)) return;
       const mine = attempt.current;
-      const controller = new AbortController();
-      designAbort.current = controller;
-      setDesigning(true);
-      let design;
-      try {
-        design = await designTeammate(client, company, described, controller.signal);
-      } catch {
-        // Transport, auth or not-found — not one of the four design refusals,
-        // which arrive as a 200. Same move for the operator either way. An
-        // abort lands here too, and is filtered by the guard below rather than
-        // named: the dialog it belonged to is already closed and reset.
-        if (attempt.current === mine) handOver("unknown");
-        return;
-      }
-      if (attempt.current !== mine) return;
-      const fields = designedTeammateFields(described, design);
+      // A design already paid for, for exactly this name and sentence. Only a
+      // retry after a failed write can find one here.
+      let fields = heldFields(heldDesign.current, described);
       if (!fields) {
-        handOver(design.reason ?? "unknown");
-        return;
+        const controller = new AbortController();
+        designAbort.current = controller;
+        setDesigning(true);
+        let design;
+        try {
+          design = await designTeammate(client, company, described, controller.signal);
+        } catch {
+          // Transport, auth or not-found — not one of the four design
+          // refusals, which arrive as a 200. Same move for the operator either
+          // way. An abort lands here too, and is filtered by the guard below
+          // rather than named: the dialog it belonged to is already closed and
+          // reset.
+          if (attempt.current === mine) handOver("unknown");
+          return;
+        }
+        if (attempt.current !== mine) return;
+        fields = designedTeammateFields(described, design);
+        if (!fields) {
+          handOver(design.reason ?? "unknown");
+          return;
+        }
+        heldDesign.current = {
+          name: described.name.trim(),
+          description: described.description.trim(),
+          fields,
+        };
       }
-      onAdd({ ...fields, landOnProfile: true });
-      reset();
+      setDesigning(false);
+      setCreating(true);
+      const landed = await onAdd({ ...fields, landOnProfile: true });
+      if (attempt.current !== mine) return;
+      setCreating(false);
+      // Only on a write that landed. A failure keeps the box, the name and the
+      // design, so Create is a retry rather than a re-ask.
+      if (landed) reset();
       return;
     }
     if (!draft.name.trim() || !draft.role.trim() || budgetInvalid) return;
-    onAdd({
+    setCreating(true);
+    const landed = await onAdd({
       name: draft.name,
       role: draft.role,
       description: draft.description,
@@ -1198,7 +1276,8 @@ function AddMemberDialog({
       inbox,
       budgetUsdDaily,
     });
-    reset();
+    setCreating(false);
+    if (landed) reset();
   }
 
   return (
@@ -1348,14 +1427,16 @@ function AddMemberDialog({
             onClick={() => void submit()}
             disabled={
               describing
-                ? Boolean(describeBlocked) || designing
-                : missing.length > 0 || budgetInvalid
+                ? Boolean(describeBlocked) || designing || creating
+                : missing.length > 0 || budgetInvalid || creating
             }
           >
-            {/* Says what is happening, because it takes seconds: the host runs
-                a model over the sentence to write the role, the mandate and the
-                persona before anything is created. */}
-            {designing ? "Designing…" : "Add teammate"}
+            {/* Says what is happening, because both halves take time: the host
+                runs a model over the sentence to write the role, the mandate
+                and the persona, and only then is the teammate written. Two
+                labels rather than one, because they are two waits and only the
+                first is a model call the operator may want to walk away from. */}
+            {designing ? "Designing…" : creating ? "Adding…" : "Add teammate"}
           </Button>
         </DialogFooter>
       </DialogContent>

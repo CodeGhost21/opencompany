@@ -60,6 +60,44 @@ the console used to produce by splitting the operator's sentence and cutting it
 at sixty characters — and on screen it looks finished, which is what makes it
 worth refusing outright.
 
+**Three non-empty strings is not enough.** `TeammateDesign::from_parts` also
+refuses two answers that pass every length and emptiness check:
+
+- **A role the model truncated itself** — an ellipsis in either spelling
+  (`…` or `...`). The brief tells it never to write one, but a brief is not a
+  validator, and `"Runs wholesale outreach to boutique retailers and keeps
+  the…"` is exactly the stored job title this route replaced. Scoped to the
+  role: a *mandate* may legitimately end in `…`, because that is the mark
+  `clamp_description` itself leaves.
+- **The same text in more than one field.** One sentence appearing as role,
+  mandate and persona at once is the original complaint, and a model that
+  echoes the sentence into two of the three reproduces it in valid JSON.
+  Compared on a normal form — whitespace collapsed, case folded, trailing
+  punctuation dropped — and before the clamps, so a description cut to the card
+  bound cannot come out looking different from the persona it was copied from.
+
+Both are refusals rather than repairs, for the same reason the type is
+all-or-nothing: the operator gets the full form carrying what they typed, where
+a salvaged two-thirds looks finished on screen and is not.
+
+### Who can run this pass, and how the console knows
+
+`build_design` needs `runtime.profile_drafter()`, which is built from
+`workflow_harness_deps` — and `RuntimeBuilder::build` assigns that in exactly
+one place, inside the embedded-harness arm. So a company on the `hosted`,
+`sidecar` or `custom` cognition path has no drafter, and this route can only
+answer `no_model` for it.
+
+The console cannot infer that from `cognition`, and when it tried
+(`cognition !== "echo"`) it was wrong for three of the six paths: the reduced
+dialog was offered, the operator typed a sentence, pressed Create, waited on a
+model call that could only refuse, and met the full form anyway.
+`GET …/inference` therefore reports `designsProfiles` — the same
+`profile_drafter().is_some()` this route acts on — so the dialog decides its
+shape from the capability rather than from a label. It is optional on the wire:
+an older host omits it, and the console reads a missing value as "unknown" and
+offers the reduced dialog, exactly as it does while the check is in flight.
+
 ### Why a role may be designed here when `DraftableField` excludes one
 
 `POST …/team/{agentId}/draft` refuses anything but `description` and

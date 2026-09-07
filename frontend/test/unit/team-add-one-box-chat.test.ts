@@ -38,6 +38,11 @@ const { AddMemberDialog } = await import("@/views/chat/AddMemberDialog");
 let container: HTMLDivElement;
 let root: Root;
 let added: NewMemberFields[];
+/**
+ * What the parent's write answers. `false` is a create that did not land, which
+ * the dialog must survive without clearing — see the retry suite at the end.
+ */
+let addLands: boolean | Promise<boolean>;
 /** Every `onOpenChange` the dialog reported, so a Cancel that never closed is visible. */
 let openChanges: boolean[];
 let open: boolean;
@@ -50,6 +55,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   added = [];
+  addLands = true;
   openChanges = [];
   open = false;
   vi.clearAllMocks();
@@ -81,6 +87,7 @@ async function render() {
         },
         onAdd: (fields: NewMemberFields) => {
           added.push(fields);
+          return addLands;
         },
         client: client as unknown as OpenCompanyClient,
         company: "acme",
@@ -332,5 +339,69 @@ describe("chat's dialog: a cognition read that lands after the operator types", 
       document.querySelector('[data-testid="chat-add-handover"]'),
       "nothing failed, so there is no hand-over to explain",
     ).toBeNull();
+  });
+});
+
+describe("chat's dialog: a write that does not land", () => {
+  // Same defect, same shape, other dialog — the reason this file exists. The
+  // dialog cleared itself the line after calling `onAdd`, so a create that
+  // failed took the name, the sentence and a paid-for design with it.
+
+  async function createTeammate() {
+    await openDialog();
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach and keeps the stockist pipeline warm.");
+    await pressCreate();
+  }
+
+  it("keeps the name and the sentence when the create fails", async () => {
+    addLands = false;
+    await createTeammate();
+
+    expect(added, "the write was attempted").toHaveLength(1);
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.value,
+    ).toBe("Sable");
+    expect(
+      document.querySelector<HTMLTextAreaElement>('[data-testid="team-describe-box"]')!.value,
+    ).toBe("Runs wholesale outreach and keeps the stockist pipeline warm.");
+    expect(
+      document.querySelector('[data-testid="chat-add-handover"]'),
+      "the design worked, so there is no refusal to explain",
+    ).toBeNull();
+  });
+
+  it("retries without paying for a second design pass", async () => {
+    addLands = false;
+    await createTeammate();
+    expect(api.designTeammate).toHaveBeenCalledTimes(1);
+
+    addLands = true;
+    await pressCreate();
+
+    expect(api.designTeammate).toHaveBeenCalledTimes(1);
+    expect(added).toHaveLength(2);
+    expect(added[1].role).toBe("Wholesale Account Manager");
+  });
+
+  it("clears the dialog once the write lands", async () => {
+    await createTeammate();
+    expect(added).toHaveLength(1);
+    await openDialog();
+    expect(
+      document.querySelector<HTMLInputElement>('[data-testid="team-describe-name"]')!.value,
+    ).toBe("");
+  });
+});
+
+describe("chat's dialog: a host that says it cannot design a teammate", () => {
+  it("renders the full form up front on a non-echo path with no drafter", async () => {
+    api.getInferenceStatus.mockResolvedValue({ cognition: "hosted", designsProfiles: false });
+    await openDialog();
+
+    expect(document.querySelector(box), "the reduced dialog must NOT be offered").toBeNull();
+    expect(document.querySelector(roleField)).not.toBeNull();
+    expect(document.querySelector('[data-testid="chat-add-handover"]')).toBeNull();
+    expect(api.designTeammate).not.toHaveBeenCalled();
   });
 });

@@ -132,6 +132,26 @@ export function addTeammateSurface(args: {
   /** The company's cognition path; `null` while unread or on a host without the route. */
   cognition: CognitionPath | null;
   /**
+   * Whether the host says this company can run a design pass at all
+   * (`designsProfiles` on `/inference`), or `null`/`undefined` when it did not
+   * say — an older host, or a check still in flight.
+   *
+   * The capability, asked of the host, instead of guessed from `cognition`.
+   * The guess was `cognition !== "echo"`, and it is wrong for three of the six
+   * paths: `profile_drafter()` is built from `workflow_harness_deps`, assigned
+   * in exactly one place — the embedded harness arm of `RuntimeBuilder::build`
+   * — so `hosted`, `sidecar` and `custom` companies have no drafter either.
+   * Every create through the reduced dialog on one of them was a sentence
+   * typed, a Create pressed, a model call waited on that could only answer
+   * `no_model`, and then the full form to fill in by hand.
+   *
+   * `echo` keeps its own line below rather than folding into this one, because
+   * the two say different things and only one survives an old host: `echo` is
+   * "there is no model on this path at all" and is true from the cognition
+   * label alone.
+   */
+  designsProfiles?: boolean | null;
+  /**
    * Whether a Create was already attempted and the design pass could not
    * produce a teammate.
    *
@@ -170,6 +190,13 @@ export function addTeammateSurface(args: {
   // not an ancestor of this branch), so "the can't-draft path keeps today's
   // form" is not a decision to inherit. The reason above is this dialog's own.
   if (args.cognition === "echo") return "form";
+  // The host's own answer, when it gave one. Only an explicit `false` retires
+  // the reduced dialog: `undefined` is an older host that does not report the
+  // capability, and `null` is a check still in flight, and both are read the
+  // way an unsettled `cognition` is read — offer the reduced dialog, and meet
+  // the refusal honestly if one comes. Guessing `form` there is the silent
+  // wrong answer described above.
+  if (args.designsProfiles === false) return "form";
   if (args.designRefused) return "form";
   return "describe";
 }
@@ -242,6 +269,34 @@ export function carriedDescribe(
   if (!name && !description) return null;
   if (current.name.trim() || current.description.trim()) return null;
   return { name, description };
+}
+
+/**
+ * A design already paid for that still answers what is in the box, or `null`.
+ *
+ * ## Why a dialog holds one at all
+ *
+ * A design is a model call the company is metered for. Before this, the dialog
+ * called `onAdd` and cleared itself on the next line without waiting, so a
+ * `POST {scope}/team` that 5xx'd or dropped left an open, blank, enabled form
+ * and threw away three things at once: the name, the sentence, and the design.
+ * Pressing Create again bought the same design a second time.
+ *
+ * The write is awaited now and the dialog clears only when it lands, which
+ * leaves the design in hand — and this is the guard on reusing it. A design
+ * belongs to the sentence it was written from, so the held one is spent only
+ * when the name and the sentence are still character-for-character what they
+ * were when the host answered. Edit either and it is dropped: reusing it then
+ * would store an answer to a question nobody asked.
+ */
+export function heldFields(
+  held: { name: string; description: string; fields: DesignedTeammateFields } | null,
+  described: DescribedTeammate,
+): DesignedTeammateFields | null {
+  if (!held) return null;
+  if (held.name !== described.name.trim()) return null;
+  if (held.description !== described.description.trim()) return null;
+  return held.fields;
 }
 
 /**

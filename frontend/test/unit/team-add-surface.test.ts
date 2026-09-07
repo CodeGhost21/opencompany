@@ -25,6 +25,7 @@ import {
   carriedDescribe,
   describeBlocked,
   designedTeammateFields,
+  heldFields,
 } from "@/lib/team-add-surface";
 
 /** Every cognition path the host can report, so a new one is never silently untested. */
@@ -39,12 +40,60 @@ const DESIGNED: TeammateDesign = {
 };
 
 describe("addTeammateSurface", () => {
-  it("shows the reduced dialog for every cognition path that is not the offline brain", () => {
+  it("shows the reduced dialog for every non-echo path a host has not ruled out", () => {
+    // `designsProfiles` absent is an older host that does not report the
+    // capability. The cognition label alone is all there is to go on there, and
+    // this is the behaviour that shipped.
     for (const cognition of PATHS.filter((p) => p !== "echo")) {
       expect(
         addTeammateSurface({ cognition, designRefused: false }),
-        `cognition=${cognition} can draft, so the dialog must be the reduced one`,
+        `cognition=${cognition} is not ruled out, so the dialog must be the reduced one`,
       ).toBe("describe");
+    }
+  });
+
+  it("shows the full form on any path where the host says no design pass can run", () => {
+    // The bug this input exists for. The console used to answer this question
+    // itself, as `cognition !== "echo"`, and it is wrong for three of the six:
+    // `profile_drafter()` is built from `workflow_harness_deps`, assigned in
+    // exactly one place — the embedded harness arm of `RuntimeBuilder::build` —
+    // so a `hosted`, `sidecar` or `custom` company has no drafter either. Every
+    // create on one of them was a sentence typed, a Create pressed, a model
+    // call waited on that could only answer `no_model`, and the full form
+    // anyway.
+    for (const cognition of PATHS) {
+      expect(
+        addTeammateSurface({ cognition, designsProfiles: false, designRefused: false }),
+        `cognition=${cognition} cannot design, so the reduced dialog is a dead end`,
+      ).toBe("form");
+    }
+  });
+
+  it("keeps the reduced dialog when the host says a design pass CAN run", () => {
+    for (const cognition of PATHS.filter((p) => p !== "echo")) {
+      expect(addTeammateSurface({ cognition, designsProfiles: true, designRefused: false })).toBe(
+        "describe",
+      );
+    }
+    // `echo` still wins: there is no model on that path at all, and that is
+    // true from the label alone.
+    expect(addTeammateSurface({ cognition: "echo", designsProfiles: true, designRefused: false })).toBe(
+      "form",
+    );
+  });
+
+  it("treats an unreported capability as unknown, not as a refusal", () => {
+    // `undefined` is an older host; `null` is a check still in flight. Both are
+    // read the way an unsettled `cognition` is read — offer the reduced dialog
+    // and meet the refusal honestly if one comes — because guessing `form` here
+    // is the silent wrong answer this module's header argues about.
+    for (const designsProfiles of [undefined, null] as const) {
+      expect(
+        addTeammateSurface({ cognition: "hosted", designsProfiles, designRefused: false }),
+      ).toBe("describe");
+      expect(addTeammateSurface({ cognition: null, designsProfiles, designRefused: false })).toBe(
+        "describe",
+      );
     }
   });
 
@@ -218,5 +267,38 @@ describe("carriedDescribe", () => {
     expect(
       carriedDescribe(described, { name: "Atlas", description: "Owns stockists." }),
     ).toBeNull();
+  });
+});
+
+describe("heldFields", () => {
+  const fields = {
+    name: "Sable",
+    role: "Wholesale Account Manager",
+    description: "Owns the stockist pipeline.",
+    instructions: "Check terms before quoting.",
+  };
+  const held = { name: "Sable", description: "Runs wholesale outreach.", fields };
+
+  it("spends a design the host already answered for exactly this box", () => {
+    // The point of holding one: a write that 5xx'd must be retriable without
+    // buying the same design a second time.
+    expect(
+      heldFields(held, { name: "Sable", description: "Runs wholesale outreach." }),
+    ).toBe(fields);
+    // The dialog trims before it sends, so the held copy is compared trimmed.
+    expect(
+      heldFields(held, { name: "  Sable ", description: " Runs wholesale outreach.  " }),
+    ).toBe(fields);
+  });
+
+  it("drops it the moment either field is edited", () => {
+    // A design belongs to the sentence it was written from. Reusing it against
+    // a different one would store an answer to a question nobody asked.
+    expect(heldFields(held, { name: "Atlas", description: "Runs wholesale outreach." })).toBeNull();
+    expect(heldFields(held, { name: "Sable", description: "Runs paid acquisition." })).toBeNull();
+  });
+
+  it("holds nothing when there is nothing held", () => {
+    expect(heldFields(null, { name: "Sable", description: "Runs wholesale outreach." })).toBeNull();
   });
 });

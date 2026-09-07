@@ -376,7 +376,19 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
    * fallback. A local row could not be placed on a desk and would vanish on
    * the next chart read.
    */
-  async function addMember(fields: NewMemberFields) {
+  /**
+   * Writes the teammate, places it on the desk, and answers whether the create
+   * landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when nothing was written — it used to be
+   * called fire-and-forget and the dialog cleared itself regardless. It is
+   * `createdOnHost` rather than "no exception": once the teammate exists, a
+   * later step failing is something the operator fixes on the chart, and a
+   * retry from a dialog that still held the sentence would make a second
+   * teammate.
+   */
+  async function addMember(fields: NewMemberFields): Promise<boolean> {
     const deskId = addMemberDeskId;
     setBusy("add-member");
     // Whether the host has the teammate, which decides whether the chart needs
@@ -455,15 +467,21 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
       // is fixed on the chart they are leaving) and only then taken away.
       if (fields.landOnProfile) onOpenAgent?.(created.id, { edit: true });
     } catch (e) {
-      setAddMemberOpen(false);
       outcome = addMemberFailure(e, "Could not create teammate.");
       if (createdOnHost) {
+        // The teammate exists and something after it threw. Clearing the
+        // dialog is right here: a retry would create a second one.
+        setAddMemberOpen(false);
         await boot();
       }
+      // Otherwise the dialog stays as it is, holding the name, the sentence
+      // and the design, so Create is a retry rather than a re-ask. It used to
+      // close unconditionally and lose all three.
     } finally {
       setBusy(null);
     }
     reportAddMember(outcome);
+    return createdOnHost;
   }
 
   return (
@@ -647,7 +665,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
       <AddMemberDialog
         open={addMemberOpen}
         onOpenChange={setAddMemberOpen}
-        onAdd={(fields) => void addMember(fields)}
+        onAdd={addMember}
         client={client}
         company={company}
       />

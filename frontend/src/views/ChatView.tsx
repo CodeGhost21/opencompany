@@ -1483,7 +1483,7 @@ export function ChatView({
             <AddMemberDialog
               open={addOpen}
               onOpenChange={setAddOpen}
-              onAdd={(fields) => void addMember(fields)}
+              onAdd={addMember}
               client={client}
               company={company}
             />
@@ -2128,7 +2128,14 @@ export function ChatView({
    * falling back to a local-only add for a host without the write plane yet —
    * the same 404 fallback `boot` uses for the roster read itself.
    */
-  async function addMember(fields: NewMemberFields) {
+  /**
+   * Writes the teammate and answers whether the write landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when this fails — it used to be called
+   * fire-and-forget and the dialog cleared itself regardless.
+   */
+  async function addMember(fields: NewMemberFields): Promise<boolean> {
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
@@ -2150,7 +2157,9 @@ export function ChatView({
         setMembers((m) => [...m, newMember(fields)]);
       } else {
         reportAddMember(addMemberFailure(error));
-        return;
+        // The dialog keeps what it holds: this is the transient case, and a
+        // retry must not cost a second design pass.
+        return false;
       }
     }
     let outcome: AddMemberOutcome;
@@ -2200,6 +2209,7 @@ export function ChatView({
     // the 404 fallback above adds a console-only row with no host id, and there
     // is no detail page for a teammate the host has never heard of.
     if (fields.landOnProfile && created) onOpenAgent?.(created.id, { edit: true });
+    return true;
   }
 
   /**
@@ -2722,7 +2732,7 @@ export function ChatView({
       <AddMemberDialog
         open={addOpen}
         onOpenChange={setAddOpen}
-        onAdd={(fields) => void addMember(fields)}
+        onAdd={addMember}
         client={client}
         company={company}
       />
