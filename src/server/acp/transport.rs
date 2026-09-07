@@ -106,7 +106,16 @@ fn owner(auth: &GqlAuth) -> String {
         // companies can legitimately mint the same id — so both are part of
         // the key, or a collision would let a second company's user share a
         // connection binding with the first's.
-        GqlAuth::User(user) => format!("user:{}:{}", user.company, user.user_id),
+        GqlAuth::User(user) => {
+            // Length-prefixed, because a plain join is not injective: neither
+            // `CompanyId::new` nor a stored `UserRecord::id` forbids a `:`, so
+            // (company `a:b`, user `c`) and (company `a`, user `b:c`) would
+            // produce the same owner and let one address the other's
+            // connection — defeating the check this key exists to make.
+            let company = user.company.as_ref();
+            let id = user.user_id.as_str();
+            format!("user:{}:{}:{}:{}", company.len(), company, id.len(), id)
+        }
         // Canonicalized for the same reason `authorize_address` compares
         // tenants in this form: `tenant:acme` and `acme` name the same
         // tenant, and a raw-string key would treat a token whose issuer
@@ -938,6 +947,23 @@ mode = "full"
             session_token_hash: session_token_hash.to_string(),
             credential: crate::ports::SessionKind::Browser,
         })
+    }
+
+    /// A colon is legal in both halves of the owner key, so the join has to be
+    /// injective on its own rather than by assuming the components are clean.
+    #[test]
+    fn two_different_principals_never_share_an_owner_key() {
+        let left = owner(&admin_auth(&CompanyId::new("a:b"), "c".to_string(), "h"));
+        let right = owner(&admin_auth(&CompanyId::new("a"), "b:c".to_string(), "h"));
+        assert_ne!(
+            left, right,
+            "a company and a user id that split differently must not collide"
+        );
+
+        // The same principal still resolves to one stable key, or an operator
+        // would lose their own connection between calls.
+        let again = owner(&admin_auth(&CompanyId::new("a:b"), "c".to_string(), "h"));
+        assert_eq!(left, again);
     }
 
     #[tokio::test]
