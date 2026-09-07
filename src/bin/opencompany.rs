@@ -804,6 +804,17 @@ fn spawn_presence_sweeper(state: &AppState, shutdown: &Arc<Notify>) -> tokio::ta
         .spawn(shutdown.clone())
 }
 
+/// Starts the process-wide ACP-session sweep: reclaims sessions idle past
+/// their TTL. Mirrors [`spawn_presence_sweeper`] — host-global state, not
+/// scoped to a registered company.
+#[cfg(feature = "acp")]
+fn spawn_acp_session_sweeper(
+    state: &AppState,
+    shutdown: &Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    opencompany::server::acp::SessionSweeper::new(state.acp_sessions()).spawn(shutdown.clone())
+}
+
 /// Starts a company's IMAP mailbox poller as a background task, if the
 /// platform injected mailbox credentials for this tenant.
 ///
@@ -2469,6 +2480,8 @@ async fn async_main() -> Result<()> {
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
             scheduler_handles.push(spawn_presence_sweeper(&state, &shutdown));
+            #[cfg(feature = "acp")]
+            scheduler_handles.push(spawn_acp_session_sweeper(&state, &shutdown));
 
             // Issue #1845: the week-1 nudge, process-wide and always started —
             // same reasoning as the workflow scheduler and maintenance ticker
