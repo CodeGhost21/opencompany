@@ -350,6 +350,13 @@ class World:
                 # expensive fault in the fleet and the easiest to miss.
                 continue
             profile = SITE_PROFILES[m.profile]
+            # Stockouts are accumulated per machine per day rather than emitted
+            # per slot. A fleet nobody has restocked yet empties every spiral,
+            # and one trigger per spiral per day is a few hundred a fortnight —
+            # a volume that buries the machine-down and contract triggers that
+            # actually need a decision. One row per machine per day is what an
+            # operator would be paged with, and it still names every line.
+            starved: list[tuple[str, int, int]] = []
             for slot in m.slots:
                 weight = profile.get(slot.sku, 0.5)
                 if CATALOGUE[slot.sku]["chilled"] and not m.chiller_ok:
