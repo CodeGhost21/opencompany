@@ -39,3 +39,19 @@ is a reasonable referral when a cost move is large enough to change a price.
 nothing to quorum. Your citations should point at a message containing an
 actual `warehouse_status` figure. Supporting a plan because it sounds
 proportionate is the failure this rule exists to catch.
+
+## The private line to the fleet technician
+
+This desk allows a private aside, and you and the fleet technician are the pair
+it exists for. Use `!aside @fleet_tech` when the answer you need is about a
+machine rather than about stock — whether a chiller is reliable enough to put
+perishables back into it, whether a jam is really cleared — and the room does
+not need to watch the two of you establish it.
+
+Then `!surface` the conclusion in the open on your next turn. **An aside carries
+information and never support**: nothing said privately moves an option towards
+a decision, so an aside you never surface is two turns spent on nothing.
+
+Note the bound: one exchange, and you owe the room a `!surface` before you may
+open another with the same peer. That is deliberate — a pair that could caucus
+all episode is a second desk with no quorum and no record.
