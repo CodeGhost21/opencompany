@@ -264,11 +264,8 @@ async fn a2a_task(
         match extract_payment(&rpc.params) {
             None => return payment_required(&state, &runtime, pay).await,
             Some(auth) => {
-                if x402::verify(&auth).is_err() {
-                    return ApiError(OpenCompanyError::InvalidRequest(
-                        "x402 payment authorization did not verify".into(),
-                    ))
-                    .into_response();
+                if let Err(err) = x402::verify(&auth, state.x402_nonce(), now_secs()) {
+                    return ApiError(err).into_response();
                 }
                 // Bind the payment to THIS company: the payer must have signed a
                 // `recipient` equal to our own agent id. Without this a
@@ -798,6 +795,50 @@ mod test {
         // The identical signature is rejected on replay.
         let second = app.oneshot(build()).await.unwrap();
         assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The spent-nonce set is the only thing that makes an authorization
+    /// single-use, so a set that cannot answer must stop the sale.
+    #[tokio::test]
+    async fn an_unusable_spent_nonce_set_refuses_a_paid_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let runtime = state.registry().sole().unwrap();
+        let our_id = signer_for(dir.path(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        state.x402_nonce().poison_for_tests();
+        let app = router().with_state(state);
+
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let response = app
+            .oneshot(paid_request(&client, &auth, "x.com"))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "an unreadable spent-nonce set must refuse the payment"
+        );
+        let stored = runtime
+            .events
+            .read_from(runtime.id(), EventSeq::new(0), 10)
+            .await
+            .unwrap();
+        assert!(
+            !stored
+                .iter()
+                .any(|e| matches!(&e.event, CompanyEvent::A2aTaskReceived { .. })),
+            "no task may reach cognition when the payment was refused"
+        );
     }
 
     #[tokio::test]
