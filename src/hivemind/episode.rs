@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tinyhivemind_hive::{
     Conversation, EpisodeState, HiveStep, SESSION_WINDOW, Sequence, SessionQuery,
+    aside::Viewer,
     desk::{Desk, DeskSet, ResponderMode},
     pins::{PIN_LIMIT, read_pinboard},
     project_for,
