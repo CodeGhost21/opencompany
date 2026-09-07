@@ -907,6 +907,27 @@ export interface InflightRun {
 }
 
 /**
+ * Which steer verbs a run supports, derived from the run itself.
+ *
+ * The host is the authority — a delegation answers `400 "this run only supports
+ * cancel"` to anything else — and this mirrors that rule so a surface offers a
+ * control the run can actually take. Read it from the run rather than from what
+ * the surface knows about it: every run in {@link listInflight} is steerable by
+ * its `key`, including a delegation whose `taskId` is null, so a surface that
+ * decides from a card it happens to have on hand is asking the wrong object.
+ */
+export function steerActionsFor(run: InflightRun): readonly SteerAction[] {
+  return run.kind === "delegation"
+    ? (["cancel"] as const)
+    : (["pause", "cancel", "redirect"] as const);
+}
+
+/** Whether `action` is one this run accepts. See {@link steerActionsFor}. */
+export function supportsSteerAction(run: InflightRun, action: SteerAction): boolean {
+  return steerActionsFor(run).includes(action);
+}
+
+/**
  * The live board state Chat needs for a card-linked background turn (#1758).
  *
  * `column` is the task's stage when the current three-column API provides one,
@@ -919,7 +940,13 @@ export interface TaskStatus {
   startedAt?: number;
 }
 
-/** Task id -> status, merged from the board and in-flight reads (#1758). */
+/**
+ * Task id -> status, merged from the board and in-flight reads (#1758).
+ *
+ * Card-keyed, so a run with no card cannot be represented and is dropped. This
+ * is a board-decoration map, never the inventory of what is running: a surface
+ * asking "what is in flight?" must read {@link listInflight} itself.
+ */
 export function taskStatusesById(
   tasks: readonly Task[],
   inflight: readonly InflightRun[],

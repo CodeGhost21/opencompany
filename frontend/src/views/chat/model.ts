@@ -1246,6 +1246,32 @@ function inlineFirstReplies(
     // the orphan arm above is about a root this transcript never held, not
     // about relaxing the depth rule.
     if (!roots.has(rootId)) continue;
+    // **One turn's output is not promoted apart.**
+    //
+    // Promotion is safe because it *empties* the chip — `own` below drops what
+    // was promoted, so a lone answer renders inline, no chip appears, and the
+    // thread is never opened. The message lives on exactly one surface. That is
+    // the case #1890 D / #1972 / #2001 built this for, and it still holds when
+    // the rest of the bucket is the operator writing again: their follow-up is
+    // a separate act, and the answer they were waiting for belongs in the
+    // channel.
+    //
+    // A capped turn is not that. It emits the agent's partial write-up and then
+    // the host's `iteration_cap_pause_notice`, both parented to the same
+    // operator message, and promoting only the first splits one turn's output
+    // across two surfaces: the write-up renders inline *and* in the panel,
+    // because `repliesInThread` walks the parent chain and knows nothing of
+    // what was promoted. Dropping it from the panel instead is not open to us —
+    // the notice under it opens "The reply above is a pause", and there has to
+    // be a reply above.
+    //
+    // So promotion stops at the boundary it was always about: a lone answer.
+    // When the runtime spoke more than once, the whole turn stays folded and
+    // the chip says so.
+    const runtimeReplies = bucket.filter(
+      (r) => (r.from === "company" && !r.byPerson) || r.from === "system",
+    );
+    if (runtimeReplies.length > 1) continue;
     const root = position.get(rootId);
     const first = bucket[0];
     // **Only the runtime's own answer is ever promoted** (codex on #1972).

@@ -1741,15 +1741,29 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
             .join(", ")
     };
     let parked = blocked.approval_ids.len();
+    let choices = crate::ports::blockers::BLOCKER_VERDICT_CHOICES;
     let mut tail = String::new();
     if parked > 0 {
-        tail.push_str(&format!(
-            " It parked {parked} approval{}; approve {} in Approvals and this run continues on \
-             its own. Approving re-runs the step, so if the agent's next turn differs it may ask \
-             again.",
-            if parked == 1 { "" } else { "s" },
-            if parked == 1 { "it" } else { "them" }
-        ));
+        let plural = if parked == 1 { "" } else { "s" };
+        let them = if parked == 1 { "it" } else { "them" };
+        // A gated call continues the run when approved; a blocker is answered
+        // with one of four verdicts, and two of them do not run the step again.
+        // Only the all-gated shape may promise an automatic continue.
+        tail.push_str(&if blocked.blockers == 0 {
+            format!(
+                " It parked {parked} approval{plural}; approve {them} in Approvals and this run \
+                 continues on its own. Approving re-runs the step, so if the agent's next turn \
+                 differs it may ask again."
+            )
+        } else if blocked.blockers == parked {
+            format!(" It parked {parked} question{plural}; answer {them} in Approvals — {choices}.")
+        } else {
+            format!(
+                " It parked {parked} approval{plural} in Approvals. Approving a gated tool call \
+                 continues this run on its own; the questions among them are answered instead — \
+                 {choices}."
+            )
+        });
     }
     if blocked.unparkable > 0 {
         tail.push_str(&format!(
@@ -4492,6 +4506,7 @@ to = "done"
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         // No node row reported `Error` at all — a setup/validation failure the
         // engine raised before any node ran, for instance.
@@ -4513,6 +4528,7 @@ to = "done"
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         let nodes = vec![crate::ports::WorkflowRunNodeRow {
             node_id: "work".to_string(),
@@ -4533,6 +4549,7 @@ to = "done"
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         let nodes = vec![
             crate::ports::WorkflowRunNodeRow {
@@ -4718,6 +4735,7 @@ to = "boom"
             approval_ids: Vec::new(),
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         };
 
         let capture = serde_json::json!({
@@ -8772,6 +8790,7 @@ to = "done"
                 approval_ids: vec!["appr-first".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
             crate::ports::WorkflowBlockedNode {
                 node_id: "second".to_string(),
@@ -8779,6 +8798,7 @@ to = "done"
                 approval_ids: vec!["appr-second".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
         ];
 
@@ -8891,6 +8911,7 @@ to = "done"
             approval_ids: vec!["appr-solo".to_string()],
             unparkable: 0,
             stranded: 0,
+            blockers: 0,
         }];
         stash_blocked_agent_nodes(
             Some(&deps),
@@ -8957,6 +8978,7 @@ to = "done"
                 approval_ids: vec!["appr-first".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
             crate::ports::WorkflowBlockedNode {
                 node_id: "second".to_string(),
@@ -8964,6 +8986,7 @@ to = "done"
                 approval_ids: vec!["appr-second".to_string()],
                 unparkable: 0,
                 stranded: 0,
+                blockers: 0,
             },
         ];
 

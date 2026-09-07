@@ -260,6 +260,29 @@ pub struct TurnStreamEvent {
     /// Wall-clock the completed call took, on `tool_result` only.
     #[serde(rename = "elapsedMs", skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// The journal sequence of the operator message this turn is answering,
+    /// when it is answering one at all.
+    ///
+    /// `chatId` says which *conversation* a frame belongs to; this says which
+    /// *query*. The distinction only starts to matter when one conversation has
+    /// two turns in flight, which is exactly when the console needs it. Keyed by
+    /// thread alone, a second send shares one live timeline with the first, so
+    /// two questions' rows pile into one list with nothing to tell them apart —
+    /// and because the console holds a single row-list per thread, arming the
+    /// second turn discards the first's rows outright. A turn blocked on a
+    /// teammate emits nothing further, so its timeline never comes back.
+    ///
+    /// With this, a console can group live rows per query and render each under
+    /// the message that asked it, the same way a settled turn's folded steps
+    /// already render under their reply.
+    ///
+    /// Carried from `ChatTarget::message_seq`, so it is `None` on every turn
+    /// that answers no journaled operator message — a relay, a delegate's
+    /// instruction, a dispatched card, a workflow node. A consumer falls back to
+    /// keying by `chatId` alone, which is what every consumer did before this
+    /// field existed.
+    #[serde(rename = "messageSeq", skip_serializing_if = "Option::is_none")]
+    pub message_seq: Option<u64>,
     /// The workflow **run** this frame belongs to, when the turn is a workflow
     /// agent node rather than a chat turn (issue #1702). The console's run-trace
     /// sheet keys the live tool timeline on this so a node's in-flight frames
@@ -293,6 +316,7 @@ impl Default for TurnStreamEvent {
             truncated: false,
             status: None,
             elapsed_ms: None,
+            message_seq: None,
             workflow_run_id: None,
             node_id: None,
         }
@@ -323,6 +347,17 @@ impl TurnStreamEvent {
         self.node_id = Some(node_id.into());
         self
     }
+
+    /// Stamps the operator message this turn answers, so the console can group
+    /// the frame under that query rather than under the thread as a whole.
+    ///
+    /// Takes the `Option` rather than the value: every publish site reads it off
+    /// a `ChatTarget` that may legitimately carry none, and answering no
+    /// journaled message is the normal case for half of them.
+    pub fn with_message_seq(mut self, seq: Option<u64>) -> Self {
+        self.message_seq = seq;
+        self
+    }
 }
 
 /// Routing context a turn carries so its live frames reach the right console
@@ -341,6 +376,11 @@ pub struct TurnStreamCtx {
     /// workflow run+node. The two are mutually exclusive, so an enum keeps a
     /// frame from ever carrying both (or neither) routing key.
     pub route: LiveRoute,
+    /// The operator message this turn answers, stamped onto every frame as
+    /// `messageSeq` so two turns sharing a thread stay tellable apart. `None`
+    /// for a turn answering no journaled message; see
+    /// [`TurnStreamEvent::message_seq`].
+    pub message_seq: Option<u64>,
 }
 
 /// Which console surface a turn's live frames route to.
@@ -591,6 +631,7 @@ mod tests {
             truncated: false,
             status: Some("ok"),
             elapsed_ms: Some(12),
+            message_seq: None,
             workflow_run_id: None,
             node_id: None,
         };
@@ -601,5 +642,59 @@ mod tests {
         assert_eq!(j["status"], "ok");
         assert_eq!(j["chatId"], "General");
         assert!(j.get("agentId").is_none(), "empty optional omitted");
+    }
+
+    /// Two turns racing in one chat are tellable apart, and by nothing else.
+    ///
+    /// `chatId` is the *conversation*; two questions asked in one channel share
+    /// it. So does `agentId` whenever the same desk answers both — which is the
+    /// common case, not a corner. Before `messageSeq` those were the only
+    /// routing keys a chat frame carried, so a console had no way to say which
+    /// question a row belonged to and merged both into one timeline.
+    ///
+    /// The observed cost was worse than a merged list: the console holds a
+    /// single row-list per thread, so arming the second turn cleared the first
+    /// turn's rows outright — and a turn blocked on a teammate emits nothing
+    /// further, so its steps never came back.
+    #[test]
+    fn two_queries_in_one_chat_are_told_apart_by_message_seq() {
+        let first = serde_json::to_value(
+            frame("tool_call", 0)
+                .with_chat("general")
+                .with_agent("product_manager")
+                .with_message_seq(Some(45)),
+        )
+        .expect("serialize");
+        let second = serde_json::to_value(
+            frame("tool_call", 0)
+                .with_chat("general")
+                .with_agent("product_manager")
+                .with_message_seq(Some(49)),
+        )
+        .expect("serialize");
+
+        // Every key they previously routed on agrees — including `seq`, which is
+        // per-turn and so restarts at 0 for each of them.
+        assert_eq!(first["chatId"], second["chatId"]);
+        assert_eq!(first["agentId"], second["agentId"]);
+        assert_eq!(first["seq"], second["seq"]);
+        // The query does not.
+        assert_eq!(first["messageSeq"], 45);
+        assert_eq!(second["messageSeq"], 49);
+        assert_ne!(first["messageSeq"], second["messageSeq"]);
+    }
+
+    /// Omitted, not null, on a turn answering no journaled message — a relay, a
+    /// dispatched card, a workflow node. A console that keys on its presence
+    /// falls back to the thread, which is what every console did before the
+    /// field existed, so an older one reads the wire form unchanged.
+    #[test]
+    fn a_turn_answering_no_message_carries_no_message_seq() {
+        let j =
+            serde_json::to_value(frame("tool_call", 0).with_chat("general")).expect("serialize");
+        assert!(
+            j.get("messageSeq").is_none(),
+            "absent rather than null, so presence is the check: {j}"
+        );
     }
 }

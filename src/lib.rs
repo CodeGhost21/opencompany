@@ -40,6 +40,11 @@ pub mod globals;
 /// echo-brained, offline behaviour unchanged.
 #[cfg(feature = "openhuman")]
 pub mod harness;
+/// Hive-mind desks: a `[[group_chat]]` with two or more members answers an
+/// operator message as a bounded deliberation episode rather than as one
+/// teammate's turn. Ungated — the episode machine is pure and the routing
+/// decision is one the default build makes as readily as the harness one does.
+pub mod hivemind;
 /// Turning dropped files and links into memory: extraction, then chunking.
 /// The console's Brain drop zone is the caller; the ports are unchanged.
 pub mod ingest;
@@ -51,6 +56,13 @@ pub mod ledger;
 /// WS5: pure Usage & Finances projections over the runtime's accounting data
 /// (usage samples, ledger, `[budget]`). No I/O; WS2 wraps these in GraphQL.
 pub mod metering;
+/// Crash and error reporting to a Sentry project the OPERATOR owns
+/// (`docs/spec/runtime/crash-reporting.md`). Ungated on purpose: the
+/// enable/disable decision and the secret scrubber are the two parts that have
+/// to be provably right, so they compile — and are tested — in every build.
+/// Only the bodies that name a `sentry::` type sit behind the
+/// `crash-reporting` feature.
+pub mod observability;
 pub mod openhuman;
 /// PayPal wallet + transaction visibility (issue #789).
 #[cfg(feature = "paypal")]
