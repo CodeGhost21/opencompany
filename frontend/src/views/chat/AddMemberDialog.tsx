@@ -325,10 +325,23 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
         };
       }
       setDesigning(false);
+      // `finally`, because `creating` is what holds the dialog shut: a parent
+      // that rejected rather than answering `false` would otherwise trap the
+      // operator in a dialog with every exit disabled.
       setCreating(true);
-      const landed = await onAdd({ ...fields, landOnProfile: true });
+      let landed: boolean;
+      try {
+        landed = await onAdd({ ...fields, landOnProfile: true });
+      } catch {
+        // A parent that rejected rather than answering. Read as "did not
+        // land", which keeps the sentence and the design for a retry — and
+        // caught rather than left to escape, because `submit` is invoked as
+        // `void submit()` and an escaping rejection is an unhandled one.
+        landed = false;
+      } finally {
+        if (attempt.current === mine) setCreating(false);
+      }
       if (attempt.current !== mine) return;
-      setCreating(false);
       // Only on a write that landed. A failure keeps the box, the name and the
       // design, so Create is a retry rather than a re-ask.
       if (landed) reset();
@@ -336,8 +349,14 @@ export function AddMemberDialog({ open, onOpenChange, onAdd, client, company }: 
     }
     if (!name.trim() || !role.trim()) return;
     setCreating(true);
-    const landed = await onAdd({ name, role, description, inbox });
-    setCreating(false);
+    let landed: boolean;
+    try {
+      landed = await onAdd({ name, role, description, inbox });
+    } catch {
+      landed = false;
+    } finally {
+      setCreating(false);
+    }
     if (landed) reset();
   }
 

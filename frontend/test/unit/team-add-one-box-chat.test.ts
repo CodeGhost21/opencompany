@@ -43,6 +43,8 @@ let added: NewMemberFields[];
  * the dialog must survive without clearing — see the retry suite at the end.
  */
 let addLands: boolean | Promise<boolean>;
+/** When set, `onAdd` rejects with it instead of answering — a parent that blew up. */
+let addRejects: unknown | null;
 /** Every `onOpenChange` the dialog reported, so a Cancel that never closed is visible. */
 let openChanges: boolean[];
 let open: boolean;
@@ -63,6 +65,7 @@ beforeEach(() => {
   root = createRoot(container);
   added = [];
   addLands = true;
+  addRejects = null;
   cancelsInFlight = true;
   openChanges = [];
   open = false;
@@ -95,6 +98,7 @@ async function render() {
         },
         onAdd: (fields: NewMemberFields) => {
           added.push(fields);
+          if (addRejects) return Promise.reject(addRejects);
           return addLands;
         },
         client: client as unknown as OpenCompanyClient,
@@ -461,5 +465,29 @@ describe("chat's dialog: holding open while leaving would not stop anything", ()
     expect((byText("button", "Cancel") as HTMLButtonElement).disabled).toBe(false);
     await pressCancel();
     expect(signals[0].aborted).toBe(true);
+  });
+});
+
+describe("chat's dialog: a parent whose write rejects instead of answering", () => {
+  // `creating` is what holds every exit shut, so a parent that threw rather
+  // than returning `false` would trap the operator in a dialog with no way out
+  // and no teammate — the worst failure the held-open rule could introduce.
+  // All three parents catch their own errors today; this is the guard on that
+  // staying true.
+  it("clears itself and stays dismissible", async () => {
+    addRejects = new Error("the parent blew up");
+    await openDialog();
+    type("team-describe-name", "Sable");
+    type("team-describe-box", "Runs wholesale outreach.");
+    await pressCreate();
+
+    expect(added, "the write was attempted").toHaveLength(1);
+    const cancel = byText("button", "Cancel") as HTMLButtonElement;
+    expect(cancel, "the dialog is still on screen").toBeDefined();
+    expect(cancel.disabled, "and not trapped shut by a `creating` that never cleared").toBe(false);
+    expect(byText("button", "Close"), "the header icon is back too").toBeDefined();
+
+    await pressCancel();
+    expect(document.querySelector(box), "and it actually closes").toBeNull();
   });
 });
