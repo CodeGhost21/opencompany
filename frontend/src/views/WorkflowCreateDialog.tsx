@@ -1857,6 +1857,10 @@ export function WorkflowCreateDialog({
         setDraftReason(banners.reason);
       }
     } catch (e) {
+      // Issue #1052, the same rule the hydrate above obeys: a rejection that
+      // lands after the dialog was closed and reopened is about contents that
+      // are gone, and its banner would sit over a form it says nothing about.
+      if (draftEpochRef.current !== requestedEpoch) return;
       // A capability gap (404/409) or a network failure — surface it inline; the
       // operator can still author by hand.
       setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
@@ -2065,6 +2069,32 @@ export function WorkflowCreateDialog({
   }
 
   /**
+   * The one box's keystroke handler: the sentence, and the answers about it
+   * that the keystroke just invalidated.
+   *
+   * The decline is the one that had teeth. `automatable: false` renders a
+   * banner whose action is **"Create it anyway"** — a bypass the operator is
+   * authorised to press *because the copilot argued against this description*.
+   * The banner did not clear when the box did, so after rewording A into B it
+   * was still on screen, still offering the bypass, and
+   * {@link createAnyway} reads `copilotPrompt` — the CURRENT sentence. One
+   * click then created B, unexamined, on a justification that was only ever
+   * about A. The copilot might have drafted B perfectly well; nobody asked it.
+   *
+   * The draft error goes with it for the ordinary reason: it is an answer about
+   * a sentence that no longer exists.
+   *
+   * A capability gap (`draftGap`) deliberately survives — it is a fact about
+   * the deployment, not about the description, and rewording does not wire a
+   * model into the build.
+   */
+  function describeBoxChanged(value: string) {
+    setCopilotPrompt(value);
+    if (draftReason !== null) setDraftReason(null);
+    if (draftError !== null) setDraftError(null);
+  }
+
+  /**
    * The one-box Create: draft from the sentence, save what came back, land on
    * the canvas (issue #1110 already takes a create there).
    *
@@ -2098,6 +2128,13 @@ export function WorkflowCreateDialog({
     try {
       drafted = await draftWorkflowFromDescription(client, company, sentence);
     } catch (e) {
+      // Issue #1052 again, and the success path below has always checked it:
+      // a rejection that lands after the dialog closed and reopened belongs to
+      // contents nobody is looking at any more. Writing `draftGap` from one is
+      // not a cosmetic stale banner — it retires drafting for the NEW open, and
+      // the next Create silently takes the `createAnyway()` fallback and builds
+      // an empty canvas for a description the copilot was never asked about.
+      if (draftEpochRef.current !== requestedEpoch) return;
       // A build that cannot draft at all says so with a code, not with prose.
       // It retires DRAFTING for this open, not the dialog: the notice above the
       // box changes to the host's own message, and the next Create builds the
@@ -2379,7 +2416,7 @@ export function WorkflowCreateDialog({
               id={`${formId}-copilot`}
               rows={4}
               value={copilotPrompt}
-              onChange={(e) => setCopilotPrompt(e.target.value)}
+              onChange={(e) => describeBoxChanged(e.target.value)}
               placeholder="e.g. Every Monday morning, have the writer draft the weekly digest and email it to the team."
               disabled={drafting || submitting}
               data-testid="workflow-describe-box"

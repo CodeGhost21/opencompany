@@ -165,11 +165,18 @@ function dialogText(): string {
   return document.querySelector('[data-slot="dialog-content"]')?.textContent ?? "";
 }
 
-async function open(client: OpenCompanyClient) {
+/**
+ * Renders the dialog with `open` as given.
+ *
+ * Separate from {@link open} because closing and reopening is the only way to
+ * bump the draft epoch from outside, and that is exactly what the late-rejection
+ * case below needs to reproduce.
+ */
+async function setOpen(client: OpenCompanyClient, isOpen: boolean) {
   await act(async () => {
     root.render(
       createElement(WorkflowCreateDialog, {
-        open: true,
+        open: isOpen,
         onOpenChange,
         onCreated,
         client,
@@ -177,6 +184,10 @@ async function open(client: OpenCompanyClient) {
       }),
     );
   });
+}
+
+async function open(client: OpenCompanyClient) {
+  await setOpen(client, true);
 }
 
 beforeEach(() => {
@@ -676,5 +687,163 @@ describe("the New-workflow dialog when the copilot declines", () => {
     expect(
       inDialog<HTMLButtonElement>('[data-testid="workflow-create-anyway"]')!.textContent,
     ).toContain("Create it anyway");
+  });
+});
+
+/**
+ * **A draft that rejects after the dialog moved on belongs to nobody.**
+ *
+ * The success path has checked the epoch since issue #1052; the failure path did
+ * not, and its failure is worse than a stale banner. A capability gap latches
+ * `draftGap`, which retires drafting for the whole open — so a rejection landing
+ * on a REOPENED dialog silently sent the next Create down the `createAnyway()`
+ * fallback, building an empty canvas from a sentence the copilot was never asked
+ * about, on a host that could draft perfectly well.
+ */
+describe("the New-workflow dialog when a draft rejects late", () => {
+  it("does not retire drafting on the dialog that replaced it", async () => {
+    let rejectDraft: (e: unknown) => void = () => {};
+    const drafts = { count: 0 };
+    const client = stubClient({
+      cognition: "hosted",
+      drafts,
+      draft: () =>
+        new Promise((_resolve, reject) => {
+          rejectDraft = reject;
+        }),
+    });
+
+    await open(client);
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(drafts.count).toBe(1);
+
+    // The operator gives up on it and opens the dialog again.
+    await setOpen(client, false);
+    await setOpen(client, true);
+
+    // …and only now does the abandoned request answer, with the one code that
+    // would otherwise retire drafting for good.
+    await act(async () => {
+      rejectDraft(
+        new ApiError(409, "inference_required", "no model is configured", true),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      inDialog('[data-testid="workflow-draft-unavailable"]'),
+      "a dead request must not tell the new dialog the copilot is gone",
+    ).toBeNull();
+    // Proof it is not merely invisible: the next Create still asks the copilot,
+    // rather than falling through to the sentence-only fallback.
+    await act(async () => {
+      typeDescription("Every Friday, chase the overdue invoices.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(drafts.count, "the new dialog can still draft").toBe(2);
+  });
+});
+
+/**
+ * **A decline is an argument about one sentence.**
+ *
+ * "Create it anyway" is a bypass, and what authorises it is that the copilot
+ * argued against *this* description. The banner did not clear when the box did,
+ * so after rewording A into B it still sat there offering the bypass — and
+ * `createAnyway()` reads the CURRENT box. One click created B unexamined, on a
+ * justification that was only ever about A.
+ */
+describe("the New-workflow dialog after the sentence changes", () => {
+  it("clears a decline the new sentence never earned", async () => {
+    await open(
+      stubClient({
+        cognition: "hosted",
+        draft: () =>
+          Promise.resolve({
+            automatable: false,
+            reason: "This is a one-off — just do it once rather than building it.",
+          }),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Email Priya the Q3 numbers, once.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(inDialog('[data-testid="workflow-draft-declined"]')).toBeTruthy();
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+
+    expect(
+      inDialog('[data-testid="workflow-draft-declined"]'),
+      "the decline was about the sentence that is no longer in the box",
+    ).toBeNull();
+    expect(
+      inDialog('[data-testid="workflow-create-anyway"]'),
+      "and the bypass goes with the argument that authorised it",
+    ).toBeNull();
+  });
+
+  it("clears a draft error the new sentence never earned", async () => {
+    await open(
+      stubClient({
+        cognition: "hosted",
+        draft: () => Promise.reject(new ApiError(500, "internal", "the copilot fell over", true)),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Email Priya the Q3 numbers, once.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(dialogText()).toContain("the copilot fell over");
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    expect(dialogText()).not.toContain("the copilot fell over");
+  });
+
+  it("keeps a capability gap, which is not about the sentence at all", async () => {
+    // The complement, and the reason this is a per-banner rule rather than
+    // "clear everything": no rewording wires a model into the build.
+    await open(
+      stubClient({
+        cognition: "hosted",
+        draft: () =>
+          Promise.reject(
+            new ApiError(404, "not_wired", "no copilot is wired into this build", true),
+          ),
+      }),
+    );
+
+    await act(async () => {
+      typeDescription("Email Priya the Q3 numbers, once.");
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(inDialog('[data-testid="workflow-draft-unavailable"]')).toBeTruthy();
+
+    await act(async () => {
+      typeDescription("Every Monday, draft the digest and email it.");
+    });
+    expect(
+      inDialog('[data-testid="workflow-draft-unavailable"]'),
+      "a build with no copilot still has no copilot",
+    ).toBeTruthy();
   });
 });
