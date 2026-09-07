@@ -611,7 +611,7 @@ impl<'a> EpisodeDriver<'a> {
         *aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
+                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations, aside)
                 .await;
         };
         let corrected = format!("{prompt}\n\n{}", moves::correction(kind, &allowed));
@@ -623,7 +623,7 @@ impl<'a> EpisodeDriver<'a> {
         *aside = rode;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return self
-                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations)
+                .grounded_and_regraded(agent_id, prompt, visible, line, &allowed, violations, aside)
                 .await;
         };
         tracing::info!(
@@ -664,8 +664,9 @@ impl<'a> EpisodeDriver<'a> {
         line: String,
         allowed: &[&'static str],
         violations: &mut Vec<MoveViolation>,
+        aside: &mut Option<String>,
     ) -> Result<String> {
-        let line = self.grounded(agent_id, prompt, visible, line).await?;
+        let line = self.grounded(agent_id, prompt, visible, line, aside).await?;
         let Some(kind) = moves::line_kind(&line).filter(|kind| !allowed.contains(kind)) else {
             return Ok(line);
         };
@@ -704,6 +705,7 @@ impl<'a> EpisodeDriver<'a> {
         prompt: &str,
         visible: &[tinyhivemind_hive::SessionMessage],
         line: String,
+        aside: &mut Option<String>,
     ) -> Result<String> {
         if self.desk.config.require_evidential != Some(true)
             || !evidential::support_misses_evidence(&line, agent_id, visible)
@@ -719,7 +721,11 @@ impl<'a> EpisodeDriver<'a> {
             "[hive] a support reached no evidence; the member was asked once more"
         );
         let corrected = format!("{prompt}\n\n{}", evidential::correction(&available));
-        Ok(marker_line(&self.runner.speak(agent_id, &corrected).await?))
+        // Same rule as the move correction: the retry is the turn that
+        // happened, so its aside replaces whatever the first attempt carried.
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
+        *aside = rode;
+        Ok(line)
     }
 
     /// What the desk remembers about the operator's task, best-effort.
