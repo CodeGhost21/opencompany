@@ -306,15 +306,16 @@ impl SessionRegistry {
             .by_connection
             .lock()
             .expect("session registry poisoned");
-        match by_connection.get(connection) {
-            Some(conn) if conn.owner == owner => by_connection
-                .remove(connection)
-                .expect("checked present above")
-                .sessions
-                .into_keys()
-                .collect(),
-            _ => Vec::new(),
+        let owned = by_connection
+            .get(connection)
+            .is_some_and(|conn| conn.owner == owner);
+        if !owned {
+            return Vec::new();
         }
+        by_connection
+            .remove(connection)
+            .map(|conn| conn.sessions.into_keys().collect())
+            .unwrap_or_default()
     }
 
     /// Forgets every session idle past [`SESSION_TTL_MILLIS`], and every
@@ -528,7 +529,11 @@ mod test {
             "exactly at the boundary is not yet expired"
         );
         assert_eq!(registry.sweep_expired(SESSION_TTL_MILLIS + 1), 1);
-        assert!(registry.get("conn-a", "alice", "s1", SESSION_TTL_MILLIS + 1).is_none());
+        assert!(
+            registry
+                .get("conn-a", "alice", "s1", SESSION_TTL_MILLIS + 1)
+                .is_none()
+        );
     }
 
     #[test]
@@ -548,7 +553,11 @@ mod test {
             0,
             "renewed at TTL/2, so a full TTL later it is not yet idle that long"
         );
-        assert!(registry.get("conn-a", "alice", "s1", SESSION_TTL_MILLIS).is_some());
+        assert!(
+            registry
+                .get("conn-a", "alice", "s1", SESSION_TTL_MILLIS)
+                .is_some()
+        );
     }
 
     #[test]

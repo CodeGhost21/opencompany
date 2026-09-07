@@ -939,10 +939,7 @@ mode = "full"
         assert_eq!(result["stopReason"], "end_turn");
         let updates = result["updates"].as_array().expect("updates array");
         assert_eq!(updates.len(), 1);
-        assert_eq!(
-            updates[0]["_meta"]["opencompany/approval"]["id"],
-            "appr-1"
-        );
+        assert_eq!(updates[0]["_meta"]["opencompany/approval"]["id"], "appr-1");
     }
 
     #[test]
@@ -957,6 +954,11 @@ mode = "full"
         };
         let result = prompt_result("sess-1", report);
         assert_eq!(result["stopReason"], "end_turn");
-        assert!(result["updates"].as_array().expect("updates array").is_empty());
+        assert!(
+            result["updates"]
+                .as_array()
+                .expect("updates array")
+                .is_empty()
+        );
     }
 }
