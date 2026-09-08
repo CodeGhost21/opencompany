@@ -135,5 +135,5 @@ pub(crate) async fn resolve_policy(
         .load(runtime.id())
         .await?
         .ok_or_else(|| async_graphql::Error::new("company not found"))?;
-    Ok(PolicyDto::build(&record).into())
+    Ok(PolicyDto::build(&record, runtime.approval_gate.policy_hitl_enabled()).into())
 }

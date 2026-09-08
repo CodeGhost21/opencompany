@@ -241,6 +241,17 @@ pub(crate) struct PolicyDto {
     /// When a change bites. Stated because "stop the flood now" is what an
     /// operator comes here to do, and this is not quite that.
     pub(crate) takes_effect: &'static str,
+    /// Whether the live gate currently turns policy — the tier,
+    /// `always_approve`, the spend cap — into approval requests, as opposed to
+    /// allowing everything the hard denials (`readonly`, the emergency stop)
+    /// do not already refuse.
+    ///
+    /// Read from [`ManifestApprovalGate::policy_hitl_enabled`]
+    /// (`crate::policy::gate`) rather than assumed, so the console's claim
+    /// about its own always-ask list tracks the gate it describes instead of
+    /// a copy of today's build state — see this module's own doc comment for
+    /// why a copy in TypeScript drifts.
+    pub(crate) policy_hitl_enabled: bool,
     /// Every tool name this build's approval gate can match, for the console's
     /// "is this a real tool?" note (issue #1423).
     ///
@@ -256,7 +267,7 @@ pub(crate) struct PolicyDto {
 }
 
 impl PolicyDto {
-    pub(crate) fn build(record: &CompanyRecord) -> Self {
+    pub(crate) fn build(record: &CompanyRecord, policy_hitl_enabled: bool) -> Self {
         let effective: Policy = record.effective_policy();
         let manifest = &record.manifest.policy;
         Self {
@@ -275,6 +286,7 @@ impl PolicyDto {
             set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
             tiers: selectable_tiers(),
             takes_effect: TAKES_EFFECT,
+            policy_hitl_enabled,
             known_tools: {
                 let mut tools: Vec<String> = crate::policy::consequence::declared_tools()
                     .map(str::to_owned)
@@ -322,7 +334,10 @@ struct SetPolicy {
 /// and the selectable tiers with their consequences.
 async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let record = load_record(&company).await?;
-    Ok(Json(PolicyDto::build(&record)))
+    Ok(Json(PolicyDto::build(
+        &record,
+        company.runtime.approval_gate.policy_hitl_enabled(),
+    )))
 }
 
 /// `PUT {scope}/policy` — set the tier and/or the always-ask list. Admin-only,
@@ -435,7 +450,10 @@ async fn set_policy(
             .approval_gate
             .apply_effective_ttl(&record.effective_policy());
     }
-    Ok(Json(PolicyDto::build(&record)))
+    Ok(Json(PolicyDto::build(
+        &record,
+        company.runtime.approval_gate.policy_hitl_enabled(),
+    )))
 }
 
 /// `DELETE {scope}/policy` — drop the override so the manifest's `[policy]`
@@ -470,7 +488,10 @@ async fn clear_policy(
             .approval_gate
             .apply_effective_ttl(&record.effective_policy());
     }
-    Ok(Json(PolicyDto::build(&record)))
+    Ok(Json(PolicyDto::build(
+        &record,
+        company.runtime.approval_gate.policy_hitl_enabled(),
+    )))
 }
 
 fn refusal(message: &str) -> Response {
@@ -574,6 +595,55 @@ mod tests {
         state
     }
 
+    /// Same fixture as [`state`], but with an injected gate that has NOT been
+    /// built through the production path's `.with_policy_hitl_disabled()` —
+    /// the only way this suite can exercise `PolicyDto.policyHitlEnabled: true`
+    /// before any code path sets it live.
+    async fn state_with_policy_hitl_enabled(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(MANIFEST).unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let gate = std::sync::Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            manifest.policy.clone(),
+        ));
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_approvals(gate)
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
     async fn call(state: &AppState, method: &str, body: Option<Value>) -> (StatusCode, Value) {
         let request = Request::builder()
             .method(method)
@@ -632,6 +702,30 @@ mod tests {
             known_tools.iter().any(|tool| tool == "shell"),
             "the registry still carries the workflow tools"
         );
+    }
+
+    /// `policyHitlEnabled` reports the live gate's own state, and every
+    /// production build reports it `false` — the console's honest "disabled"
+    /// copy must be reading a real fact, not a hardcoded one.
+    #[tokio::test]
+    async fn get_reports_policy_hitl_as_disabled_on_the_production_path() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["policyHitlEnabled"], false);
+    }
+
+    /// The other half of the same fact: a gate that has NOT been built through
+    /// `.with_policy_hitl_disabled()` must report `true`, so the field really
+    /// does track the gate rather than always answering `false`.
+    #[tokio::test]
+    async fn get_reports_policy_hitl_as_enabled_when_the_gate_has_it_on() {
+        let dir = home();
+        let state = state_with_policy_hitl_enabled(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["policyHitlEnabled"], true);
     }
 
     /// A tier `PUT` moves the tier and leaves the always-ask list on the
