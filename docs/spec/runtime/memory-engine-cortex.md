@@ -352,11 +352,36 @@ loopback rather than in a second VM.
 Three things landed differently from how this section anticipated them.
 
 **Sizing no longer waits.** Measured per engine: 120 MB steady and 152 MB peak
-against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`, and 176-192 MB
-for a whole guest with its workload. That puts roughly 60 concurrently-awake
-tenants on a 64 GB box — but **disk binds first**: parking writes a full,
-non-sparse 1 GiB memory image per tenant, so a run-and-parked tenant costs ~2 GB
-of disk against ~190 MB of RAM.
+against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`, of which the
+resident vector cache is ~123 MB (`20_000 x 1536 dims x 4 bytes`) — the one term
+that scales with the corpus.
+
+**Plan against the 1024 MiB ceiling, not the working set, because a wake costs
+five times a boot.** Per-tenant cgroup peaks, same tenant, one afternoon:
+
+| Start path | Peak |
+|---|---|
+| cold boot (`--config-file`) | 201.7 MB, 205.6 MB |
+| wake from snapshot (`PUT /snapshot/load`) | 1.0 GB, 1.2 GB |
+
+A cold boot allocates only what the guest touches; a restore faults in the whole
+saved address space, because that is what a snapshot is. So ~200 MB is a floor
+seen once, on a tenant's first boot, and any fleet that parks and wakes costs
+the ceiling. Restored pages are file-backed by `vm.mem`, so they land in page
+cache — the host reports them under `buff/cache` rather than `used`, and the
+kernel can reclaim the clean ones. That makes overcommit survivable, not free.
+
+**Two limits, governing different things.** RAM bounds how many tenants can be
+awake at once: `(63.9 GB - ~1.8 GB host) / 1 GiB` is roughly **60**. Disk bounds
+how many can exist: a parked tenant costs **~1.13 GB** — `vm.mem` is 1.1 GB and
+genuinely not sparse, while `data.ext4` is 1.0 GB apparent but **30 MB
+allocated** — so 828 GB of free space holds roughly **730**. A box therefore
+carries ~730 companies of which ~60 are awake simultaneously.
+
+**Corrects an earlier revision of this section**, which said disk binds before
+RAM and put a parked tenant at ~2 GB. That read apparent size and missed that
+`data.ext4` is sparse; the two limits bound different quantities rather than one
+preceding the other.
 
 **The manager holds no provider credential at all.** This section assumed the
 control plane would inject a fleet key. It does not: it asks the platform
