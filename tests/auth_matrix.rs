@@ -1477,6 +1477,34 @@ fn external_authority_router_files_have_no_unclassified_paths() {
         ]),
         &provision.direct,
     );
+
+    // Knowing a path exists is not the same as exercising it. These four are
+    // `PlatformScope` and the matrix has no platform access class to express
+    // them, so they carry no row and no principal ever probes them. Naming
+    // them here is what stops that being silent: a ninth provisioning route,
+    // or a fix that gives these rows, fails this assertion rather than
+    // quietly joining a set nobody checks.
+    let unexercised: BTreeSet<String> = provision
+        .direct_methods
+        .iter()
+        .filter(|entry| {
+            !EXTERNAL_AUTHORITY_ROUTES
+                .iter()
+                .any(|route| *entry == &format!("{} {}", route.method.label(), route.path))
+        })
+        .cloned()
+        .collect();
+    assert_set_eq(
+        "provisioning routes no principal probes",
+        &string_set(&[
+            "POST /api/v1/companies",
+            "GET /api/v1/companies/provisioning",
+            "POST /api/v1/companies/{id}/suspend",
+            "POST /api/v1/companies/{id}/archive",
+        ]),
+        &unexercised,
+    );
+
     assert!(provision.scoped.is_empty());
 
     let operator = scan_file_route_literals(&root.join("operator.rs"))
@@ -1595,7 +1623,44 @@ fn declared_method_sets() -> BTreeMap<String, BTreeSet<String>> {
 struct Scan {
     scoped: BTreeSet<String>,
     direct: BTreeSet<String>,
+    /// `"POST /api/v1/companies"` — the method matters as much as the path.
+    /// A path already in the inventory can gain a second method, and a
+    /// path-only set stays green while that new method goes unprobed.
+    direct_methods: BTreeSet<String>,
     allowed_nonliteral: BTreeMap<&'static str, usize>,
+}
+
+/// Every HTTP verb a `.route("/p", …)` call wires, including Axum's chained
+/// form `post(handler).delete(other)`. Reading only the first identifier
+/// records `POST` and silently drops the `DELETE`, which is the same
+/// path-shaped blindness this check exists to remove.
+fn route_verbs(tokens: &[Token], open_paren: usize) -> BTreeSet<String> {
+    const VERBS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+    let mut verbs = BTreeSet::new();
+    let mut depth = 0usize;
+    for index in open_paren..tokens.len() {
+        match punct_at(tokens, index) {
+            Some('(') => depth += 1,
+            Some(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        if depth == 1
+            && punct_at(tokens, index + 1) == Some('(')
+            && let Some(name) = ident_at(tokens, index)
+            && VERBS.contains(&name)
+        {
+            verbs.insert(name.to_ascii_uppercase());
+        }
+    }
+    if verbs.is_empty() {
+        verbs.insert("?".to_string());
+    }
+    verbs
 }
 
 fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
@@ -1604,6 +1669,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     let skipped = test_only_token_indexes(&tokens);
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     for index in 0..tokens.len() {
         if skipped.contains(&index) {
             continue;
@@ -1629,6 +1695,12 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
             match tokens.get(index + 3).map(|token| &token.kind) {
                 Some(TokenKind::String(path)) => {
                     direct.insert(path.clone());
+                    // `.route("/p", post(h))` — the verb is the identifier
+                    // after the comma. An unreadable one is recorded as
+                    // `?` rather than skipped, so it cannot vanish quietly.
+                    for verb in route_verbs(&tokens, index + 2) {
+                        direct_methods.insert(format!("{verb} {path}"));
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -1643,6 +1715,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral: BTreeMap::new(),
     })
 }
@@ -1666,6 +1739,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     files.sort();
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     let mut allowed_nonliteral = BTreeMap::new();
     for file in files {
         let relative = file.strip_prefix(root).expect("collected under root");
@@ -1703,6 +1777,9 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
                 match tokens.get(index + 3).map(|token| &token.kind) {
                     Some(TokenKind::String(path)) => {
                         direct.insert(path.clone());
+                        for verb in route_verbs(&tokens, index + 2) {
+                            direct_methods.insert(format!("{verb} {path}"));
+                        }
                     }
                     _ => {
                         let Some(fingerprint) =
@@ -1723,6 +1800,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral,
     })
 }
@@ -2160,4 +2238,16 @@ mod scanner_tests {
         assert!(visible);
         assert!(!hidden);
     }
+}
+
+#[test]
+fn chained_route_verbs_are_all_recorded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let setup = scan_file_route_literals(&root.join("setup.rs")).expect("scan");
+    assert!(
+        setup.direct_methods.contains("GET /api/v1/setup")
+            && setup.direct_methods.contains("POST /api/v1/setup"),
+        "chained get(read).post(apply) must yield both verbs, got {:?}",
+        setup.direct_methods
+    );
 }
