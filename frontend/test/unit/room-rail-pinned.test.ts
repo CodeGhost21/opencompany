@@ -43,9 +43,16 @@ describe("ChatView, mounted off its own route", () => {
   const chatView = read("views/ChatView.tsx");
 
   it("refuses to restore the remembered channel while another section is open", () => {
+    // Anchored on the effect's own body rather than on `const restoredFor =
+    // useRef`: since B-096 the ref is declared with the other long-lived refs,
+    // well above the three early returns, while the effect that reads it moved
+    // below `channel` — so slicing from the declaration now runs through other
+    // hooks and finds their dependency arrays first.
+    const body = chatView.indexOf("restoredFor.current = undefined;");
+    expect(body).toBeGreaterThan(-1);
+    const effect = chatView.slice(chatView.lastIndexOf("useEffect(() => {", body));
     // The guard, and that it is the FIRST thing the effect does — after the
     // `if (sub)` line it is already too late for a bare `#/workflows`.
-    const effect = chatView.slice(chatView.indexOf("const restoredFor = useRef"));
     const guard = effect.indexOf("if (!routeOpen) return;");
     const subCheck = effect.indexOf("if (sub) {");
     expect(guard).toBeGreaterThan(-1);
@@ -54,8 +61,14 @@ describe("ChatView, mounted off its own route", () => {
     // And it is a dependency, so arriving on Room re-runs the restore rather
     // than skipping it for the life of the mount.
     expect(effect.slice(0, effect.indexOf("}, [") + 200)).toContain(
-      "[company, routeOpen, scope, sub, onNavigate]",
+      "[routeOpen, scope, sub, channel, onNavigate]",
     );
+    // B-096 made this guard matter MORE, not less. The effect it replaced only
+    // navigated when something was remembered (`if (remembered)`), so an
+    // operator who had never opened a channel was accidentally spared; this one
+    // always resolves — memory, else `channel.id` — and without the guard would
+    // bounce every such operator out of Flows on the first paint.
+    expect(effect).toContain("onNavigate(readLastChannel(scope) ?? channel.id);");
   });
 
   it("renders the transcript only on its own route", () => {
