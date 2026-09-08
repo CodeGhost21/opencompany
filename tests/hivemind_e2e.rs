@@ -211,6 +211,11 @@ fn parse_transcript_line(line: &str) -> Option<(u64, String, String)> {
     let rest = line.strip_prefix('[')?;
     let (seq, rest) = rest.split_once("] ")?;
     let (author, content) = rest.split_once(": ")?;
+    // The reader's own rows are attributed `<id> (you)` so a member can tell
+    // its own turns from a colleague's without losing the id colleagues cite
+    // it by. The id is what every assertion here matches on, so the marker is
+    // stripped back off.
+    let author = author.strip_suffix(" (you)").unwrap_or(author);
     Some((
         seq.parse().ok()?,
         author.to_owned(),
@@ -644,7 +649,14 @@ async fn a_desk_deliberates_and_converges_through_the_fold() {
     assert_eq!(reports.len(), 1, "exactly one closing row: {rows:?}");
     let report = &reports[0];
     assert!(report.contains(&format!("#{TOPIC}")), "{report}");
-    assert!(report.contains("settled on"), "{report}");
+    assert!(report.contains("settled"), "{report}");
+    // The decision itself, not only the label the room filed it under: the
+    // report leads with what `!propose` actually said, so an operator reading
+    // it learns the answer without going back to the transcript for it.
+    assert!(
+        report.contains("The closed form of the recurrence is 42."),
+        "the report names the label but not the decision: {report}"
+    );
     for member in [THEORIST, PROGRAMMER, VERIFIER] {
         assert!(
             report.contains(member),
@@ -1064,8 +1076,16 @@ async fn two_carrying_topics_and_no_objection_deadlock() {
     assert!(report.contains(&format!("#{ALPHA}")), "{report}");
     assert!(report.contains(&format!("#{BETA}")), "{report}");
     assert!(
-        report.contains("nobody broke the tie"),
+        report.contains("nobody was left to break the tie"),
         "a deadlock is reported as a deadlock, not as a decision: {report}"
+    );
+    // And escalated rather than merely stated. `Deadlocked` is returned only
+    // when every member has taken a side, so the room cannot break this itself
+    // and cannot even pick who to ask — one side would be choosing its own
+    // referee. That leaves the operator, and the report has to say so.
+    assert!(
+        report.contains("It needs your call"),
+        "a deadlock the room cannot break is put to the operator: {report}"
     );
 }
 
