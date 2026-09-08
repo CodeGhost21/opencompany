@@ -546,6 +546,10 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
 /// A hand-off chain terminates by construction rather than by nobody writing
 /// one. `pub(crate)` so the harness tests can drive a chain the same number of
 /// times production does, instead of hard-coding a number that drifts.
+/// Both the cap's reader and the test that drives it are `openhuman`-only,
+/// so the constant carries the same gate rather than reading as dead code
+/// in a default build.
+#[cfg(feature = "openhuman")]
 pub(crate) const MAX_HAND_OFF_HOPS: usize = 3;
 
 impl CompanyRuntime {
