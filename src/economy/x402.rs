@@ -132,10 +132,10 @@ pub struct X402Authorization {
     pub network: String,
     /// A single-use nonce: 256 bits of OS randomness, base64url, 43 chars.
     ///
-    /// Opaque to every reader — nothing parses or matches its shape — so the
-    /// counterparty only needs it to be unpredictable and unique. [`verify`]
-    /// spends it against a [`NonceCache`], which is what makes "single-use"
-    /// true. See [`mint_nonce`].
+    /// [`verify`] rejects any value that is not exactly [`NONCE_LEN`]
+    /// base64url characters before it ever reaches the shared
+    /// [`NonceCache`], so a counterparty cannot grow the cache's memory
+    /// footprint by signing an oversized nonce. See [`mint_nonce`].
     pub nonce: String,
     /// The authorization timestamp, epoch seconds.
     pub timestamp: i64,
@@ -148,6 +148,10 @@ pub struct X402Authorization {
 /// matching the user-auth secrets, so two mints colliding is not a scenario.
 const NONCE_BYTES: usize = 32;
 
+/// The exact length of a [`mint_nonce`] output: unpadded base64url of
+/// [`NONCE_BYTES`] bytes.
+const NONCE_LEN: usize = (NONCE_BYTES * 4).div_ceil(3);
+
 /// Mints an authorization nonce: 256 bits from `src`, base64url, 43 chars.
 ///
 /// A pure function of the source bytes — no clock, no counter, no process
@@ -157,6 +161,18 @@ pub fn mint_nonce(src: &dyn TokenSource) -> String {
     let mut bytes = [0u8; NONCE_BYTES];
     src.fill(&mut bytes);
     b64url_encode(&bytes)
+}
+
+/// Whether `nonce` has the exact shape [`mint_nonce`] produces: [`NONCE_LEN`]
+/// unpadded base64url characters. [`verify`] enforces this before the nonce
+/// ever reaches the shared [`NonceCache`], so a counterparty cannot grow that
+/// cache's memory footprint by signing an authorization around an oversized
+/// nonce.
+fn has_nonce_shape(nonce: &str) -> bool {
+    nonce.len() == NONCE_LEN
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Builds the canonical bytes an x402 authorization signs. See module docs.
@@ -224,8 +240,9 @@ fn authorize_amount(
 /// Verifies an authorization and spends its nonce, so one signature buys one
 /// task.
 ///
-/// Enforces, in order: the signature against the declared `agentId`, freshness
-/// within [`MAX_AGE_SECS`], and single use of the nonce against `spent`.
+/// Enforces, in order: the nonce's shape, the signature against the declared
+/// `agentId`, freshness within [`MAX_AGE_SECS`], and single use of the nonce
+/// against `spent`.
 ///
 /// `spent` and `now` are parameters rather than something a caller may choose
 /// to consult. A signature proves who authorized the payment, not that the
@@ -237,6 +254,12 @@ fn authorize_amount(
 /// authorization cannot burn a nonce — otherwise anyone who observed a payer's
 /// nonce could spend it on their behalf with a forged signature.
 pub fn verify(auth: &X402Authorization, spent: &NonceCache, now: i64) -> Result<()> {
+    if !has_nonce_shape(&auth.nonce) {
+        return Err(OpenCompanyError::InvalidRequest(
+            "x402 authorization nonce is not a valid mint_nonce value".into(),
+        ));
+    }
+
     let msg = canonical_bytes(
         &auth.agent_id,
         &auth.amount,
@@ -491,6 +514,67 @@ mod test {
         assert!(
             verify(&auth, &spent, 0).is_err(),
             "a timestamp whose distance from now cannot be held in an i64 must be refused"
+        );
+    }
+
+    /// Builds a validly-signed authorization around an arbitrary nonce, so a
+    /// test can prove `verify` rejects a malformed nonce on its own merits
+    /// rather than piggybacking on a broken signature.
+    fn authorization_with_nonce(
+        signer: &LocalSigner,
+        ch: &X402Challenge,
+        now: i64,
+        nonce: &str,
+    ) -> X402Authorization {
+        let agent_id = signer.agent_id();
+        let msg = canonical_bytes(
+            &agent_id,
+            &ch.amount,
+            &ch.recipient,
+            &ch.asset,
+            &ch.network,
+            nonce,
+            now,
+        );
+        X402Authorization {
+            agent_id,
+            amount: ch.amount.clone(),
+            recipient: ch.recipient.clone(),
+            asset: ch.asset.clone(),
+            network: ch.network.clone(),
+            nonce: nonce.to_string(),
+            timestamp: now,
+            signature_b58: signer.sign_b58(&msg),
+        }
+    }
+
+    #[test]
+    fn an_oversized_nonce_is_refused_before_touching_the_cache() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let oversized = "A".repeat(NONCE_LEN + 1);
+        let auth = authorization_with_nonce(&signer, &sample_challenge(), now, &oversized);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, now).is_err(),
+            "a validly-signed authorization around an oversized nonce must still be refused, \
+             so a counterparty cannot grow the shared cache with unbounded nonce strings"
+        );
+    }
+
+    #[test]
+    fn a_nonce_outside_the_base64url_alphabet_is_refused() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let mut malformed = mint_nonce(&OsTokens);
+        malformed.replace_range(0..1, "/");
+        let auth = authorization_with_nonce(&signer, &sample_challenge(), now, &malformed);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, now).is_err(),
+            "a nonce containing a character mint_nonce never produces must be refused"
         );
     }
 
