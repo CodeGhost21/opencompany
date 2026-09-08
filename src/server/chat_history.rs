@@ -1257,9 +1257,8 @@ async fn attach_referral_origins(
                     // FOR the asker — "you are the only one who has seen it" —
                     // in a channel, over the name of an agent that is not even
                     // on this desk. Only the other desk's own words survive.
-                    if let Some((answer, _)) = view
-                        .text
-                        .split_once(crate::runtime::hivemind::RELAY_NOTE_MARKER)
+                    if let Some((answer, _)) =
+                        view.text.split_once(crate::ports::types::RELAY_NOTE_MARKER)
                     {
                         view.text = answer.to_string();
                     }
@@ -3416,7 +3415,7 @@ mod referral_origin_test {
         let note = format!(
             "{}product_designer on the Design desk answered what you asked them. \
              This did not appear in your channel — you are the only one who has seen it.",
-            crate::runtime::hivemind::RELAY_NOTE_MARKER
+            crate::ports::types::RELAY_NOTE_MARKER
         );
         // No reply follows, so the fallback renders this relay.
         for event in referral_leg(

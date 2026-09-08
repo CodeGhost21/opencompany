@@ -1502,29 +1502,6 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
 #[cfg(test)]
 pub(crate) const REFERRAL_MAX_HOPS: u32 = 4;
 
-/// Separates the other desk's actual answer from the note addressed to the
-/// asker, in a returning relay.
-///
-/// # Why the two have to be separable
-///
-/// The relay is normally dropped from the projection, so the note is private to
-/// the asker and can say things only the asker should read. But the drop is
-/// conditional: if the asker's report never lands — a failed turn, an empty
-/// model response — the relay renders instead, because a line in the wrong
-/// voice is a smaller failure than an answer nobody can see.
-///
-/// That fallback used to publish the note along with it. An operator watching
-/// #engineering was told "you are the only one who has seen it" by an agent
-/// that is not on their desk. So the answer goes FIRST and everything the host
-/// added goes after this marker, and the projection renders only what precedes
-/// it — which is exactly the other desk's own words, the thing the fallback
-/// exists to preserve.
-///
-/// Written to be unmistakable rather than pretty: a bare `---` is a markdown
-/// rule an answer may legitimately contain, and truncating on one would eat
-/// half of it.
-pub(crate) const RELAY_NOTE_MARKER: &str = "\n\n[referral-note]\n";
-
 /// What the asker is handed when an answer comes home.
 ///
 /// # Why the answer is framed rather than passed through
@@ -1593,10 +1570,12 @@ fn returned_answer(
         .join("\n")
     };
 
-    // Answer first, host note after the marker — see `RELAY_NOTE_MARKER`. The
-    // order is load-bearing, not stylistic: the projection keeps the prefix.
+    // Answer first, host note after the marker — see `RELAY_NOTE_MARKER` in
+    // `ports::types`. The order is load-bearing, not stylistic: the projection
+    // keeps the prefix and drops everything after it.
+    let marker = crate::ports::types::RELAY_NOTE_MARKER;
     format!(
-        "{answer}{RELAY_NOTE_MARKER}\
+        "{answer}{marker}\
          {who} on the {desk} desk answered what you asked them. This is exchange \
          {round} of {rounds} with them.\n\
          This did not appear in your channel — you are the only one who has seen it.\n\
