@@ -173,7 +173,11 @@ impl RunSupervisor {
         scheduled: bool,
     ) -> Result<(WorkflowRunContext, RunGuard)> {
         let mut map = self.inner.lock().expect("run supervisor poisoned");
-        if self.emergency.as_deref().is_some_and(|gate| gate.is_emergency()) {
+        if self
+            .emergency
+            .as_deref()
+            .is_some_and(|gate| gate.is_emergency())
+        {
             return Err(OpenCompanyError::EmergencyStop(format!(
                 "refusing to start workflow `{workflow_id}` while stopped"
             )));

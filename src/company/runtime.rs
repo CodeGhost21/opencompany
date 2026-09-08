@@ -7154,7 +7154,11 @@ impl CompanyRuntime {
     ///
     /// Returns `true` when this call released the stop, `false` when it did
     /// not (it was not engaged, or a concurrent release already cleared it).
-    pub async fn emergency_resume(self: &Arc<Self>, by: Actor, reason: Option<String>) -> Result<bool> {
+    pub async fn emergency_resume(
+        self: &Arc<Self>,
+        by: Actor,
+        reason: Option<String>,
+    ) -> Result<bool> {
         if !self.approval_gate.is_emergency() {
             return Ok(false);
         }

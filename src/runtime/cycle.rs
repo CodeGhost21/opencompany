@@ -7509,7 +7509,9 @@ members = ["writer"]
             agent: None,
             run_id: None,
         };
-        let gate = Arc::new(ManifestApprovalGate::new(manifest("supervised").policy.clone()));
+        let gate = Arc::new(ManifestApprovalGate::new(
+            manifest("supervised").policy.clone(),
+        ));
         let rt = Arc::new(
             RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
                 .with_brain(Arc::new(EffectBrain {
@@ -7555,9 +7557,11 @@ members = ["writer"]
             "a refused settle must not have minted a grant"
         );
 
-        let raw = tokio::fs::read_to_string(Bundle::new(&home_dir.path().to_path_buf(), rt.id()).journal_jsonl())
-            .await
-            .unwrap();
+        let raw = tokio::fs::read_to_string(
+            Bundle::new(home_dir.path().to_path_buf(), rt.id()).journal_jsonl(),
+        )
+        .await
+        .unwrap();
         assert!(
             !raw.contains("ApprovalResolved"),
             "a refused settle must not journal a resolution"
