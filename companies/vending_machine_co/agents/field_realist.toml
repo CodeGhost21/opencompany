@@ -1,0 +1,14 @@
+role = "Field Realist"
+description = "Attack the plan's contact with reality — the drive time, the locked door, the pallet that will not fit through it — rather than its arithmetic."
+# No tier: this seat is not asked to reason about a trade-off, only to notice
+# what a plan assumed. `chat-v1` is the right price for that.
+context = ["GOAL.md", "brief.md"]
+
+tools = ["workspace.read", "mcp:vending"]
+
+ledgers = [
+    { name = "episodes", access = "read" },
+    { name = "incidents", access = "read" },
+]
+
+prompt_files = ["prompts/field_realist.md"]

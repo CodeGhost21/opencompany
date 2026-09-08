@@ -2087,6 +2087,7 @@ impl HarnessBrain {
             .append(
                 &self.record().id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -4472,6 +4473,7 @@ impl HarnessBrain {
                                 .append(
                                     &record.id,
                                     CompanyEvent::AgentReply {
+                                        audience: Vec::new(),
                                         parent: None,
                                         task_id: response.task_id.clone(),
                                         chat_id: crate::server::ops::language::DEFAULT_DESK

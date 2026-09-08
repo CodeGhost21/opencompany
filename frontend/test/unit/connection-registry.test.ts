@@ -621,6 +621,9 @@ describe("a same-origin profile", () => {
 describe("a credentialed host on plain http", () => {
   /** Records whether anything was sent, and answers nothing useful if it was. */
   class SilentTransport implements Transport {
+    /** Test double: an abort stops the caller; there is no real work to cancel. */
+    readonly cancelsInFlight = true;
+
     calls = 0;
     async request(): Promise<never> {
       this.calls += 1;

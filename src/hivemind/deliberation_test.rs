@@ -95,7 +95,7 @@ fn the_commit_prompt_names_the_carried_topic() {
         message(1, "planner", "!propose #euler12-triangle 76576500"),
         message(2, "scout", "!support #euler12-triangle ^1 It checks out."),
     ];
-    let visible: Vec<&tinyhivemind_hive::SessionMessage> = messages.iter().collect();
+    let visible = messages.clone();
     let prompt = EpisodePrompt::new(&member, &desk, "Project Euler 12.", quorum, &[])
         .render(&turn("critic", tinyhivemind_hive::Phase::Commit), &visible);
 
@@ -270,7 +270,7 @@ fn a_support_citing_only_a_proposal_reaches_no_evidence() {
         message(1, "planner", "!propose #euler12 76576500"),
         message(2, "scout", "!evidence #euler12 ^1 The 12375th triangular."),
     ];
-    let visible: Vec<&tinyhivemind_hive::SessionMessage> = messages.iter().collect();
+    let visible = messages.clone();
     assert!(
         evidential::support_misses_evidence(
             "!support #euler12 ^1 It looks right.",
@@ -418,6 +418,8 @@ fn message(sequence: u64, agent: &str, content: &str) -> tinyhivemind_hive::Sess
             label: agent.to_owned(),
         },
         content: content.to_owned(),
+        audience: tinyhivemind_hive::aside::Audience::Desk,
+        elided: None,
     }
 }
 

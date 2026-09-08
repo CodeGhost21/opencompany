@@ -52,6 +52,22 @@ interface Props {
   directMessages?: Channel[];
   onStartDirectMessage?: (id: string) => void;
   className?: string;
+  /**
+   * Whether the channel this rail marks is the page on screen.
+   *
+   * `true` — the default, and what a rail beside its own transcript means —
+   * makes the marked row `aria-current="page"`. `false` demotes it to
+   * `aria-current="true"`: still "the one of these you are on", but not a claim
+   * to be the current *page*.
+   *
+   * It exists because this rail is pinned in the app sidebar on every section
+   * since #2130. On `#/finances/wallet` the marked channel is where Room will
+   * take you back to, not the page being read — and two nodes claiming `page`
+   * is a page a screen reader cannot locate you on, which is the same defect
+   * the section rail was reviewed for on that PR. `ChatView` passes its own
+   * `routeOpen` straight through.
+   */
+  currentPage?: boolean;
 }
 
 /**
@@ -77,7 +93,11 @@ export function ChannelRail({
   directMessages = [],
   onStartDirectMessage,
   className,
+  currentPage = true,
 }: Props) {
+  // Resolved once and threaded down, so the three row shapes cannot come to
+  // disagree about what marking the open channel means.
+  const activeAria: "page" | "true" = currentPage ? "page" : "true";
   // Section disclosure lives here rather than inside `Section`, because the
   // collapsed branch below unmounts every `Section`. Held inside them, folding
   // a section and then collapsing the rail would reopen it on expand — the
@@ -119,6 +139,7 @@ export function ChannelRail({
               key={channel.id}
               channel={channel}
               active={channel.id === activeId}
+              activeAria={activeAria}
               unread={unread[channel.id] ?? 0}
               mentions={mentions?.[channel.id] ?? 0}
               onSelect={onSelect}
@@ -142,6 +163,7 @@ export function ChannelRail({
             key={section.id}
             channel={section.channels[0]}
             active={section.channels[0]?.id === activeId}
+            activeAria={activeAria}
             unread={section.channels[0] ? (unread[section.channels[0].id] ?? 0) : 0}
             onSelect={onSelect}
           />
@@ -172,6 +194,7 @@ export function ChannelRail({
               ) : undefined
             }
             activeId={activeId}
+            activeAria={activeAria}
             unread={unread}
             mentions={mentions}
             onSelect={onSelect}
@@ -202,11 +225,13 @@ export function ChannelRail({
 function PinnedOperatorRow({
   channel,
   active,
+  activeAria,
   unread,
   onSelect,
 }: {
   channel: Channel | undefined;
   active: boolean;
+  activeAria: "page" | "true";
   unread: number;
   onSelect: (id: string) => void;
 }) {
@@ -217,7 +242,7 @@ function PinnedOperatorRow({
       <button
         type="button"
         onClick={() => onSelect(channel.id)}
-        aria-current={active ? "page" : undefined}
+        aria-current={active ? activeAria : undefined}
         title={channelSubtitle(channel) ?? undefined}
         className={cn(
           "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
@@ -246,12 +271,14 @@ function PinnedOperatorRow({
 function CompactChannelRow({
   channel,
   active,
+  activeAria,
   unread,
   mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
+  activeAria: "page" | "true";
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -263,7 +290,7 @@ function CompactChannelRow({
     <button
       type="button"
       onClick={() => onSelect(channel.id)}
-      aria-current={active ? "page" : undefined}
+      aria-current={active ? activeAria : undefined}
       // The compact row renders unread as a bare dot, so the count has to live
       // in the accessible name — the expanded row says it in text, and
       // collapsing the rail must not strip the same fact from the screen-reader
@@ -344,6 +371,7 @@ function SectionAction({
 function Section({
   section,
   activeId,
+  activeAria,
   unread,
   mentions,
   onSelect,
@@ -353,6 +381,7 @@ function Section({
 }: {
   section: ChannelSection;
   activeId: string | null;
+  activeAria: "page" | "true";
   unread: Record<string, number>;
   mentions?: Record<string, number>;
   onSelect: (id: string) => void;
@@ -423,6 +452,7 @@ function Section({
               <ChannelRow
                 channel={channel}
                 active={channel.id === activeId}
+                activeAria={activeAria}
                 unread={unread[channel.id] ?? 0}
                 mentions={mentions?.[channel.id] ?? 0}
                 onSelect={onSelect}
@@ -441,12 +471,14 @@ function Section({
 function ChannelRow({
   channel,
   active,
+  activeAria,
   unread,
   mentions,
   onSelect,
 }: {
   channel: Channel;
   active: boolean;
+  activeAria: "page" | "true";
   unread: number;
   mentions: number;
   onSelect: (id: string) => void;
@@ -458,7 +490,7 @@ function ChannelRow({
     <button
       type="button"
       onClick={() => onSelect(channel.id)}
-      aria-current={active ? "page" : undefined}
+      aria-current={active ? activeAria : undefined}
       // The row's own label is `channel.name`, so a tooltip that resolves to
       // the same string is the header's issue-#1180 duplicate in a slower
       // form: you hover for a second fact and get the one already under the

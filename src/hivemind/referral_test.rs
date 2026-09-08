@@ -469,6 +469,162 @@ async fn a_line_that_asks_nobody_refers_nothing() {
     );
 }
 
+/// **A question put to a seat on this desk is not a question of another desk.**
+///
+/// `reach` widens strictly (`local` → `channels` → `desks`), so a desk that
+/// opted in to referral may legitimately put a question to one of its own
+/// seats. The close used to describe every recorded question as being "of
+/// another desk" regardless, and a live six-day `companies/vending_machine_co`
+/// run reported "The room asked 2 questions of another desk (@fleet_tech on
+/// ops, @field_realist on ops)" — on the ops desk, naming two ops seats. An
+/// operator reading that has been told the room reached outside when it did
+/// not, which is exactly the kind of claim the close exists to make reliably.
+#[test]
+fn the_close_tells_a_local_question_from_a_crossing_one() {
+    use crate::hivemind::referral::{AskedQuestion, ReferralLedger};
+
+    let outcome = |asked: Vec<AskedQuestion>| EpisodeOutcome {
+        ending: EpisodeEnding::Exhausted,
+        turns: 4,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: ReferralLedger {
+            asked,
+            over_cap: 0,
+            failed: 0,
+        },
+    };
+    let question = |target: &str, desk: &str, crossed: bool| AskedQuestion {
+        asker: "route_planner".to_owned(),
+        target: target.to_owned(),
+        desk: desk.to_owned(),
+        returned: false,
+        crossed,
+    };
+
+    let local = outcome(vec![question("field_realist", "ops", false)]).referral_summary();
+    assert!(
+        local.contains("put 1 question to a seat on this desk (@field_realist)"),
+        "{local}"
+    );
+    assert!(
+        !local.contains("another desk"),
+        "a question that never left the desk must not be reported as crossing: {local}"
+    );
+
+    let crossing =
+        outcome(vec![question("account_manager", "commercial", true)]).referral_summary();
+    assert!(
+        crossing.contains("asked 1 question of another desk (@account_manager on commercial)"),
+        "{crossing}"
+    );
+
+    // Both in one episode: each is counted under its own heading, and the
+    // crossing one still names the desk it reached.
+    let both = outcome(vec![
+        question("account_manager", "commercial", true),
+        question("field_realist", "ops", false),
+    ])
+    .referral_summary();
+    assert!(both.contains("asked 1 question of another desk"), "{both}");
+    assert!(
+        both.contains("put 1 question to a seat on this desk"),
+        "{both}"
+    );
+}
+
+/// **Every close is a sentence, whatever the episode's referral facts were.**
+///
+/// The summary used to hang every clause off one "The room …" prefix, so an
+/// episode whose only referral fact was a failure printed "The room 1 went
+/// unanswered." — which a live `companies/vending_machine_co` run duly did.
+#[test]
+fn the_close_reads_as_english_for_every_combination_of_referral_facts() {
+    use crate::hivemind::referral::{AskedQuestion, ReferralLedger};
+
+    let outcome = |asked: Vec<AskedQuestion>, failed: u32, over_cap: u32| EpisodeOutcome {
+        ending: EpisodeEnding::Exhausted,
+        turns: 4,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: ReferralLedger {
+            asked,
+            over_cap,
+            failed,
+        },
+    };
+    let asked = || {
+        vec![AskedQuestion {
+            asker: "route_planner".to_owned(),
+            target: "account_manager".to_owned(),
+            desk: "commercial".to_owned(),
+            returned: false,
+            crossed: true,
+        }]
+    };
+
+    // A failure on its own is its own sentence, with its own subject.
+    let only_failed = outcome(Vec::new(), 1, 0).referral_summary();
+    assert!(
+        only_failed.contains("1 question went unanswered."),
+        "{only_failed}"
+    );
+    assert!(
+        !only_failed.contains("The room 1"),
+        "the failure clause was hung off a prefix it does not continue: {only_failed}"
+    );
+
+    // Plural agreement on the same clause.
+    let two_failed = outcome(Vec::new(), 2, 0).referral_summary();
+    assert!(
+        two_failed.contains("2 questions went unanswered."),
+        "{two_failed}"
+    );
+
+    // And it still composes with a question the room did ask.
+    let both = outcome(asked(), 1, 0).referral_summary();
+    assert!(
+        both.contains("The room asked 1 question of another desk"),
+        "{both}"
+    );
+    assert!(both.contains("1 question went unanswered."), "{both}");
+
+    // A cap refusal alone, likewise.
+    let capped = outcome(Vec::new(), 0, 2).referral_summary();
+    assert!(capped.starts_with(" 2 more were declined"), "{capped}");
+}
+
+/// **A desk whose name already ends in "desk" does not get a second one.**
+///
+/// Every desk in this repo is named "… desk", and the referral note appended
+/// the word unconditionally: a live run printed "@route_planner on the
+/// Operations desk desk did not answer the question."
+#[test]
+fn a_referral_note_names_a_desk_once() {
+    use crate::hivemind::referral::{returned_note, unanswered_note};
+
+    let named = returned_note("account_manager", "Commercial desk", "no idea");
+    assert!(named.contains("on the Commercial desk answered"), "{named}");
+    assert!(!named.contains("desk desk"), "{named}");
+
+    let missing = unanswered_note("route_planner", "Operations desk");
+    assert!(
+        missing.contains("on the Operations desk did not answer"),
+        "{missing}"
+    );
+    assert!(!missing.contains("desk desk"), "{missing}");
+
+    // A name that does not carry the word still gets it.
+    let bare = unanswered_note("planner", "eng");
+    assert!(bare.contains("on the eng desk did not answer"), "{bare}");
+}
+
 /// **A barred move demoted for its grammar violation must not still trigger a
 /// referral.**
 ///
@@ -579,7 +735,7 @@ async fn a_far_turn_that_does_not_finish_leaves_the_room_running() {
     assert!(outcome.referrals.asked.is_empty());
     assert!(matches!(outcome.ending, EpisodeEnding::Converged { .. }));
     assert!(
-        outcome.summary().contains("1 went unanswered"),
+        outcome.summary().contains("1 question went unanswered"),
         "{}",
         outcome.summary()
     );

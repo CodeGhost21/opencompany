@@ -73,6 +73,16 @@ pub struct HiveConfig {
     /// desk quietly goes on voting.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub moves: BTreeMap<String, Vec<String>>,
+    /// Whether two members of this desk may say something the rest of it
+    /// cannot read, and under what bounds.
+    ///
+    /// Off unless a desk says otherwise, and off for a reason that was
+    /// measured rather than assumed: upstream found a private pairwise check
+    /// buys no answer quality and costs some. What it does buy is bounded
+    /// independence and an auditable record of it — see
+    /// [`aside`](super::aside) for the whole argument.
+    #[serde(default, skip_serializing_if = "super::aside::AsideConfig::is_default")]
+    pub aside: super::aside::AsideConfig,
     /// Whether support must trace back to a stated fact rather than to another
     /// opinion.
     ///
@@ -93,11 +103,24 @@ pub struct HiveConfig {
     /// member firing it on a noisy read removes an option for the whole room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refutation_cap: Option<u32>,
-    /// Turns one member may take before the attention market damps its bids.
+    /// **Percent** of the room's grounded share above which a member's bids are
+    /// damped — not a count of turns.
     ///
-    /// Defaults to `EpisodePolicy::DEFAULT` (50), which is effectively off for
-    /// any budget a desk would actually run. Lower it on a desk where one
-    /// member reliably takes the floor.
+    /// The library compares `share * 100 > total * cap`
+    /// (`tinyhivemind_hive::attention::exceeds`), so `50` — the default — means
+    /// "damp a member holding more than half the grounded share", and it is
+    /// effectively off for any desk that is actually sharing the floor.
+    ///
+    /// The units matter and this comment used to get them wrong, which is how
+    /// shipped manifests came to set `dominance_cap = 3` believing it meant
+    /// three turns. It means **three percent**: with a handful of grounded
+    /// contributions on the floor, every member that has said anything at all
+    /// exceeds it and takes the dominance penalty on every subsequent bid,
+    /// which damps the whole room rather than its loudest seat.
+    ///
+    /// Lower it below 50 on a desk where one member reliably takes the floor,
+    /// but keep it a share: the benchmark sweeps this at 40 and 60
+    /// (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench/sweep.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dominance_cap: Option<u32>,
     /// Distinct supporters after which restating a topic scores nothing.
@@ -373,19 +396,41 @@ impl EpisodeOutcome {
             return String::new();
         }
         let mut parts = Vec::new();
-        if !ledger.asked.is_empty() {
-            let named = ledger
-                .asked
-                .iter()
-                .map(|question| format!("@{} on {}", question.target, question.desk))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let count = ledger.asked.len();
+        // Split by whether the question actually left this desk. `reach` widens
+        // strictly, so a desk that opted in to referral may legitimately put a
+        // question to one of its own seats — but calling that "another desk"
+        // tells an operator the room reached outside when it did not. A live
+        // run of `companies/vending_machine_co` reported two questions "of
+        // another desk" on the ops desk, naming two ops seats.
+        let (crossed, local): (Vec<_>, Vec<_>) =
+            ledger.asked.iter().partition(|question| question.crossed);
+        let name = |question: &&super::referral::AskedQuestion| {
+            format!("@{} on {}", question.target, question.desk)
+        };
+        if !crossed.is_empty() {
+            let named = crossed.iter().map(name).collect::<Vec<_>>().join(", ");
+            let count = crossed.len();
             let plural = if count == 1 { "question" } else { "questions" };
             parts.push(format!("asked {count} {plural} of another desk ({named})"));
         }
+        if !local.is_empty() {
+            let named = local
+                .iter()
+                .map(|question| format!("@{}", question.target))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count = local.len();
+            let plural = if count == 1 { "question" } else { "questions" };
+            parts.push(format!(
+                "put {count} {plural} to a seat on this desk ({named})"
+            ));
+        }
         if ledger.failed > 0 {
-            parts.push(format!("{} went unanswered", ledger.failed));
+            let plural = if ledger.failed == 1 { "" } else { "s" };
+            parts.push(format!(
+                "{} question{plural} went unanswered",
+                ledger.failed
+            ));
         }
         if ledger.over_cap > 0 {
             parts.push(format!(
@@ -393,7 +438,36 @@ impl EpisodeOutcome {
                 ledger.over_cap
             ));
         }
-        format!(" The room {}.", parts.join("; "))
+        // Each part is a clause whose subject is "the room", except the two
+        // counts, which carry their own — so the sentence is assembled rather
+        // than concatenated under one prefix. A live run printed "The room 1
+        // went unanswered." when an episode's only referral fact was a failure,
+        // because the prefix assumed every part continued from it.
+        let mut sentences: Vec<String> = Vec::new();
+        let room: Vec<&String> = parts
+            .iter()
+            .filter(|part| part.starts_with("asked ") || part.starts_with("put "))
+            .collect();
+        if !room.is_empty() {
+            sentences.push(format!(
+                "The room {}.",
+                room.iter()
+                    .map(|part| part.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        for part in parts
+            .iter()
+            .filter(|part| !part.starts_with("asked ") && !part.starts_with("put "))
+        {
+            let mut sentence = part.clone();
+            if let Some(first) = sentence.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            sentences.push(format!("{sentence}."));
+        }
+        format!(" {}", sentences.join(" "))
     }
 
     /// The sentence naming turns that did not finish, or nothing when they all
