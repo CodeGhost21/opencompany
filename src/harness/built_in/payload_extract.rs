@@ -108,6 +108,27 @@ fn cap_input(raw: &str) -> (&str, bool) {
 pub struct PayloadExtractor {
     model: Arc<dyn tinyinference::model::ChatModel<()>>,
     model_name: String,
+    /// What the extraction's spend is charged to.
+    ///
+    /// Carried rather than resolved here, for the reason every other one-shot
+    /// pass in this crate carries it: the call spends the company's own
+    /// credential, so it belongs on the company's ledger. Shipping without this
+    /// made a per-oversized-result model call — whose input is the payload —
+    /// invisible to the usage ledger and the per-turn spend accounting
+    /// (codex on tinyhumansai/opencompany#2153).
+    metering: Option<ExtractionMetering>,
+}
+
+/// The handles [`crate::metering::record_extraction_usage`] needs.
+#[derive(Clone)]
+struct ExtractionMetering {
+    company: crate::ports::types::CompanyId,
+    provider_slug: String,
+    store: Arc<dyn crate::ports::CompanyStore>,
+    meter: Option<Arc<dyn crate::ports::usage::UsageMeter>>,
+    /// Read off the `HarnessModel` at construction: the extractor itself holds
+    /// only a `ChatModel<()>`, which cannot name itself for telemetry.
+    model_slug: Option<crate::metering::ModelSlug>,
 }
 
 impl PayloadExtractor {
@@ -115,7 +136,7 @@ impl PayloadExtractor {
     /// company's own credential and is metered against it — the reason every
     /// other one-shot pass in this crate is constructed this way rather than
     /// resolving its own.
-    pub fn from_deps(deps: &HarnessDeps) -> Self {
+    pub fn from_deps(deps: &HarnessDeps, company: &crate::ports::types::CompanyId) -> Self {
         let model_name = deps
             .model_override
             .clone()
@@ -123,7 +144,60 @@ impl PayloadExtractor {
         Self {
             model: deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>,
             model_name,
+            metering: Some(ExtractionMetering {
+                company: company.clone(),
+                provider_slug: deps.provider_slug.clone(),
+                store: deps.store.clone(),
+                meter: deps.meter.clone(),
+                model_slug: deps.provider.telemetry_model(),
+            }),
         }
+    }
+}
+
+impl PayloadExtractor {
+    /// Charge one extraction's tokens to the company that paid for them.
+    ///
+    /// Best-effort by design, on the same rule the titling and selector paths
+    /// follow: the call has already happened and the turn is already carrying
+    /// its result, so a ledger hiccup must cost the accounting row rather than
+    /// the turn.
+    async fn record_usage(&self, response: &tinyinference::model::ModelResponse) {
+        let Some(metering) = self.metering.as_ref() else {
+            return;
+        };
+        let usage = usage_from(response);
+        crate::metering::record_extraction_usage(
+            &usage,
+            &metering.provider_slug,
+            metering.model_slug,
+            &metering.company,
+            metering.store.as_ref(),
+            metering.meter.as_deref(),
+        )
+        .await;
+    }
+}
+
+/// The tokens and charged cost one response reports.
+///
+/// Reads the provider's charged amount out of response metadata the same way
+/// the titling pass does, so a managed provider's real dollar figure is used in
+/// preference to a local estimate.
+fn usage_from(response: &tinyinference::model::ModelResponse) -> crate::ports::types::TokenUsage {
+    let tokens = response.usage.unwrap_or_default();
+    let cost_usd = response
+        .raw
+        .as_ref()
+        .and_then(|raw| raw.pointer("/openhuman_usage_meta/charged_amount_usd"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|c| c.is_finite() && *c > 0.0)
+        .unwrap_or(0.0);
+    crate::ports::types::TokenUsage {
+        input: tokens.input_tokens,
+        output: tokens.output_tokens,
+        cached_input: tokens.cache_read_tokens,
+        cost_usd,
     }
 }
 
@@ -235,6 +309,11 @@ impl PayloadSummarizer for PayloadExtractor {
                 }
             };
 
+        // Before anything is decided about the answer: the tokens are spent
+        // either way, and an extraction that is later rejected as `NotNeeded`
+        // cost exactly as much as one that is used.
+        self.record_usage(&response).await;
+
         let summary = response.text();
         if summary.trim().is_empty() {
             tracing::warn!(
@@ -311,6 +390,10 @@ mod tests {
         PayloadExtractor {
             model: Arc::new(Scripted(behaviour)),
             model_name: "test-model".to_string(),
+            // No company handles under test here: these cases are about which
+            // `SummarizeOutcome` each branch yields. The metering path is
+            // exercised where the ledger and meter live.
+            metering: None,
         }
     }
 

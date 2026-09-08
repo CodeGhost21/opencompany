@@ -1213,7 +1213,7 @@ pub fn build_agent(
         // bounded model call — built `from_deps` like every other one-shot pass
         // here, so it spends the company's own credential and meters against it.
         .payload_summarizer(std::sync::Arc::new(
-            crate::harness::payload_extract::PayloadExtractor::from_deps(deps),
+            crate::harness::payload_extract::PayloadExtractor::from_deps(deps, company),
         ))
         .model_name(model)
         .workspace_dir(workspace)
