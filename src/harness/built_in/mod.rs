@@ -122,6 +122,10 @@ pub mod paypal;
 /// `planning`, with the host gathering the evidence and verifying every
 /// prerequisite the model claims. See [`planning`].
 pub mod planning;
+/// Issue #6014: task-aware extraction of an oversized tool result — one
+/// bounded model call that keeps what answers the turn, in place of a byte cut
+/// that keeps whatever happened to come first. See [`payload_extract`].
+pub mod payload_extract;
 pub mod policy;
 pub mod provider;
 /// Issue #244: `publish_artifact` — the only way a workspace file becomes a
@@ -4316,18 +4320,26 @@ impl HarnessPool {
                 crate::turn_stream::LiveRoute::Workflow { .. } => None,
             })
             .or_else(|| chat.chat_id.map(str::to_string));
-        let (outcome, turn_costs) = crate::runtime::delegation::with_turn_conversation(
-            turn_chat,
-            deps.approval_requests.turn_scoped(agent.run_with_steer(
-                &augmented,
-                steer,
-                stream_ctx,
-                run_sink.clone(),
-                chat_seed_request,
-                // The caller's own, not read off `live` (#1890 I). A turn can
-                // have a conversation and stream nothing.
-                chat,
-            )),
+        // Issue #6014: what this turn is for, in scope for its whole duration, so
+        // an oversized tool result can be extracted against the task instead of
+        // cut on a byte boundary. `operator_words` for the reason its own docs
+        // give — `message` here is the composed text and carries the cycle's
+        // briefings, which are not what anybody asked for.
+        let (outcome, turn_costs) = crate::runtime::delegation::with_task_hint(
+            crate::runtime::delegation::operator_words(message).to_string(),
+            crate::runtime::delegation::with_turn_conversation(
+                turn_chat,
+                deps.approval_requests.turn_scoped(agent.run_with_steer(
+                    &augmented,
+                    steer,
+                    stream_ctx,
+                    run_sink.clone(),
+                    chat_seed_request,
+                    // The caller's own, not read off `live` (#1890 I). A turn can
+                    // have a conversation and stream nothing.
+                    chat,
+                )),
+            ),
         )
         .await;
         // Issue B-120: bank what the turn spent BEFORE its result is unwrapped.
