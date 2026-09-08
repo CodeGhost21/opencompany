@@ -989,6 +989,9 @@ async fn a_row_missing_a_required_field_is_refused_at_the_write() {
     let message = format!("{error}");
     assert!(message.contains("evidence"), "{message}");
     assert!(message.contains("f1"), "{message}");
+    // The description is what tells whoever filled it in wrong what belongs
+    // there, so the refusal carries it.
+    assert!(message.contains("What actually happened"), "{message}");
 
     // Nothing was stored: a refused write must not leave the row behind.
     let read = read(&ctx, &spec, &Query::default()).await.expect("read");

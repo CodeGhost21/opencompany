@@ -467,7 +467,7 @@ async fn record_amending(
              not be readable back — it would be reported under the ledger's unreadable rows \
              instead of appearing in its section. Send {} in this same call. `{}` declares: {}.",
             spec.slug,
-            name_list(&missing),
+            described_list(&missing, spec),
             name_list(&missing),
             spec.slug,
             name_list(&declared),
@@ -689,6 +689,29 @@ fn name_list(names: &[&str]) -> String {
     names
         .iter()
         .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// [`name_list`], with each field's description alongside its name.
+///
+/// A caller who left a field out is told what belongs there in the same
+/// refusal, rather than having to read the spec back to find out.
+fn described_list(names: &[&str], spec: &LedgerSpec) -> String {
+    names
+        .iter()
+        .map(|name| {
+            match spec
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .map(|field| field.description.trim())
+                .filter(|description| !description.is_empty())
+            {
+                Some(description) => format!("`{name}` ({description})"),
+                None => format!("`{name}`"),
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
