@@ -1195,6 +1195,26 @@ pub fn build_agent(
             tool_result_budget_bytes: TOOL_RESULT_BUDGET_BYTES,
             ..Default::default()
         })
+        // Issue #6014: extract the answering content from an oversized tool
+        // result instead of cutting it on a byte boundary.
+        //
+        // `ContextConfig` has carried the threshold this fires at
+        // (`summarizer_payload_threshold_tokens`, 4000) since before this crate
+        // existed, and `ToolOutputMiddleware` has consulted it on every tool
+        // result — but the builder defaults the summarizer itself to `None`, so
+        // the whole path was inert here and the byte cut was the only thing
+        // bounding a large payload. That cut keeps whatever came first: a
+        // thirty-issue listing reached the model as two issues, and the agent
+        // reported two.
+        //
+        // The upstream implementation dispatches a sub-agent, which this crate
+        // cannot use (see `toolbelt`'s v1 note on spawn tools under
+        // multi-tenancy), so `PayloadExtractor` serves the same trait with one
+        // bounded model call — built `from_deps` like every other one-shot pass
+        // here, so it spends the company's own credential and meters against it.
+        .payload_summarizer(std::sync::Arc::new(
+            crate::harness::payload_extract::PayloadExtractor::from_deps(deps, company),
+        ))
         .model_name(model)
         .workspace_dir(workspace)
         .agent_definition_name(agent_definition_name)

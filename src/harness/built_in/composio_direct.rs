@@ -68,8 +68,40 @@ fn v3_base() -> String {
     format!("{DIRECT_BASE_URL}/api/v3")
 }
 
-/// How many rows one page pulls. Composio's own maximum for these endpoints.
-const PAGE_LIMIT: &str = "200";
+/// How many rows one `/tools` page pulls.
+///
+/// Was `200`, described here as "Composio's own maximum for these endpoints" —
+/// a phrase that was wrong twice over: it is not the maximum, and "these
+/// endpoints" is what let one number govern two that answer to different
+/// limits (see [`TOOLKITS_PAGE_LIMIT`]).
+/// That is not what the API documents — `/tools` accepts `limit` up to **1000**
+/// — and `tinyhumansai/backend` has been paging the same endpoint at 1000 since
+/// before this client existed (`REST_PAGE_LIMIT` in
+/// `controllers/agentIntegrations/composio/listTools.ts`). The old value made
+/// the three-page budget a 600-row ceiling, which GitHub's 893-action catalogue
+/// overflows: an agent asking for repo-scoped issue actions was handed 600 rows
+/// that did not contain them and concluded, reasonably and wrongly, that the
+/// capability did not exist.
+///
+/// At 1000 the same three pages reach 3000 rows, GitHub fits in a single
+/// request, and the round-trip count drops with it.
+const TOOLS_PAGE_LIMIT: &str = "1000";
+
+/// How many rows one `/toolkits` page pulls.
+///
+/// **Deliberately not [`TOOLS_PAGE_LIMIT`].** The two endpoints shared one
+/// constant until review caught it, and the justification above is about
+/// `/tools` alone — the 1000 is what the tools endpoint documents and what
+/// `listTools.ts` has always paged it at. Nothing in that reasoning transfers
+/// to the provider catalogue, and applying it there was an unevidenced
+/// widening: the two would keep moving together for a reason that only holds
+/// for one of them.
+///
+/// 500 is what `tinyhumansai/backend` fetches the catalogue at
+/// (`CATALOG_FETCH_LIMIT` in `services/composio/catalog.ts`), against the same
+/// API, in production. The directory is ~1501 entries, so this still pages —
+/// it is a page size, not a ceiling on the listing.
+const TOOLKITS_PAGE_LIMIT: &str = "500";
 
 /// How many pages one listing will follow before it stops.
 ///
@@ -212,11 +244,71 @@ impl DirectComposio {
     /// restates it — same endpoint, same `toolkit_versions=latest` pin (without
     /// it v3 answers from a snapshot that lists nothing for any toolkit
     /// published since launch), same envelope.
-    pub(crate) async fn list_tools(&self, toolkits: &[String]) -> Result<ComposioToolsResponse> {
+    pub(crate) async fn list_tools(
+        &self,
+        toolkits: &[String],
+        // Full-text narrowing, applied by Composio over each action's name,
+        // slug and description (`search`), and its declared tags (`tags`).
+        //
+        // Both were absent before, and their absence is what made discovery
+        // fail rather than merely be coarse: the tool surface has taken a
+        // `search` argument all along, but applied it CLIENT-SIDE to whatever
+        // survived the page budget. Searching "issue" among 600 rows cannot
+        // return an action sitting in the 293 that were dropped, so a narrowing
+        // the caller asked for silently narrowed nothing. `tinyhumansai/backend`
+        // threads `tags` server-side for the same reason.
+        //
+        // A `None` for either sends no parameter at all, which leaves the query
+        // exactly as it was — the widening is opt-in, so no existing caller
+        // changes behaviour.
+        search: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> Result<ComposioToolsResponse> {
         let mut params: Vec<(&str, String)> = vec![
-            ("limit", PAGE_LIMIT.to_string()),
+            ("limit", TOOLS_PAGE_LIMIT.to_string()),
             ("toolkit_versions", "latest".to_string()),
         ];
+        if let Some(term) = search.map(str::trim).filter(|term| !term.is_empty()) {
+            params.push(("search", term.to_string()));
+        }
+        let tag_values: Vec<&str> = tags
+            .unwrap_or(&[])
+            .iter()
+            .map(|tag| tag.trim())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        // Curated preview when the caller has narrowed nothing (the shape
+        // `tinyhumansai/backend` documents: "when `important` is omitted,
+        // server-side defaults the filter to curated-only — returning ~50
+        // 'featured' tools per toolkit").
+        //
+        // That default does NOT hold on this raw REST path — omitting the
+        // parameter here returns the whole catalogue, which is how a bare
+        // `toolkits: ["github"]` came back as 893 actions and overflowed the
+        // page budget. So the curation is requested explicitly.
+        //
+        // Gated on having no `search` and no `tags`, and that is the whole
+        // design: an unnarrowed call is a **browse**, and ~50 featured actions
+        // is a far better answer to "what can GitHub do" than 893 rows the
+        // reader cannot skim and the budget cannot carry. A call that names
+        // either one is a **search**, and a search must be able to reach the
+        // long tail — `GITHUB_LIST_REPOSITORY_ISSUES` is not featured, and it is
+        // exactly what the last agent went looking for and reported as absent.
+        //
+        // So: browse is curated and small, search is complete. Neither is
+        // truncated silently — `render_header` states `available`, `matched` and
+        // `showing` on every listing.
+        let narrowed = search.is_some_and(|term| !term.trim().is_empty()) || !tag_values.is_empty();
+        if !narrowed {
+            params.push(("important", "true".to_string()));
+        }
+        if !tag_values.is_empty() {
+            // Comma-separated in one parameter, matching `toolkit_slug`'s
+            // handling directly below — repeating a parameter is what returned
+            // an empty body there, and there is no reason to assume this
+            // endpoint treats a second one differently.
+            params.push(("tags", tag_values.join(",")));
+        }
         let slugs: Vec<&str> = toolkits
             .iter()
             .map(|slug| slug.trim())
@@ -244,8 +336,10 @@ impl DirectComposio {
                 toolkits = ?slugs,
                 fetched = paged.items.len(),
                 dropped = paged.dropped,
-                "[composio-byok] list_tools: stopped at the page budget; narrow the toolkit list \
-                 to see the rest"
+                search,
+                tags = ?tag_values,
+                "[composio-byok] list_tools: stopped at the page budget; narrow with `search` or \
+                 `tags`, or name fewer toolkits, to see the rest"
             );
         }
         Ok(ComposioToolsResponse {
@@ -342,7 +436,7 @@ impl DirectComposio {
     /// deserialize should still be connectable.
     pub(crate) async fn list_toolkits(&self) -> Result<ComposioToolkitsResponse> {
         let paged: Paged<V3Toolkit> = self
-            .get_paged("/toolkits", &[("limit", PAGE_LIMIT.to_string())])
+            .get_paged("/toolkits", &[("limit", TOOLKITS_PAGE_LIMIT.to_string())])
             .await
             .context("Composio v3 /toolkits")?;
         if paged.dropped > 0 {
@@ -577,6 +671,9 @@ impl V3Category {
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
     #[test]
     fn a_v3_tool_keeps_the_schema_an_agent_needs_to_call_it() {
         // The whole reason this module restates the listing: `list_actions`
@@ -639,6 +736,110 @@ mod tests {
     /// itself, asserting the `x-api-key` header on the way through: the whole
     /// point of BYOK is that the *company's* key, and no other credential,
     /// reaches Composio.
+    /// The two endpoints answer to different limits, and shared one constant
+    /// until review caught it. The 1000 is justified for `/tools` only; the
+    /// catalogue is paged at what the backend proves against the same API.
+    #[test]
+    fn the_two_endpoints_do_not_share_a_page_limit() {
+        assert_eq!(TOOLS_PAGE_LIMIT, "1000");
+        assert_eq!(TOOLKITS_PAGE_LIMIT, "500");
+        assert_ne!(
+            TOOLS_PAGE_LIMIT, TOOLKITS_PAGE_LIMIT,
+            "a tools-only justification must not govern the provider catalogue"
+        );
+    }
+
+    /// A `/tools` server that records the query it was asked with.
+    ///
+    /// The existing fixture asserts on counts, which cannot see a query
+    /// parameter at all — and `important=true` changes what the *server*
+    /// returns, so a count-based assertion would pass whether it was sent or
+    /// not (tinysweeper on tinyhumansai/opencompany#2153).
+    async fn spawn_query_recorder() -> (String, Arc<Mutex<Vec<HashMap<String, String>>>>) {
+        use axum::extract::Query;
+        use axum::routing::get;
+        use axum::{Json, Router};
+
+        let seen: Arc<Mutex<Vec<HashMap<String, String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        // `/tools`, not `/api/v3/tools`: `with_v3_base_for_test` already carries
+        // the API path, exactly as the fixtures below mount it.
+        let app = Router::new().route(
+            "/tools",
+            get(move |Query(params): Query<HashMap<String, String>>| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().expect("query sink").push(params);
+                    Json(serde_json::json!({ "items": [] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (base, seen)
+    }
+
+    /// An unnarrowed browse asks for the curated set; a search must reach the
+    /// long tail, so it must not.
+    #[tokio::test]
+    async fn important_is_sent_only_for_an_unnarrowed_browse() {
+        let (base, seen) = spawn_query_recorder().await;
+        let direct = DirectComposio::new("ak_live").with_v3_base_for_test(base);
+
+        direct
+            .list_tools(&["github".to_string()], None, None)
+            .await
+            .expect("browse");
+        direct
+            .list_tools(&["github".to_string()], Some("issue"), None)
+            .await
+            .expect("search");
+        direct
+            .list_tools(
+                &["github".to_string()],
+                None,
+                Some(&["important".to_string()]),
+            )
+            .await
+            .expect("tag-narrowed");
+
+        let seen = seen.lock().expect("query sink");
+        assert_eq!(seen.len(), 3, "three calls were made");
+        assert_eq!(
+            seen[0].get("important").map(String::as_str),
+            Some("true"),
+            "an unnarrowed browse asks for the curated set: {:?}",
+            seen[0]
+        );
+        assert!(
+            !seen[1].contains_key("important"),
+            "a search must reach past the featured actions: {:?}",
+            seen[1]
+        );
+        assert!(
+            !seen[2].contains_key("important"),
+            "a tag filter is a search too: {:?}",
+            seen[2]
+        );
+        assert_eq!(
+            seen[2].get("tags").map(String::as_str),
+            Some("important"),
+            "the tag itself still travels: {:?}",
+            seen[2]
+        );
+        assert_eq!(
+            seen[1].get("search").map(String::as_str),
+            Some("issue"),
+            "the search term travels server-side: {:?}",
+            seen[1]
+        );
+    }
+
     async fn spawn_composio_v3() -> String {
         use axum::extract::Query;
         use axum::http::HeaderMap;
@@ -735,7 +936,11 @@ mod tests {
         let direct = DirectComposio::new("ak_live").with_v3_base_for_test(base);
 
         let resp = direct
-            .list_tools(&["gmail".to_string(), "  ".to_string(), "slack".to_string()])
+            .list_tools(
+                &["gmail".to_string(), "  ".to_string(), "slack".to_string()],
+                None,
+                None,
+            )
             .await
             .expect("tools");
         assert_eq!(resp.tools.len(), 1);
@@ -968,7 +1173,7 @@ mod tests {
 
         // 1. The listing the agent discovers actions through.
         let tools = direct
-            .list_tools(&["github".to_string()])
+            .list_tools(&["github".to_string()], None, None)
             .await
             .expect("list_tools");
         let target = tools

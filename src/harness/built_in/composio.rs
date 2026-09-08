@@ -787,24 +787,53 @@ mod live {
             }
         }
 
-        /// The action schemas for `toolkits` (all of them when `None`).
+        /// The action schemas for `toolkits` (all of them when `None`),
+        /// optionally narrowed server-side by `search` and `tags`.
+        ///
+        /// `search` is new (and `tags` newly honoured on the BYOK route). The
+        /// tool surface has taken a search term all along and applied it
+        /// **client-side**, over whatever survived the page budget — so a
+        /// narrowing the caller asked for could not reach an action that was
+        /// dropped before it ever arrived. Composio filters both server-side on
+        /// `/tools`; `tinyhumansai/backend` already threads `tags` for the same
+        /// reason.
         async fn list_tools(
             &self,
             toolkits: Option<&[String]>,
             tags: Option<&[String]>,
-        ) -> Result<ComposioToolsResponse> {
+            search: Option<&str>,
+        ) -> Result<(ComposioToolsResponse, bool)> {
+            // The `bool` is whether the listing was **curated** — the BYOK route
+            // asks Composio for featured actions only when nothing narrows the
+            // call, and the renderer has to say so or it reports ~50 featured
+            // rows as the toolkit's whole catalogue (codex on
+            // tinyhumansai/opencompany#2153). The response type is vendored, so
+            // the flag rides beside it rather than on it.
+            let curated = matches!(self, Self::Byok { .. })
+                && !search.is_some_and(|term| !term.trim().is_empty())
+                && !tags.is_some_and(|tags| !tags.is_empty());
             match self {
-                Self::Managed(client) => client.list_tools(toolkits, tags).await,
-                Self::Byok { direct, .. } => {
-                    if tags.is_some_and(|tags| !tags.is_empty()) {
-                        // Nothing in this repo passes tags today; say so rather
-                        // than silently narrowing to nothing if something starts.
-                        tracing::warn!(
-                            "[composio-byok] list_tools: tag filtering is not applied on the                              BYOK route; returning the unfiltered toolkit listing"
+                Self::Managed(client) => {
+                    if search.is_some_and(|term| !term.trim().is_empty()) {
+                        // The managed backend's own endpoint takes no search
+                        // parameter, so the term stays a client-side filter
+                        // there. Said out loud rather than dropped silently —
+                        // that silence is what made the BYOK route's truncation
+                        // so hard to see.
+                        tracing::debug!(
+                            "[composio] list_tools: managed route has no server-side search; \
+                             the term is applied client-side"
                         );
                     }
-                    direct.list_tools(toolkits.unwrap_or(&[])).await
+                    client
+                        .list_tools(toolkits, tags)
+                        .await
+                        .map(|resp| (resp, curated))
                 }
+                Self::Byok { direct, .. } => direct
+                    .list_tools(toolkits.unwrap_or(&[]), search, tags)
+                    .await
+                    .map(|resp| (resp, curated)),
             }
         }
 
@@ -988,9 +1017,40 @@ mod live {
     /// [`redact`] keeps the security half — the token replacement and the URL
     /// query strip — verbatim and unconditional; only the length decision moves
     /// here, where it can be sized for a body and describe its own cut.
-    fn scrubbed_ok(value: Value, secrets: &[String], what: &str) -> ToolResult {
+    fn scrubbed_ok(value: Value, secrets: &[String]) -> ToolResult {
+        // Project BEFORE serialising, and serialise before redacting.
+        //
+        // Order is the whole of it. `redact` strips URL query strings and
+        // rewrites secret substrings inside the serialised text, which leaves a
+        // string that is no longer valid JSON — so a projection attempted after
+        // it (the first cut of this) could never parse the payload and declined
+        // on every real response, silently, while the byte cut carried on
+        // dropping whole records. Projecting the structured `Value` here means
+        // the transform sees JSON, and `redact` still sees every byte that ends
+        // up in front of the model.
+        let value = catalog::project_records_value(value);
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        ToolResult::success(catalog::bound_body(redact(&text, secrets), what))
+        // No `bound_body` here any more (issue #6014).
+        //
+        // It bounded the payload to 12 KiB **inside the tool**, chosen so that
+        // "the harness's own anonymous cut never fires first" — a good trade
+        // when the only thing downstream was a byte cut that said nothing.
+        //
+        // It is the wrong trade now. The same 12 KiB also fired ahead of the
+        // per-result artifact store (so an oversized Composio result was
+        // discarded rather than written to disk and pointed at) and ahead of the
+        // task-aware extractor (whose threshold is 4000 tokens, which a
+        // pre-bounded body can never reach). Bounding first made this the one
+        // tool family whose large results could be handled by nothing but
+        // truncation — measured on a live GitHub call as 3 of 30 records
+        // surviving, and the agent correctly reporting 3.
+        //
+        // Handing the full payload downstream puts it back on the same ladder
+        // every other tool's output takes: extract against the task, else
+        // persist and hand back a path, else cut at the budget. Each of those
+        // says what it did, which was the property the pre-bound was protecting
+        // and is now protected by the mechanisms themselves.
+        ToolResult::success(redact(&text, secrets))
     }
 
     /// A scrubbed error result — the tenant token is stripped from any error
@@ -1466,7 +1526,6 @@ mod live {
                     Ok(scrubbed_ok(
                         serde_json::to_value(&resp).unwrap_or(Value::Null),
                         &secrets,
-                        "connections list",
                     ))
                 }
                 Err(err) => Ok(scrubbed_err(
@@ -1535,7 +1594,7 @@ mod live {
             // above is a security decision (allowlist intersection) and stays
             // here; `search` / `detail` / `limit` are presentation and live in
             // the pure catalogue module.
-            let request = catalog::ListRequest::parse(&args, effective.clone());
+            let mut request = catalog::ListRequest::parse(&args, effective.clone());
             tracing::debug!(
                 effective = ?effective,
                 allowlist = ?self.toolkits,
@@ -1558,8 +1617,20 @@ mod live {
                     )));
                 }
             };
-            match client.list_tools(query, None).await {
-                Ok(mut resp) => {
+            // The search term now travels to Composio rather than being applied
+            // only to what came back. `request.search` is the tool's own
+            // already-parsed terms; joined because the API takes one free-text
+            // string over name/slug/description.
+            let search_term = request.search.join(" ");
+            let search = Some(search_term.as_str()).filter(|term| !term.trim().is_empty());
+            // The parsed tags, not `None`: without this the tag narrowing added
+            // to the BYOK route was unreachable from the agent tool that is
+            // supposed to use it (CodeRabbit on tinyhumansai/opencompany#2153).
+            let tags: Option<&[String]> =
+                Some(request.tags.as_slice()).filter(|tags| !tags.is_empty());
+            match client.list_tools(query, tags, search).await {
+                Ok((mut resp, curated)) => {
+                    request.curated = curated;
                     if !self.toolkits.is_empty() {
                         resp.tools.retain(|schema| {
                             toolkit_allowed(&self.toolkits, &slug_toolkit(&schema.function.name))
@@ -1654,7 +1725,6 @@ mod live {
                 Ok(resp) => Ok(scrubbed_ok(
                     serde_json::to_value(&resp).unwrap_or(Value::Null),
                     &secrets,
-                    "authorization response",
                 )),
                 Err(err) => Ok(scrubbed_err("composio_authorize failed", &err, &secrets)),
             }
@@ -1753,7 +1823,6 @@ mod live {
                     Ok(scrubbed_ok(
                         serde_json::to_value(&resp).unwrap_or(Value::Null),
                         &secrets,
-                        &format!("`{tool}` output"),
                     ))
                 }
                 Err(err) => Ok(scrubbed_err("composio_execute failed", &err, &secrets)),

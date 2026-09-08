@@ -138,7 +138,235 @@ pub const MAX_BODY_BYTES: usize = 12 * 1024;
 /// agent that adjusts and an agent that repeats itself.
 ///
 /// `what` names the payload for the trailer, e.g. `"GITHUB_LIST_ISSUES output"`.
+/// Keys carrying a provider's *self-referential* API plumbing — the endpoints
+/// a client would call to re-fetch related collections, never a value anyone
+/// asked for.
+///
+/// **This list used to include `url`, `href` and every `*_url`, and that was
+/// wrong** (codex and CodeRabbit on tinyhumansai/opencompany#2153). The
+/// premise was that a link is never an answer. It plainly can be: "list the
+/// issues with their browser links" makes `html_url` *the* answer, and this
+/// projection runs **before** the task-aware extractor and before the artifact
+/// store, so a field dropped here cannot be recovered by anything downstream.
+///
+/// That is the exact mistake this whole change exists to correct — a
+/// task-blind reduction deciding what matters without knowing what was asked.
+/// Dropping generic link fields bought about 1.6x on measured payloads; the
+/// extraction pass is worth orders of magnitude more and knows the task. The
+/// trade is not close.
+///
+/// What remains are the `*_url` siblings that are unambiguously navigation
+/// *within the API*: they address collections rather than the record, and a
+/// caller that wants them has the record's own id to build them from.
+fn is_link_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "labels_url"
+            | "comments_url"
+            | "events_url"
+            | "timeline_url"
+            | "notifications_url"
+            | "collaborators_url"
+            | "contributors_url"
+            | "subscribers_url"
+            | "subscription_url"
+            | "commits_url"
+            | "git_commits_url"
+            | "issue_comment_url"
+            | "issue_events_url"
+            | "assignees_url"
+            | "branches_url"
+            | "tags_url"
+            | "blobs_url"
+            | "trees_url"
+            | "statuses_url"
+            | "languages_url"
+            | "stargazers_url"
+            | "forks_url"
+            | "downloads_url"
+            | "releases_url"
+            | "deployments_url"
+            | "compare_url"
+            | "merges_url"
+            | "archive_url"
+            | "hooks_url"
+            | "keys_url"
+            | "teams_url"
+            | "milestones_url"
+            | "pulls_url"
+    )
+}
+
+/// The single field that stands in for a nested object — a user becomes its
+/// `login`, a label its `name`, a milestone its `title`.
+///
+/// Tried in order, so an object carrying several answers the most specific.
+const NESTED_STAND_INS: [&str; 5] = ["login", "name", "title", "slug", "id"];
+
+/// Reduce one record to the fields that carry an answer.
+///
+/// Scalars are kept as they are. A nested object collapses to its stand-in
+/// (`user` → `"octocat"`), an array of objects to the list of theirs
+/// (`labels` → `["bug", "p2"]`). Anything else — a nested structure with no
+/// obvious name, an empty container — is dropped: it costs bytes and answers
+/// nothing, and a model that needs it can ask the action for that record by id.
+fn project_record(value: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (key, val) in map {
+        if is_link_key(key) {
+            continue;
+        }
+        match val {
+            serde_json::Value::Object(inner) => {
+                if let Some(stand_in) = NESTED_STAND_INS
+                    .iter()
+                    .find_map(|name| inner.get(*name).filter(|v| !v.is_null()))
+                {
+                    out.insert(key.clone(), stand_in.clone());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                let names: Vec<serde_json::Value> = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        serde_json::Value::Object(inner) => NESTED_STAND_INS
+                            .iter()
+                            .find_map(|name| inner.get(*name).filter(|v| !v.is_null()))
+                            .cloned(),
+                        scalar if !scalar.is_null() => Some(scalar.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !names.is_empty() {
+                    out.insert(key.clone(), serde_json::Value::Array(names));
+                }
+            }
+            scalar => {
+                if !scalar.is_null() {
+                    out.insert(key.clone(), scalar.clone());
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Project an array-of-records payload down to its answering fields, returning
+/// `None` when the body is not that shape.
+///
+/// The gap this fills is named in [`bound_body`]'s own docs: "there is no
+/// generic argument that makes *that* smaller". True of the action's
+/// **arguments** — the narrowing lives in the provider's own parameters — but
+/// not of its **encoding**. Most provider output is a list of records, and the
+/// bulk of each record is navigation rather than answer. Cutting the payload on
+/// a byte boundary keeps whole records and discards whole records; projecting it
+/// keeps every record and discards the parts of each that nobody asked for.
+///
+/// Deliberately conservative: a payload that is not a list of objects is left
+/// alone, and every scalar the records do carry survives. This is a lossy
+/// transform, so it is reported (see the `[composio] projected` log) rather than
+/// applied invisibly — and the trailer `bound_body` appends when the projection
+/// is still too big says the same thing it always did.
+/// Project an already-parsed payload, returning it unchanged when it holds no
+/// array of records. The entry point [`scrubbed_ok`] uses, because by the time
+/// a body is a `String` it has been through [`redact`] and is no longer JSON.
+pub fn project_records_value(mut value: serde_json::Value) -> serde_json::Value {
+    let before = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(0);
+    if before <= MAX_BODY_BYTES {
+        // Nothing to gain: the payload already fits, and projecting it would
+        // drop fields for no reason.
+        return value;
+    }
+    if project_in_place(&mut value) {
+        let after = serde_json::to_string(&value)
+            .map(|s| s.len())
+            .unwrap_or(before);
+        tracing::info!(
+            from_bytes = before,
+            to_bytes = after,
+            ratio = format!("{:.1}x", before as f64 / after.max(1) as f64),
+            fits_now = after <= MAX_BODY_BYTES,
+            "[composio] projected an array-of-records payload to its answering fields"
+        );
+    }
+    value
+}
+
+pub fn project_records(body: &str) -> Option<String> {
+    let mut parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    // Rewrites every record array in place, wherever it sits. The first cut of
+    // this looked one level down and found nothing: Composio returns the
+    // provider payload inside its own result envelope, so the records are never
+    // where a naive reader expects them, and the shape differs per action. A
+    // recursive walk needs no table of envelope names and cannot be defeated by
+    // the next provider nesting one level deeper.
+    let projected_any = project_in_place(&mut parsed);
+    projected_any.then(|| serde_json::to_string(&parsed).ok())?
+}
+
+/// Project every array-of-records found anywhere in `value`, in place.
+///
+/// Returns whether anything was projected, so the caller can tell "nothing to
+/// do" from "done" without comparing serialisations.
+fn project_in_place(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => {
+            // The premise is many records sharing a shape; one object is better
+            // shown as it came, and a list of scalars has nothing to prune.
+            if items.len() >= 2 && items.iter().all(serde_json::Value::is_object) {
+                for item in items.iter_mut() {
+                    *item = project_record(item);
+                }
+                return true;
+            }
+            let mut any = false;
+            for item in items.iter_mut() {
+                any |= project_in_place(item);
+            }
+            any
+        }
+        serde_json::Value::Object(map) => {
+            let mut any = false;
+            for (_, val) in map.iter_mut() {
+                any |= project_in_place(val);
+            }
+            any
+        }
+        _ => false,
+    }
+}
+
 pub fn bound_body(body: String, what: &str) -> String {
+    if body.len() <= MAX_BODY_BYTES {
+        return body;
+    }
+    // Try to keep every record before resorting to keeping only the first few.
+    let body = match project_records(&body) {
+        Some(projected) if projected.len() < body.len() => {
+            tracing::info!(
+                what,
+                from_bytes = body.len(),
+                to_bytes = projected.len(),
+                ratio = format!("{:.1}x", body.len() as f64 / projected.len().max(1) as f64),
+                fits_now = projected.len() <= MAX_BODY_BYTES,
+                "[composio] projected an array-of-records payload to its answering fields"
+            );
+            projected
+        }
+        _ => {
+            tracing::info!(
+                what,
+                bytes = body.len(),
+                head = body.chars().take(180).collect::<String>(),
+                "[composio] no array-of-records to project; bounding the payload as it came"
+            );
+            body
+        }
+    };
     if body.len() <= MAX_BODY_BYTES {
         return body;
     }
@@ -226,6 +454,23 @@ pub struct ListRequest {
     /// Lowercased search words. Every word must match the slug or the
     /// description.
     pub search: Vec<String>,
+    /// Composio's own action tags, forwarded server-side.
+    ///
+    /// Carried through to `LiveClient::list_tools` rather than applied here:
+    /// tags are a property of the catalogue, not of the text this module
+    /// renders, so a tag filter applied client-side could only narrow what
+    /// already survived the page budget — the same defect the server-side
+    /// `search` forwarding fixed.
+    pub tags: Vec<String>,
+    /// Whether the listing that came back was **curated** — Composio's featured
+    /// actions rather than the toolkit's whole catalogue.
+    ///
+    /// Set by the caller from what the client actually asked for, not derived
+    /// here: only the BYOK route requests curation, and only when nothing
+    /// narrows the call. Without it the header reports ~50 featured rows as the
+    /// number "available", and an agent taking an inventory of GitHub is told
+    /// that is everything (codex on tinyhumansai/opencompany#2153).
+    pub curated: bool,
     /// How much per action to render.
     pub detail: Detail,
     /// Entry cap, already clamped to the mode's ceiling.
@@ -243,6 +488,19 @@ impl ListRequest {
             .and_then(Value::as_str)
             .map(search_terms)
             .unwrap_or_default();
+        let tags = args
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         let limit = args
             .get("limit")
             .and_then(Value::as_u64)
@@ -251,6 +509,10 @@ impl ListRequest {
         Self {
             toolkits,
             search,
+            tags,
+            // The caller sets this from the client's own answer; parsing the
+            // arguments cannot know which route served them.
+            curated: false,
             detail,
             limit,
         }
@@ -380,9 +642,21 @@ fn render_header(available: usize, matched: usize, shown: usize, request: &ListR
     } else {
         format!(" matching `{}`", request.search.join(" "))
     };
-    let mut header = format!(
-        "Composio actions in {scope} — {available} available, {matched}{filter}, showing {shown}.\n"
-    );
+    let mut header = if request.curated {
+        // Not "available": these are Composio's featured actions, and the long
+        // tail is reachable only by narrowing. Saying "available" here is what
+        // told an agent that ~50 rows were all GitHub could do.
+        format!(
+            "Composio actions in {scope} — showing {shown} of {available} **featured** actions{filter}. \
+             This is a curated preview, not the full catalogue: many more are callable but not \
+             listed. Narrow with `search` or `tags` to reach them, e.g. \
+             {LIST_TOOLS_TOOL}({{\"toolkits\": [\"<slug>\"], \"search\": \"issue\"}}).\n"
+        )
+    } else {
+        format!(
+            "Composio actions in {scope} — {available} available, {matched}{filter}, showing {shown}.\n"
+        )
+    };
     match request.detail {
         Detail::Names => header.push_str(&format!(
             "Each line is `SLUG — description`. Read one action's parameters before calling it:\n  \
@@ -473,20 +747,46 @@ fn render_empty(available: usize, request: &ListRequest) -> String {
         [] => "every connected toolkit".to_string(),
         toolkits => toolkits.join(", "),
     };
-    if available == 0 {
+    // Whether the *server* was asked to narrow. This is the distinction that
+    // matters now that `search` and `tags` travel to Composio: an empty
+    // response to a narrowed query says nothing about the toolkit, only about
+    // the filter, and `available` is the count of what came back rather than
+    // what exists (codex on tinyhumansai/opencompany#2153).
+    let filter = match (request.search.is_empty(), request.tags.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(format!("`{}`", request.search.join(" "))),
+        (true, false) => Some(format!("tags `{}`", request.tags.join(", "))),
+        (false, false) => Some(format!(
+            "`{}` with tags `{}`",
+            request.search.join(" "),
+            request.tags.join(", ")
+        )),
+    };
+    let Some(filter) = filter else {
+        // Unnarrowed and empty is the only case that says anything about the
+        // toolkit itself.
         return format!(
             "Composio actions in {scope} — none. This toolkit has no callable actions available to \
              this company (it may not be connected). Check `composio_list_connections`, and do not \
              guess an action slug.\n"
         );
-    }
+    };
+    // Narrowed and empty. Saying "no callable actions (it may not be
+    // connected)" here would be a lie about a connected toolkit, and the
+    // expensive kind: an agent told a capability does not exist stops looking
+    // for it, which is the exact failure this listing was rewritten to end.
+    let total = if available == 0 {
+        "The filter was applied by Composio, so this is what it matched, not what the toolkit has."
+            .to_string()
+    } else {
+        format!("{available} returned, 0 matching after filtering.")
+    };
     format!(
-        "Composio actions in {scope} — {available} available, 0 matching `{search}`.\n\
-         Nothing matched those words. Try fewer or different words (the search matches the action \
-         slug and its description), or list everything with \
+        "Composio actions in {scope} — nothing matched {filter}. {total}\n\
+         Try fewer or different words (the search matches the action slug and its description), \
+         drop the tags, or list the toolkit unnarrowed with \
          {LIST_TOOLS_TOOL}({{\"toolkits\": [\"<slug>\"]}}). Do NOT guess a slug that was not \
-         listed.\n",
-        search = request.search.join(" ")
+         listed, and do not conclude the toolkit is unavailable from this result.\n"
     )
 }
 
@@ -507,6 +807,11 @@ pub fn list_tools_parameters_schema() -> Value {
             "search": {
                 "type": "string",
                 "description": "Narrow the listing to actions whose slug or description contains ALL of these words (case-insensitive), e.g. `list issues` or `send email`. Pass an exact slug here with `detail: \"schemas\"` to read just that action's parameters."
+            },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Composio action tags to narrow by, server-side (e.g. `important`). Combine with `search` to cut a large toolkit down before it is paged."
             },
             "detail": {
                 "type": "string",
@@ -1110,6 +1415,8 @@ mod tests {
         ListRequest {
             toolkits: toolkits.iter().map(|t| t.to_string()).collect(),
             search: search_terms(search),
+            tags: Vec::new(),
+            curated: false,
             detail,
             limit: detail.default_limit(),
         }
@@ -1280,9 +1587,85 @@ mod tests {
             &actions,
             &request("quantum teleport", Detail::Names, &["gmail"]),
         );
-        assert!(out.contains("0 matching `quantum teleport`"), "{out}");
+        assert!(out.contains("nothing matched `quantum teleport`"), "{out}");
+        assert!(
+            out.contains("40 returned"),
+            "the real total is stated: {out}"
+        );
         assert!(out.contains("Do NOT guess a slug"), "{out}");
         assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
+    }
+
+    /// A curated listing must not present itself as the full catalogue.
+    ///
+    /// An unnarrowed BYOK browse asks Composio for featured actions only, so
+    /// the count that comes back is a preview. Calling it "available" is what
+    /// told an agent taking an inventory of GitHub that ~50 rows were
+    /// everything it could do (codex on tinyhumansai/opencompany#2153).
+    #[test]
+    fn a_curated_listing_says_it_is_a_preview() {
+        let actions = catalogue("github", 50);
+        let mut curated = request("", Detail::Names, &["github"]);
+        curated.curated = true;
+        let out = render(&actions, &curated);
+
+        assert!(out.contains("featured"), "curation must be named: {out}");
+        assert!(
+            out.contains("not the full catalogue"),
+            "the preview must say what it is not: {out}"
+        );
+        assert!(
+            out.contains("search"),
+            "the way to reach the rest must be given: {out}"
+        );
+        assert!(
+            !out.contains("50 available"),
+            "a curated count is not what is available: {out}"
+        );
+
+        // An unnarrowed listing that was NOT curated still reports plainly.
+        let plain = render(&actions, &request("", Detail::Names, &["github"]));
+        assert!(plain.contains("50 available"), "{plain}");
+        assert!(!plain.contains("featured"), "{plain}");
+    }
+
+    /// A server-side filter that matches nothing says so about the *filter*.
+    ///
+    /// Once `search` and `tags` travel to Composio, a narrowed query that
+    /// matches nothing comes back with zero rows — and the old message read
+    /// that as "this toolkit has no callable actions (it may not be
+    /// connected)". That is a lie about a connected toolkit, and the expensive
+    /// kind: an agent told a capability does not exist stops looking for it,
+    /// which is the failure this whole listing was rewritten to end (codex on
+    /// tinyhumansai/opencompany#2153).
+    #[test]
+    fn an_empty_server_filtered_response_does_not_blame_the_connection() {
+        let mut narrowed = request("quantum teleport", Detail::Names, &["gmail"]);
+        narrowed.tags = vec!["important".to_string()];
+        // Zero rows back, because the server did the filtering.
+        let out = render(&[], &narrowed);
+
+        assert!(
+            !out.contains("may not be connected"),
+            "an empty filter result says nothing about the connection: {out}"
+        );
+        assert!(
+            !out.contains("no callable actions"),
+            "the toolkit was not shown to be empty: {out}"
+        );
+        assert!(
+            out.contains("quantum teleport") && out.contains("important"),
+            "both halves of the filter are named: {out}"
+        );
+        assert!(
+            out.contains("not what the toolkit has"),
+            "the count must be disclosed as the filter's, not the toolkit's: {out}"
+        );
+
+        // The unnarrowed empty case still points at the connection, which is
+        // the one time that is the right thing to say.
+        let bare = render(&[], &request("", Detail::Names, &["github"]));
+        assert!(bare.contains("may not be connected"), "{bare}");
     }
 
     /// An empty catalogue is a different fact from an empty search, and points
@@ -2122,6 +2505,119 @@ mod tests {
         assert!(
             web_call_deflection(&connected, "https://api.linkedin.com/rest/posts").is_some(),
             "the LinkedIn API host must be deflected"
+        );
+    }
+}
+
+#[cfg(test)]
+mod projection_prototype_tests {
+    /// The projection runs **before** the task-aware extractor and before the
+    /// artifact store, so anything it drops is gone for every consumer. A link
+    /// can be the answer — "list the issues with their browser links" — and the
+    /// first cut of this dropped `url`, `href` and every `*_url` on the premise
+    /// that a link never is (codex and CodeRabbit on
+    /// tinyhumansai/opencompany#2153).
+    #[test]
+    fn answering_links_survive_the_projection() {
+        // Two records, not one: the projection declines an array shorter than
+        // that, so a single-record payload would pass every assertion below
+        // without the projection having run at all.
+        let record = |n: u64| {
+            serde_json::json!({
+                "number": n,
+                "title": "flaky login",
+                "url": format!("https://api.github.com/repos/o/r/issues/{n}"),
+                "html_url": format!("https://github.com/o/r/issues/{n}"),
+                "href": format!("https://example.test/{n}"),
+                "avatar_urls": ["https://example.test/a.png"],
+                "comments_url": format!("https://api.github.com/repos/o/r/issues/{n}/comments"),
+                "labels_url": format!("https://api.github.com/repos/o/r/issues/{n}/labels"),
+                "user": { "login": "octocat", "id": 7 }
+            })
+        };
+        // Over `MAX_BODY_BYTES`: the projection declines anything already small
+        // enough, so a short payload passes every assertion below without it
+        // having run. Two earlier versions of this test did exactly that.
+        let records: Vec<serde_json::Value> = (1..=60).map(record).collect();
+        let payload = serde_json::json!({ "data": records });
+        assert!(
+            serde_json::to_string(&payload).unwrap().len() > MAX_BODY_BYTES,
+            "the fixture must exceed the projection threshold or nothing runs"
+        );
+
+        let projected = project_records_value(payload);
+        let record = &projected["data"][0];
+
+        // The fields a caller can actually have asked for.
+        assert_eq!(record["html_url"], "https://github.com/o/r/issues/1");
+        assert_eq!(record["url"], "https://api.github.com/repos/o/r/issues/1");
+        assert_eq!(record["href"], "https://example.test/1");
+        assert!(
+            !record["avatar_urls"].is_null(),
+            "a `*_urls` field is content, not API plumbing: {record}"
+        );
+        // Proof the projection actually ran. Without this the link assertions
+        // above pass trivially on a payload the projection declined — which is
+        // exactly what the first version of this test did.
+        assert_eq!(
+            record["user"], "octocat",
+            "the nested object did not collapse, so the projection never ran: {record}"
+        );
+        assert_eq!(record["title"], "flaky login");
+        // Only self-referential collection endpoints go.
+        assert!(record["comments_url"].is_null(), "collection endpoint kept");
+        assert!(record["labels_url"].is_null(), "collection endpoint kept");
+    }
+
+    use super::*;
+
+    /// The exact shape the live GitHub call returns: records two levels down,
+    /// under Composio's own `data` envelope.
+    #[test]
+    fn projects_records_nested_under_the_composio_envelope() {
+        let body = serde_json::json!({
+            "data": { "details": [
+                { "number": 1, "title": "a", "url": "https://x", "html_url": "https://y",
+                  "user": { "login": "octocat", "avatar_url": "https://z", "id": 5 },
+                  "labels": [ { "name": "bug", "url": "https://l" } ] },
+                { "number": 2, "title": "b", "url": "https://x2", "html_url": "https://y2",
+                  "user": { "login": "hubot", "avatar_url": "https://z2", "id": 6 },
+                  "labels": [ { "name": "p2", "url": "https://l2" } ] }
+            ]}
+        })
+        .to_string();
+
+        let projected = project_records(&body).expect("records nested under `data.details`");
+        assert!(
+            projected.len() < body.len(),
+            "must shrink: {} -> {}",
+            body.len(),
+            projected.len()
+        );
+        // These used to assert that `avatar_url` and `html_url` were dropped.
+        // They are answers a caller can ask for, and this projection runs ahead
+        // of the task-aware extractor and the artifact store, so dropping them
+        // was unrecoverable (codex and CodeRabbit on
+        // tinyhumansai/opencompany#2153). What goes now is API plumbing only.
+        assert!(
+            projected.contains("html_url"),
+            "a browser link can be the answer and must survive: {projected}"
+        );
+        assert!(
+            !projected.contains("comments_url"),
+            "self-referential collection endpoints still go: {projected}"
+        );
+        assert!(
+            projected.contains("octocat"),
+            "nested user collapses to its login: {projected}"
+        );
+        assert!(
+            projected.contains("bug"),
+            "label array collapses to names: {projected}"
+        );
+        assert!(
+            projected.contains("\"title\""),
+            "answering fields survive: {projected}"
         );
     }
 }
