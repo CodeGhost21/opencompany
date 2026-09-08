@@ -1519,21 +1519,19 @@ fn external_authority_router_files_have_no_unclassified_paths() {
             "/api/v1/companies/{id}/chat/attribution-audit",
             "/api/v1/companies/{id}/chat/messages/{seq}/reactions",
             "/api/v1/companies/{id}/approvals",
-            "/api/v1/companies/{id}/approvals/{aid}",
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
             "/api/v1/company/chat",
             "/api/v1/company/chat/history",
             "/api/v1/company/chat/attribution-audit",
             "/api/v1/company/chat/messages/{seq}/reactions",
             "/api/v1/company/approvals",
-            "/api/v1/company/approvals/{aid}",
-            "/api/v1/company/approvals/{aid}/extend",
         ]),
         &operator.direct,
     );
     assert_set_eq(
         "operator scoped suffix",
         &string_set(&[
+            "/approvals/{aid}",
+            "/approvals/{aid}/extend",
             "/desks",
             "/desks/{desk_id}",
             "/desks/{desk_id}/members",
