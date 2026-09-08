@@ -111,17 +111,51 @@ describe("a console holding a platform bearer", () => {
   });
 });
 
+describe("a member (not an admin) signed in without a platform bearer", () => {
+  it("never offers pause or resume, in any lifecycle a button would otherwise show for", () => {
+    expect(lifecycleAffordances("running", false, false).actions).not.toContain("pause");
+    expect(lifecycleAffordances("paused", false, false).actions).not.toContain("resume");
+  });
+
+  it("explains the withheld controls rather than dropping them silently", () => {
+    expect(lifecycleAffordances("running", false, false).explainMemberOnly).toBe(true);
+    expect(lifecycleAffordances("paused", false, false).explainMemberOnly).toBe(true);
+  });
+
+  it("has nothing to explain on a lifecycle with no pause/resume to withhold", () => {
+    expect(lifecycleAffordances("suspended", false, false).explainMemberOnly).toBe(false);
+  });
+});
+
+describe("an admin signed in without a platform bearer", () => {
+  it("still offers pause and resume — only suspend/archive stay platform-only", () => {
+    expect(lifecycleAffordances("running", false, true).actions).toEqual(["pause"]);
+    expect(lifecycleAffordances("paused", false, true).actions).toEqual(["resume"]);
+    expect(lifecycleAffordances("running", false, true).explainMemberOnly).toBe(false);
+  });
+});
+
+describe("a platform bearer with no admin role resolved yet", () => {
+  it("still offers pause and resume — the machine principal is exempt from the admin check", () => {
+    expect(lifecycleAffordances("running", true, false).actions).toContain("pause");
+    expect(lifecycleAffordances("paused", true, false).actions).toContain("resume");
+  });
+});
+
 describe("an archived company", () => {
   it("offers nothing to anyone, and explains nothing away", () => {
     // Terminal: the host removes it from the registry. Even a platform bearer
     // has no transition left, and the banners would be noise next to the
     // "This company is archived." line the card already shows.
     for (const platform of [false, true]) {
-      const shown = lifecycleAffordances("archived", platform);
-      expect(shown.actions).toEqual([]);
-      expect(shown.archived).toBe(true);
-      expect(shown.explainPlatformOnly).toBe(false);
-      expect(shown.explainPlatformSuspended).toBe(false);
+      for (const isAdmin of [false, true]) {
+        const shown = lifecycleAffordances("archived", platform, isAdmin);
+        expect(shown.actions).toEqual([]);
+        expect(shown.archived).toBe(true);
+        expect(shown.explainPlatformOnly).toBe(false);
+        expect(shown.explainPlatformSuspended).toBe(false);
+        expect(shown.explainMemberOnly).toBe(false);
+      }
     }
   });
 });

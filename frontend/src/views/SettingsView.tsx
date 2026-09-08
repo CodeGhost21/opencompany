@@ -302,6 +302,20 @@ export function LifecycleControls({
   const [pending, setPending] = useState<string | null>(null);
   const state = pending ?? feed.status.lifecycle;
 
+  const [me, setMe] = useState<Me | null>(null);
+  useEffect(() => {
+    let live = true;
+    setMe(null);
+    void fetchMe(client, company)
+      .then((who) => {
+        if (live) setMe(who);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
   async function run(action: LifecycleAction) {
     if (busy) return;
     setBusy(true);
@@ -329,8 +343,9 @@ export function LifecycleControls({
   // it is company creation wearing another label and has to answer the same
   // question the other triggers do.
   const platform = canCreateCompanies(client);
-  const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
-    lifecycleAffordances(state, platform);
+  const isAdmin = me?.role === "admin";
+  const { actions, explainPlatformOnly, explainPlatformSuspended, explainMemberOnly, archived } =
+    lifecycleAffordances(state, platform, isAdmin);
   const offers = (action: LifecycleAction) => actions.includes(action);
 
   return (
@@ -367,6 +382,16 @@ export function LifecycleControls({
             <AlertDescription>
               The platform suspended this company. Only the platform can lift a suspension — an
               admin here cannot resume it, so there is no Resume button to offer.
+            </AlertDescription>
+          </Alert>
+        )}
+        {explainMemberOnly && (
+          <Alert data-testid="lifecycle-member-only">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              Pausing and resuming a company now take admin authority. A member's session reaches
+              these routes but the host refuses them, so the controls are left out here rather than
+              shown failing — ask a company admin.
             </AlertDescription>
           </Alert>
         )}

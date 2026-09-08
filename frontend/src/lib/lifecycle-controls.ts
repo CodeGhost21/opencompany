@@ -49,6 +49,8 @@ export interface LifecycleAffordances {
    * `Resume` there is the same dishonesty as `Archive`, one layer deeper.
    */
   explainPlatformSuspended: boolean;
+  /** Whether pause and resume were withheld for lacking admin authority. */
+  explainMemberOnly: boolean;
   /** Whether the company is past the end of its lifecycle. */
   archived: boolean;
 }
@@ -56,8 +58,15 @@ export interface LifecycleAffordances {
 /**
  * @param lifecycle the host's `status.lifecycle` (or the optimistic pending one)
  * @param platform whether this client carries a platform bearer
+ * @param isAdmin whether the signed-in person administers this company;
+ *   ignored when `platform` is true. Defaults to `true` for a caller that
+ *   has not resolved role yet.
  */
-export function lifecycleAffordances(lifecycle: string, platform: boolean): LifecycleAffordances {
+export function lifecycleAffordances(
+  lifecycle: string,
+  platform: boolean,
+  isAdmin: boolean = true,
+): LifecycleAffordances {
   const archived = lifecycle === "archived";
   const suspended = lifecycle === "suspended";
   if (archived) {
@@ -65,20 +74,23 @@ export function lifecycleAffordances(lifecycle: string, platform: boolean): Life
       actions: [],
       explainPlatformOnly: false,
       explainPlatformSuspended: false,
+      explainMemberOnly: false,
       archived: true,
     };
   }
 
+  const mayDecide = platform || isAdmin;
   const actions: LifecycleAction[] = [];
-  if (lifecycle === "running") actions.push("pause");
-  // A paused company is anyone's to restart; a suspended one is the platform's.
-  if (lifecycle === "paused" || (suspended && platform)) actions.push("resume");
+  if (lifecycle === "running" && mayDecide) actions.push("pause");
+  // A paused company is any admin's to restart; a suspended one is the platform's.
+  if ((lifecycle === "paused" || (suspended && platform)) && mayDecide) actions.push("resume");
   if (platform) actions.push("suspend", "archive");
 
   return {
     actions,
     explainPlatformOnly: !platform,
     explainPlatformSuspended: suspended && !platform,
+    explainMemberOnly: !mayDecide && (lifecycle === "running" || lifecycle === "paused"),
     archived: false,
   };
 }
