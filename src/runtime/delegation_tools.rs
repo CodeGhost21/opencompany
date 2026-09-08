@@ -1152,6 +1152,7 @@ members = ["counsel"]
             description: None,
             responder: Default::default(),
             members: vec!["writer".to_string()],
+            hive: Default::default(),
         });
         assert_eq!(chat_responder(&record, "main"), None);
 
@@ -1292,6 +1293,7 @@ members = ["counsel"]
             description: None,
             responder: Default::default(),
             members: vec!["ceo".to_string()],
+            hive: Default::default(),
         });
         // Named `General`, but addressable under its own id — it stays.
         record.overlay_desks.push(crate::ports::types::OverlayDesk {
@@ -1300,6 +1302,7 @@ members = ["counsel"]
             description: None,
             responder: Default::default(),
             members: vec!["writer".to_string()],
+            hive: Default::default(),
         });
 
         assert_eq!(
@@ -1808,6 +1811,7 @@ members = ["analyst"]
             description: None,
             members: vec!["ceo".to_string(), "writer".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         assert_eq!(
             desk_lead(&record, "launch"),
@@ -1832,6 +1836,7 @@ members = ["analyst"]
             description: None,
             members: vec!["writer".to_string()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         assert_eq!(desk_lead(&record, "growth").as_deref(), Some("writer"));
     }
@@ -1849,6 +1854,7 @@ members = ["analyst"]
             description: None,
             members: vec!["ceo".to_string(), "writer".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         let message = reject_desk_target(&record, "launch").expect("refused");
         assert!(message.contains("picked per message"), "{message}");

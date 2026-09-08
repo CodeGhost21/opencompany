@@ -10083,6 +10083,7 @@ members = ["writer"]
             description: None,
             members: vec!["eng1".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         rt.store().save(&record).await.unwrap();
 

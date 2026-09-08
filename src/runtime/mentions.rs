@@ -1796,6 +1796,7 @@ members = ["designer"]
             description: None,
             responder: Default::default(),
             members: vec!["ceo".to_string()],
+            hive: Default::default(),
         });
         let found = resolve_text("@everyone standup in five");
         for spelling in ["general", "General", "main", ""] {

@@ -143,6 +143,13 @@ pub struct HiveConfig {
 }
 
 impl HiveConfig {
+    /// Whether this block says nothing at all, so a record that predates the
+    /// field keeps omitting it exactly as it did before.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
     /// Whether a desk of `members` effective members deliberates under this
     /// config.
     ///
@@ -534,6 +541,39 @@ impl EpisodeOutcome {
     }
 }
 
+/// The hive block in force for `desk_id`, overlay first and manifest behind it.
+///
+/// Both surfaces can declare one and they are merged the same way
+/// `effective_desk_members` merges membership: an operator-created desk keeps
+/// its own settings, a manifest desk keeps the blueprint's, and a desk that
+/// declares nothing takes the defaults.
+///
+/// Reading only the manifest — which is what this did — meant a console-created
+/// desk could not answer either question the block decides. It deliberated
+/// because the default says so and had no way to opt out, and it could never
+/// opt IN to referral, because there was no `[[group_chat]]` entry to hang the
+/// block on. A company that builds its desks in the console therefore had
+/// cross-desk referral permanently unavailable, with nothing to change to get
+/// it.
+#[must_use]
+pub fn effective_hive_config(record: &CompanyRecord, desk_id: &str) -> HiveConfig {
+    record
+        .overlay_desks
+        .iter()
+        .find(|desk| desk.id == desk_id)
+        .filter(|desk| !desk.hive.is_default())
+        .map(|desk| desk.hive.clone())
+        .or_else(|| {
+            record
+                .manifest
+                .group_chats
+                .iter()
+                .find(|group| group.id == desk_id)
+                .map(|group| group.hive.clone())
+        })
+        .unwrap_or_default()
+}
+
 /// The desk a hive episode should answer `chat` on, or `None` to keep today's
 /// single-responder path.
 ///
@@ -563,12 +603,7 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
         return None;
     }
     let desk_id = record.resolve_desk_id(chat)?;
-    let declared = record
-        .manifest
-        .group_chats
-        .iter()
-        .find(|group| group.id == desk_id);
-    let config = declared.map(|group| group.hive.clone()).unwrap_or_default();
+    let config = effective_hive_config(record, &desk_id);
     let members: Vec<HiveMember> = record
         .effective_desk_members(&desk_id)
         .into_iter()
@@ -613,9 +648,24 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
         );
         return None;
     }
+    // Name and description come from whichever surface declared the desk, the
+    // same order the config does. Reading the manifest alone left an operator
+    // -created desk carrying its raw id as its name in every episode prompt and
+    // closing report, because the manifest has no entry for it.
+    let overlay = record.overlay_desks.iter().find(|desk| desk.id == desk_id);
+    let declared = record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|group| group.id == desk_id);
     Some(HiveDesk {
-        name: declared.map_or_else(|| desk_id.clone(), |group| group.name.clone()),
-        description: declared.and_then(|group| group.description.clone()),
+        name: overlay
+            .map(|desk| desk.name.clone())
+            .or_else(|| declared.map(|group| group.name.clone()))
+            .unwrap_or_else(|| desk_id.clone()),
+        description: overlay
+            .and_then(|desk| desk.description.clone())
+            .or_else(|| declared.and_then(|group| group.description.clone())),
         id: desk_id,
         members,
         config,

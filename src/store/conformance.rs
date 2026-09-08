@@ -245,6 +245,7 @@ fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
             description: Some("Customer mail triage.".to_string()),
             members: vec!["ceo".to_string(), "aria_stone".to_string()],
             responder: ResponderMode::default(),
+            hive: Default::default(),
         },
         OverlayDesk {
             id: "launch".to_string(),
@@ -252,6 +253,7 @@ fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
             description: None,
             members: vec!["ceo".to_string(), "aria_stone".to_string()],
             responder: ResponderMode::Auto,
+            hive: Default::default(),
         },
     ]
 }

@@ -706,6 +706,50 @@ mod test {
     // -----------------------------------------------------------------------
 
     /// The shipped software company's shape: three desks, no overlap.
+    /// **A console-created desk can opt into referral.**
+    ///
+    /// The rig that exercised all of this has `group_chat = []` — every desk is
+    /// an overlay desk. Reading the block from the manifest alone therefore
+    /// left referral permanently off for it, with nothing an operator could
+    /// write to turn it on: there was no `[[group_chat]]` entry to hang
+    /// `hive.referral` on, and `OverlayDesk` had no field for it.
+    #[test]
+    fn an_overlay_desk_carries_its_own_referral_block() {
+        let mut record = software_company();
+        record.manifest.group_chats.clear();
+        record.overlay_desks.push(crate::ports::types::OverlayDesk {
+            id: "engineering".to_string(),
+            name: "Engineering".to_string(),
+            description: None,
+            members: vec!["software_engineer".to_string()],
+            responder: crate::ports::types::ResponderMode::default(),
+            hive: crate::hivemind::HiveConfig {
+                referral: crate::hivemind::ReferralConfig {
+                    enabled: Some(true),
+                    max_hops: Some(4),
+                    peer_cap: Some(3),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        });
+
+        let config = referral_config(&record, "engineering");
+        assert!(
+            config.policy().enabled,
+            "an overlay desk that opted in refers: {config:?}"
+        );
+        assert_eq!(config.policy().max_hops, 4);
+        assert_eq!(config.peer_cap(), 3);
+
+        // And a desk that declared nothing still refers nothing — the
+        // conservative default is what the manifest-only read got right.
+        assert!(
+            !referral_config(&record, "design").policy().enabled,
+            "a desk with no block anywhere stays off"
+        );
+    }
+
     fn software_company() -> CompanyRecord {
         let src = "[company]\nname = \"Acme\"\n\n[policy]\nmode = \"full\"\n\
                    \n[[agent]]\nid = \"software_engineer\"\nrole = \"Engineer\"\n\
@@ -1574,13 +1618,7 @@ pub(crate) fn referral_config(
     record: &CompanyRecord,
     desk_id: &str,
 ) -> crate::hivemind::ReferralConfig {
-    record
-        .manifest
-        .group_chats
-        .iter()
-        .find(|chat| chat.id == desk_id)
-        .map(|chat| chat.hive.referral.clone())
-        .unwrap_or_default()
+    crate::hivemind::effective_hive_config(record, desk_id).referral
 }
 
 /// A desk's operator-facing name, or its id when it has none to show.

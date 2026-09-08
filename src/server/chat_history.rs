@@ -3434,6 +3434,7 @@ name = "{name}"
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         for spelling in ["ops_desk", "Operations"] {
             assert_eq!(

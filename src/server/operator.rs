@@ -824,6 +824,9 @@ async fn create_desk(
         description: description.clone(),
         members: members.clone(),
         responder: body.responder,
+        // A desk created here starts with no hive block of its own and takes
+        // the defaults, exactly as a manifest desk that declares none does.
+        hive: crate::hivemind::HiveConfig::default(),
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
@@ -6651,6 +6654,7 @@ mode = "full"
             description: None,
             members: vec!["ceo".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "main".to_string(),
@@ -6658,6 +6662,7 @@ mode = "full"
             description: None,
             members: vec!["eng".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -6785,6 +6790,7 @@ mode = "full"
             description: None,
             members: vec!["ceo".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -7654,6 +7660,7 @@ mode = "full"
             description: None,
             members: vec![],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 

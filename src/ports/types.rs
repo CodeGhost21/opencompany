@@ -617,6 +617,29 @@ impl StartedBy {
     }
 }
 
+/// Separates the other desk's actual answer from the note addressed to the
+/// asker, in a returning relay.
+///
+/// # Why the two have to be separable
+///
+/// The relay is normally dropped from the projection, so the note is private to
+/// the asker and can say things only the asker should read. But the drop is
+/// conditional: if the asker's report never lands — a failed turn, an empty
+/// model response — the relay renders instead, because a line in the wrong
+/// voice is a smaller failure than an answer nobody can see.
+///
+/// That fallback used to publish the note along with it. An operator watching
+/// #engineering was told "you are the only one who has seen it" by an agent
+/// that is not on their desk. So the answer goes FIRST and everything the host
+/// added goes after this marker, and the projection renders only what precedes
+/// it — which is exactly the other desk's own words, the thing the fallback
+/// exists to preserve.
+///
+/// Written to be unmistakable rather than pretty: a bare `---` is a markdown
+/// rule an answer may legitimately contain, and truncating on one would eat
+/// half of it.
+pub const RELAY_NOTE_MARKER: &str = "\n\n[referral-note]\n";
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -3528,6 +3551,26 @@ pub struct OverlayDesk {
     /// no such field.
     #[serde(default, skip_serializing_if = "ResponderMode::is_lead")]
     pub responder: ResponderMode,
+    /// How this desk deliberates and whether it may refer across desks — the
+    /// overlay analogue of `[[group_chat]].hive`.
+    ///
+    /// Without it a console-created desk could not answer either question. The
+    /// hive config was read from the manifest only, and the responder mode from
+    /// the overlay only, so the two surfaces each carried half the settings and
+    /// a desk could never hold both: an overlay desk deliberated because the
+    /// default says so and could not opt out, and could never opt IN to
+    /// referral, because there was no `[[group_chat]]` entry to hang the block
+    /// on. A company whose desks are all operator-created — which is every
+    /// company that builds its desks in the console — therefore had cross-desk
+    /// referral permanently unavailable.
+    ///
+    /// Defaulted and skipped when empty, so every record written before this
+    /// field existed deserializes and re-serializes unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::hivemind::HiveConfig::is_default"
+    )]
+    pub hive: crate::hivemind::HiveConfig,
 }
 
 /// A workflow graph body authored at runtime (the console's create dialog or
@@ -7477,6 +7520,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "sales".into(),
@@ -7484,6 +7528,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(
@@ -7512,6 +7557,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -7541,6 +7587,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
         // …while the overlay desk's id is reserved exactly like a manifest one.
@@ -8591,6 +8638,7 @@ mod test {
             description: None,
             members: vec!["eng".into()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         // Resolves by id and by case-insensitive name.
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -8637,6 +8685,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "ops".into(),
@@ -8644,6 +8693,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["ceo".into()],
+            hive: Default::default(),
         });
 
         for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
@@ -8688,6 +8738,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             record.resolve_desk_id("Front office"),
@@ -8712,6 +8763,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             ordinary.resolve_desk_id("Front office").as_deref(),

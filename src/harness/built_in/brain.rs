@@ -8619,6 +8619,7 @@ members = ["ceo", "engineer"]
                 description: None,
                 responder: Default::default(),
                 members: vec!["engineer".into()],
+                hive: Default::default(),
             })
         });
         for spelling in ["", "main", "Main", "general", "General"] {
@@ -12364,6 +12365,7 @@ members = ["engineer", "designer"]
             description: None,
             members: vec!["engineer".to_string(), "chief".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),

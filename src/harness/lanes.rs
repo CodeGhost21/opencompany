@@ -471,6 +471,7 @@ mod tests {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         let desks = declared_desks(&record);

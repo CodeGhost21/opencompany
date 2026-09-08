@@ -220,6 +220,7 @@ fn the_federation_includes_a_console_created_desk() {
         description: Some("Runs experiments".to_owned()),
         members: vec!["planner".to_owned()],
         responder: crate::ports::types::ResponderMode::default(),
+        hive: Default::default(),
     });
 
     let federation = desk_federation(&record, &desk).expect("a federation");
