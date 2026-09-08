@@ -723,20 +723,46 @@ fn render_empty(available: usize, request: &ListRequest) -> String {
         [] => "every connected toolkit".to_string(),
         toolkits => toolkits.join(", "),
     };
-    if available == 0 {
+    // Whether the *server* was asked to narrow. This is the distinction that
+    // matters now that `search` and `tags` travel to Composio: an empty
+    // response to a narrowed query says nothing about the toolkit, only about
+    // the filter, and `available` is the count of what came back rather than
+    // what exists (codex on tinyhumansai/opencompany#2153).
+    let filter = match (request.search.is_empty(), request.tags.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(format!("`{}`", request.search.join(" "))),
+        (true, false) => Some(format!("tags `{}`", request.tags.join(", "))),
+        (false, false) => Some(format!(
+            "`{}` with tags `{}`",
+            request.search.join(" "),
+            request.tags.join(", ")
+        )),
+    };
+    let Some(filter) = filter else {
+        // Unnarrowed and empty is the only case that says anything about the
+        // toolkit itself.
         return format!(
             "Composio actions in {scope} — none. This toolkit has no callable actions available to \
              this company (it may not be connected). Check `composio_list_connections`, and do not \
              guess an action slug.\n"
         );
-    }
+    };
+    // Narrowed and empty. Saying "no callable actions (it may not be
+    // connected)" here would be a lie about a connected toolkit, and the
+    // expensive kind: an agent told a capability does not exist stops looking
+    // for it, which is the exact failure this listing was rewritten to end.
+    let total = if available == 0 {
+        "The filter was applied by Composio, so this is what it matched, not what the toolkit has."
+            .to_string()
+    } else {
+        format!("{available} returned, 0 matching after filtering.")
+    };
     format!(
-        "Composio actions in {scope} — {available} available, 0 matching `{search}`.\n\
-         Nothing matched those words. Try fewer or different words (the search matches the action \
-         slug and its description), or list everything with \
+        "Composio actions in {scope} — nothing matched {filter}. {total}\n\
+         Try fewer or different words (the search matches the action slug and its description), \
+         drop the tags, or list the toolkit unnarrowed with \
          {LIST_TOOLS_TOOL}({{\"toolkits\": [\"<slug>\"]}}). Do NOT guess a slug that was not \
-         listed.\n",
-        search = request.search.join(" ")
+         listed, and do not conclude the toolkit is unavailable from this result.\n"
     )
 }
 
@@ -1536,9 +1562,52 @@ mod tests {
             &actions,
             &request("quantum teleport", Detail::Names, &["gmail"]),
         );
-        assert!(out.contains("0 matching `quantum teleport`"), "{out}");
+        assert!(out.contains("nothing matched `quantum teleport`"), "{out}");
+        assert!(
+            out.contains("40 returned"),
+            "the real total is stated: {out}"
+        );
         assert!(out.contains("Do NOT guess a slug"), "{out}");
         assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
+    }
+
+    /// A server-side filter that matches nothing says so about the *filter*.
+    ///
+    /// Once `search` and `tags` travel to Composio, a narrowed query that
+    /// matches nothing comes back with zero rows — and the old message read
+    /// that as "this toolkit has no callable actions (it may not be
+    /// connected)". That is a lie about a connected toolkit, and the expensive
+    /// kind: an agent told a capability does not exist stops looking for it,
+    /// which is the failure this whole listing was rewritten to end (codex on
+    /// tinyhumansai/opencompany#2153).
+    #[test]
+    fn an_empty_server_filtered_response_does_not_blame_the_connection() {
+        let mut narrowed = request("quantum teleport", Detail::Names, &["gmail"]);
+        narrowed.tags = vec!["important".to_string()];
+        // Zero rows back, because the server did the filtering.
+        let out = render(&[], &narrowed);
+
+        assert!(
+            !out.contains("may not be connected"),
+            "an empty filter result says nothing about the connection: {out}"
+        );
+        assert!(
+            !out.contains("no callable actions"),
+            "the toolkit was not shown to be empty: {out}"
+        );
+        assert!(
+            out.contains("quantum teleport") && out.contains("important"),
+            "both halves of the filter are named: {out}"
+        );
+        assert!(
+            out.contains("not what the toolkit has"),
+            "the count must be disclosed as the filter's, not the toolkit's: {out}"
+        );
+
+        // The unnarrowed empty case still points at the connection, which is
+        // the one time that is the right thing to say.
+        let bare = render(&[], &request("", Detail::Names, &["github"]));
+        assert!(bare.contains("may not be connected"), "{bare}");
     }
 
     /// An empty catalogue is a different fact from an empty search, and points
