@@ -81,11 +81,6 @@ function categoryStyle(category: string): string {
  * optimistically, reverting on error.
  */
 export function SkillsView({ client, company }: Props) {
-  // Install, uninstall, toggle and custom-authoring are all AdminScopedCompany
-  // on the host — a skill's content lands in every agent's effective prompt,
-  // company-wide, so a member's write here would only ever earn a 403.
-  // Resolved the way `HostingView` and `SearchView` resolve the same question.
-  const [canManage, setCanManage] = useState(false);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +94,25 @@ export function SkillsView({ client, company }: Props) {
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
   const gen = useRef(0);
+  // Whether this viewer may enable, install, uninstall or add a skill. The four
+  // writes are admin-only on the host; an unresolved role must not render an
+  // enabled control, so this defaults closed the way `HostingView` does.
+  const [canManage, setCanManage] = useState(false);
+  const [authorityScope, setAuthorityScope] = useState({ client, company });
+
+  // Closed *during* the render that first sees a new scope, not in the effect
+  // that follows it. An effect runs after commit, so the frame carrying the new
+  // scope would already have painted the previous scope's `canManage` — one
+  // real frame of live write controls aimed at a scope this operator may not
+  // administer. Keyed by both `client` and `company`: a host reseat changes
+  // `client` identity while `company` can stay the same. Resetting here is
+  // React's documented adjust-state-during-render pattern: it re-renders
+  // before anything reaches the screen.
+  if (authorityScope.client !== client || authorityScope.company !== company) {
+    setAuthorityScope({ client, company });
+    setCanManage(false);
+    setAddOpen(false);
+  }
 
   useEffect(() => {
     let live = true;
@@ -237,6 +251,19 @@ export function SkillsView({ client, company }: Props) {
         }
       />
       <div className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6">
+        {!canManage && (
+          <Alert data-testid="skills-admin-only">
+            <Info className="size-4" />
+            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
+            <AlertDescription>
+              Enabling, installing, uninstalling and adding a skill change what every teammate is
+              told to do, so an admin makes those calls. You can see what is installed and browse
+              the registry.
+            </AlertDescription>
+          </Alert>
+        )}
+
+
         {/* Issue #569: what install / enable actually buy. A desk agent can list,
             describe and read a skill and can never run one — deliberate, and
             pinned by `dispatched_belt_excludes_every_deferred_family` — but this
@@ -374,8 +401,8 @@ function InstalledCard({
           </div>
           <Switch
             checked={skill.enabled}
-            onCheckedChange={onToggle}
             disabled={!canManage}
+            onCheckedChange={canManage ? onToggle : undefined}
             aria-label="Enable skill"
           />
         </div>

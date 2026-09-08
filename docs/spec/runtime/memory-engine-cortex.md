@@ -342,24 +342,67 @@ unreserved id when the host declares the class, and this host declares every
 remote driver `External` with `TRUSTED`, so the class stays host-decided rather
 than self-reported.
 
-**Phase 2 — provisioning.** Per-tenant instance lifecycle through
-opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existing
-`OPENCOMPANY_MONGODB_URI`/`_DB` injection, health-probe, back up, destroy. Sizing
-waits on a real per-instance figure from Cortex.
+**Phase 2 — provisioning. Shipped, except backup.** Per-tenant instance
+lifecycle through opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*`
+alongside the existing `OPENCOMPANY_MONGODB_URI`/`_DB` injection, health-probe,
+back up, destroy. Running on both runtimes — Kubernetes, and Firecracker on the
+Hetzner host, where the engine lives *inside* the tenant's own microVM on
+loopback rather than in a second VM.
+
+Three things landed differently from how this section anticipated them.
+
+**Sizing no longer waits.** Measured per engine: 120 MB steady and 152 MB peak
+against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`, and 176-192 MB
+for a whole guest with its workload. That puts roughly 60 concurrently-awake
+tenants on a 64 GB box — but **disk binds first**: parking writes a full,
+non-sparse 1 GiB memory image per tenant, so a run-and-parked tenant costs ~2 GB
+of disk against ~190 MB of RAM.
+
+**The manager holds no provider credential at all.** This section assumed the
+control plane would inject a fleet key. It does not: it asks the platform
+backend for an `inference`-scoped key per instance
+(`POST /opencompany/instances/{slug}/inference-key`), sending only the slug. The
+backend resolves which team owns that instance, mints against it, and keeps the
+provider credential server-side. What that replaced was an OpenRouter
+*management* key held on the host — a credential able to create, re-limit and
+delete every runtime key on the account, sitting on a machine whose whole job is
+running other people's workloads. The per-tenant spend ceiling survived the move
+as a monthly cap the backend applies, across both the `inference` and
+`passthrough` buckets, since an engine calling the passthrough bills to the
+latter.
+
+**A prerequisite this section did not name:** the backend resolves the owning
+team from an instance record, so a tenant created directly against the manager
+has none and its mint answers 404. Under Firecracker a failed mint is fatal
+rather than degrading, so tenants created outside the hosted flow must be
+adopted before their first cold boot.
+
+**Backup remains the open item.** There is still no backup path on the
+Firecracker runtime; the logical export job exists elsewhere and nothing
+schedules one here.
 
 **Phase 3 — migration.** `opencompany memory migrate --to cortex` over the
 Portability family. The generic procedure in
 [`memory-engine.md`](memory-engine.md#switching-engines--the-operator-runbook)
 holds; four things are specific to Cortex and one of them is a blocker.
 
-**The target engine has to exist, and for an existing company it does not.**
-`ensure_cortex` runs inside `provision`, and `ensure_running` calls `provision`
-only when the workload's StatefulSet is *absent*. Parking scales to zero and
-keeps it. So a company created before Cortex was switched on never gets an
-engine, no matter how many times it wakes — and migration has a prerequisite
-with no path behind it. Closing that is the first task of this phase, not a
-detail of it: either provisioning learns to add an engine to a running tenant,
-or the operator re-provisions deliberately.
+**The target engine has to exist, and an existing company does not grow one by
+waking.** `ensure_cortex` runs inside `provision`, and `ensure_running` calls
+`provision` only when the workload object is *absent*. Parking keeps that
+object, so a company created before Cortex was switched on never gets an engine
+however many times it wakes. That is still true of the code.
+
+What has changed is that the operator path behind it is now proven, so this is a
+deliberate step rather than a blocker with nothing behind it. Discard the
+tenant's snapshot — `vm.snap` and `vm.mem` under Firecracker, or delete the
+StatefulSet under Kubernetes, whose PVC retention policy is `Retain` on both
+delete and scale — and the next wake takes the boot path, which re-runs
+provisioning and mints an engine. **The data disk is untouched: this is not
+delete-and-recreate.** Six tenants were migrated this way with their memory
+intact.
+
+Provisioning learning to add an engine to a running tenant would still be
+better, and is the remaining improvement here.
 
 **The driver id is `cortex`, not `cortexdb`.** They are two adapters for the
 same service and both are accepted targets; the manager injects `cortex`, so

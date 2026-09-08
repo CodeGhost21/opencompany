@@ -271,6 +271,17 @@ export function ApprovalRow({
   const condensed = variant !== "full";
 
   const lead = approvals[0];
+  /**
+   * Whether this viewer may decide this card at all.
+   *
+   * Resolving and declining are the same admin-scoped route on the host, and
+   * `contents_hidden` is set by that same `may_administer` check on the
+   * summary read — so a card whose contents are hidden from this viewer is
+   * exactly a card this viewer cannot resolve. Reusing it here means a member
+   * gets ONE fact about the card ("your role withholds this") rather than two
+   * separately-worded refusals that happen to be about the same thing.
+   */
+  const canManage = !lead.contents_hidden;
   const pending = useMemo(() => approvals.filter((a) => !decided[a.id]), [approvals, decided]);
   const settledCount = approvals.length - pending.length;
   const failedCount = pending.filter((a) => failed[a.id]).length;
@@ -357,7 +368,7 @@ export function ApprovalRow({
   const declineVariant = compact ? "ghost" : "outline";
   const approveVariant = compact ? "ghost" : "default";
 
-  const actions = done ? undefined : soleBlocker ? (
+  const actions = done || !canManage ? undefined : soleBlocker ? (
     <BlockerDecide
       approval={soleBlocker}
       askerNames={askerNames}
@@ -555,7 +566,7 @@ export function ApprovalRow({
            * own grant, scoped to its own arguments (#739). One choice, one
            * grant per item — never one grant spanning them.
            */}
-          {!done && (
+          {!done && canManage && (
             <ApprovalScopeControl
               approval={pending[0]}
               askerNames={askerNames}
@@ -564,7 +575,14 @@ export function ApprovalRow({
               disabled={busy}
             />
           )}
-          {!done && <DeclineScopeControl approval={pending[0]} scope={declineScope} onChange={setDeclineScope} disabled={busy} />}
+          {!done && canManage && (
+            <DeclineScopeControl
+              approval={pending[0]}
+              scope={declineScope}
+              onChange={setDeclineScope}
+              disabled={busy}
+            />
+          )}
 
           <ApprovalMeta
             approval={lead}
