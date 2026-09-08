@@ -796,14 +796,17 @@ fn a_transcript_spanning_the_watermark_renders_the_divider_between_episodes() {
     let divider_at = prompt
         .find("this episode's floor")
         .expect("the divider names its own meaning");
+    // `planner` is the member this prompt is for, so its own row reads "You" —
+    // the distinction that stops a member describing itself in the third person.
     let current_start = prompt
-        .find("[3] planner")
-        .expect("current row 3 is rendered");
+        .find("[3] You")
+        .expect("current row 3 is rendered, as the reader's own");
     assert!(prior_end < divider_at, "{prompt}");
     assert!(divider_at < current_start, "{prompt}");
     // Sequence numbers stay exactly as the projection assigned them, on both
     // sides of the divider.
-    for needle in ["[1] scout", "[2] scout", "[3] planner", "[4] critic"] {
+    // `planner` reads its own row as "You"; the rest keep their names.
+    for needle in ["[1] scout", "[2] scout", "[3] You", "[4] critic"] {
         assert!(prompt.contains(needle), "{needle} missing:\n{prompt}");
     }
 }
@@ -858,7 +861,8 @@ fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
         prompt.contains("[1] scout"),
         "prior context stays visible even blind:\n{prompt}"
     );
-    assert!(prompt.contains("[2] planner"), "{prompt}");
+    // The reader's own prior row is labelled "You", not by name.
+    assert!(prompt.contains("[2] You"), "{prompt}");
     assert!(
         !prompt.contains("[3]"),
         "a peer's live position leaked into a blind turn:\n{prompt}"
@@ -873,7 +877,8 @@ fn a_blind_turn_still_hides_only_this_episodes_peers_not_prior_context() {
     let divider_at = prompt
         .find("this episode's floor")
         .expect("the divider names its own meaning");
-    let current_start = prompt.find("[2] planner").expect("current row rendered");
+    // The turn-holder's own line, so it reads "You" rather than its own name.
+    let current_start = prompt.find("[2] You").expect("current row rendered");
     assert!(prior_end < divider_at, "{prompt}");
     assert!(divider_at < current_start, "{prompt}");
 }
@@ -1035,4 +1040,41 @@ fn a_settled_room_reports_what_it_decided() {
         "{}",
         unknown.ending_summary()
     );
+}
+
+/// **A member must be able to tell its own turns from its colleagues'.**
+///
+/// Every transcript row was labelled with its author's name, the reader's own
+/// included, so a member had no convention for first person and copied the one
+/// it was shown. Observed live: `software_engineer` closed a room with
+/// "carried with support from software_engineer and junior_engineer" — naming
+/// itself as though it were somebody else.
+#[test]
+fn a_member_reads_its_own_turns_as_its_own() {
+    let visible = vec![
+        message(1, "scout", "!propose #ship send it now"),
+        message(
+            2,
+            "planner",
+            "!object >1 ^1 the last rollout broke checkout",
+        ),
+    ];
+    let rendered = crate::hivemind::prompt::render_transcript(&visible, None, Some("planner"));
+
+    assert!(
+        rendered.contains("[2] You:"),
+        "the reader's own row is theirs: {rendered}"
+    );
+    assert!(
+        rendered.contains("[1] scout:"),
+        "and a colleague keeps its name: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[2] planner:"),
+        "the reader is never named to itself: {rendered}"
+    );
+
+    // A caller with no reader renders every row by name, as before.
+    let anonymous = crate::hivemind::prompt::render_transcript(&visible, None, None);
+    assert!(anonymous.contains("[2] planner:"), "{anonymous}");
 }

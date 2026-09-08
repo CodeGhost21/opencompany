@@ -569,7 +569,7 @@ impl MessageView {
                 channel: agent_id.clone(),
                 admin_only: agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR,
                 author: agent_id,
-                text,
+                text: readable_moves(text),
                 at_millis,
                 mine: false,
                 // The runtime wrote this, whichever brain produced it.
@@ -1270,6 +1270,33 @@ async fn attach_referral_origins(
     }
     messages.retain(|m| !relayed.contains(&m.id));
     Ok(())
+}
+
+/// Renders a deliberation turn for a person, leaving every other reply alone.
+///
+/// A room's grammar — `!move`, `#topic`, `^N`, `>N` — is addressed to the fold
+/// and was reaching the operator verbatim: `!support #lazy-load ^3 agreed`
+/// rendered as-is in a chat window. Each line that carries a move is rewritten
+/// to a plain-English lead; a line that carries none passes through untouched,
+/// which is every reply on every desk that does not deliberate.
+///
+/// Line by line, because a turn may pair prose with its move, and only the
+/// marked line is grammar.
+///
+/// **The journal keeps the original.** The fold reads markers off the stored
+/// line, so this rewrite lives here and nowhere earlier — a room whose own
+/// transcript had been cleaned could not count itself.
+fn readable_moves(text: String) -> String {
+    if !text
+        .lines()
+        .any(|line| crate::hivemind::line_kind(line).is_some())
+    {
+        return text;
+    }
+    text.lines()
+        .map(|line| crate::hivemind::readable(line).unwrap_or_else(|| line.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Blanks `task_id` on any row naming a card the board no longer has

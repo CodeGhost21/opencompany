@@ -129,6 +129,75 @@ pub fn correction(attempted: &str, allowed: &[&str]) -> String {
 
 /// The same line, stripped of the marker that made it a move.
 ///
+/// One deliberation line, rendered for a person instead of for the fold.
+///
+/// The grammar is addressed to the mechanism: `!` says which move this is,
+/// `#topic` names the option, `^N` and `>N` are sequence citations. All four
+/// are load-bearing in the transcript and meaningless in a chat window — an
+/// operator reading a desk was being shown `!support #lazy-load ^3 agreed`,
+/// which is machine syntax rendered verbatim in a human channel.
+///
+/// So the head tokens are lifted into a plain-English lead and the member's own
+/// sentence follows untouched. `None` for any line carrying no move, which is
+/// every ordinary reply on every non-deliberating desk — those must pass
+/// through byte-for-byte.
+///
+/// **A rendering only.** The stored line keeps its grammar: the fold reads
+/// markers off the journal, and a projection that rewrote them would leave the
+/// room unable to count its own transcript.
+#[must_use]
+pub fn readable(line: &str) -> Option<String> {
+    let kind = line_kind(line)?;
+    let rest = line.trim_start().strip_prefix('!')?;
+    let rest = rest
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, tail)| tail);
+
+    // Only the citation tokens at the HEAD are grammar. The same characters
+    // inside a sentence are the member's own words — "#2 in the list", "a > b"
+    // — and rewriting those would edit what a teammate said.
+    let mut topic = None;
+    let mut rest = rest.trim_start();
+    loop {
+        let token = rest.split_whitespace().next().unwrap_or_default();
+        let is_grammar = token.starts_with('#')
+            || token.starts_with('^')
+            || token.starts_with('>')
+            || token.starts_with("!");
+        if token.is_empty() || !is_grammar {
+            break;
+        }
+        if let Some(name) = token.strip_prefix('#')
+            && topic.is_none()
+        {
+            topic = Some(name.to_string());
+        }
+        rest = rest[token.len()..].trim_start();
+    }
+
+    let lead = match (kind, topic) {
+        ("propose", Some(topic)) => format!("proposes {topic}"),
+        ("propose", None) => "proposes".to_string(),
+        ("support", Some(topic)) => format!("supports {topic}"),
+        ("support", None) => "supports".to_string(),
+        ("object", _) => "objects".to_string(),
+        ("refute", Some(topic)) => format!("refutes {topic}"),
+        ("refute", None) => "refutes".to_string(),
+        ("evidence", _) => "evidence".to_string(),
+        ("question", _) => "asks".to_string(),
+        ("defer", _) => "defers".to_string(),
+        ("commit", Some(topic)) => format!("records {topic}"),
+        ("commit", None) => "records".to_string(),
+        ("pin", _) => "pins".to_string(),
+        (other, _) => other.to_string(),
+    };
+    Some(if rest.is_empty() {
+        format!("[{lead}]")
+    } else {
+        format!("[{lead}] {rest}")
+    })
+}
+
 /// The leading `!` and nothing else: the member's own words are kept verbatim,
 /// so the transcript records what it wanted to say and a reader can see the
 /// attempt. What it loses is the only thing at stake — `resolve` reads a
@@ -157,4 +226,50 @@ pub struct MoveViolation {
     pub agent_id: String,
     /// The kind it reached for, without the `!`.
     pub attempted: String,
+}
+
+#[cfg(test)]
+mod readable_test {
+    use super::readable;
+
+    #[test]
+    fn a_move_line_reads_as_english() {
+        assert_eq!(
+            readable("!propose #lazy-load defer each section until it is opened").as_deref(),
+            Some("[proposes lazy-load] defer each section until it is opened")
+        );
+        assert_eq!(
+            readable("!support #lazy-load ^3 agreed, and it is reversible").as_deref(),
+            Some("[supports lazy-load] agreed, and it is reversible")
+        );
+        assert_eq!(
+            readable("!object >3 ^1 users bounce between sections").as_deref(),
+            Some("[objects] users bounce between sections")
+        );
+    }
+
+    /// The same characters inside a sentence are the member's own words —
+    /// rewriting those would edit what a teammate said.
+    #[test]
+    fn only_the_head_tokens_are_grammar() {
+        assert_eq!(
+            readable("!evidence #perf ^2 the p95 is > 400ms and #2 in the list is worse")
+                .as_deref(),
+            Some("[evidence] the p95 is > 400ms and #2 in the list is worse")
+        );
+    }
+
+    /// Every reply on every desk that does not deliberate must survive
+    /// byte-for-byte.
+    #[test]
+    fn an_ordinary_reply_is_untouched() {
+        assert_eq!(readable("here is the summary you asked for"), None);
+        assert_eq!(readable("!notamove still ordinary prose"), None);
+    }
+
+    /// A bare marker still says which move it was.
+    #[test]
+    fn a_move_with_nothing_after_it_still_renders() {
+        assert_eq!(readable("!question").as_deref(), Some("[asks]"));
+    }
 }

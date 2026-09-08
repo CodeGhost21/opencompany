@@ -88,7 +88,7 @@ pub use memory::{
     HIVE_MEMORY_LABEL_PREFIX, HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory,
     desk_prefix, note_label,
 };
-pub use moves::{MOVE_KINDS, MoveViolation, UNGATED_KINDS};
+pub use moves::{MOVE_KINDS, MoveViolation, UNGATED_KINDS, line_kind, readable};
 pub use prompt::{EpisodePrompt, canonical_topic, marker_line};
 pub use referral::{
     AskedQuestion, EpisodeReferrals, FederationDesk, HiveFederation, HiveReferralRunner,
