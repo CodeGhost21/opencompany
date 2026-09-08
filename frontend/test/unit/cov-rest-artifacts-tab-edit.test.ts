@@ -145,18 +145,24 @@ describe("ArtifactsTab, an operator edit with no admin gate", () => {
       ],
       updatedAtMillis: 3000,
     };
+    // Initial mount sees only v1 — the stale copy this tab actually had —
+    // so "v3 on screen" can only mean the save's own response replaced it,
+    // not that the fixture handed v3 to every render from the start.
+    let getCalls = 0;
     const client = {
       scopeFor: () => "/api/v1/companies/acme",
       // The background refresh after a save re-reads the list — by the time it
       // lands, the host's own roster already agrees with what the append
       // answered, exactly as it would once the write is durable.
-      get: () => Promise.resolve([afterSecondTabAppended]),
+      get: () => Promise.resolve([getCalls++ === 0 ? ARTIFACT : afterSecondTabAppended]),
       post: vi.fn(() => Promise.resolve(afterSecondTabAppended)),
     } as unknown as OpenCompanyClient;
     await show(createElement(ArtifactsTab, { client, company: "acme", taskId: "t1" }));
 
     findButton("launch-notes.md")!.click();
     await act(async () => {});
+    // Confirms the stale-v1 premise: nothing has shown v3 yet.
+    expect(container.textContent).not.toContain("v3");
     findButton("Edit as operator")!.click();
     await act(async () => {});
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
