@@ -1098,6 +1098,27 @@ pub async fn history_for_desk(
         }
     }
 
+    // **The room's own bookkeeping does not draw in the room.**
+    //
+    // An episode journals every turn as an ordinary reply by the teammate that
+    // took it, and then one closing row under `HIVE_REPORT_AUTHOR`. The turns
+    // are the conversation and belong on screen. The closing row is the host's
+    // summary of a tally it just computed — and rendered here it appeared as a
+    // *teammate* called `hive-report`, a participant in a channel where no such
+    // teammate exists and none can: the id is hyphenated precisely so no roster
+    // id can equal it.
+    //
+    // The fold already reads it as `SessionAuthor::System` rather than as an
+    // agent, so dropping it here makes the console agree with the fold instead
+    // of disagreeing with it in a way an operator can see.
+    //
+    // **Dropped from the projection, never from the journal.** The row stays
+    // durable and stays readable: the next episode folds it as context, the
+    // memory note keeps the long form, and the chat POST still returns it to
+    // its caller. This is a rendering decision about one channel, on the same
+    // terms the referral relay is dropped below.
+    messages.retain(|message| message.channel != crate::hivemind::HIVE_REPORT_AUTHOR);
+
     drop_dead_cards(runtime, &mut messages).await?;
     attach_referral_origins(runtime, desk_id, &mut messages).await?;
     Ok(messages)
@@ -3073,6 +3094,81 @@ mod referral_origin_test {
                 attachments: Vec::new(),
             },
         ]
+    }
+
+    /// **An episode's turns are the conversation; its closing row is not.**
+    ///
+    /// The room journals every turn as an ordinary reply by the teammate that
+    /// took it, then one summary under `hive-report`. Rendered, that summary
+    /// appeared as a *teammate* — a participant in a channel where no such
+    /// teammate exists and none can, since the id is hyphenated exactly so no
+    /// roster id can equal it. The fold already reads it as `System`; this
+    /// makes the console agree.
+    ///
+    /// The turns must survive: dropping the room and keeping only its summary
+    /// would hide the reasoning, the losing options and every objection — the
+    /// one thing a room produces that a single answer cannot.
+    #[tokio::test]
+    async fn an_episodes_turns_render_but_its_closing_row_does_not() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        for (agent, text) in [
+            (
+                "software_engineer",
+                "!propose #lazy-load defer each section",
+            ),
+            (
+                "junior_engineer",
+                "!object >1 ^1 users bounce between sections",
+            ),
+            (
+                crate::hivemind::HIVE_REPORT_AUTHOR,
+                "The desk settled after 2 turns (#lazy-load, backed by software_engineer): defer each section",
+            ),
+        ] {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: agent.to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+
+        let voices: Vec<&str> = history.iter().map(|m| m.channel.as_str()).collect();
+        assert!(
+            voices.contains(&"software_engineer") && voices.contains(&"junior_engineer"),
+            "every teammate's turn is on screen, the objection included: {voices:?}"
+        );
+        assert!(
+            !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
+            "and the room's own bookkeeping is not a participant in it: {voices:?}"
+        );
     }
 
     /// **A referred line is the ASKING AGENT speaking, not the desk.**

@@ -77,22 +77,55 @@ fn carried_proposal(
     transcript: &[tinyhivemind_hive::SessionMessage],
     topic: &str,
 ) -> Option<String> {
-    let head = format!("#{topic}");
     transcript
         .iter()
         .flat_map(|message| message.content.lines())
-        .map(str::trim)
-        .find_map(|line| {
-            let rest = line.strip_prefix("!propose")?.trim_start();
-            let rest = rest.strip_prefix(&head)?;
-            // A prefix match alone would let `#lazy` claim `#lazy-load`, so the
-            // token has to end here.
-            if rest.starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_') {
-                return None;
-            }
-            let text = rest.trim_start_matches([':', '\u{2014}', '-', ' ']).trim();
-            (!text.is_empty()).then(|| text.to_string())
+        .find_map(|line| match proposed(line) {
+            Some((named, text)) if named == topic && !text.is_empty() => Some(text.to_string()),
+            _ => None,
         })
+}
+
+/// The topic a `!propose` line names, and what it says about it.
+///
+/// `None` for any other line. The topic token ends at whitespace, so `#lazy`
+/// and `#lazy-load` are different topics rather than one being a prefix of the
+/// other — crediting or reporting the wrong option is worse than doing neither.
+fn proposed(line: &str) -> Option<(&str, &str)> {
+    let rest = line.trim().strip_prefix("!propose")?.trim_start();
+    let rest = rest.strip_prefix('#')?;
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        .unwrap_or(rest.len());
+    let (topic, tail) = rest.split_at(end);
+    (!topic.is_empty()).then(|| {
+        (
+            topic,
+            tail.trim_start_matches([':', '\u{2014}', '-', ' ']).trim(),
+        )
+    })
+}
+
+/// The topic this line re-proposes, when the floor already holds one by that
+/// name.
+///
+/// **A topic is put on the floor once.** `!propose` introduces an OPTION; a
+/// member that agrees with an option already there is supporting it, and
+/// `!support` is the move for that.
+///
+/// Reusing an id is not a style slip, it is a vote-corrupting one, because the
+/// fold counts `Propose` and `Support` alike as backing. Observed live: two
+/// members filed *opposite* answers — "lazy-load each section" and "load
+/// everything up front" — under one id named after the question, and the room
+/// reported a quorum of two for a decision they disagreed about. Neither had
+/// supported anything; the tally could not tell them apart.
+fn reuses_a_topic(line: &str, visible: &[tinyhivemind_hive::SessionMessage]) -> Option<String> {
+    let (topic, _) = proposed(line)?;
+    visible
+        .iter()
+        .flat_map(|message| message.content.lines())
+        .any(|earlier| proposed(earlier).is_some_and(|(named, _)| named == topic))
+        .then(|| topic.to_string())
 }
 
 /// The system line a failed turn leaves on the desk.
@@ -782,6 +815,44 @@ impl<'a> EpisodeDriver<'a> {
         Ok(moves::demote(&line))
     }
 
+    /// One corrective turn when a member re-proposes a topic already on the
+    /// floor — see [`reuses_a_topic`] for why that corrupts the tally rather
+    /// than merely reading badly.
+    ///
+    /// Shaped exactly like [`grounded`](Self::grounded): detect, say what to do
+    /// instead, ask once more, keep whatever comes back. A member that
+    /// re-proposes twice has made its point, and a second correction would
+    /// spend a third turn winning a naming argument.
+    async fn fresh_topic(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        visible: &[tinyhivemind_hive::SessionMessage],
+        line: String,
+        scratch: &mut TurnScratch,
+    ) -> Result<String> {
+        let Some(topic) = reuses_a_topic(&line, visible) else {
+            return Ok(line);
+        };
+        tracing::info!(
+            company = %self.company,
+            desk = %self.desk.id,
+            agent = %agent_id,
+            topic = %topic,
+            "[hive] a member re-proposed a topic already on the floor; asked once more"
+        );
+        let corrected = format!(
+            "{prompt}\n\n#{topic} is already on the floor. `!propose` puts a NEW option there, \
+             and two proposals under one id count as agreement even when they say opposite \
+             things. If you agree with #{topic}, write `!support #{topic} ^N` citing what \
+             convinced you. If you are arguing for something else, propose it under its own \
+             topic id — one that names YOUR option, not the question."
+        );
+        let (line, rode) = split_reply(&self.runner.speak(agent_id, &corrected).await?);
+        scratch.aside = rode;
+        Ok(line)
+    }
+
     /// The same line, once its citations have been given one chance to reach a
     /// fact.
     ///
@@ -804,6 +875,11 @@ impl<'a> EpisodeDriver<'a> {
         line: String,
         scratch: &mut TurnScratch,
     ) -> Result<String> {
+        // A distinct rule with its own correction, applied first: a re-proposed
+        // topic corrupts the tally whatever the desk's evidential setting is.
+        let line = self
+            .fresh_topic(agent_id, prompt, visible, line, scratch)
+            .await?;
         if self.desk.config.require_evidential != Some(true)
             || !evidential::support_misses_evidence(&line, agent_id, visible)
         {
@@ -1165,5 +1241,48 @@ mod carried_proposal_test {
     fn a_topic_never_proposed_in_the_window_is_absent() {
         let transcript = vec![msg(1, "!support #stage ^0 no proposal survives here")];
         assert_eq!(carried_proposal(&transcript, "stage"), None);
+    }
+    /// The live failure this rule exists for: two members filed opposite
+    /// answers under one id named after the QUESTION, and the fold counted
+    /// both `!propose` traces as backing the same topic — a reported quorum
+    /// of two for a decision they disagreed about.
+    #[test]
+    fn a_second_proposal_under_one_id_is_caught() {
+        let floor = vec![msg(
+            1,
+            "!propose #decide-one lazy-load each section because settings pages are single-purpose",
+        )];
+        assert_eq!(
+            super::reuses_a_topic(
+                "!propose #decide-one load everything up front, because sections are small forms",
+                &floor,
+            )
+            .as_deref(),
+            Some("decide-one"),
+        );
+        // Supporting it is the right move and is never corrected.
+        assert_eq!(
+            super::reuses_a_topic("!support #decide-one ^1 agreed", &floor),
+            None
+        );
+        // A genuinely new option is not a reuse.
+        assert_eq!(
+            super::reuses_a_topic(
+                "!propose #load-upfront one fetch, instant switching",
+                &floor
+            ),
+            None
+        );
+    }
+
+    /// `#lazy` and `#lazy-load` are different topics — a prefix match would
+    /// correct a member for proposing something nobody had proposed.
+    #[test]
+    fn a_topic_that_merely_prefixes_another_is_not_a_reuse() {
+        let floor = vec![msg(1, "!propose #lazy-load defer every section")];
+        assert_eq!(
+            super::reuses_a_topic("!propose #lazy do it later", &floor),
+            None
+        );
     }
 }
