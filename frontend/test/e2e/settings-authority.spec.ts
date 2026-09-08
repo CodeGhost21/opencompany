@@ -5,11 +5,19 @@ import { expect, test } from "@playwright/test";
  *
  * `connections-authority.spec.ts` is this spec's older half, and covers the
  * three pages that existed when issue #403 was fixed: Apps, MCP and Inference.
- * Hosting, Search, and the Approvals and Domain cards on General arrived later
- * and never joined it — which is why each of them shipped rendering a member an
- * enabled Save. A page that gains a credential form after the spec was written
- * does not fail it; it is simply not in it. So this file walks the Settings
- * section by page, and is the thing to extend when a page is added.
+ * Hosting, Search, and the Approvals card on General arrived later and never
+ * joined it — which is why each of them shipped rendering a member an enabled
+ * Save. A page that gains a credential form after the spec was written does
+ * not fail it; it is simply not in it. So this file walks the Settings section
+ * by page, and is the thing to extend when a page is added.
+ *
+ * Domain and SMTP are not among those pages right now: #2131 gated both cards
+ * on General to a static `ComingSoon` preview for every role, with no form,
+ * button, or handler in either — so there is nothing on screen for a role gate
+ * to protect until that gate lifts. `useCanManage` still authorizes
+ * `PUT …/domain` and the SMTP writes the same as `PUT …/hosting` and
+ * `PUT …/search`; the case for them belongs back here alongside `DomainCard`
+ * and `SmtpCard` once #2131 remounts the real forms.
  *
  * The host is the boundary either way: `PUT …/hosting`, `PUT …/search`,
  * `PUT …/domain` and the SMTP writes are `AdminScopedCompany`, and
@@ -142,20 +150,17 @@ test("a member sees what Settings holds but is offered nothing that changes it",
     await expect(provider).toBeVisible();
     await expect(provider).toBeDisabled();
 
-    // ---- General: approvals, domain, outbound mail --------------------------
+    // ---- General: approvals --------------------------------------------------
     await openSettingsPage(memberPage, "general");
     await expect(memberPage.getByTestId("policy-read-only")).toBeVisible({ timeout: 30_000 });
     // The tiers stay readable — which one is in force decides what this
     // member's teammates may do without asking — but none of them is a choice.
     await expect(memberPage.getByTestId("policy-tier-full")).toBeDisabled();
 
-    await expect(memberPage.getByTestId("domain-read-only")).toBeVisible();
-    await expect(memberPage.getByTestId("domain-remove")).toHaveCount(0);
-    await expect(memberPage.getByTestId("domain-input")).toHaveCount(0);
-
-    await expect(memberPage.getByTestId("smtp-read-only")).toBeVisible();
-    await expect(memberPage.getByTestId("smtp-save")).toHaveCount(0);
-    await expect(memberPage.getByTestId("smtp-password")).toHaveCount(0);
+    // Domain and SMTP assertions retired with the surface: #2131 gated both
+    // cards to a static `ComingSoon` preview for every role, so `useCanManage`
+    // has nothing left to authorize there. Return them here when that gate
+    // lifts and the real `DomainCard`/`SmtpCard` mount again.
 
     // ---- Usage: read-only for everyone, and unchanged by any of this --------
     // `GET …/usage` is `ScopedCompany`, and the page carries no admin control
@@ -188,9 +193,8 @@ test("an admin is still offered every Settings control", async ({ page }) => {
   await openSettingsPage(page, "general");
   await expect(page.getByTestId("policy-read-only")).toHaveCount(0);
   await expect(page.getByTestId("policy-tier-full")).toBeEnabled({ timeout: 30_000 });
-  await expect(page.getByTestId("domain-read-only")).toHaveCount(0);
-  await expect(page.getByTestId("smtp-read-only")).toHaveCount(0);
-  await expect(page.getByTestId("smtp-save")).toBeVisible();
+  // Domain and SMTP assertions retired with the surface — see the matching
+  // note in the member test above.
 });
 
 /**
