@@ -13,8 +13,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { fetchAuthConfig, logout, me as fetchMe, type Me, type UserRole } from "@/api/auth";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { fetchAuthConfig, logout, me as fetchMe, type Me } from "@/api/auth";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
@@ -317,6 +317,33 @@ export function LifecycleControls({
   const [pending, setPending] = useState<string | null>(null);
   const state = pending ?? feed.status.lifecycle;
 
+  /**
+   * The signed-in caller's role, or `null` when the console found no session.
+   *
+   * `null` is not "non-admin" — `resolve_principal` prefers a resolved
+   * session over a platform bearer whenever both are present, so whether a
+   * session exists at all changes which credential `pause` / `resume`
+   * actually authorize against. Defaults to `null` so an unresolved read
+   * never renders an enabled Pause/Resume, matching the closed-by-default
+   * pattern every other admin-gated view uses (`HostingView`, `TeamView`, ...).
+   */
+  const [session, setSession] = useState<UserRole | null>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let role: UserRole | null = null;
+      try {
+        role = (await fetchMe(client, company)).role;
+      } catch {
+        // No user plane on this host, or not signed in — no session.
+      }
+      if (live) setSession(role);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
   async function run(action: LifecycleAction) {
     if (busy) return;
     setBusy(true);
@@ -339,13 +366,19 @@ export function LifecycleControls({
     }
   }
 
-  // Through the funnel, not the raw bearer: "Reset / Start clean" archives this
-  // company and re-provisions it through the same dialog "New company" opens, so
-  // it is company creation wearing another label and has to answer the same
-  // question the other triggers do.
-  const platform = canCreateCompanies(client);
-  const { actions, explainPlatformOnly, explainPlatformSuspended, archived } =
-    lifecycleAffordances(state, platform);
+  // The raw bearer, not the funnel: `canCreateCompanies` also folds in
+  // `COMPANY_SWITCHING_HIDDEN`, a UI feature flag that has nothing to do with
+  // whether this client actually carries platform authority. Gating lifecycle
+  // affordances on the funnel would hide Suspend/Archive from a real platform
+  // caller on a deployment where that flag happens to be set.
+  const platform = client.carriesPlatformBearer;
+  // "Reset / Start clean" archives this company and re-provisions it through
+  // the same dialog "New company" opens, so it is company creation wearing
+  // another label and has to answer the same question the other triggers do —
+  // unlike the lifecycle actions above, it rides the funnel on purpose.
+  const canReset = canCreateCompanies(client);
+  const { actions, explainPlatformOnly, explainPlatformSuspended, explainAdminOnly, archived } =
+    lifecycleAffordances(state, session, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
 
   return (
@@ -382,6 +415,15 @@ export function LifecycleControls({
             <AlertDescription>
               The platform suspended this company. Only the platform can lift a suspension — an
               admin here cannot resume it, so there is no Resume button to offer.
+            </AlertDescription>
+          </Alert>
+        )}
+        {explainAdminOnly && (
+          <Alert data-testid="lifecycle-admin-only">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              Pausing and resuming a company need admin authority here — ask one of this
+              company&rsquo;s admins, since a member&rsquo;s session cannot reach these controls.
             </AlertDescription>
           </Alert>
         )}
@@ -431,9 +473,10 @@ export function LifecycleControls({
           {/* Reset = archive this company (data retained, not deleted) and
               provision a fresh empty one in its place — the only truthful
               "start clean" the host offers, since there is no purge route.
-              Platform-scoped like archive, so it rides the same `platform`
-              gate and is left out entirely for a magic-link operator. */}
-          {onReset && platform && !archived && (
+              Gated on `canReset`, not the raw bearer: it goes through the same
+              funnel "New company" does, and is left out entirely for a
+              magic-link operator. */}
+          {onReset && canReset && !archived && (
             <Button variant="destructive" disabled={busy} onClick={onReset}>
               <RotateCcw className="size-4" /> Reset / Start clean
             </Button>
