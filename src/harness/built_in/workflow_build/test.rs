@@ -674,6 +674,27 @@ fn the_host_assigns_a_safe_unique_id() {
     assert_eq!(safe_workflow_id("!!!", "!!!", &existing), "workflow");
 }
 
+/// `check_workflow` mints its candidate id against `existing_ids`, a snapshot
+/// taken once at copilot-session start (HT-120) — it never inserts the id it
+/// just minted. Two concurrent sessions courtesy-checking the same name
+/// against that same unmutated snapshot therefore mint the SAME id and both
+/// report it clean; only the real `create_workflow` write, serialized under
+/// `company_write_lock`, catches the collision — for the loser, as a rejected
+/// write after a check that said "fine".
+#[test]
+fn two_sessions_sharing_a_stale_snapshot_mint_colliding_ids() {
+    let existing = HashSet::new(); // neither session's own id is in here yet
+    let session_a = safe_workflow_id("Weekly Digest!", "card", &existing);
+    let session_b = safe_workflow_id("Weekly Digest!", "card", &existing);
+    assert_eq!(
+        session_a, session_b,
+        "two check passes against the same stale snapshot must not silently \
+         diverge — they collide, which is exactly the gap: only the locked \
+         write path (company_write_lock in workflow_create.rs) can tell them \
+         apart"
+    );
+}
+
 /// A large plan is bounded before it reaches the prompt: the step and
 /// prerequisite counts are capped and each step's free text is truncated, so an
 /// oversized plan can't run up the input tokens the pass meters (issue #580).
