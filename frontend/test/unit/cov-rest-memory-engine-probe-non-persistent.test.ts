@@ -41,15 +41,21 @@ const STATE: MemoryEngineState = {
   ],
 };
 
-function clientWith(probe: EngineProbe): { client: OpenCompanyClient; put: ReturnType<typeof vi.fn> } {
+function clientWith(
+  probe: EngineProbe,
+): { client: OpenCompanyClient; put: ReturnType<typeof vi.fn>; test: ReturnType<typeof vi.fn> } {
   const put = vi.fn(() => Promise.reject(new Error("apply should not be called by a probe")));
+  const test = vi.fn((_body: unknown) => Promise.resolve(probe));
   const client = {
     scopeFor: () => "/api/v1/company/acme",
     get: vi.fn(() => Promise.resolve(STATE)),
-    post: vi.fn(() => Promise.resolve(probe)),
+    post: (path: string, body: unknown) => {
+      if (path.endsWith("/memory/engine/test")) return test(body);
+      return Promise.reject(new Error(`unexpected POST ${path}`));
+    },
     put,
   } as unknown as OpenCompanyClient;
-  return { client, put };
+  return { client, put, test };
 }
 
 let container: HTMLDivElement;
@@ -80,21 +86,25 @@ afterEach(() => {
 
 describe("the probe path never binds anything", () => {
   it("tests a candidate engine without applying it, whatever the probe answers", async () => {
-    const { client, put } = clientWith({ healthy: true, capabilities: ["core"] });
+    const { client, put, test } = clientWith({ healthy: true, capabilities: ["core"] });
     await show(client);
 
     await act(async () => {
       tile("supermemory")!.click();
     });
-    const test = Array.from(container.querySelectorAll("button")).find(
+    const testButton = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent?.trim() === "Test connection",
     ) as HTMLButtonElement;
     await act(async () => {
-      test.click();
+      testButton.click();
     });
 
     // A healthy probe still must not have bound anything: the standing engine
-    // on screen is unchanged, and the write route was never called.
+    // on screen is unchanged, and the write route was never called — but the
+    // click must have actually reached the probe route for the candidate,
+    // not just left the screen looking untouched.
+    expect(test).toHaveBeenCalledTimes(1);
+    expect(test).toHaveBeenCalledWith(expect.objectContaining({ engine: "supermemory" }));
     expect(put).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="memory-engine-health"]')?.textContent).toContain(
       "store",
@@ -102,19 +112,25 @@ describe("the probe path never binds anything", () => {
   });
 
   it("leaves the bound engine on screen unchanged after a failed probe too", async () => {
-    const { client, put } = clientWith({ healthy: false, capabilities: [], detail: "connection refused" });
+    const { client, put, test } = clientWith({
+      healthy: false,
+      capabilities: [],
+      detail: "connection refused",
+    });
     await show(client);
 
     await act(async () => {
       tile("supermemory")!.click();
     });
-    const test = Array.from(container.querySelectorAll("button")).find(
+    const testButton = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent?.trim() === "Test connection",
     ) as HTMLButtonElement;
     await act(async () => {
-      test.click();
+      testButton.click();
     });
 
+    expect(test).toHaveBeenCalledTimes(1);
+    expect(test).toHaveBeenCalledWith(expect.objectContaining({ engine: "supermemory" }));
     expect(put).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="memory-engine-health"]')?.textContent).toContain(
       "store",
