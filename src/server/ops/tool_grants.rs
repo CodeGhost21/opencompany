@@ -551,7 +551,14 @@ mod tests {
         assert_eq!(body["added"], json!([]));
         assert_eq!(
             body["grantable"],
-            json!(["chargebee", "composio", "hosting", "paypal", "search"])
+            json!([
+                "chargebee",
+                "composio",
+                "hosting",
+                "mcp_registry",
+                "paypal",
+                "search"
+            ])
         );
         assert!(body["setBy"].is_null());
     }
@@ -597,6 +604,42 @@ mod tests {
         );
         assert!(
             crate::company::grants_chargebee_explicit(&record.effective_tool_allow()),
+            "and so must the effective list"
+        );
+    }
+
+    /// `mcp_registry` is grantable here too (a hosted tenant, whose manifest
+    /// is a read-only boot snapshot, has no other way to confer it once the
+    /// harness starts requiring the explicit grant), and the grant reaches the
+    /// same reader the harness gate uses.
+    #[tokio::test]
+    async fn granting_mcp_registry_is_visible_to_the_harness_grant_check() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(
+            &state,
+            "PUT",
+            URI,
+            Some(json!({"namespace": "mcp_registry"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["allow"], json!(["*", "search", "mcp_registry"]));
+        assert_eq!(body["added"], json!(["mcp_registry"]));
+
+        let store = FsCompanyStore::new(dir.path().to_path_buf());
+        let record = store
+            .load(&CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .expect("the company is stored");
+        assert!(
+            crate::company::grants_mcp_registry_explicit(&record.manifest.tools.allow),
+            "the stored manifest must grant it: {:?}",
+            record.manifest.tools.allow
+        );
+        assert!(
+            crate::company::grants_mcp_registry_explicit(&record.effective_tool_allow()),
             "and so must the effective list"
         );
     }
