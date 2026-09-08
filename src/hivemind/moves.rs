@@ -137,8 +137,8 @@ pub fn correction(attempted: &str, allowed: &[&str]) -> String {
 /// operator reading a desk was being shown `!support #lazy-load ^3 agreed`,
 /// which is machine syntax rendered verbatim in a human channel.
 ///
-/// So the head tokens are lifted into a plain-English lead and the member's own
-/// sentence follows untouched. `None` for any line carrying no move, which is
+/// So the head tokens are stripped and the member's own sentence is all that
+/// remains — a teammate's line should read as a teammate talking. `None` for any line carrying no move, which is
 /// every ordinary reply on every non-deliberating desk — those must pass
 /// through byte-for-byte.
 ///
@@ -175,27 +175,32 @@ pub fn readable(line: &str) -> Option<String> {
         rest = rest[token.len()..].trim_start();
     }
 
-    let lead = match (kind, topic) {
-        ("propose", Some(topic)) => format!("proposes {topic}"),
-        ("propose", None) => "proposes".to_string(),
-        ("support", Some(topic)) => format!("supports {topic}"),
-        ("support", None) => "supports".to_string(),
-        ("object", _) => "objects".to_string(),
-        ("refute", Some(topic)) => format!("refutes {topic}"),
-        ("refute", None) => "refutes".to_string(),
-        ("evidence", _) => "evidence".to_string(),
-        ("question", _) => "asks".to_string(),
-        ("defer", _) => "defers".to_string(),
-        ("commit", Some(topic)) => format!("records {topic}"),
-        ("commit", None) => "records".to_string(),
-        ("pin", _) => "pins".to_string(),
-        (other, _) => other.to_string(),
-    };
-    Some(if rest.is_empty() {
-        format!("[{lead}]")
-    } else {
-        format!("[{lead}] {rest}")
-    })
+    // **No label, only the sentence.** The lead this once carried — "[supports
+    // lazy-load]" — was the grammar in another costume: still the mechanism's
+    // vocabulary, still addressed to the fold, still something an operator has
+    // to learn before the channel reads as a conversation. A teammate's line
+    // should look like a teammate talking.
+    //
+    // What is lost is that the channel no longer distinguishes a support from
+    // an objection at a glance. That is recoverable from the prose, which says
+    // so in words, and the fold keeps the marker on the stored row either way.
+    //
+    // A move with no sentence after it — `!question` and `!defer` are the two
+    // honest things a member with nothing to add can say — would otherwise
+    // render as an empty bubble, so those keep a plain phrase.
+    if !rest.is_empty() {
+        return Some(rest.to_string());
+    }
+    Some(
+        match kind {
+            "question" => "I have nothing further to ask.",
+            "defer" => "This is not mine to answer.",
+            "commit" => "Recorded.",
+            "pin" => "Pinned for the room.",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 /// The leading `!` and nothing else: the member's own words are kept verbatim,
@@ -236,15 +241,15 @@ mod readable_test {
     fn a_move_line_reads_as_english() {
         assert_eq!(
             readable("!propose #lazy-load defer each section until it is opened").as_deref(),
-            Some("[proposes lazy-load] defer each section until it is opened")
+            Some("defer each section until it is opened")
         );
         assert_eq!(
             readable("!support #lazy-load ^3 agreed, and it is reversible").as_deref(),
-            Some("[supports lazy-load] agreed, and it is reversible")
+            Some("agreed, and it is reversible")
         );
         assert_eq!(
             readable("!object >3 ^1 users bounce between sections").as_deref(),
-            Some("[objects] users bounce between sections")
+            Some("users bounce between sections")
         );
     }
 
@@ -255,7 +260,7 @@ mod readable_test {
         assert_eq!(
             readable("!evidence #perf ^2 the p95 is > 400ms and #2 in the list is worse")
                 .as_deref(),
-            Some("[evidence] the p95 is > 400ms and #2 in the list is worse")
+            Some("the p95 is > 400ms and #2 in the list is worse")
         );
     }
 
@@ -270,6 +275,10 @@ mod readable_test {
     /// A bare marker still says which move it was.
     #[test]
     fn a_move_with_nothing_after_it_still_renders() {
-        assert_eq!(readable("!question").as_deref(), Some("[asks]"));
+        assert_eq!(
+            readable("!question").as_deref(),
+            Some("I have nothing further to ask."),
+            "a bare move would otherwise render as an empty bubble"
+        );
     }
 }
