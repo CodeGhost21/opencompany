@@ -143,7 +143,7 @@ pub fn verify(
 ) -> Result<String> {
     let parsed = parse_header(header)?;
 
-    if (now - parsed.timestamp).abs() > SKEW_SECS {
+    if now.abs_diff(parsed.timestamp) > SKEW_SECS as u64 {
         return Err(OpenCompanyError::InvalidRequest(format!(
             "authorization timestamp is outside the ±{SKEW_SECS}s window"
         )));
@@ -235,7 +235,7 @@ impl NonceCache {
             .seen
             .lock()
             .map_err(|_| OpenCompanyError::Store("replay-protection cache is unusable".into()))?;
-        guard.retain(|_, ts| (now - *ts).abs() <= self.ttl_secs);
+        guard.retain(|_, ts| now.abs_diff(*ts) <= self.ttl_secs as u64);
         match guard.entry(key.to_string()) {
             Entry::Occupied(_) => Ok(false),
             Entry::Vacant(slot) => {
@@ -304,6 +304,30 @@ mod test {
         let now = signed_at + SKEW_SECS + 100;
         let err = verify(&header, "POST", "/a2a/acme", "abc123", now, &cache);
         assert!(err.is_err(), "stale timestamp must be rejected");
+    }
+
+    #[test]
+    fn an_extreme_timestamp_is_rejected_rather_than_wrapping() {
+        let signer = LocalSigner::generate();
+        let header = header_value(&build_header(&signer, &payload(i64::MIN)));
+        let cache = NonceCache::new();
+
+        let err = verify(&header, "POST", "/a2a/acme", "abc123", 0, &cache);
+        assert!(
+            err.is_err(),
+            "a timestamp whose distance from now cannot be held in an i64 must be refused"
+        );
+    }
+
+    #[test]
+    fn the_cache_prunes_an_entry_whose_distance_from_now_overflows() {
+        let cache = NonceCache::with_ttl(SKEW_SECS);
+        assert!(cache.check_and_insert("sig-a", 0, i64::MIN).unwrap());
+
+        assert!(
+            cache.check_and_insert("sig-a", 0, 0).unwrap(),
+            "an entry that far outside the window must expire rather than live forever"
+        );
     }
 
     #[test]

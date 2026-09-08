@@ -248,7 +248,7 @@ pub fn verify(auth: &X402Authorization, spent: &NonceCache, now: i64) -> Result<
     );
     verify_b58(&auth.agent_id, &msg, &auth.signature_b58)?;
 
-    if (now - auth.timestamp).abs() > MAX_AGE_SECS {
+    if now.abs_diff(auth.timestamp) > MAX_AGE_SECS as u64 {
         return Err(OpenCompanyError::InvalidRequest(format!(
             "x402 authorization timestamp is outside the ±{MAX_AGE_SECS}s window"
         )));
@@ -479,6 +479,18 @@ mod test {
         assert!(
             verify(&auth, &spent, signed_at + MAX_AGE_SECS + 1).is_err(),
             "an authorization older than the spent set's memory must not verify"
+        );
+    }
+
+    #[test]
+    fn an_extreme_timestamp_is_refused_rather_than_wrapping() {
+        let signer = LocalSigner::generate();
+        let auth = authorize(&signer, &sample_challenge(), i64::MIN);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, 0).is_err(),
+            "a timestamp whose distance from now cannot be held in an i64 must be refused"
         );
     }
 
