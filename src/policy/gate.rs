@@ -276,6 +276,19 @@ impl ManifestApprovalGate {
         self.ttl_millis.load(Ordering::Relaxed)
     }
 
+    /// Whether this gate currently turns policy (the tier, `always_approve`,
+    /// the spend cap) into approval requests, as opposed to allowing
+    /// everything the hard denials do not already refuse.
+    ///
+    /// Read by [`PolicyDto`](crate::server::ops::policy::PolicyDto) so the
+    /// console states this fact rather than assuming it: every gate built by
+    /// [`with_policy_hitl_disabled`](Self::with_policy_hitl_disabled) reports
+    /// `false` here, and a copy of that assumption in TypeScript would drift
+    /// the moment a gate is built without it.
+    pub fn policy_hitl_enabled(&self) -> bool {
+        self.policy_hitl_enabled.load(Ordering::Relaxed)
+    }
+
     /// The policy snapshot the gate currently evaluates against.
     ///
     /// What [`apply_effective_policy`](Self::apply_effective_policy) last
@@ -888,6 +901,16 @@ mod test {
 
     async fn decide(gate: &ManifestApprovalGate, effect: &Effect) -> PolicyDecision {
         gate.evaluate(&company(), effect).await.unwrap()
+    }
+
+    #[test]
+    fn policy_hitl_enabled_reflects_the_gate_that_reports_it() {
+        let live = ManifestApprovalGate::new(policy("supervised", None));
+        assert!(live.policy_hitl_enabled());
+
+        let disabled =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+        assert!(!disabled.policy_hitl_enabled());
     }
 
     #[tokio::test]

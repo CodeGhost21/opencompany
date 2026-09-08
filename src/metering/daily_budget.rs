@@ -211,6 +211,42 @@ mod tests {
         assert_eq!(utc_day_start_millis(midnight), midnight);
     }
 
+    /// `usd_spent_by_agent` has no validation seam: a negative `cost_usd` folds
+    /// straight into the total instead of being rejected, so one bad sample
+    /// silently lowers a teammate's measured spend below what it actually
+    /// spent.
+    #[test]
+    #[ignore = "finding MET-001: usd_spent_by_agent has no validation seam; a negative cost_usd sample lowers measured spend instead of being rejected or clamped"]
+    fn a_negative_cost_sample_does_not_lower_measured_spend() {
+        let samples = vec![
+            sample("analyst", 5.0, SampleKind::Inference),
+            sample("analyst", -3.0, SampleKind::Inference),
+        ];
+        assert!(
+            (usd_spent_by_agent(&samples, "analyst") - 5.0).abs() < f64::EPSILON,
+            "a negative cost_usd sample must not silently lower measured spend, got {}",
+            usd_spent_by_agent(&samples, "analyst")
+        );
+    }
+
+    /// Same seam, the non-finite case: `NaN` propagates through `+` and poisons
+    /// every later sum it touches (`x + NaN == NaN`), so one malformed sample
+    /// would erase an agent's whole daily total rather than being rejected.
+    #[test]
+    #[ignore = "finding MET-001: usd_spent_by_agent has no validation seam; a NaN cost_usd sample poisons the whole running total instead of being rejected or clamped"]
+    fn a_non_finite_cost_sample_does_not_poison_the_total() {
+        let samples = vec![
+            sample("analyst", 5.0, SampleKind::Inference),
+            sample("analyst", f64::NAN, SampleKind::Inference),
+            sample("analyst", 2.0, SampleKind::Inference),
+        ];
+        let spent = usd_spent_by_agent(&samples, "analyst");
+        assert!(
+            spent.is_finite(),
+            "a NaN sample must not poison the running total, got {spent}"
+        );
+    }
+
     /// The console row: remaining floors at zero and `exhausted` trips on `>=`,
     /// matching the boundary the harness gate and the policy arm use.
     #[test]

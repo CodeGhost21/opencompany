@@ -11,6 +11,14 @@
 //! they are known authority defects. Runtime `TRACE` probes pin every method
 //! set, and the anonymous column pins route existence.
 //!
+//! The standing-grant routes (`GET`/`DELETE …/grants[/{gid}]`, registered in
+//! `operator.rs`) are a third source, declared the same way as
+//! `EXTERNAL_AUTHORITY_ROUTES` — a manually maintained list, not a scan. Unlike
+//! the ops inventory, nothing asserts this list is the complete set of
+//! `operator.rs` routes; it is an open allowlist that grows by hand as more of
+//! that file earns per-principal coverage. Do not read its presence as
+//! evidence `operator.rs` has no other uncovered authority surface.
+//!
 //! Red-proof log (all temporary edits were restored from `/tmp` copies before
 //! continuing, and `git diff` was byte-identical to the pre-proof tree):
 //! - Removed `clear_policy`'s `require_admin`: the member `DELETE /policy`
@@ -225,6 +233,7 @@ enum Address {
 enum Source {
     Ops,
     ExternalAuthority,
+    Operator,
 }
 
 impl Source {
@@ -232,6 +241,7 @@ impl Source {
         match self {
             Self::Ops => "ops",
             Self::ExternalAuthority => "external",
+            Self::Operator => "operator",
         }
     }
 }
@@ -953,12 +963,47 @@ const fn external_admin(
     }
 }
 
+// Standing-grant routes (issue #2148 part 2): registered via the same
+// `scoped(...)` helper as the ops inventory, so `ScopedCompany` governs both —
+// any member may list or revoke, not just an admin. Declared by hand rather
+// than folded into the `src/server/ops` scan because they are registered from
+// `operator.rs`, which the scan does not walk.
+const OPERATOR_AUTHORITY_ROUTES: &[Route] = &[
+    Route {
+        method: Verb::Get,
+        path: "/grants",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Lists every standing permission open on the company, including who granted it and what it admits.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Delete,
+        path: "/grants/{gid}",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+];
+
 fn all_routes() -> impl Iterator<Item = &'static Route> {
     OPS_SCOPED_ROUTES
         .iter()
         .chain(OPS_EXACT_ROUTES)
         .chain(EXTERNAL_AUTHORITY_ROUTES)
         .chain(OVERLAPPING_EXTERNAL_ROUTES)
+        .chain(OPERATOR_AUTHORITY_ROUTES)
 }
 
 fn routes() -> impl Iterator<Item = &'static Route> {
@@ -1263,11 +1308,12 @@ fn table_counts_and_intentional_widenings_are_explicit() {
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 8);
     assert_eq!(OVERLAPPING_EXTERNAL_ROUTES.len(), 1);
+    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 2);
     assert_eq!(
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        382,
+        386,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1275,10 +1321,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        297,
+        301,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 2_674);
+    assert_eq!(render_snapshot().lines().count(), 2_702);
     assert_eq!(
         all_routes()
             .map(|route| {
@@ -1431,6 +1477,34 @@ fn external_authority_router_files_have_no_unclassified_paths() {
         ]),
         &provision.direct,
     );
+
+    // Knowing a path exists is not the same as exercising it. These four are
+    // `PlatformScope` and the matrix has no platform access class to express
+    // them, so they carry no row and no principal ever probes them. Naming
+    // them here is what stops that being silent: a ninth provisioning route,
+    // or a fix that gives these rows, fails this assertion rather than
+    // quietly joining a set nobody checks.
+    let unexercised: BTreeSet<String> = provision
+        .direct_methods
+        .iter()
+        .filter(|entry| {
+            !EXTERNAL_AUTHORITY_ROUTES
+                .iter()
+                .any(|route| *entry == &format!("{} {}", route.method.label(), route.path))
+        })
+        .cloned()
+        .collect();
+    assert_set_eq(
+        "provisioning routes no principal probes",
+        &string_set(&[
+            "POST /api/v1/companies",
+            "GET /api/v1/companies/provisioning",
+            "POST /api/v1/companies/{id}/suspend",
+            "POST /api/v1/companies/{id}/archive",
+        ]),
+        &unexercised,
+    );
+
     assert!(provision.scoped.is_empty());
 
     let operator = scan_file_route_literals(&root.join("operator.rs"))
@@ -1549,7 +1623,44 @@ fn declared_method_sets() -> BTreeMap<String, BTreeSet<String>> {
 struct Scan {
     scoped: BTreeSet<String>,
     direct: BTreeSet<String>,
+    /// `"POST /api/v1/companies"` — the method matters as much as the path.
+    /// A path already in the inventory can gain a second method, and a
+    /// path-only set stays green while that new method goes unprobed.
+    direct_methods: BTreeSet<String>,
     allowed_nonliteral: BTreeMap<&'static str, usize>,
+}
+
+/// Every HTTP verb a `.route("/p", …)` call wires, including Axum's chained
+/// form `post(handler).delete(other)`. Reading only the first identifier
+/// records `POST` and silently drops the `DELETE`, which is the same
+/// path-shaped blindness this check exists to remove.
+fn route_verbs(tokens: &[Token], open_paren: usize) -> BTreeSet<String> {
+    const VERBS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+    let mut verbs = BTreeSet::new();
+    let mut depth = 0usize;
+    for index in open_paren..tokens.len() {
+        match punct_at(tokens, index) {
+            Some('(') => depth += 1,
+            Some(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        if depth == 1
+            && punct_at(tokens, index + 1) == Some('(')
+            && let Some(name) = ident_at(tokens, index)
+            && VERBS.contains(&name)
+        {
+            verbs.insert(name.to_ascii_uppercase());
+        }
+    }
+    if verbs.is_empty() {
+        verbs.insert("?".to_string());
+    }
+    verbs
 }
 
 fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
@@ -1558,6 +1669,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     let skipped = test_only_token_indexes(&tokens);
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     for index in 0..tokens.len() {
         if skipped.contains(&index) {
             continue;
@@ -1583,6 +1695,12 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
             match tokens.get(index + 3).map(|token| &token.kind) {
                 Some(TokenKind::String(path)) => {
                     direct.insert(path.clone());
+                    // `.route("/p", post(h))` — the verb is the identifier
+                    // after the comma. An unreadable one is recorded as
+                    // `?` rather than skipped, so it cannot vanish quietly.
+                    for verb in route_verbs(&tokens, index + 2) {
+                        direct_methods.insert(format!("{verb} {path}"));
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -1597,6 +1715,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral: BTreeMap::new(),
     })
 }
@@ -1620,6 +1739,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     files.sort();
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     let mut allowed_nonliteral = BTreeMap::new();
     for file in files {
         let relative = file.strip_prefix(root).expect("collected under root");
@@ -1657,6 +1777,9 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
                 match tokens.get(index + 3).map(|token| &token.kind) {
                     Some(TokenKind::String(path)) => {
                         direct.insert(path.clone());
+                        for verb in route_verbs(&tokens, index + 2) {
+                            direct_methods.insert(format!("{verb} {path}"));
+                        }
                     }
                     _ => {
                         let Some(fingerprint) =
@@ -1677,6 +1800,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral,
     })
 }
@@ -2114,4 +2238,16 @@ mod scanner_tests {
         assert!(visible);
         assert!(!hidden);
     }
+}
+
+#[test]
+fn chained_route_verbs_are_all_recorded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let setup = scan_file_route_literals(&root.join("setup.rs")).expect("scan");
+    assert!(
+        setup.direct_methods.contains("GET /api/v1/setup")
+            && setup.direct_methods.contains("POST /api/v1/setup"),
+        "chained get(read).post(apply) must yield both verbs, got {:?}",
+        setup.direct_methods
+    );
 }

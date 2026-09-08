@@ -12,7 +12,9 @@ import { ChatView } from "@/views/ChatView";
 
 /**
  * The channel composer answers a read-only channel by not existing, and the
- * echo-brain notice sits next to the control it qualifies.
+ * echo-brain notice sits next to the control it qualifies — and stays on the
+ * feed that has no such control, where the attribution it corrects is the one
+ * the reader cannot check by asking.
  *
  * # Why a render test and not a source scan
  *
@@ -90,7 +92,31 @@ afterEach(() => {
   container.remove();
 });
 
-function tree(client: OpenCompanyClient, sub: string, typing: string[] = []): ReactNode {
+/**
+ * One run for the in-flight bar.
+ *
+ * Every other test here passes no `inflightRuns` at all, which is why the
+ * sibling-order tests below could once claim the banner and the composer are
+ * adjacent: `ChatView` gates `InflightRunBar` on the prop being defined, so a
+ * harness that omits it never renders the row that actually sits between them
+ * (codex and CodeRabbit, both on PR #2159).
+ */
+const INFLIGHT_RUN = {
+  taskId: "t-1",
+  key: "run-1",
+  kind: "task",
+  title: "Weekly pipeline review",
+  agentId: "pm",
+  startedAt: 0,
+  pendingAction: null,
+} as const;
+
+function tree(
+  client: OpenCompanyClient,
+  sub: string,
+  typing: string[] = [],
+  inflight = false,
+): ReactNode {
   const view = createElement(ChatView, {
     client,
     company: "acme",
@@ -103,6 +129,10 @@ function tree(client: OpenCompanyClient, sub: string, typing: string[] = []): Re
     // renders nothing at all when nobody is typing and the banner's placement
     // was only ever wrong when it renders something.
     resolveTypingNames: () => typing,
+    // Undefined by default, because that is the shape most of these cases care
+    // about — but a shell in production always passes both, so the in-flight
+    // order test opts in.
+    ...(inflight ? { inflightRuns: [INFLIGHT_RUN], onInflightSteered: vi.fn() } : {}),
     // The live-scope escape hatch `send` reads to decide whether a reply still
     // belongs to the company on screen. Nothing here sends.
     scopeRef: { current: { connection: "local", company: "acme", client } },
@@ -123,9 +153,14 @@ function tree(client: OpenCompanyClient, sub: string, typing: string[] = []): Re
  * have nothing to do with the behaviour under test, and the test would pass
  * against any implementation.
  */
-async function renderAt(client: OpenCompanyClient, sub: string, typing: string[] = []) {
+async function renderAt(
+  client: OpenCompanyClient,
+  sub: string,
+  typing: string[] = [],
+  inflight = false,
+) {
   await act(async () => {
-    root.render(tree(client, sub, typing));
+    root.render(tree(client, sub, typing, inflight));
   });
   // Let the desks / operator / capability reads settle.
   await act(async () => {
@@ -134,9 +169,14 @@ async function renderAt(client: OpenCompanyClient, sub: string, typing: string[]
   });
 }
 
-async function mount(sub: string, cognition: string | null = null, typing: string[] = []) {
+async function mount(
+  sub: string,
+  cognition: string | null = null,
+  typing: string[] = [],
+  inflight = false,
+) {
   const client = stubClient(cognition);
-  await renderAt(client, sub, typing);
+  await renderAt(client, sub, typing, inflight);
   return client;
 }
 
@@ -226,7 +266,7 @@ describe("a writable channel still renders the whole composer", () => {
   });
 });
 
-describe("the harness-unavailable notice sits next to the composer", () => {
+describe("the harness-unavailable notice sits next to the composer, or without one", () => {
   it("renders the notice on a writable channel, saying all three things", async () => {
     await mount("main", "unavailable");
 
@@ -269,7 +309,7 @@ describe("the harness-unavailable notice sits next to the composer", () => {
     expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(composerRoot));
   });
 
-  it("stays directly above the composer with somebody typing", async () => {
+  it("stays directly above the composer with somebody typing, nothing in flight", async () => {
     // The order was asserted with nobody typing, which is the one case where
     // `TypingLine` renders nothing — so `["TRANSCRIPT", "BANNER", "COMPOSER"]`
     // read correct while the shipped order was TRANSCRIPT, BANNER, TYPING,
@@ -290,16 +330,95 @@ describe("the harness-unavailable notice sits next to the composer", () => {
     const composerRoot = kids.find((el) => el.contains(input))!;
 
     // Adjacency, not just order: nothing at all between the notice and the
-    // control it qualifies.
+    // control it qualifies. True while the company is idle, which is the case
+    // this one pins — `InflightRunBar` is the one thing that comes between them,
+    // and the test below is where that is pinned instead.
     expect(kids.indexOf(typing!)).toBeLessThan(kids.indexOf(strip));
     expect(kids.indexOf(composerRoot)).toBe(kids.indexOf(strip) + 1);
+    expect(container.querySelector('[data-testid="inflight-run-bar"]')).toBeNull();
   });
 
-  it("is suppressed on a read-only channel, where nothing can be sent", async () => {
+  /**
+   * With a run in flight, the run bar is between the banner and the composer —
+   * on purpose, and the specification says so.
+   *
+   * The adjacency above was asserted with no `inflightRuns` prop at all, and
+   * `ChatView` gates `InflightRunBar` on that prop being defined, so the harness
+   * was pinning a layout no shell in production ever renders. Both reviewers on
+   * PR #2159 caught the same thing in the spec prose; this is the assertion half.
+   */
+  it("lets the in-flight run bar come between it and the composer", async () => {
+    await mount("main", "unavailable", ["Jane"], true);
+
+    const strip = banner()!;
+    const input = composerInput()!;
+    const bar = container.querySelector('[data-testid="inflight-run-bar"]');
+    expect(strip).not.toBeNull();
+    expect(input).not.toBeNull();
+    expect(bar).not.toBeNull();
+
+    const column = strip.parentElement!;
+    const kids = Array.from(column.children);
+    const composerRoot = kids.find((el) => el.contains(input))!;
+    const barRoot = kids.find((el) => el.contains(bar!))!;
+
+    // Still below the transcript and the typing line — the placement this
+    // strip moved for — and still before the composer. Just not glued to it.
+    expect(kids.indexOf(strip)).toBeLessThan(kids.indexOf(barRoot));
+    expect(kids.indexOf(barRoot)).toBeLessThan(kids.indexOf(composerRoot));
+  });
+
+  /**
+   * The read-only feed keeps it, and that is the case it matters most in.
+   *
+   * `#Operator` renders the company's own workflow reports under the reserved
+   * authors `workflow-report` / `owner-fallback-report` — titleized into
+   * "Workflow Report" and "Owner Fallback Report", names belonging to no
+   * person. In an echo state nobody wrote those words, and the only thing on
+   * the row that says so is `EchoPlaceholder`, a non-focusable `<span>`
+   * carrying its reason in a `title`, which reaches neither keyboard, touch nor
+   * screen reader. Suppressing the strip here left the reader with a status
+   * report, a "Placeholder" pill against a name that is not a colleague, and no
+   * way to ask anything — the feed takes no replies.
+   */
+  it("stays on the read-only feed, which the reader cannot interrogate", async () => {
     await mount("operator", "unavailable");
 
-    expect(banner()).toBeNull();
+    const strip = banner();
+    expect(strip).not.toBeNull();
+    expect(strip?.textContent).toContain(
+      "This host cannot reach a model — no agent harness is available.",
+    );
+    expect(strip?.textContent).toContain(
+      "The replies in this conversation come from the offline echo brain rather than the " +
+        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "started with the harness.",
+    );
+
+    // Restoring the notice restores nothing else: the channel is still
+    // read-only, still says so, and still draws no composer.
     expect(container.textContent).toContain("There is nothing to reply to here");
+    expect(composerInput()).toBeNull();
+    expect(readOnlyComposerInput()).toBeNull();
+    expect(container.querySelector("textarea")).toBeNull();
+  });
+
+  it("sits after the read-only notice, with no composer between them", async () => {
+    await mount("operator", "unavailable");
+
+    const strip = banner()!;
+    const column = strip.parentElement!;
+    const kids = Array.from(column.children);
+    const notice = kids.find((el) => el.textContent?.includes("There is nothing to reply to here"));
+
+    expect(notice).not.toBeUndefined();
+    expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(strip));
+
+    // Order relative to the read-only notice only — deliberately NOT "and it is
+    // the last child of the column". `InflightRunBar` renders after this strip
+    // in production, outside the read-only branch on purpose (see its comment
+    // at the render site), and this harness passes no `inflightRuns`, so a
+    // last-child assertion would pass here while being false on screen.
   });
 });
 

@@ -124,6 +124,24 @@ pub enum SampleKind {
     /// Counts toward the capability-tier token budget: it is per-card spend a
     /// company past its ceiling must stop paying.
     TitleCall,
+    /// One completed oversized-tool-result extraction — the single tool-less
+    /// model call that turns a payload too large to inline into the part of it
+    /// that answers the turn (issue #6014).
+    ///
+    /// Deliberately **not** [`Self::Inference`], on the same reasoning as
+    /// [`Self::TitleCall`] and [`Self::PlanningCall`]: an `Inference` sample is
+    /// a teammate's turn, attributed to an agent and counted against the
+    /// per-teammate chart and the daily cap. An extraction happens *inside*
+    /// another agent's turn, on a tool result, and is charged to the
+    /// whole-company bucket with no `run_id`.
+    ///
+    /// It gets its own kind because its cost curve is unlike anything else
+    /// here: it fires once per oversized tool result, its input is the payload
+    /// rather than a prompt, and a turn that hits several large results pays it
+    /// several times. Folded into any existing kind, that spend would be
+    /// invisible exactly when it mattered — which is how it shipped unmetered
+    /// and was caught in review on tinyhumansai/opencompany#2153.
+    ExtractionCall,
     /// One completed first-run setup pass — the single tool-less model call
     /// that turns three answers into a starting roster
     /// (`docs/spec/runtime/company-setup.md`).

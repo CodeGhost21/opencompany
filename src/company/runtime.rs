@@ -10819,6 +10819,196 @@ mod tests {
         );
     }
 
+    /// A DM reply and a console verdict both resolve through
+    /// `claim_blocker_resolution`, so they cannot both win — but until now
+    /// nothing drove one of each at the same blocker and checked the loser's
+    /// **own return value**, only the armed slot's content (see the test
+    /// above). `resolve_approval_spawned` and `apply_blocker_reply_spawned`
+    /// both hold `self.blocker_resolutions` for their claim-and-settle window,
+    /// so true interleaving is impossible by construction; what remains
+    /// untested is that the second caller in, whichever surface it is, is
+    /// handed back `AlreadyResolved` rather than a receipt that reads like it
+    /// was the one that settled the blocker.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_console_verdict_after_a_dm_reply_already_won_is_told_it_lost() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        // The DM reply lands first and wins the claim.
+        let (dm_receipt, dm_follow_up) = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await
+            .expect("the dm reply claims and settles");
+        assert!(
+            matches!(
+                dm_receipt,
+                crate::runtime::cycle::ResolveReceipt::Settled(_)
+            ),
+            "the dm reply must be the one that settles the blocker: {dm_receipt:?}"
+        );
+        drop(dm_follow_up);
+
+        // The console verdict arrives on the same id after the claim is
+        // already taken. It must not error, and it must not be told it won.
+        let (console_receipt, _console_follow_up) = runtime
+            .resolve_approval_spawned(
+                &id,
+                crate::ports::types::Verdict::Deny,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("a losing resolve is a receipt, not an error");
+        assert!(
+            matches!(
+                console_receipt,
+                crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+            ),
+            "a console verdict racing a dm reply it lost must be reported to its own \
+             caller as already-resolved, not silently accepted as though it settled \
+             the blocker: {console_receipt:?}"
+        );
+    }
+
+    /// The mirror of the test above: the console verdict wins the claim, and a
+    /// DM reply arriving after it on the same blocker must be told it lost
+    /// through its own return value rather than being silently accepted.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_dm_reply_after_a_console_verdict_already_won_is_told_it_lost() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        let (console_receipt, _console_follow_up) = runtime
+            .resolve_approval_spawned(
+                &id,
+                crate::ports::types::Verdict::Approve,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("the console verdict claims and settles");
+        assert!(
+            matches!(
+                console_receipt,
+                crate::runtime::cycle::ResolveReceipt::Settled(_)
+            ),
+            "the console verdict must be the one that settles the blocker: {console_receipt:?}"
+        );
+
+        let (dm_receipt, dm_follow_up) = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await
+            .expect("a losing dm reply is a receipt, not an error");
+        assert!(
+            matches!(
+                dm_receipt,
+                crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+            ),
+            "a dm reply racing a console verdict it lost must be reported to its own \
+             caller as already-resolved, not silently accepted as though it settled \
+             the blocker: {dm_receipt:?}"
+        );
+        drop(dm_follow_up);
+    }
+
     /// The thread-as-review-surface: a reply to a settled `in_review` dispatch
     /// card's settle pill or relay bubble routes as review feedback and re-runs
     /// the card; an Approve verdict finishes it.

@@ -345,20 +345,49 @@ pub fn build_agent(
             deps.store.clone(),
         )));
     }
+    // Installed-MCP-registry surface (`mcp_registry_list_tools` /
+    // `mcp_registry_tool_call`) — distinct from the per-server `mcp:<name>`
+    // bridge below, and reaching further: `mcp_registry_tool_call` invokes an
+    // arbitrary tool on ANY server the company has installed and connected,
+    // addressed at call time by a bare `server_id` argument, with none of the
+    // bridge's per-server grant scoping. Two hard gates before either tool is
+    // wired, following the `composio`/`media`/`search` precedent above:
+    //
+    //  1. an **EXPLICIT** `mcp_registry` grant
+    //     (`grants_mcp_registry_explicit`) — the catch-all `*` does NOT confer
+    //     it, for the same reason it does not confer `composio`: this reaches
+    //     third-party servers and can mutate them, so a broadly-permissioned
+    //     company must still opt in by name.
+    //  2. a configured registry store (`deps.mcp_home`) — the store an install
+    //     writes through. Granted-but-unconfigured wires nothing and warns
+    //     (fail-closed), matching every other explicit namespace in this file.
+    //
+    // `mcp_registry_list_tools` (read-only schema discovery over the same
+    // registry) rides the SAME grant as the mutating call tool rather than a
+    // narrower one of its own — see `grants_mcp_registry_explicit`'s doc
+    // comment for why: every other third-party-reaching family already bundles
+    // its read-only discovery tools under the one grant that covers the
+    // mutating ones, and OpenHuman's own tool description frames the two as a
+    // single discover-then-call workflow.
     #[cfg(feature = "mcp")]
-    {
-        // These read the installed-server registry, so installs and lifecycle
-        // changes are visible without rebuilding agents. They take the config
-        // that selects the store now rather than reading a process global —
-        // hand them this company's own, the one REST writes through.
-        if let Some(mcp_home) = deps.mcp_home.clone() {
-            let config = std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
-            tools.push(Box::new(
-                oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
-            ));
-            tools.push(Box::new(
-                oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
-            ));
+    if crate::company::grants_mcp_registry_explicit(grants) {
+        match deps.mcp_home.clone() {
+            Some(mcp_home) => {
+                let config =
+                    std::sync::Arc::new(crate::harness::mcp::McpRuntime::config_for(mcp_home));
+                tools.push(Box::new(
+                    oh::mcp::registry::tools::McpRegistryListToolsTool::new(config.clone()),
+                ));
+                tools.push(Box::new(
+                    oh::mcp::registry::tools::McpRegistryToolCallTool::new(config),
+                ));
+            }
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `mcp_registry` but no MCP registry home is \
+                 configured; mcp_registry tools NOT wired (fail-closed)"
+            ),
         }
     }
 
@@ -1195,6 +1224,26 @@ pub fn build_agent(
             tool_result_budget_bytes: TOOL_RESULT_BUDGET_BYTES,
             ..Default::default()
         })
+        // Issue #6014: extract the answering content from an oversized tool
+        // result instead of cutting it on a byte boundary.
+        //
+        // `ContextConfig` has carried the threshold this fires at
+        // (`summarizer_payload_threshold_tokens`, 4000) since before this crate
+        // existed, and `ToolOutputMiddleware` has consulted it on every tool
+        // result — but the builder defaults the summarizer itself to `None`, so
+        // the whole path was inert here and the byte cut was the only thing
+        // bounding a large payload. That cut keeps whatever came first: a
+        // thirty-issue listing reached the model as two issues, and the agent
+        // reported two.
+        //
+        // The upstream implementation dispatches a sub-agent, which this crate
+        // cannot use (see `toolbelt`'s v1 note on spawn tools under
+        // multi-tenancy), so `PayloadExtractor` serves the same trait with one
+        // bounded model call — built `from_deps` like every other one-shot pass
+        // here, so it spends the company's own credential and meters against it.
+        .payload_summarizer(std::sync::Arc::new(
+            crate::harness::payload_extract::PayloadExtractor::from_deps(deps, company),
+        ))
         .model_name(model)
         .workspace_dir(workspace)
         .agent_definition_name(agent_definition_name)
@@ -2725,24 +2774,14 @@ mod tests {
     /// curated exec subset (shell / code / web) plus the intrinsic memory + file
     /// tools; it contains NO delegation tool and NO deferred family, and — the
     /// #238 addition — no `web_search`, because a bare `*` does not confer the
-    /// `search` grant.
-    ///
-    /// **Feature-aware (issue #297).** The belt genuinely differs by feature
-    /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
-    /// unconditionally in `build_agent`, so a flat literal was *wrong* under
-    /// `--features openhuman,mcp` — the combination a full local build
-    /// and the shipped tenant image both use, and which no CI lane ran. The pin
-    /// was therefore failing unseen on `main`. Extending the array
-    /// unconditionally would only move the failure onto plain
-    /// `--features openhuman`, which CI *does* run, so the fix has to branch.
-    /// Composing the expectation from the same `cfg` the wiring uses keeps the
-    /// two from drifting again.
+    /// `search` grant. Nor does it contain `mcp_registry_list_tools` /
+    /// `mcp_registry_tool_call`, for the identical reason: those two ride the
+    /// explicit `mcp_registry` grant, never the wildcard — see the
+    /// `mcp_registry_tools_are_wired_only_by_explicit_grant` test below for the
+    /// belt a company that names that grant actually receives.
     #[test]
     fn dispatched_desk_agent_tool_belt_is_pinned() {
         let names = built_tool_names(&["*"], false);
-        // `mut` is only used by the `mcp` arm below; without the feature the
-        // literal is already the whole expectation.
-        #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
         let mut expected = vec![
             "apply_patch",
             "csv_export",
@@ -2777,18 +2816,125 @@ mod tests {
         // belt now — including a company with no skills source of its own.
         expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
         expected.sort();
-        // Mirrors the `#[cfg(feature = "mcp")]` push in `build_agent`. These two
-        // are intrinsic (unmapped by `namespace_of`), so no grant gates them:
-        // the feature plus a configured `HarnessDeps::mcp_home` is the whole
-        // condition. The home is what selects the company's own registry store,
-        // and a tool built without it would read a different one.
-        #[cfg(feature = "mcp")]
-        {
-            expected.push("mcp_registry_list_tools");
-            expected.push("mcp_registry_tool_call");
-            expected.sort();
-        }
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    /// The three gate states of the `mcp_registry` surface, mirroring
+    /// [`web_search_is_wired_only_by_explicit_grant_and_credential`].
+    ///
+    /// The load-bearing row is the first: a broad `*` grant does **not** wire
+    /// either `mcp_registry_list_tools` or `mcp_registry_tool_call`, even with
+    /// a configured registry home (`pin_deps` always sets one). Before this
+    /// gate existed, both tools were pushed unconditionally whenever
+    /// `deps.mcp_home` was set — this row is the regression check for that.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_registry_tools_are_wired_only_by_explicit_grant() {
+        const REGISTRY_TOOLS: [&str; 2] = ["mcp_registry_list_tools", "mcp_registry_tool_call"];
+
+        // No grant at all → absent.
+        let ungranted = built_tool_names(&[], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                !ungranted.contains(&tool.to_string()),
+                "no grant must mean no `{tool}`: {ungranted:?}"
+            );
+        }
+
+        // `*` (with a configured home) → still absent. The wildcard never
+        // confers a third-party-reaching, mutating surface.
+        let wildcard = built_tool_names(&["*"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                !wildcard.contains(&tool.to_string()),
+                "a bare `*` must NOT confer `{tool}`: {wildcard:?}"
+            );
+        }
+
+        // An unrelated grant → absent.
+        let unrelated = built_tool_names(&["web.*"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                !unrelated.contains(&tool.to_string()),
+                "an unrelated grant must not confer `{tool}`: {unrelated:?}"
+            );
+        }
+
+        // Explicit `mcp_registry` grant, with a configured home → BOTH tools,
+        // together — list is never conferred without call, or vice versa.
+        let granted = built_tool_names(&["mcp_registry"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                granted.contains(&tool.to_string()),
+                "an explicit `mcp_registry` grant must wire `{tool}`: {granted:?}"
+            );
+        }
+
+        // The sub-grant form works the same way `search.web` / `composio.gmail`
+        // do.
+        let sub_granted = built_tool_names(&["mcp_registry.notion"], false);
+        for tool in REGISTRY_TOOLS {
+            assert!(
+                sub_granted.contains(&tool.to_string()),
+                "`mcp_registry.notion` must wire `{tool}`: {sub_granted:?}"
+            );
+        }
+    }
+
+    /// Explicit `mcp_registry` grant, NO configured registry home → absent,
+    /// fail-closed — matching every other explicit namespace's
+    /// granted-but-uncredentialed shape (`media`, `composio`, `chargebee`,
+    /// `paypal`, `hosting`, `search`).
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_registry_tools_fail_closed_with_no_registry_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.mcp_home = None;
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            name: None,
+            description: None,
+            tier: None,
+            harness: None,
+            tools: None,
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+            model: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = vec!["mcp_registry".to_string()];
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            None,
+            false,
+        )
+        .expect("agent builds");
+        let names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        assert!(
+            !names.contains(&"mcp_registry_list_tools".to_string()),
+            "granted-but-unconfigured must not wire `mcp_registry_list_tools`: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mcp_registry_tool_call".to_string()),
+            "granted-but-unconfigured must not wire `mcp_registry_tool_call`: {names:?}"
+        );
     }
 
     #[test]
@@ -3142,5 +3288,145 @@ mod tests {
             history.contains("checkpoint: after file_write"),
             "{history}"
         );
+    }
+
+    // --- FAIL-axis: the MCP registry belt is wired without a grant check ------
+
+    /// The read half of the MCP registry family must be withheld from an agent
+    /// whose effective grants cover no namespace at all.
+    ///
+    /// `build_agent` pushes it on `#[cfg(feature = "mcp")]` + a configured
+    /// `mcp_home` alone, with no `grants` term in the condition, so an agent
+    /// granted nothing still receives it. Pinned here as the safe behaviour.
+    #[cfg(feature = "mcp")]
+    #[test]
+    #[ignore = "confirms fail-open: mcp_registry_list_tools is wired with no grant term"]
+    fn mcp_registry_list_tools_is_withheld_from_an_agent_granted_nothing() {
+        let names = built_tool_names(&[], false);
+        assert!(
+            !names.contains(&"mcp_registry_list_tools".to_string()),
+            "an agent holding no grant must not receive the MCP registry reader: {names:?}"
+        );
+    }
+
+    /// The mutating half — the one that invokes an arbitrary tool on any server
+    /// the company has installed. Same ungated wiring, higher blast radius: an
+    /// agent granted nothing can drive every connected MCP server.
+    #[cfg(feature = "mcp")]
+    #[test]
+    #[ignore = "confirms fail-open: mcp_registry_tool_call is wired with no grant term"]
+    fn mcp_registry_tool_call_is_withheld_from_an_agent_granted_nothing() {
+        let names = built_tool_names(&[], false);
+        assert!(
+            !names.contains(&"mcp_registry_tool_call".to_string()),
+            "an agent holding no grant must not receive the MCP registry invoker: {names:?}"
+        );
+    }
+
+    /// Narrow grants are not a way in either: an agent granted only `docs`
+    /// holds no MCP namespace, so neither registry tool may appear.
+    #[cfg(feature = "mcp")]
+    #[test]
+    #[ignore = "confirms fail-open: a docs-only agent still receives both registry tools"]
+    fn a_docs_only_agent_receives_no_mcp_registry_tool() {
+        let names = built_tool_names(&["docs.*"], false);
+        for tool in ["mcp_registry_list_tools", "mcp_registry_tool_call"] {
+            assert!(
+                !names.contains(&tool.to_string()),
+                "`docs.*` must not confer `{tool}`: {names:?}"
+            );
+        }
+    }
+
+    /// The server-backed MCP family (`mcp_list_tools` / `mcp_call`) is the
+    /// contrast case, and it fails closed: with no server configured on the
+    /// company, `registry_for_agent` yields nothing and not one of those tools
+    /// is built — even for a `*` agent. This is the gate the registry family
+    /// above is missing, pinned so a change that wires the belt unconditionally
+    /// is caught here.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn no_configured_mcp_server_wires_no_server_backed_mcp_tool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = pin_deps(dir.path().to_path_buf());
+        assert!(
+            deps.mcp_servers.is_empty(),
+            "this test's premise is a company with no configured server"
+        );
+        assert!(
+            crate::harness::mcp::registry_for_agent(&deps.mcp_servers, &["*".to_string()])
+                .is_none(),
+            "no configured server must yield no registry, even under `*`"
+        );
+
+        let names = built_tool_names(&["*"], false);
+        for tool in ["mcp_list_servers", "mcp_list_tools", "mcp_call"] {
+            assert!(
+                !names.contains(&tool.to_string()),
+                "`{tool}` must not be wired without a configured server: {names:?}"
+            );
+        }
+    }
+
+    /// The tool-iteration ceiling is one crate-wide constant with no per-agent
+    /// lever: a tier hint, a declared daily budget and the orchestrator flag all
+    /// build agents that run on exactly [`MAX_TOOL_ITERATIONS`]. An agent that
+    /// needs a longer loop has no way to ask for one, and — the direction that
+    /// matters — no manifest field can raise its own ceiling.
+    #[test]
+    fn the_tool_iteration_cap_is_uniform_and_not_manifest_configurable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = pin_deps(dir.path().to_path_buf());
+
+        let build_with = |tier: Option<&str>, budget: Option<f64>, is_orchestrator: bool| {
+            let manifest_agent = ManifestAgent {
+                global: false,
+                id: "desk".to_string(),
+                role: "Desk Lead".to_string(),
+                name: None,
+                description: None,
+                tier: tier.map(str::to_string),
+                harness: None,
+                tools: None,
+                delegates_to: Vec::new(),
+                context: None,
+                budget_usd_daily: budget,
+                prompt: None,
+                prompt_files: Vec::new(),
+                prompt_files_resolved: Vec::new(),
+                classes: Vec::new(),
+                ledgers: None,
+                can_declare_ledgers: true,
+                model: None,
+            };
+            build_agent(
+                &CompanyId::new("acme"),
+                "Acme",
+                &manifest_agent,
+                ApprovalPolicy::new(&Policy::default(), None),
+                &deps,
+                &["*".to_string()],
+                &[],
+                &[],
+                None,
+                is_orchestrator,
+            )
+            .expect("agent builds")
+            .agent_config()
+            .max_tool_iterations
+        };
+
+        for (label, got) in [
+            ("no tier", build_with(None, None, false)),
+            ("deep tier", build_with(Some("deep"), None, false)),
+            ("fast tier", build_with(Some("fast"), None, false)),
+            ("budgeted", build_with(None, Some(500.0), false)),
+            ("orchestrator", build_with(None, None, true)),
+        ] {
+            assert_eq!(
+                got, MAX_TOOL_ITERATIONS,
+                "`{label}` must run on the one stated ceiling, not its own"
+            );
+        }
     }
 }

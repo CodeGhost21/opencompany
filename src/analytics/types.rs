@@ -307,6 +307,7 @@ pub fn sample_kind_slug(kind: SampleKind) -> &'static str {
         SampleKind::AuthoringCall => "authoring-call",
         SampleKind::SelectorCall => "selector-call",
         SampleKind::TitleCall => "title-call",
+        SampleKind::ExtractionCall => "extraction-call",
     }
 }
 

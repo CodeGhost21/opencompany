@@ -734,4 +734,48 @@ mod tool_test {
             .expect("runs");
         assert!(queue.drain(8).requests[0].effect.agent.is_none());
     }
+
+    /// The other half of `an_escalation_mints_no_grant`, and the half that is
+    /// load-bearing in the opposite direction.
+    ///
+    /// `agent: None` is what stops an approval re-dispatching the agent into
+    /// asking the same question again. But `None` is also what
+    /// `CycleRunner::settle_approval` reads as *a native effect the runtime
+    /// performs*, and its fall-through hands the effect to
+    /// `execute_effect_once` — which for a blocker payload ledgers a phantom
+    /// spend and routes nothing while reporting success. The only thing
+    /// standing between those two is
+    /// [`is_blocker_effect`](crate::ports::blockers::is_blocker_effect), which
+    /// matches on the effect **kind string**. Nothing else couples the kind
+    /// this tool stamps to the prefix that guard looks for, so a rename on
+    /// either side reopens the fall-through silently.
+    #[tokio::test]
+    async fn an_escalation_is_recognisable_as_a_blocker_so_approval_cannot_execute_it_natively() {
+        let queue = ApprovalRequestQueue::default();
+        tool(&queue)
+            .execute(serde_json::json!({ "question": "staging or prod?" }))
+            .await
+            .expect("runs");
+        let effect = queue.drain(8).requests[0].effect.clone();
+        assert!(
+            effect.agent.is_none(),
+            "a grant here would re-ask the question"
+        );
+        assert!(
+            crate::ports::blockers::is_blocker_effect(&effect),
+            "an agent-None effect that is not recognised as a blocker falls through to native \
+             execution on approval: {}",
+            effect.kind
+        );
+        assert!(
+            serde_json::from_value::<BlockerPayload>(effect.payload.clone()).is_ok(),
+            "the resolve path reads the payload back off the parked effect to carry the step: {:?}",
+            effect.payload
+        );
+        assert!(
+            effect.amount_usd.is_none(),
+            "a question costs nothing; an amount here is what a phantom spend would be ledgered \
+             from"
+        );
+    }
 }

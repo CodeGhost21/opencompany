@@ -1811,8 +1811,8 @@ const MAX_BLOCKING_THREADS: usize = 512;
 /// The log filter used when `RUST_LOG` says nothing.
 ///
 /// The bare `error` is exactly what `EnvFilter::from_default_env()` fell back to,
-/// so no target in this binary becomes chattier than it was. The one added
-/// directive is the exception the default cannot express, and it is not cosmetic.
+/// so no target in this binary becomes chattier than it was. Each added
+/// directive is an exception the default cannot express, and neither is cosmetic.
 ///
 /// `tinyagents::observability` is the target the vendored durable-append writer
 /// (`AppendWorker`, in
@@ -1834,9 +1834,17 @@ const MAX_BLOCKING_THREADS: usize = 512;
 /// is `pub(crate)` in tinyagents and cannot be read from here, so the subscriber
 /// is the only channel we have (see `docs/spec/runtime/workspace-layout.md`).
 ///
+/// `policy::shadow_floor` is the target the consequence-floor shadow reader
+/// (`ApprovalPolicy::record_shadow_floor`, `src/harness/built_in/policy.rs`,
+/// issue #2147) reports on. It emits `info!`, one line per call the floor would
+/// have stopped, and that line is the entire measurement: no container image,
+/// compose file or deploy workflow sets `RUST_LOG` either, so a bare `error`
+/// filter would run the whole staging measurement and record nothing — the same
+/// shape as the durable-append gap above, one level quieter.
+///
 /// Setting `RUST_LOG` replaces this string wholesale — the operator keeps full
 /// control, and behaviour with `RUST_LOG` set is unchanged.
-const DEFAULT_LOG_FILTER: &str = "error,tinyagents::observability=warn";
+const DEFAULT_LOG_FILTER: &str = "error,tinyagents::observability=warn,policy::shadow_floor=info";
 
 fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -3149,6 +3157,48 @@ mod test {
         assert!(
             !seen("tinyagents::observability", tracing::Level::INFO),
             "the exception stops at `warn`; captured {events:?}"
+        );
+    }
+
+    /// Issue #2147: the consequence-floor shadow reader's whole output is one
+    /// `info!` per call it would have stopped. Without a named exception a
+    /// bare `error` filter drops every line of it, so a week of staging
+    /// traffic measures nothing and nobody notices — the same failure mode
+    /// `the_default_filter_passes_durable_append_warnings_and_still_drops_other_ones`
+    /// pins for the durable-append worker, one level quieter. Revert the
+    /// `policy::shadow_floor=info` directive and this fails.
+    #[test]
+    fn the_default_filter_passes_the_shadow_floor_measurement() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(None));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "policy::shadow_floor",
+                "[policy:shadow-floor] agent=- tool='gmail_send_email' would_stop=irreversible_send \
+                 mode=Auto hitl=false issue=2147"
+            );
+            // An unrelated `info!` stays dropped: this is one named target,
+            // not a global level bump.
+            tracing::info!(target: "opencompany::unrelated", "ordinary chatter");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        let seen = |target: &str, level: tracing::Level| {
+            events.iter().any(|(t, l)| t == target && *l == level)
+        };
+
+        assert!(
+            seen("policy::shadow_floor", tracing::Level::INFO),
+            "the shadow-floor measurement must survive the default filter; captured {events:?}"
+        );
+        assert!(
+            !seen("opencompany::unrelated", tracing::Level::INFO),
+            "the exception is one target, not a global level bump; captured {events:?}"
         );
     }
 

@@ -1083,4 +1083,62 @@ mod tests {
         );
         assert_eq!(schema["required"][0], "query");
     }
+
+    /// A malformed-but-2xx backend body (a real HTTP response, just not one
+    /// `SearchResponse` deserializes) refunds the ledger slot exactly like an
+    /// unreachable backend does — even though a 2xx status means the backend
+    /// was reached and may already have dispatched (and billed) the search
+    /// server-side. The client cannot tell "never reached the backend" apart
+    /// from "reached it, but the reply was unparseable", so this pins today's
+    /// behaviour: the slot comes back and the caller loses no quota either way.
+    #[tokio::test]
+    async fn a_malformed_2xx_response_still_refunds_the_slot() {
+        use axum::Json;
+        use axum::routing::post;
+
+        let app = axum::Router::new().route(
+            SEARCH_PATH,
+            post(|| async { Json(serde_json::json!({ "not": "a SearchResponse" })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let backend = SearchBackend::new(
+            format!("http://{addr}"),
+            Credential::from_value("managed-token"),
+            5,
+        );
+        let tools = search_tools(
+            &backend,
+            SearchMetering {
+                company: CompanyId::new("acme"),
+                agent: "ceo".into(),
+                meter: None,
+            },
+        );
+        let tool = &tools[0];
+
+        let result = tool
+            .execute(json!({ "query": "competitor pricing" }))
+            .await
+            .expect("tool never propagates");
+        assert!(
+            result.is_error,
+            "an unparseable body must not be reported as a successful search"
+        );
+
+        let acme = CompanyId::new("acme");
+        let now = crate::ports::now_millis();
+        assert_eq!(
+            backend.ledger().used_today(&acme, now),
+            0,
+            "today's pinned behaviour: the slot is refunded even though the \
+             backend was actually reached and may have already run (and billed) \
+             the search — this is the HT-098 undercounting gap, not a proof \
+             that undercounting is safe"
+        );
+    }
 }
