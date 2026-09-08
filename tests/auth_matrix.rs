@@ -11,6 +11,14 @@
 //! they are known authority defects. Runtime `TRACE` probes pin every method
 //! set, and the anonymous column pins route existence.
 //!
+//! The standing-grant routes (`GET`/`DELETE …/grants[/{gid}]`, registered in
+//! `operator.rs`) are a third source, declared the same way as
+//! `EXTERNAL_AUTHORITY_ROUTES` — a manually maintained list, not a scan. Unlike
+//! the ops inventory, nothing asserts this list is the complete set of
+//! `operator.rs` routes; it is an open allowlist that grows by hand as more of
+//! that file earns per-principal coverage. Do not read its presence as
+//! evidence `operator.rs` has no other uncovered authority surface.
+//!
 //! Red-proof log (all temporary edits were restored from `/tmp` copies before
 //! continuing, and `git diff` was byte-identical to the pre-proof tree):
 //! - Removed `clear_policy`'s `require_admin`: the member `DELETE /policy`
@@ -225,6 +233,7 @@ enum Address {
 enum Source {
     Ops,
     ExternalAuthority,
+    Operator,
 }
 
 impl Source {
@@ -232,6 +241,7 @@ impl Source {
         match self {
             Self::Ops => "ops",
             Self::ExternalAuthority => "external",
+            Self::Operator => "operator",
         }
     }
 }
@@ -953,12 +963,47 @@ const fn external_admin(
     }
 }
 
+// Standing-grant routes (issue #2148 part 2): registered via the same
+// `scoped(...)` helper as the ops inventory, so `ScopedCompany` governs both —
+// any member may list or revoke, not just an admin. Declared by hand rather
+// than folded into the `src/server/ops` scan because they are registered from
+// `operator.rs`, which the scan does not walk.
+const OPERATOR_AUTHORITY_ROUTES: &[Route] = &[
+    Route {
+        method: Verb::Get,
+        path: "/grants",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Lists every standing permission open on the company, including who granted it and what it admits.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Delete,
+        path: "/grants/{gid}",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+];
+
 fn all_routes() -> impl Iterator<Item = &'static Route> {
     OPS_SCOPED_ROUTES
         .iter()
         .chain(OPS_EXACT_ROUTES)
         .chain(EXTERNAL_AUTHORITY_ROUTES)
         .chain(OVERLAPPING_EXTERNAL_ROUTES)
+        .chain(OPERATOR_AUTHORITY_ROUTES)
 }
 
 fn routes() -> impl Iterator<Item = &'static Route> {
@@ -1263,11 +1308,12 @@ fn table_counts_and_intentional_widenings_are_explicit() {
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 8);
     assert_eq!(OVERLAPPING_EXTERNAL_ROUTES.len(), 1);
+    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 2);
     assert_eq!(
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        382,
+        386,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1275,10 +1321,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        297,
+        301,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 2_674);
+    assert_eq!(render_snapshot().lines().count(), 2_702);
     assert_eq!(
         all_routes()
             .map(|route| {
