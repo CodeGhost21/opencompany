@@ -3787,6 +3787,52 @@ mod tests {
         );
     }
 
+    /// `escalate_to_human` (issue #1860's agent-question blocker), unlike
+    /// `request_approval`, never sets `EXPLICIT_REQUEST_PENDING` — so nothing
+    /// stops a model from calling it again inside the same turn. A ninth
+    /// distinct question in one turn overflows `MAX_APPROVAL_REQUESTS_PER_TURN`
+    /// and is dropped by the drain cap with no card ever raised for it, even
+    /// though the run may still park believing it asked something.
+    #[tokio::test]
+    async fn escalate_to_human_does_not_set_the_turn_boundary_and_can_overflow_the_cap() {
+        let queue = ApprovalRequestQueue::default();
+        let blocker_request = |i: usize| ApprovalRequest {
+            tool: crate::harness::built_in::blockers::ESCALATE_TO_HUMAN_TOOL.to_string(),
+            reason: format!("question {i}"),
+            effect: Effect {
+                kind: "blocker.information".to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({ "reason": format!("question {i}") }),
+                agent: None,
+                run_id: None,
+            },
+        };
+
+        queue
+            .turn_scoped(async {
+                for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN + 1) {
+                    queue.push(blocker_request(i));
+                }
+                assert!(
+                    !queue.explicit_request_pending(),
+                    "unlike request_approval, escalate_to_human never establishes the turn \
+                     boundary — nothing in the queue itself stops a model from calling it \
+                     again in the same turn"
+                );
+            })
+            .await;
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.discarded, 1,
+            "a ninth question in one turn overflows the cap and is silently dropped — no card \
+             is ever raised for it, though the run may still park expecting an answer"
+        );
+    }
+
     // --- Redeeming a grant (issue #243) --------------------------------------
 
     /// A policy bound to `agent`, plus the grant set its queue carries.

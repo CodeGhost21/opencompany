@@ -1393,6 +1393,48 @@ mod tests {
         );
     }
 
+    /// `block_high_risk_commands` is set unconditionally in `exec_security`,
+    /// but every existing test proving a destructive command is refused does
+    /// so under `Readonly`, where the autonomy tier alone already blocks
+    /// everything — so none of them isolates this flag.
+    ///
+    /// Finding CONF-002: it turns out this flag has **no effect at all** on
+    /// `ShellTool::execute`. The flag is only read by the vendored
+    /// `SecurityPolicy::validate_command_execution` — but `ShellTool`'s real
+    /// runtime path (`run_with_security_in_context`) calls
+    /// `check_gated_command` instead, which never calls
+    /// `validate_command_execution`/`is_command_allowed` at all (this is
+    /// already documented at `src/policy/consequence.rs:1658`, for a
+    /// different boundary). `check_gated_command` only consults
+    /// `gate_decision`, and under `Full`, `Destructive` maps to `Prompt`, not
+    /// `Block` — so a raw `execute()` call runs the command.
+    ///
+    /// In production this is caught upstream by opencompany's own
+    /// `ApprovalPolicy`/consequence classifier, which is the actual gate on
+    /// this call — but that means `block_high_risk_commands` is not the
+    /// "last independent brake below our policy" its name and the module
+    /// docs claim it is; it is dead configuration. Anything that reaches a
+    /// wired `ShellTool` without going through opencompany's own policy layer
+    /// first (a bug in that layer, a future direct call site) has no
+    /// OpenHuman-level backstop at all.
+    #[tokio::test]
+    #[ignore = "finding CONF-002: block_high_risk_commands has no effect on ShellTool::execute — the real path (check_gated_command) never calls validate_command_execution, so a destructive command runs under Full even with the flag set"]
+    async fn block_high_risk_commands_refuses_a_destructive_command_even_under_full_autonomy() {
+        let ws = std::env::temp_dir();
+        let full = test_security(&ws, PolicyMode::Full);
+        let tool = ShellTool::new(full, native_runtime(), AuditLogger::disabled());
+        let result = tool
+            .execute(json!({ "command": "rm -rf /tmp/oc-toolbelt-conf002-nonexistent-xyz" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "block_high_risk_commands=true must refuse a destructive command even under Full \
+             autonomy, independent of the autonomy-tier gate: {}",
+            result.output()
+        );
+    }
+
     #[tokio::test]
     async fn web_tools_reject_ssrf_ip_literals() {
         let ws = std::env::temp_dir();
