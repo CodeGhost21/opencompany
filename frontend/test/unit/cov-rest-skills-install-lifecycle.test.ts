@@ -47,6 +47,8 @@ function clientAs(opts: {
     scopeFor: () => "/api/v1/companies/acme",
     get: (path: string) => {
       if (path.includes("/skills/registry")) return Promise.resolve([REGISTRY]);
+      if (path.endsWith("/auth/me"))
+        return Promise.resolve({ id: "u1", email: "a@b.c", role: "admin", company: "acme", hasPassword: true });
       return Promise.resolve(opts.skills ?? []);
     },
     post: vi.fn((path: string) => {

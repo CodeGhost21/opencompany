@@ -37,6 +37,8 @@ function clientWith(opts: { skills: Skill[]; post?: (path: string) => Promise<un
     get: vi.fn((path: string) => {
       if (path.endsWith("/skills")) return Promise.resolve(opts.skills);
       if (path.endsWith("/skills/registry")) return Promise.resolve([]);
+      if (path.endsWith("/auth/me"))
+        return Promise.resolve({ id: "u1", email: "a@b.c", role: "admin", company: "acme", hasPassword: true });
       return Promise.reject(new Error(`unexpected GET ${path}`));
     }),
     post,
