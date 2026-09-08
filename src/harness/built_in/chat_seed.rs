@@ -99,13 +99,13 @@ pub struct ChatSeedRequest {
     /// coupling this crate keeps getting bitten by — it would also cost a
     /// journal read on the *non*-switch turns the switch branch exists to keep
     /// free.
+    pub thread_root: Option<EventSeq>,
     /// Whose seed this is — the agent the projection is FOR.
     ///
     /// Only the `hivemind` projection reads it: attribution is the whole point
     /// of that path, and it cannot tell "something I said" from "something a
     /// teammate said to me" without knowing who is reading.
     pub reader: String,
-    pub thread_root: Option<EventSeq>,
     /// This turn's own operator message, as its position in the company
     /// journal — the boundary [`build_chat_seed`] cuts the history at.
     ///

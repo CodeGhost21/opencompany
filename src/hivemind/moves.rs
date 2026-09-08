@@ -191,8 +191,15 @@ pub fn readable(line: &str) -> Option<String> {
     if !rest.is_empty() {
         return Some(rest.to_string());
     }
+    // `line_kind` folds `!unpin` onto `pin` — they write the same board, so the
+    // fold treats them alike. A RENDERING must not: "Pinned for the room." is
+    // the opposite of what an unpin did, and a bare one carries no sentence to
+    // correct the impression.
+    let bare = line.trim_start().strip_prefix('!').unwrap_or_default();
+    let unpinning = bare.split_whitespace().next() == Some("unpin");
     Some(
         match kind {
+            "pin" if unpinning => "Unpinned from the room's board.",
             "question" => "I have nothing further to ask.",
             "defer" => "This is not mine to answer.",
             "commit" => "Recorded.",
@@ -279,6 +286,21 @@ mod readable_test {
             readable("!question").as_deref(),
             Some("I have nothing further to ask."),
             "a bare move would otherwise render as an empty bubble"
+        );
+    }
+    /// `line_kind` folds `!unpin` onto `pin` because both write one board — a
+    /// RENDERING must not, or an unpin reads as its own opposite.
+    #[test]
+    fn an_unpin_does_not_read_as_a_pin() {
+        assert_eq!(
+            readable("!unpin").as_deref(),
+            Some("Unpinned from the room's board.")
+        );
+        assert_eq!(readable("!pin").as_deref(), Some("Pinned for the room."));
+        // With a sentence, the member's own words stand either way.
+        assert_eq!(
+            readable("!unpin ^4 the window has moved past it").as_deref(),
+            Some("the window has moved past it")
         );
     }
 }

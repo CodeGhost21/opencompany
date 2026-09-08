@@ -1299,18 +1299,6 @@ function inlineFirstReplies(
     // say, and it is what *every* locally built company line carries — this
     // console's own POST, an `AgentReplyEvent` — so reading it as "might be a
     // person" would fold the live answer this promotion exists for.
-    // SPIKE: inline the whole CONTIGUOUS RUN of runtime answers, not just the
-    // first. The original rule promotes `bucket[0]` alone, which is right when
-    // a root has exactly one answer — question, answer, done. A multi-party
-    // exchange under one root (agent A hands to B, B answers) leaves the first
-    // inline and folds the rest onto the chip, so the same message shows up
-    // both in the channel and in the thread panel, and the chip's count
-    // disagrees with the panel's.
-    //
-    // Every guard the single-reply version applied still applies, per reply:
-    // only a runtime answer is promoted (never the operator's own follow-up,
-    // never a colleague's), and the run stops at the first thing that breaks
-    // contiguity — which is exactly the interleaving case the fold exists for.
     if (root === undefined) continue;
     const own = new Set(bucket.map((r) => r.id));
 

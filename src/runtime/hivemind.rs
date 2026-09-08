@@ -238,6 +238,23 @@ impl JournalSessionLog<'_> {
         // Manifest before overlay, the order `resolve_roster_agent_id` reads
         // them in — and a manifest `[[agent]]` carries no display name at all,
         // which is why the two tiers cannot share one pass.
+        // **An operator rename outranks both tiers.** `overlay_agent_edits` is
+        // what the console writes when a teammate is renamed, and it is what
+        // the Team page and every byline read. Consulting only the manifest and
+        // the overlay roster made the transcript call a teammate by the name it
+        // was declared with while the channel called it by the name it has —
+        // "Software Engineer" in the room, "10x engineer" everywhere else.
+        let edited = self
+            .record
+            .overlay_agent_edits
+            .iter()
+            .find(|edit| edit.agent_id.eq_ignore_ascii_case(agent_id))
+            .and_then(|edit| {
+                edit.name
+                    .clone()
+                    .or_else(|| edit.role.clone())
+                    .filter(|label| !label.trim().is_empty())
+            });
         let declared = self
             .record
             .manifest
@@ -251,7 +268,8 @@ impl JournalSessionLog<'_> {
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| agent.role.clone())
             });
-        let label = declared
+        let label = edited
+            .or(declared)
             .or_else(|| {
                 self.record
                     .overlay_agents
@@ -1403,20 +1421,13 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
             //    A return is exempt: it spends no turn of its own, and refusing
             //    one strands an answer another desk has already produced.
             //
-            //    Counted AFTER authorization, not before. The budget exists to
-            //    bound what a company spends on other desks' turns, and a
-            //    refused forward spends nothing — charging it would let an
-            //    unauthorized mention exhaust the allowance for the authorized
-            //    question that follows it.
-            if matches!(referral.kind, tinyhivemind::referral::ReferralKind::Forward) {
-                let mut asked = self.asked.lock().await;
-                if *asked >= self.peer_cap {
-                    return Ok(EnqueueOutcome::Refused {
-                        reason: EnqueueRefusal::FeatureDisabled,
-                    });
-                }
-                *asked = asked.saturating_add(1);
-            }
+            //    Counted last, after authorization AND after the target is
+            //    known to be reachable. The budget bounds what a company spends
+            //    on other desks' turns, and a forward that is refused — for
+            //    permission, or because the teammate it names has left the
+            //    roster — spends nothing. Charging either would let a mention
+            //    that could never run exhaust the allowance for the question
+            //    behind it.
             let Ok(Some(record)) = self.runtime.store().load(self.runtime.id()).await else {
                 return Ok(EnqueueOutcome::Refused {
                     reason: EnqueueRefusal::TargetUnavailable,
@@ -1428,6 +1439,16 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                 return Ok(EnqueueOutcome::Refused {
                     reason: EnqueueRefusal::TargetUnavailable,
                 });
+            }
+
+            if matches!(referral.kind, tinyhivemind::referral::ReferralKind::Forward) {
+                let mut asked = self.asked.lock().await;
+                if *asked >= self.peer_cap {
+                    return Ok(EnqueueOutcome::Refused {
+                        reason: EnqueueRefusal::FeatureDisabled,
+                    });
+                }
+                *asked = asked.saturating_add(1);
             }
 
             // 4. The marker, durably, BEFORE the turn — see the type's doc for

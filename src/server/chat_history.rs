@@ -1046,6 +1046,30 @@ pub async fn history_for_desk(
                 if message.admin_only && !is_admin {
                     continue;
                 }
+                // The room's own bookkeeping, excluded on the same terms and
+                // in the same place, for the same reason: filtered after the
+                // page was built, an episode's closing row silently shortened
+                // every page it appeared on.
+                //
+                // An episode journals every turn as an ordinary reply by the
+                // teammate that took it, and then one closing row under
+                // `HIVE_REPORT_AUTHOR`. The turns are the conversation and
+                // belong on screen. The closing row is the host summarising a
+                // tally whose inputs are those turns — and rendered here it
+                // appeared as a *teammate* in a channel where no such teammate
+                // exists and none can, the id being hyphenated precisely so no
+                // roster id can equal it. The fold already reads it as
+                // `SessionAuthor::System`; this makes the console agree.
+                //
+                // Dropped from the projection, never from the journal: the next
+                // episode folds it as context, the memory note keeps the long
+                // form, and the chat POST still returns it to its caller. A
+                // FAILED turn's notice carries its own reserved id and is not
+                // dropped — the turn it describes does not exist, so there is
+                // no gap for a reader to notice.
+                if message.channel == crate::hivemind::HIVE_REPORT_AUTHOR {
+                    continue;
+                }
                 messages.push(message);
                 if messages.len() == first {
                     break;
@@ -1097,34 +1121,6 @@ pub async fn history_for_desk(
             message.reactions = reactions.remove(&message.id).unwrap_or_default();
         }
     }
-
-    // **The room's own bookkeeping does not draw in the room.**
-    //
-    // An episode journals every turn as an ordinary reply by the teammate that
-    // took it, and then one closing row under `HIVE_REPORT_AUTHOR`. The turns
-    // are the conversation and belong on screen. The closing row is the host's
-    // summary of a tally it just computed — and rendered here it appeared as a
-    // *teammate* called `hive-report`, a participant in a channel where no such
-    // teammate exists and none can: the id is hyphenated precisely so no roster
-    // id can equal it.
-    //
-    // The fold already reads it as `SessionAuthor::System` rather than as an
-    // agent, so dropping it here makes the console agree with the fold instead
-    // of disagreeing with it in a way an operator can see.
-    //
-    // **Dropped from the projection, never from the journal.** The row stays
-    // durable and stays readable: the next episode folds it as context, the
-    // memory note keeps the long form, and the chat POST still returns it to
-    // its caller. This is a rendering decision about one channel, on the same
-    // terms the referral relay is dropped below.
-    //
-    // **Only the closing row.** A failed turn's notice is journaled under its
-    // own reserved id for exactly this reason: the turn it describes does not
-    // exist, so there is no gap for a reader to notice, and dropping it would
-    // leave "a transcript with a hole in it that nothing accounts for". The
-    // report restates a tally whose inputs are the visible turns; a failure
-    // notice is the only record that a seat was asked and could not answer.
-    messages.retain(|message| message.channel != crate::hivemind::HIVE_REPORT_AUTHOR);
 
     drop_dead_cards(runtime, &mut messages).await?;
     attach_referral_origins(runtime, desk_id, &mut messages).await?;
@@ -3201,6 +3197,71 @@ mod referral_origin_test {
         assert!(
             !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
             "and the room's own bookkeeping is not a participant in it: {voices:?}"
+        );
+    }
+
+    /// **A suppressed row must not shorten the page.**
+    ///
+    /// Filtered after the page was assembled, an episode's closing row silently
+    /// cost the reader a message: a page asked for `n` came back with `n - 1`,
+    /// and the row that should have taken its place stayed unfetched. The
+    /// admission point already excludes an admin-only row for exactly this
+    /// reason, and says so.
+    #[tokio::test]
+    async fn a_suppressed_report_does_not_shorten_the_page() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        // Four teammate turns with the room's closing row in the middle.
+        for (agent, text) in [
+            ("software_engineer", "first"),
+            ("junior_engineer", "second"),
+            (crate::hivemind::HIVE_REPORT_AUTHOR, "The desk settled."),
+            ("qa_engineer", "third"),
+            ("software_engineer", "fourth"),
+        ] {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: agent.to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+
+        let page = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            4,
+            true,
+        )
+        .await
+        .expect("history");
+
+        assert_eq!(
+            page.len(),
+            4,
+            "a page of four is four teammate turns, not three and a hole: {page:?}"
+        );
+        assert!(
+            page.iter()
+                .all(|m| m.channel != crate::hivemind::HIVE_REPORT_AUTHOR),
+            "and none of them is the room's bookkeeping: {page:?}"
         );
     }
 

@@ -9564,11 +9564,6 @@ mod tests {
     /// continuation invisible — strictly worse than the bug being fixed, since
     /// today's answer at least reaches the channel.
 
-    /// **The reason `ReferralQueue` exists**: the same trigger, twice, creates
-    /// one child turn.
-    ///
-    /// A referral is decided from a COMMITTED reply, so a restart, a
-    /// redelivered frame or a retry decides the identical referral again.
     /// A runtime whose one agent is allowed to refer to the `design` desk, so a
     /// forward reaches the width bound instead of stopping at authorization.
     #[cfg(all(feature = "openhuman", feature = "hivemind"))]
@@ -9663,12 +9658,16 @@ mod tests {
         );
     }
 
-    /// Without the durable marker the target desk is asked twice — two turns,
-    /// two answers, twice the spend, one question. `Already` is the whole
-    /// point of the port, and this is the test that would catch losing it.
+    /// **Fail-closed, and leave nothing behind.** The fixture roster declares
+    /// no `delegates_to`, so an agent may not cause a turn on another desk —
+    /// referral is off until an operator opts somebody in.
+    ///
+    /// And a refusal writes no marker, so it cannot be mistaken for a completed
+    /// enqueue on the next attempt: the second call is refused for the same
+    /// reason as the first, rather than coming back `Already`.
     #[cfg(all(feature = "openhuman", feature = "hivemind"))]
     #[tokio::test]
-    async fn the_same_trigger_enqueues_one_child_turn() {
+    async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
         use tinyhivemind::dispatch::EnqueueOutcome;
         use tinyhivemind::referral::ReferralQueue;
 
