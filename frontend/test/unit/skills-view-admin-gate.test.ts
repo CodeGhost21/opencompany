@@ -60,9 +60,9 @@ function clientAs(role: "admin" | "member"): OpenCompanyClient {
 /** A client whose `/auth/me` never settles, so a test can prove a reset
  *  happened before the new scope's role is known, rather than because it
  *  happened to arrive quickly. */
-function clientWithHungAuth(): OpenCompanyClient {
+function clientWithHungAuth(company = "beta"): OpenCompanyClient {
   return {
-    scopeFor: () => "/api/v1/companies/beta",
+    scopeFor: () => `/api/v1/companies/${company}`,
     get: (path: string) => {
       if (path.endsWith("/auth/me")) return new Promise(() => {});
       if (path.endsWith("/skills/registry")) return Promise.resolve([]);
@@ -180,6 +180,23 @@ describe("SkillsView authority", () => {
     });
 
     expect(document.body.textContent).not.toContain("Add a skill");
+    expect(at("skills-admin-only")?.textContent).toContain("Only an admin");
+    expect(buttons().some((t) => t.includes("Add skill"))).toBe(false);
+  });
+
+  it("closes the write surface on a host reseat, even though `company` stays the same", async () => {
+    await show(clientAs("admin"));
+
+    expect(buttons().some((t) => t.includes("Add skill"))).toBe(true);
+
+    // Same company as `show()` used ("acme"), but a different client — the
+    // reseat a host swap produces. The new host's `/auth/me` never answers,
+    // so anything closed after this render can only be explained by keying
+    // the reset on `client`, not by a fresh (non-)admin result racing in.
+    await act(async () => {
+      root.render(createElement(SkillsView, { client: clientWithHungAuth("acme"), company: "acme" }));
+    });
+
     expect(at("skills-admin-only")?.textContent).toContain("Only an admin");
     expect(buttons().some((t) => t.includes("Add skill"))).toBe(false);
   });

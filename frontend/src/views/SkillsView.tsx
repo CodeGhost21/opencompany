@@ -98,16 +98,18 @@ export function SkillsView({ client, company }: Props) {
   // writes are admin-only on the host; an unresolved role must not render an
   // enabled control, so this defaults closed the way `HostingView` does.
   const [canManage, setCanManage] = useState(false);
-  const [authorityScope, setAuthorityScope] = useState(company);
+  const [authorityScope, setAuthorityScope] = useState({ client, company });
 
   // Closed *during* the render that first sees a new scope, not in the effect
   // that follows it. An effect runs after commit, so the frame carrying the new
-  // company would already have painted the previous scope's `canManage` — one
-  // real frame of live write controls aimed at a company this operator may not
-  // administer. Resetting here is React's documented adjust-state-during-render
-  // pattern: it re-renders before anything reaches the screen.
-  if (authorityScope !== company) {
-    setAuthorityScope(company);
+  // scope would already have painted the previous scope's `canManage` — one
+  // real frame of live write controls aimed at a scope this operator may not
+  // administer. Keyed by both `client` and `company`: a host reseat changes
+  // `client` identity while `company` can stay the same. Resetting here is
+  // React's documented adjust-state-during-render pattern: it re-renders
+  // before anything reaches the screen.
+  if (authorityScope.client !== client || authorityScope.company !== company) {
+    setAuthorityScope({ client, company });
     setCanManage(false);
     setAddOpen(false);
   }
