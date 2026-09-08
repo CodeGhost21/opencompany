@@ -566,6 +566,7 @@ impl CompanyRuntime {
         grants: GrantSet,
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
+        let run_supervisor_gate = approval_gate.clone();
         Self {
             inert_board_reported: std::sync::atomic::AtomicBool::new(false),
             // Install-wide, not per-company, so it is set by the builder from
@@ -601,7 +602,8 @@ impl CompanyRuntime {
             #[cfg(feature = "openhuman")]
             workflow_checkpoints: None,
             steer: crate::company::steer::InflightRegistry::new(),
-            run_supervisor: crate::runtime::RunSupervisor::new(),
+            run_supervisor: crate::runtime::RunSupervisor::new()
+                .with_emergency_gate(run_supervisor_gate),
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),

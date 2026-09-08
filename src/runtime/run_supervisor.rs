@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 use crate::Result;
 use crate::company::DEFAULT_MAX_IN_FLIGHT_RUNS;
 use crate::error::OpenCompanyError;
+use crate::policy::ManifestApprovalGate;
 use crate::ports::{RunCancel, WorkflowRunContext};
 
 /// One registered run: its stop signal, plus the graph it belongs to for the log
@@ -81,6 +82,16 @@ pub struct RunSupervisor {
     /// The most runs that may be registered at once. Enforced by
     /// [`begin`](Self::begin) under the map lock.
     limit: usize,
+    /// The company's emergency-stop flag, consulted by [`begin`](Self::begin)
+    /// under the same lock as the concurrency ceiling.
+    ///
+    /// `None` at every construction site except the two that build a
+    /// company's real supervisor
+    /// ([`CompanyRuntime::new`](crate::company::runtime::CompanyRuntime::new)
+    /// and the manifest-limited build in
+    /// [`RuntimeBuilder`](crate::runtime::builder::RuntimeBuilder)), so every
+    /// test and every non-harness caller admits exactly as before.
+    emergency: Option<Arc<ManifestApprovalGate>>,
 }
 
 impl Default for RunSupervisor {
@@ -109,7 +120,18 @@ impl RunSupervisor {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             limit,
+            emergency: None,
         }
+    }
+
+    /// Installs the emergency-stop flag [`begin`](Self::begin) refuses new runs
+    /// against.
+    ///
+    /// Without this the supervisor admits regardless of the flag — the default
+    /// for every construction site that has no company to ask.
+    pub fn with_emergency_gate(mut self, gate: Arc<ManifestApprovalGate>) -> Self {
+        self.emergency = Some(gate);
+        self
     }
 
     /// This supervisor's concurrency ceiling. For diagnostics and tests.
@@ -137,12 +159,25 @@ impl RunSupervisor {
     /// lingering as a cancellable one *and* frees the slot it held against the
     /// ceiling — and because it is a `Drop`, that holds on the error and panic
     /// paths too.
+    ///
+    /// Also refuses — ahead of the ceiling — while the company's emergency
+    /// stop is engaged, when [`with_emergency_gate`](Self::with_emergency_gate)
+    /// installed one. Every caller that reaches `begin` has already asked
+    /// [`ensure_not_emergency_stopped`](crate::company::runtime::CompanyRuntime::ensure_not_emergency_stopped)
+    /// earlier, but that ask sits behind at least one `.await` before this
+    /// call; checking again here, under the same lock as the ceiling, closes
+    /// that window instead of leaving it open at every call site.
     pub fn begin(
         &self,
         workflow_id: &str,
         scheduled: bool,
     ) -> Result<(WorkflowRunContext, RunGuard)> {
         let mut map = self.inner.lock().expect("run supervisor poisoned");
+        if self.emergency.as_deref().is_some_and(|gate| gate.is_emergency()) {
+            return Err(OpenCompanyError::EmergencyStop(format!(
+                "refusing to start workflow `{workflow_id}` while stopped"
+            )));
+        }
         if map.len() >= self.limit {
             return Err(OpenCompanyError::WorkflowRunLimit { limit: self.limit });
         }

@@ -3093,7 +3093,8 @@ impl RuntimeBuilder {
                             // route both hold — enforces that cap on every run.
                             let supervisor = crate::runtime::RunSupervisor::with_limit(
                                 self.manifest.workflows.max_in_flight_runs,
-                            );
+                            )
+                            .with_emergency_gate(gate.clone());
                             run_supervisor = Some(supervisor.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
