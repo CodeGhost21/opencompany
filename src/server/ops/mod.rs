@@ -112,6 +112,8 @@ pub mod connections;
 pub(crate) use scope::{AdminScopedCompany, ScopedCompany, scoped};
 
 #[cfg(test)]
+mod setup_test;
+#[cfg(test)]
 mod test;
 #[cfg(test)]
 mod write_test;
