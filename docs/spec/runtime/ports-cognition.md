@@ -140,14 +140,22 @@ drift from reality. Reported on `GET …/capabilities` beside `mediaInBuild`,
 "what can this company actually do" — as `cognition`.
 
 The console consumes it in chat (issue #1734): on anything but `configured` the
-transcript carries a banner naming the cause and, where one exists, the remedy,
-and every company-side row is marked as a placeholder rather than presented as
-the teammate's own words. `ChatMessage` carries no provenance, so a company-level
-state is the only shape that answer has — see `MessageRow`'s `cognition` prop for
-why marking beats suppressing. The same state reaches `ThreadPanel`, because a
-reply read inside a thread is the same false attribution as one read in the
-channel, and the marker's tooltip names the cause it was given rather than
-restating `unconfigured`'s remedy for both.
+pane carries a banner naming the cause and, where one exists, the remedy, and
+every company-side row is marked as a placeholder rather than presented as the
+teammate's own words. The banner is a strip at the **foot of the pane, below
+the transcript and the typing line**, rather than above the transcript — the
+caveat and the control it qualifies are read together. It precedes the
+composer rather than being glued to it: `InflightRunBar` renders between the
+two whenever a run is in flight, since stopping a run is not posting. And it is
+rendered on a read-only channel too, where there is no composer at all: the
+sentence is about attribution, not about sending, and `#Operator` is precisely a
+feed of company-authored reports rendered under a teammate's name. `ChatMessage`
+carries no provenance, so a company-level state is the only shape that answer
+has — see `MessageRow`'s `cognition` prop for why marking beats suppressing.
+The same state reaches `ThreadPanel`, because a reply read inside a thread is
+the same false attribution as one read in the channel, and the marker's tooltip
+names the cause it was given rather than restating `unconfigured`'s remedy for
+both.
 
 ```rust
 /// Callbacks the brain makes into the host mid-cycle.

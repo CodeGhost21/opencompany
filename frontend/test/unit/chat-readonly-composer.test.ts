@@ -12,7 +12,9 @@ import { ChatView } from "@/views/ChatView";
 
 /**
  * The channel composer answers a read-only channel by not existing, and the
- * echo-brain notice sits next to the control it qualifies.
+ * echo-brain notice sits next to the control it qualifies — and stays on the
+ * feed that has no such control, where the attribution it corrects is the one
+ * the reader cannot check by asking.
  *
  * # Why a render test and not a source scan
  *
@@ -226,7 +228,7 @@ describe("a writable channel still renders the whole composer", () => {
   });
 });
 
-describe("the harness-unavailable notice sits next to the composer", () => {
+describe("the harness-unavailable notice sits next to the composer, or without one", () => {
   it("renders the notice on a writable channel, saying all three things", async () => {
     await mount("main", "unavailable");
 
@@ -295,11 +297,55 @@ describe("the harness-unavailable notice sits next to the composer", () => {
     expect(kids.indexOf(composerRoot)).toBe(kids.indexOf(strip) + 1);
   });
 
-  it("is suppressed on a read-only channel, where nothing can be sent", async () => {
+  /**
+   * The read-only feed keeps it, and that is the case it matters most in.
+   *
+   * `#Operator` renders the company's own workflow reports under a teammate's
+   * name and avatar. In an echo state nobody wrote those words — and the only
+   * thing on the row that says so is `EchoPlaceholder`, a non-focusable
+   * `<span>` carrying its reason in a `title`, which reaches neither keyboard,
+   * touch nor screen reader. Suppressing the strip here left the reader with a
+   * status report from a named colleague and no way to ask whether the
+   * colleague sent it, because the feed takes no replies.
+   */
+  it("stays on the read-only feed, which the reader cannot interrogate", async () => {
     await mount("operator", "unavailable");
 
-    expect(banner()).toBeNull();
+    const strip = banner();
+    expect(strip).not.toBeNull();
+    expect(strip?.textContent).toContain(
+      "This host cannot reach a model — no agent harness is available.",
+    );
+    expect(strip?.textContent).toContain(
+      "The replies in this conversation come from the offline echo brain rather than the " +
+        "teammate they appear under. No setting changes that: it takes a host built and " +
+        "started with the harness.",
+    );
+
+    // Restoring the notice restores nothing else: the channel is still
+    // read-only, still says so, and still draws no composer.
     expect(container.textContent).toContain("There is nothing to reply to here");
+    expect(composerInput()).toBeNull();
+    expect(readOnlyComposerInput()).toBeNull();
+    expect(container.querySelector("textarea")).toBeNull();
+  });
+
+  it("sits after the read-only notice, with no composer between them", async () => {
+    await mount("operator", "unavailable");
+
+    const strip = banner()!;
+    const column = strip.parentElement!;
+    const kids = Array.from(column.children);
+    const notice = kids.find((el) => el.textContent?.includes("There is nothing to reply to here"));
+
+    expect(notice).not.toBeUndefined();
+    expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(strip));
+
+    // Order relative to the read-only notice only — deliberately NOT "and it is
+    // the last child of the column". `InflightRunBar` renders after this strip
+    // in production, outside the read-only branch on purpose (see its comment
+    // at the render site), and this harness passes no `inflightRuns`, so a
+    // last-child assertion would pass here while being false on screen.
   });
 });
 
