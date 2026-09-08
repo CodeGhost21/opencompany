@@ -71,6 +71,13 @@ const EXTRACT_TIMEOUT: Duration = Duration::from_secs(25);
 /// budget problem with a second one.
 const MAX_SUMMARY_TOKENS: u32 = 1_500;
 
+/// Below this, a payload is passed through untouched as `NotNeeded`.
+///
+/// Mirrors the reference summarizer's `summarizer_payload_threshold_tokens`
+/// (4 000 tokens, ~4 chars per token) so both implementations answer the same
+/// question the same way.
+const PASS_THROUGH_BYTES: usize = 16 * 1024;
+
 /// The most of an oversized payload that is worth sending to the extractor.
 ///
 /// `raw` arrives here *because* it exceeded the per-result budget, so it has no
@@ -235,6 +242,22 @@ impl PayloadSummarizer for PayloadExtractor {
         raw: &str,
     ) -> anyhow::Result<SummarizeOutcome> {
         let original_bytes = raw.len();
+        // Size first, hint second — the order the reference implementation uses,
+        // and the order that matters here.
+        //
+        // `ToolOutputMiddleware` calls this for **every** tool result, passing
+        // `None` for the hint, and turns any `Unavailable` into a notice
+        // prefixed onto the payload the model reads. Deciding on the hint first
+        // stamped "summarization unavailable" onto every small result of every
+        // turn without a hint — announcing the absence of a reduction nothing
+        // had asked for, on payloads that never needed one. It broke 15 turn
+        // tests, whose scripted models then never saw the results they were
+        // written to act on.
+        //
+        // A result under the threshold is not unavailable. It is fine as it is.
+        if original_bytes <= PASS_THROUGH_BYTES {
+            return Ok(SummarizeOutcome::NotNeeded);
+        }
         // The task hint is the whole point of this over a mechanical cut. With
         // none, an extraction has no way to tell an answering record from a
         // filler one, and would be guessing exactly as blindly as the byte cut
@@ -433,12 +456,19 @@ mod tests {
     }
 
     fn big() -> String {
-        // Comfortably over anything the summary will be, so `NotNeeded` is only
-        // reached when the model genuinely fails to shrink it.
-        format!(
+        // Over `PASS_THROUGH_BYTES`, or the size gate short-circuits to
+        // `NotNeeded` and none of the branches below is reached — which is
+        // exactly what happened when that gate was added: five tests here
+        // began passing through instead of exercising the paths they name.
+        let payload = format!(
             "[{}]",
-            vec![r#"{"number":1,"title":"a flaky test"}"#; 400].join(",")
-        )
+            vec![r#"{"number":1,"title":"a flaky test"}"#; 2_000].join(",")
+        );
+        assert!(
+            payload.len() > PASS_THROUGH_BYTES,
+            "the fixture must clear the pass-through gate"
+        );
+        payload
     }
 
     /// Without a hint the extraction has nothing to select against and would be
