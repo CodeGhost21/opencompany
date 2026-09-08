@@ -889,6 +889,17 @@ pub struct ApprovalPolicy {
     /// S1 tells the agent to route these providers through Composio, this refuses
     /// the raw `http_request` / `curl` / `web_fetch` that ignores it.
     connected_composio_toolkits: Vec<String>,
+    /// The company's emergency-stop flag, consulted ahead of the mode dispatch
+    /// so a consequential call still refuses under `full` autonomy — the one
+    /// tier with no per-call gate to reach `ManifestApprovalGate::evaluate` or
+    /// `park` at all.
+    ///
+    /// `None` at every non-harness construction site and every test with no
+    /// company gate to ask, which keeps them dispatching exactly as before.
+    /// Only `build_roster` chains
+    /// [`with_emergency_gate`](Self::with_emergency_gate), from
+    /// `deps.emergency_gate`.
+    emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
 }
 
 #[derive(Clone)]
@@ -943,6 +954,10 @@ impl ApprovalPolicy {
             // No connected toolkits by default, so the S2 web-deflection arm is
             // inert — see `with_connected_composio_toolkits`.
             connected_composio_toolkits: Vec::new(),
+            // No gate by default, so every non-harness construction site and
+            // every test with no company to ask dispatches exactly as before —
+            // see `with_emergency_gate`.
+            emergency_gate: None,
         }
     }
 
@@ -974,6 +989,17 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    /// Installs the company's emergency-stop flag, so `check` refuses a
+    /// consequential call under `full` autonomy the same way `evaluate` and
+    /// `park` already refuse one on every other tier.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Arc<crate::policy::gate::ManifestApprovalGate>,
+    ) -> Self {
+        self.emergency_gate = Some(gate);
         self
     }
 
@@ -1748,6 +1774,26 @@ impl ToolPolicy for ApprovalPolicy {
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
         let consequence = self.consequence_for(tool, &request.arguments).await;
+        // The emergency stop (issue #86), ahead of `full`'s blanket allow —
+        // the one tier with no per-call gate to reach. `ManifestApprovalGate`
+        // enforces the same veto at `evaluate`/`park`, but a harness tool call
+        // in `full` autonomy never reaches either: `check` decides `Allow`
+        // below without ever projecting an effect at the gate. Without this,
+        // an in-flight turn that survives the stop (by design — see
+        // `CompanyRuntime::ensure_not_emergency_stopped`) could still dispatch
+        // a consequential tool the containment story assumes the gate denies.
+        // `EffectGroup::Other` stays exempt, matching `evaluate`/`park`.
+        if consequence.group != EffectGroup::Other
+            && self
+                .emergency_gate
+                .as_deref()
+                .is_some_and(|gate| gate.is_emergency())
+        {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' was not run because the company is stopped and will run no work \
+                 until an operator releases it"
+            ));
+        }
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
@@ -2482,6 +2528,55 @@ mod tests {
                 "{tool} leaves the company or spends money and must still park under auto"
             );
         }
+    }
+
+    /// **Codex review finding on PR #2140 (`3952368155`).** `full` autonomy is
+    /// the one tier with no per-call gate at all
+    /// ([`PolicyMode::Full`](PolicyMode::Full) allows every consequential call
+    /// outright), so it never reaches `ManifestApprovalGate::evaluate` or
+    /// `park` — the choke point the emergency stop is enforced at everywhere
+    /// else. An in-flight turn that survives the stop by design (see
+    /// `CompanyRuntime::ensure_not_emergency_stopped`) could dispatch a
+    /// consequential harness tool through this tier with nothing to refuse it.
+    ///
+    /// `EffectGroup::Other` calls (`spawn_task` and the like) still run, matching
+    /// `evaluate`/`park`'s own exemption.
+    #[tokio::test]
+    async fn full_autonomy_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None).with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a consequential call must refuse under `full` once the company is stopped, \
+             the same way `evaluate`/`park` already refuse one on every other tier"
+        );
+
+        assert_eq!(
+            p.check(&request("spawn_task", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "an `EffectGroup::Other` call is exempt while stopped, matching evaluate/park"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores `full`'s ordinary blanket allow"
+        );
     }
 
     /// **Issue #1124, end to end at the policy layer.** A bridge call to a
