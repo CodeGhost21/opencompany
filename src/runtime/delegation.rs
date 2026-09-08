@@ -9115,6 +9115,146 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             "nested delegation must not move the card a second time"
         );
     }
+
+    // ── Issue #453 residual: an id that names no card ───────────────────────
+
+    /// `assign_task`'s receipt tells the model the assignment "takes effect as
+    /// this turn completes". The drain is what completes it, and an id naming
+    /// no card reaches a `tracing::warn!` and `DelegationOutcome::default()` —
+    /// the board is untouched, which is right, and nobody who could act on it
+    /// is told, which is not. A mistyped id and a deleted card are the same
+    /// silence, and the turn has already been told it worked.
+    #[tokio::test]
+    #[ignore = "assign_task on an unknown task_id is a silent drain-time no-op after a success receipt"]
+    async fn assigning_a_card_that_is_not_on_the_board_does_not_report_success() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "assigning it",
+                vec![Delegation::AssignTask {
+                    task_id: "card-that-never-existed".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: Some("please pick this up".to_string()),
+                }],
+            )],
+        );
+
+        let outcome = fx
+            .runner(&turns)
+            .handle_operator_message(
+                "chief",
+                "put the launch plan on engineering",
+                Some("general"),
+            )
+            .await;
+
+        assert!(
+            fx.cards().await.iter().all(|card| card.assignee.is_empty()),
+            "nothing may be assigned on the strength of an id that names no card"
+        );
+        let error = outcome.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error.contains("card-that-never-existed"),
+            "the drain must name the card it could not assign rather than warn into the log and \
+             let the receipt stand: {error:?}"
+        );
+    }
+
+    /// The same residual on the arm the code's own comment calls the more
+    /// consequential one: `review_task`'s receipt says the card "moves to done
+    /// as this turn completes". An unknown id moves nothing, records the
+    /// verdict nowhere, and returns the same empty outcome a real approval
+    /// returns.
+    #[tokio::test]
+    #[ignore = "review_task on an unknown task_id records the verdict nowhere after a 'moves to done' receipt"]
+    async fn approving_a_card_that_is_not_on_the_board_does_not_report_success() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "approved",
+                vec![Delegation::ReviewTask {
+                    task_id: "card-that-never-existed".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: Some("looks good".to_string()),
+                }],
+            )],
+        );
+
+        let outcome = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "approve the launch plan card", Some("general"))
+            .await;
+
+        assert!(
+            fx.cards().await.is_empty(),
+            "a verdict on an id that names no card may not mint one"
+        );
+        let error = outcome.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error.contains("card-that-never-existed"),
+            "the drain must name the card whose approval landed nowhere rather than warn into the \
+             log while the turn is told it moved: {error:?}"
+        );
+    }
+
+    /// The bound on both refusals above: an id that DOES name a card must not
+    /// be caught by them. Without this the two tests are satisfied by a drain
+    /// that refuses every lifecycle write.
+    #[tokio::test]
+    async fn a_known_card_id_still_assigns_and_reports_no_failure() {
+        let fx = Fixture::new();
+        let card = TaskRecord {
+            id: "card-real".to_string(),
+            title: TaskTitle::authored("Draft the launch plan"),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: now_millis(),
+            origin: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        };
+        fx.tasks
+            .upsert(&fx.record.id, &card)
+            .await
+            .expect("seed the card");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "assigning it",
+                vec![Delegation::AssignTask {
+                    task_id: "card-real".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: None,
+                }],
+            )],
+        );
+
+        fx.runner(&turns)
+            .handle_operator_message(
+                "chief",
+                "put the launch plan on engineering",
+                Some("general"),
+            )
+            .await
+            .expect("a real card assigns without complaint");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].assignee, "engineer");
+    }
 }
 
 #[cfg(test)]

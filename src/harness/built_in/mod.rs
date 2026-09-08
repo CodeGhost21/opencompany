@@ -8047,6 +8047,34 @@ description = "Builds the product."
         );
     }
 
+    /// The empty-retry guard above proves steer does not silently *restart*
+    /// work. This proves the other half: a steer requested before a turn whose
+    /// first attempt already produced a real reply must not discard it. Only
+    /// the *next* iteration is where `SteerStopHook` is meant to intervene —
+    /// nothing here may drop output the model already returned.
+    #[tokio::test]
+    async fn a_steer_pending_before_a_successful_attempt_does_not_drop_its_reply() {
+        let (agent, _deps) = scripted_agent(vec![Ok("here is the answer".into())]);
+        let control = SteerControl::new();
+        control.request(SteerAction::Cancel);
+        let (outcome, usages) = agent
+            .run_with_steer(
+                "hi",
+                Some(&control),
+                None,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
+        let outcome = outcome.expect("runs");
+        assert_eq!(usages.len(), 1, "one attempt, and it already succeeded");
+        assert_eq!(
+            outcome.reply, "here is the answer",
+            "a pending steer must not discard a reply the model already produced"
+        );
+    }
+
     // Note: the *installation* of the steer stop-hook can't be observed from the
     // provider — the tinyagents adapter snapshots the hooks at turn entry and the
     // provider call may run on a spawned task where the task-local isn't
@@ -13002,6 +13030,112 @@ budget_usd_daily = 0.0
                 log.reads(),
                 reads_after_first,
                 "a second turn in the same thread is not a switch"
+            );
+        }
+
+        /// A journal that can be made to fail, so a test can break the seed's
+        /// one dependency after a binding has already been established.
+        struct BreakingLog {
+            inner: Arc<InMemoryLog>,
+            failing: std::sync::atomic::AtomicBool,
+        }
+
+        impl BreakingLog {
+            fn break_now(&self) {
+                self.failing
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait]
+        impl EventLog for BreakingLog {
+            async fn append(&self, id: &CompanyId, event: CompanyEvent) -> crate::Result<EventSeq> {
+                self.inner.append(id, event).await
+            }
+            async fn read_from(
+                &self,
+                id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "the journal is unreadable".into(),
+                    ));
+                }
+                self.inner.read_from(id, seq, limit).await
+            }
+            fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
+                self.inner.subscribe(id)
+            }
+        }
+
+        /// The clear-and-reseed runs under the agent and binding locks, so it
+        /// cannot interleave — but it still depends on the journal, and the
+        /// journal can fail. When it does, the switch has already cleared the
+        /// outgoing desk's history and has nothing to put in its place.
+        ///
+        /// The invariant that must survive that is the one the switch exists
+        /// for: a turn on `beta` never sees `alpha`. Starting blind is the
+        /// correct answer to an unreadable journal; falling back to the
+        /// transcript autoload — which on a switch points at the OUTGOING
+        /// thread — would answer beta's question out of alpha's conversation.
+        #[tokio::test]
+        async fn a_seed_that_cannot_be_built_starts_blind_rather_than_leaking_the_bound_desk() {
+            let (mut fx, log, seen) = recording_fixture();
+            let breaking = Arc::new(BreakingLog {
+                inner: log.clone(),
+                failing: std::sync::atomic::AtomicBool::new(false),
+            });
+            fx.deps.events = Some(breaking.clone());
+            let rec = record();
+            log.operator("alpha", "ALPHA_USER_MARKER");
+            log.reply("alpha", "ALPHA_AGENT_MARKER");
+            log.operator("beta", "BETA_USER_MARKER");
+            log.reply("beta", "BETA_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello alpha",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("alpha")),
+            )
+            .await
+            .expect("alpha chat turn");
+
+            let bound_to_alpha = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                bound_to_alpha.contains("ALPHA_USER_MARKER"),
+                "the fixture must actually bind to alpha first, or this proves nothing: \
+                 {bound_to_alpha:?}"
+            );
+
+            breaking.break_now();
+            let before = seen.lock().unwrap().len();
+
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello beta",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("beta")),
+            )
+            .await
+            .expect("a switch whose seed cannot be built must still answer");
+
+            let after: Vec<String> = seen.lock().unwrap()[before..].to_vec();
+            let last = after.last().expect("the beta turn made a model call");
+            assert!(
+                !last.contains("ALPHA_USER_MARKER") && !last.contains("ALPHA_AGENT_MARKER"),
+                "an unreadable journal let the previously-bound desk's history into an \
+                 unrelated turn: {last:?}"
+            );
+            assert!(
+                last.contains("hello beta"),
+                "the turn still has to answer the message it was given: {last:?}"
             );
         }
     }
