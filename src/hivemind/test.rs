@@ -930,3 +930,109 @@ fn a_retirement_that_strands_the_quorum_falls_back_to_one_responder() {
         "losing an ineligible seat leaves the quorum reachable"
     );
 }
+
+/// **A deadlock asks the operator, rather than merely announcing itself.**
+///
+/// `Deadlocked` is only returned when `has_free_dissenter` is false — every
+/// member has taken a side. So the room cannot break the tie, and nobody in it
+/// can even choose whom to consult without one side picking its own referee.
+/// Every member also had the chance to name an outsider on any of its own
+/// turns: referral is considered on every committed marked line. None did.
+///
+/// The one party left is the operator, and the sentence has to say so — read
+/// flatly it is an outcome, and an operator would have to know the mechanism to
+/// realise a decision was owed.
+#[test]
+fn a_deadlocked_desk_asks_the_operator_to_decide() {
+    let outcome = EpisodeOutcome {
+        ending: EpisodeEnding::Deadlocked {
+            topics: vec!["skeleton".to_string(), "spinner".to_string()],
+        },
+        turns: 6,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: Default::default(),
+    };
+
+    let summary = outcome.ending_summary();
+    assert!(
+        summary.contains("#skeleton") && summary.contains("#spinner"),
+        "both tied topics are named, so the operator knows what it is choosing between: {summary}"
+    );
+    assert!(
+        summary.contains("needs your call"),
+        "and is asked for a decision rather than told an outcome: {summary}"
+    );
+    assert!(
+        summary.contains("nobody was left to break the tie"),
+        "with the reason the desk could not settle it alone: {summary}"
+    );
+}
+
+/// **The report carries the decision, not only its label.**
+///
+/// A topic id is a name an LLM picked. Observed live: a desk argued
+/// lazy-loading coherently, filed it under `#need-decide`, and the report read
+/// "the desk settled on #need-decide" — which says nothing. The reasoning was
+/// in the transcript, where `EpisodeOutcome` cannot reach it.
+#[test]
+fn a_settled_room_reports_what_it_decided() {
+    let settled = EpisodeOutcome {
+        ending: EpisodeEnding::Converged {
+            topic: "need-decide".to_string(),
+            supporters: vec![
+                "software_engineer".to_string(),
+                "junior_engineer".to_string(),
+            ],
+            proposal: Some(
+                "lazy-load each section, so the page only pays for what is opened".to_string(),
+            ),
+        },
+        turns: 3,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: Default::default(),
+    };
+    let summary = settled.ending_summary();
+    assert!(
+        summary.contains("lazy-load each section"),
+        "an operator reads the decision itself: {summary}"
+    );
+    assert!(
+        !summary.contains('\n'),
+        "and it stays one line: this row is journaled onto the desk and lands in \
+         the next episode's window: {summary}"
+    );
+    assert!(
+        summary.contains("#need-decide") && summary.contains("software_engineer"),
+        "with the label and backing kept as bookkeeping: {summary}"
+    );
+
+    // A room whose proposal has scrolled out of the window reads exactly as it
+    // did before this field existed, rather than losing the sentence entirely.
+    let unknown = EpisodeOutcome {
+        ending: EpisodeEnding::Converged {
+            topic: "stage".to_string(),
+            supporters: vec!["engineer".to_string()],
+            proposal: None,
+        },
+        turns: 5,
+        first_seq: None,
+        last_seq: None,
+        report_seq: None,
+        violations: Vec::new(),
+        failed_turns: 0,
+        referrals: Default::default(),
+    };
+    assert!(
+        unknown.ending_summary().contains("settled on #stage"),
+        "{}",
+        unknown.ending_summary()
+    );
+}

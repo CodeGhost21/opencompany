@@ -64,6 +64,37 @@ pub trait HiveTurnRunner: Send + Sync {
 /// How many `!pin` lines one closing note carries.
 const MAX_NOTE_PINS: usize = 3;
 
+/// The `!propose` line that put `topic` on the floor, without its marker.
+///
+/// The FIRST one wins: a topic is introduced once and later lines support it,
+/// so the opening proposal is the statement of the option. Matching is on the
+/// `#topic` token exactly — `#lazy` must not answer for `#lazy-load` — and the
+/// marker and topic are stripped, leaving the sentence a person would read.
+///
+/// A multi-line turn is searched line by line, because a member may write prose
+/// and then its move, and only the marked line is the proposal.
+fn carried_proposal(
+    transcript: &[tinyhivemind_hive::SessionMessage],
+    topic: &str,
+) -> Option<String> {
+    let head = format!("#{topic}");
+    transcript
+        .iter()
+        .flat_map(|message| message.content.lines())
+        .map(str::trim)
+        .find_map(|line| {
+            let rest = line.strip_prefix("!propose")?.trim_start();
+            let rest = rest.strip_prefix(&head)?;
+            // A prefix match alone would let `#lazy` claim `#lazy-load`, so the
+            // token has to end here.
+            if rest.starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_') {
+                return None;
+            }
+            let text = rest.trim_start_matches([':', '\u{2014}', '-', ' ']).trim();
+            (!text.is_empty()).then(|| text.to_string())
+        })
+}
+
 /// The system line a failed turn leaves on the desk.
 ///
 /// Authored by `hive-report`, the same reserved id the closing row uses, so the
@@ -343,6 +374,9 @@ impl<'a> EpisodeDriver<'a> {
                 HiveStep::Speak { turn } => *turn,
                 HiveStep::Converged { topic, standing } => {
                     break EpisodeEnding::Converged {
+                        // Read from the very transcript `step` just decided on,
+                        // so the text reported is the text that carried.
+                        proposal: carried_proposal(&transcript, topic.as_str()),
                         topic: topic.to_string(),
                         supporters: standing.supporters.clone(),
                     };
@@ -838,7 +872,9 @@ impl<'a> EpisodeDriver<'a> {
         };
         let note = match &outcome.ending {
             EpisodeEnding::Idle => return,
-            EpisodeEnding::Converged { topic, supporters } => {
+            EpisodeEnding::Converged {
+                topic, supporters, ..
+            } => {
                 let mut body = format!(
                     "Task: {task_line}\nCarried: #{topic}\nSupporters: {}\n",
                     if supporters.is_empty() {
@@ -1080,5 +1116,54 @@ impl<'a> EpisodeDriver<'a> {
     /// A library error, named as what it actually is on this host.
     fn malformed(&self, error: &dyn std::fmt::Display) -> OpenCompanyError {
         OpenCompanyError::Config(format!("hive episode on desk `{}`: {error}", self.desk.id))
+    }
+}
+
+#[cfg(test)]
+mod carried_proposal_test {
+    use super::carried_proposal;
+    use tinyhivemind_hive::{Sequence, SessionAuthor, SessionMessage};
+
+    fn msg(seq: u64, content: &str) -> SessionMessage {
+        SessionMessage {
+            sequence: Sequence(seq),
+            author: SessionAuthor::Agent {
+                id: "engineer".to_string(),
+                label: "Engineer".to_string(),
+            },
+            content: content.to_string(),
+            elided: None,
+            audience: tinyhivemind_hive::aside::Audience::Desk,
+        }
+    }
+
+    #[test]
+    fn takes_the_opening_proposal_and_strips_the_grammar() {
+        let transcript = vec![
+            msg(
+                1,
+                "thinking about this\n!propose #lazy-load each section, so the page only pays for what is opened",
+            ),
+            msg(2, "!support #lazy-load ^1 agreed"),
+        ];
+        assert_eq!(
+            carried_proposal(&transcript, "lazy-load").as_deref(),
+            Some("each section, so the page only pays for what is opened"),
+            "the marker and topic are stripped, and prose above the move is ignored"
+        );
+    }
+
+    /// `#lazy` must not answer for `#lazy-load`: a plain prefix match would
+    /// report the wrong decision, which is worse than reporting none.
+    #[test]
+    fn a_topic_that_merely_prefixes_another_does_not_match() {
+        let transcript = vec![msg(1, "!propose #lazy-load defer every section")];
+        assert_eq!(carried_proposal(&transcript, "lazy"), None);
+    }
+
+    #[test]
+    fn a_topic_never_proposed_in_the_window_is_absent() {
+        let transcript = vec![msg(1, "!support #stage ^0 no proposal survives here")];
+        assert_eq!(carried_proposal(&transcript, "stage"), None);
     }
 }

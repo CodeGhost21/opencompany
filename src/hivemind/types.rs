@@ -303,6 +303,20 @@ impl HivePolicy {
 pub enum EpisodeEnding {
     /// One topic carried and the room recorded it.
     Converged {
+        /// What the carried proposal actually SAID, when its `!propose` line is
+        /// still in the window.
+        ///
+        /// A topic id is a label, and the report had only the label: a room
+        /// that argued well and named its option `#need-decide` reported
+        /// "the desk settled on #need-decide", which tells an operator nothing
+        /// about the decision. The reasoning was in the transcript, where the
+        /// report could not reach it — `EpisodeOutcome` carries no transcript,
+        /// so the text has to travel on the ending itself.
+        ///
+        /// `None` when no `!propose` for the topic survives the fold window,
+        /// which is possible for a long room: the sentence then reads exactly
+        /// as it did before this field existed.
+        proposal: Option<String>,
         /// The topic that carried.
         topic: String,
         /// The members whose grounded support carried it.
@@ -513,18 +527,53 @@ impl EpisodeOutcome {
         let turns = self.turns;
         let plural = if turns == 1 { "turn" } else { "turns" };
         match &self.ending {
-            EpisodeEnding::Converged { topic, supporters } => {
+            EpisodeEnding::Converged {
+                topic,
+                supporters,
+                proposal,
+            } => {
                 let backing = if supporters.is_empty() {
                     "the room".to_owned()
                 } else {
                     supporters.join(", ")
                 };
-                format!(
-                    "The desk settled on #{topic} after {turns} {plural} (backed by {backing})."
-                )
+                match proposal.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                    // The decision first, the bookkeeping after it: an operator
+                    // reading this wants to know what was decided, not which
+                    // label the room happened to file it under.
+                    // Kept to ONE line, like every other row the room writes.
+                    // This report is journaled onto the desk, so it lands in the
+                    // NEXT episode's transcript window — a paragraph here would
+                    // take that space from every future room. A proposal is
+                    // extracted from a single `!propose` line, so it fits.
+                    Some(text) => format!(
+                        "The desk settled after {turns} {plural} (#{topic}, backed by \
+                         {backing}): {text}"
+                    ),
+                    None => format!(
+                        "The desk settled on #{topic} after {turns} {plural} (backed by \
+                         {backing})."
+                    ),
+                }
             }
+            // **A deadlock is escalated, not merely reported.**
+            //
+            // `Deadlocked` is returned only when `has_free_dissenter` is false
+            // — every member has taken a side by construction. So the room
+            // cannot break this itself, and nobody in it can even choose who to
+            // ask: any member picking an outside desk would be one side of a
+            // split choosing its own referee. Every member also had the chance
+            // to name an outsider on any of its own turns, since referral is
+            // considered on every committed marked line; none did.
+            //
+            // That leaves exactly one party who can decide, and the sentence
+            // now says so. Reported flatly, this read as an outcome rather than
+            // as a question, and an operator watching a desk had to know the
+            // mechanism to realise a decision was owed.
             EpisodeEnding::Deadlocked { topics } => format!(
-                "The desk deadlocked after {turns} {plural}: {} carried together and nobody broke the tie.",
+                "The desk deadlocked after {turns} {plural}: {} carried together and everyone had \
+                 taken a side, so nobody was left to break the tie. It needs your call — say which \
+                 to take, or what would settle it.",
                 topics
                     .iter()
                     .map(|topic| format!("#{topic}"))
