@@ -53,7 +53,7 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 import { forgetSession } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { lifecycleAffordances } from "@/lib/lifecycle-controls";
-import { canCreateCompanies } from "@/components/create-company-dialog";
+import { offersCompanyCreation } from "@/components/create-company-dialog";
 import { personName } from "@/lib/person";
 
 interface Props {
@@ -366,17 +366,18 @@ export function LifecycleControls({
     }
   }
 
-  // The raw bearer, not the funnel: `canCreateCompanies` also folds in
+  // The raw bearer, not the funnel: the product-scope predicate also folds in
   // `COMPANY_SWITCHING_HIDDEN`, a UI feature flag that has nothing to do with
   // whether this client actually carries platform authority. Gating lifecycle
-  // affordances on the funnel would hide Suspend/Archive from a real platform
-  // caller on a deployment where that flag happens to be set.
+  // affordances on it would hide Suspend/Archive from a real platform caller
+  // on a deployment where that flag happens to be set.
   const platform = client.carriesPlatformBearer;
   // "Reset / Start clean" archives this company and re-provisions it through
   // the same dialog "New company" opens, so it is company creation wearing
-  // another label and has to answer the same question the other triggers do —
-  // unlike the lifecycle actions above, it rides the funnel on purpose.
-  const canReset = canCreateCompanies(client);
+  // another label and answers the same presentation question the other
+  // triggers do — unlike the lifecycle actions above, it rides the funnel on
+  // purpose.
+  const canReset = offersCompanyCreation(client);
   const { actions, explainPlatformOnly, explainPlatformSuspended, explainAdminOnly, archived } =
     lifecycleAffordances(state, session, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
