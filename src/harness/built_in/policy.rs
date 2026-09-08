@@ -1326,12 +1326,22 @@ impl ApprovalPolicy {
     /// [`floor::deferred_group`] is reported on its own axis so #658's
     /// `publish_artifact` carve-out can be revisited with a number instead of
     /// two opinions — it is counted, never folded into the floor's own count.
+    ///
+    /// Emitted through `tracing`, at the `policy::shadow_floor` target
+    /// `DEFAULT_LOG_FILTER` (`src/bin/opencompany.rs`) names explicitly. The
+    /// binary's default filter is bare `error`, and no container image,
+    /// compose file or deploy workflow sets `RUST_LOG` — the same shape issue
+    /// #450 already found once for the durable-append worker's `warn!` lines.
+    /// An `info!` with no matching exception is exactly as silent as those
+    /// were: a week of staging traffic would produce this measurement's
+    /// entire denominator and record none of it.
     fn record_shadow_floor(&self, tool: &str, args: &serde_json::Value) {
         // The per-call allowance, which is the cap a single call is measured
         // against. The daily budget is a different question and has its own arm.
         let verdict = crate::policy::floor::evaluate(tool, args, self.auto_approve_under_usd);
         if verdict.requires_human() {
-            log::info!(
+            tracing::info!(
+                target: "policy::shadow_floor",
                 "[policy:shadow-floor] agent={} tool='{}' would_stop={} mode={:?} hitl={} issue=2147",
                 self.agent.as_deref().unwrap_or("-"),
                 tool,
@@ -1341,7 +1351,8 @@ impl ApprovalPolicy {
             );
         }
         if let Some(group) = crate::policy::floor::deferred_group(tool, args) {
-            log::info!(
+            tracing::info!(
+                target: "policy::shadow_floor",
                 "[policy:shadow-floor] agent={} tool='{}' deferred_group={:?} mode={:?} hitl={} \
                  issue=2147",
                 self.agent.as_deref().unwrap_or("-"),
