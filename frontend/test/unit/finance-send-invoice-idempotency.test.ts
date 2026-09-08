@@ -386,14 +386,59 @@ describe("SendInvoiceDialog idempotency key", () => {
     });
     await settle();
 
-    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(true);
+    // A blank form is not that invoice yet, so nothing is adopted on sight.
+    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(false);
 
     await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(true);
+
     await clickSend();
     const secondKey = lastSentKey();
 
     expect(secondKey).toBe(firstKey);
     expect(readUnresolvedForceNew(SCOPE)).toBeUndefined();
+  });
+
+  it("never lends one invoice's forced nonce to a different invoice", async () => {
+    sendInvoice.mockRejectedValueOnce(new Error("timeout"));
+    sendInvoice.mockResolvedValueOnce(invoiceReply());
+
+    function Mount({ instance }: { instance: string }) {
+      return withScope(
+        createElement(SendInvoiceDialog, {
+          key: instance,
+          client: CLIENT,
+          company: "acme",
+          site: "acme-test",
+          open: true,
+          onOpenChange: () => {},
+          onSent: () => {},
+        }),
+      );
+    }
+
+    act(() => {
+      root.render(createElement(Mount, { instance: "first" }));
+    });
+    await settle();
+    await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    await toggleForceNew(true);
+    await clickSend();
+    const forcedKey = lastSentKey();
+
+    // The forced send for Alan is unresolved. A reload, then a DIFFERENT
+    // invoice: it must carry its own key, or the host dedupes a genuinely
+    // new invoice away as a replay of Alan's.
+    act(() => {
+      root.render(createElement(Mount, { instance: "second" }));
+    });
+    await settle();
+    await fillInvoiceFields({ email: "beth@example.com", description: "Design", amount: "400.00" });
+
+    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(false);
+
+    await clickSend();
+    expect(lastSentKey()).not.toBe(forcedKey);
   });
 
   it("a deliberate resend forces a different key from the default derivation", async () => {
