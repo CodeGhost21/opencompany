@@ -1404,3 +1404,66 @@ async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
         err_text(&result)
     );
 }
+
+/// A graph well under [`GRAPH_RENDER_BUDGET_BYTES`] renders pretty-printed —
+/// the cheap, common case.
+#[test]
+fn render_graph_pretty_prints_a_small_graph() {
+    let spec = json!({"nodes": [{"id": "n1"}], "edges": []});
+    let rendered = render_graph(&spec);
+    assert!(rendered.starts_with("```json\n"));
+    assert!(rendered.contains("\"nodes\""));
+    assert!(rendered.contains('\n'), "pretty output must be multi-line");
+}
+
+/// A graph over the pretty-printed budget but under the compact one falls
+/// back to compact JSON rather than refusing.
+#[test]
+fn render_graph_falls_back_to_compact_before_refusing() {
+    // Many short keys: pretty-printing's per-field newline/indent overhead
+    // pushes this over budget while the compact form (no whitespace) stays
+    // under it.
+    let mut nodes = Vec::new();
+    for i in 0..(GRAPH_RENDER_BUDGET_BYTES / 20) {
+        nodes.push(json!({"id": format!("n{i}")}));
+    }
+    let spec = json!({ "nodes": nodes });
+    let pretty_len = serde_json::to_string_pretty(&spec).unwrap().len();
+    let compact_len = spec.to_string().len();
+    assert!(
+        pretty_len > GRAPH_RENDER_BUDGET_BYTES,
+        "fixture must actually exceed the pretty budget: {pretty_len}"
+    );
+    assert!(
+        compact_len <= GRAPH_RENDER_BUDGET_BYTES,
+        "fixture must fit compact for this test to prove the fallback: {compact_len}"
+    );
+
+    let rendered = render_graph(&spec);
+    assert!(rendered.starts_with("```json\n"));
+    assert!(
+        !rendered.contains("  "),
+        "the compact fallback must carry no pretty-printer indentation"
+    );
+}
+
+/// Past both budgets, `render_graph` refuses rather than quoting a
+/// half-truncated fence the agent would hand back as an "edit".
+#[test]
+fn render_graph_refuses_a_graph_that_exceeds_both_budgets() {
+    let huge_id = "n".repeat(GRAPH_RENDER_BUDGET_BYTES + 1_000);
+    let spec = json!({ "nodes": [{"id": huge_id}] });
+    let compact_len = spec.to_string().len();
+    assert!(
+        compact_len > GRAPH_RENDER_BUDGET_BYTES,
+        "fixture must exceed even the compact budget: {compact_len}"
+    );
+
+    let rendered = render_graph(&spec);
+    assert!(
+        !rendered.starts_with("```json"),
+        "an over-budget graph must not be quoted at all: {rendered}"
+    );
+    assert!(rendered.contains("too large"));
+    assert!(rendered.contains("console"));
+}

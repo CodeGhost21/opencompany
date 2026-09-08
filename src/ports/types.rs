@@ -3801,9 +3801,22 @@ pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverr
 /// on `[tools]` exists to prevent. `media` is absent for the same reason: it
 /// spends real money and has no connect page to be dead-ended on.
 ///
+/// `mcp_registry` joins the list for the same reason `composio` is in it: the
+/// registry's own install form (`McpRegistryBrowser`) is the credential step —
+/// some servers ask for one, some do not, but installing is always the
+/// deliberate act the grant is the second half of — and without an entry here
+/// a hosted tenant, whose manifest is a read-only boot snapshot, could install
+/// a registry server no agent could ever be granted access to.
+///
 /// Sorted, so the console's own ordering is not a second source of truth.
-pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 5] =
-    ["chargebee", "composio", "hosting", "paypal", "search"];
+pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 6] = [
+    "chargebee",
+    "composio",
+    "hosting",
+    "mcp_registry",
+    "paypal",
+    "search",
+];
 
 /// Whether `namespace` is one the console is allowed to grant.
 pub fn console_grantable(namespace: &str) -> bool {

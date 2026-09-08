@@ -787,24 +787,53 @@ mod live {
             }
         }
 
-        /// The action schemas for `toolkits` (all of them when `None`).
+        /// The action schemas for `toolkits` (all of them when `None`),
+        /// optionally narrowed server-side by `search` and `tags`.
+        ///
+        /// `search` is new (and `tags` newly honoured on the BYOK route). The
+        /// tool surface has taken a search term all along and applied it
+        /// **client-side**, over whatever survived the page budget — so a
+        /// narrowing the caller asked for could not reach an action that was
+        /// dropped before it ever arrived. Composio filters both server-side on
+        /// `/tools`; `tinyhumansai/backend` already threads `tags` for the same
+        /// reason.
         async fn list_tools(
             &self,
             toolkits: Option<&[String]>,
             tags: Option<&[String]>,
-        ) -> Result<ComposioToolsResponse> {
+            search: Option<&str>,
+        ) -> Result<(ComposioToolsResponse, bool)> {
+            // The `bool` is whether the listing was **curated** — the BYOK route
+            // asks Composio for featured actions only when nothing narrows the
+            // call, and the renderer has to say so or it reports ~50 featured
+            // rows as the toolkit's whole catalogue (codex on
+            // tinyhumansai/opencompany#2153). The response type is vendored, so
+            // the flag rides beside it rather than on it.
+            let curated = matches!(self, Self::Byok { .. })
+                && !search.is_some_and(|term| !term.trim().is_empty())
+                && !tags.is_some_and(|tags| !tags.is_empty());
             match self {
-                Self::Managed(client) => client.list_tools(toolkits, tags).await,
-                Self::Byok { direct, .. } => {
-                    if tags.is_some_and(|tags| !tags.is_empty()) {
-                        // Nothing in this repo passes tags today; say so rather
-                        // than silently narrowing to nothing if something starts.
-                        tracing::warn!(
-                            "[composio-byok] list_tools: tag filtering is not applied on the                              BYOK route; returning the unfiltered toolkit listing"
+                Self::Managed(client) => {
+                    if search.is_some_and(|term| !term.trim().is_empty()) {
+                        // The managed backend's own endpoint takes no search
+                        // parameter, so the term stays a client-side filter
+                        // there. Said out loud rather than dropped silently —
+                        // that silence is what made the BYOK route's truncation
+                        // so hard to see.
+                        tracing::debug!(
+                            "[composio] list_tools: managed route has no server-side search; \
+                             the term is applied client-side"
                         );
                     }
-                    direct.list_tools(toolkits.unwrap_or(&[])).await
+                    client
+                        .list_tools(toolkits, tags)
+                        .await
+                        .map(|resp| (resp, curated))
                 }
+                Self::Byok { direct, .. } => direct
+                    .list_tools(toolkits.unwrap_or(&[]), search, tags)
+                    .await
+                    .map(|resp| (resp, curated)),
             }
         }
 
@@ -988,9 +1017,40 @@ mod live {
     /// [`redact`] keeps the security half — the token replacement and the URL
     /// query strip — verbatim and unconditional; only the length decision moves
     /// here, where it can be sized for a body and describe its own cut.
-    fn scrubbed_ok(value: Value, secrets: &[String], what: &str) -> ToolResult {
+    fn scrubbed_ok(value: Value, secrets: &[String]) -> ToolResult {
+        // Project BEFORE serialising, and serialise before redacting.
+        //
+        // Order is the whole of it. `redact` strips URL query strings and
+        // rewrites secret substrings inside the serialised text, which leaves a
+        // string that is no longer valid JSON — so a projection attempted after
+        // it (the first cut of this) could never parse the payload and declined
+        // on every real response, silently, while the byte cut carried on
+        // dropping whole records. Projecting the structured `Value` here means
+        // the transform sees JSON, and `redact` still sees every byte that ends
+        // up in front of the model.
+        let value = catalog::project_records_value(value);
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        ToolResult::success(catalog::bound_body(redact(&text, secrets), what))
+        // No `bound_body` here any more (issue #6014).
+        //
+        // It bounded the payload to 12 KiB **inside the tool**, chosen so that
+        // "the harness's own anonymous cut never fires first" — a good trade
+        // when the only thing downstream was a byte cut that said nothing.
+        //
+        // It is the wrong trade now. The same 12 KiB also fired ahead of the
+        // per-result artifact store (so an oversized Composio result was
+        // discarded rather than written to disk and pointed at) and ahead of the
+        // task-aware extractor (whose threshold is 4000 tokens, which a
+        // pre-bounded body can never reach). Bounding first made this the one
+        // tool family whose large results could be handled by nothing but
+        // truncation — measured on a live GitHub call as 3 of 30 records
+        // surviving, and the agent correctly reporting 3.
+        //
+        // Handing the full payload downstream puts it back on the same ladder
+        // every other tool's output takes: extract against the task, else
+        // persist and hand back a path, else cut at the budget. Each of those
+        // says what it did, which was the property the pre-bound was protecting
+        // and is now protected by the mechanisms themselves.
+        ToolResult::success(redact(&text, secrets))
     }
 
     /// A scrubbed error result — the tenant token is stripped from any error
@@ -1466,7 +1526,6 @@ mod live {
                     Ok(scrubbed_ok(
                         serde_json::to_value(&resp).unwrap_or(Value::Null),
                         &secrets,
-                        "connections list",
                     ))
                 }
                 Err(err) => Ok(scrubbed_err(
@@ -1535,7 +1594,7 @@ mod live {
             // above is a security decision (allowlist intersection) and stays
             // here; `search` / `detail` / `limit` are presentation and live in
             // the pure catalogue module.
-            let request = catalog::ListRequest::parse(&args, effective.clone());
+            let mut request = catalog::ListRequest::parse(&args, effective.clone());
             tracing::debug!(
                 effective = ?effective,
                 allowlist = ?self.toolkits,
@@ -1558,8 +1617,20 @@ mod live {
                     )));
                 }
             };
-            match client.list_tools(query, None).await {
-                Ok(mut resp) => {
+            // The search term now travels to Composio rather than being applied
+            // only to what came back. `request.search` is the tool's own
+            // already-parsed terms; joined because the API takes one free-text
+            // string over name/slug/description.
+            let search_term = request.search.join(" ");
+            let search = Some(search_term.as_str()).filter(|term| !term.trim().is_empty());
+            // The parsed tags, not `None`: without this the tag narrowing added
+            // to the BYOK route was unreachable from the agent tool that is
+            // supposed to use it (CodeRabbit on tinyhumansai/opencompany#2153).
+            let tags: Option<&[String]> =
+                Some(request.tags.as_slice()).filter(|tags| !tags.is_empty());
+            match client.list_tools(query, tags, search).await {
+                Ok((mut resp, curated)) => {
+                    request.curated = curated;
                     if !self.toolkits.is_empty() {
                         resp.tools.retain(|schema| {
                             toolkit_allowed(&self.toolkits, &slug_toolkit(&schema.function.name))
@@ -1654,7 +1725,6 @@ mod live {
                 Ok(resp) => Ok(scrubbed_ok(
                     serde_json::to_value(&resp).unwrap_or(Value::Null),
                     &secrets,
-                    "authorization response",
                 )),
                 Err(err) => Ok(scrubbed_err("composio_authorize failed", &err, &secrets)),
             }
@@ -1753,7 +1823,6 @@ mod live {
                     Ok(scrubbed_ok(
                         serde_json::to_value(&resp).unwrap_or(Value::Null),
                         &secrets,
-                        &format!("`{tool}` output"),
                     ))
                 }
                 Err(err) => Ok(scrubbed_err("composio_execute failed", &err, &secrets)),
@@ -3386,6 +3455,254 @@ mod isolation_tests {
         assert!(
             !text.contains("reflected-secret-token"),
             "the reflected token leaked into agent-visible output: {text}"
+        );
+    }
+
+    // --- FAIL-axis: what each Composio tool does when the backend fails ------
+
+    use axum::http::StatusCode;
+    use axum::routing::post;
+
+    /// A handler that always 5xxs, recording each hit so a caller can count the
+    /// requests a single tool call actually made.
+    async fn always_500(State(log): State<AuthLog>) -> (StatusCode, axum::Json<Value>) {
+        log.lock().unwrap().push("hit".to_string());
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "success": false, "error": "upstream exploded" })),
+        )
+    }
+
+    /// Spawn a backend whose every Composio route 5xxs.
+    async fn spawn_failing_backend() -> (String, AuthLog) {
+        let log: AuthLog = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/agent-integrations/composio/toolkits", get(always_500))
+            .route("/agent-integrations/composio/tools", get(always_500))
+            .route("/agent-integrations/composio/connections", get(always_500))
+            .with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), log)
+    }
+
+    fn tool_named(config: &TenantComposio, name: &str) -> Box<dyn Tool> {
+        let metering = ComposioMetering {
+            company: CompanyId::new("acme"),
+            agent: "ceo".to_string(),
+            meter: None,
+        };
+        composio_tools(config, metering)
+            .into_iter()
+            .find(|t| t.name() == name)
+            .unwrap_or_else(|| panic!("`{name}` tool present"))
+    }
+
+    /// A hard backend failure on the toolkit catalogue must surface as an error,
+    /// never as an empty-but-successful listing. The distinction is the whole
+    /// point: an agent told "no toolkits" concludes the company has connected
+    /// nothing and stops asking, while an agent told the catalogue could not be
+    /// read can say so and retry later.
+    #[tokio::test]
+    async fn list_toolkits_reports_a_backend_failure_rather_than_an_empty_catalogue() {
+        let (url, _log) = spawn_failing_backend().await;
+        let tool = tool_named(&config(&url, "token-a"), "composio_list_toolkits");
+
+        let out = tool.execute(json!({})).await.unwrap();
+        let text = out.output();
+        assert!(
+            out.is_error,
+            "a 500 from the catalogue must be an error, not a listing: {text}"
+        );
+        assert!(
+            !text.contains("token-a"),
+            "the tenant token leaked into the failure text: {text}"
+        );
+    }
+
+    /// The same contract on the action catalogue. `composio_list_tools` is what
+    /// an agent reads before it picks a slug, so an empty success here sends it
+    /// on to guess a slug that was never listed.
+    #[tokio::test]
+    async fn list_tools_reports_a_backend_failure_rather_than_an_empty_listing() {
+        let (url, _log) = spawn_failing_backend().await;
+        let tool = tool_named(&config(&url, "token-a"), "composio_list_tools");
+
+        let out = tool
+            .execute(json!({ "search": "send email" }))
+            .await
+            .unwrap();
+        let text = out.output();
+        assert!(
+            out.is_error,
+            "a 500 from the action catalogue must be an error, not a listing: {text}"
+        );
+        assert!(
+            !text.contains("token-a"),
+            "the tenant token leaked into the failure text: {text}"
+        );
+    }
+
+    /// Cross-tenant isolation must hold on the failure path too. A backend that
+    /// 5xxs gives the tool nothing to render, and the one thing it must not do
+    /// is fall back to any other source of connections — the output carries no
+    /// account at all, and no other tenant's bearer was ever presented.
+    #[tokio::test]
+    async fn a_backend_failure_on_connections_yields_no_accounts_and_no_other_tenants_token() {
+        let (url, log) = spawn_failing_backend().await;
+        let tool = tool_named(&config(&url, "token-a"), "composio_list_connections");
+
+        let out = tool.execute(json!({})).await.unwrap();
+        let text = out.output();
+        assert!(
+            out.is_error,
+            "a 500 on connections must be an error: {text}"
+        );
+        assert!(
+            !text.contains("@example.com"),
+            "a failed listing must render no account whatsoever: {text}"
+        );
+        assert!(
+            !text.contains("token-a") && !text.contains("token-b"),
+            "no bearer may appear in the failure text: {text}"
+        );
+        let seen = log.lock().unwrap().len();
+        assert!(seen >= 1, "the call must actually have reached the backend");
+    }
+
+    /// A company that has configured no Composio credential at all must have
+    /// every tool refuse before the network, rather than calling the backend
+    /// unauthenticated and rendering whatever it returns.
+    #[tokio::test]
+    async fn an_absent_credential_refuses_every_tool_before_the_network() {
+        let (url, log) = spawn_failing_backend().await;
+        let config = TenantComposio::new(url, Credential::None, Vec::new());
+
+        for name in [
+            "composio_list_toolkits",
+            "composio_list_connections",
+            "composio_list_tools",
+        ] {
+            let out = tool_named(&config, name).execute(json!({})).await.unwrap();
+            assert!(
+                out.is_error,
+                "`{name}` must refuse without a credential: {}",
+                out.output()
+            );
+        }
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "no request may leave for a company that configured no credential"
+        );
+    }
+
+    /// Two `composio_authorize` calls for the same toolkit, back to back, must
+    /// not each open a fresh OAuth handoff. There is no lock, no idempotency key
+    /// and no already-connected short-circuit around `client.authorize`, so the
+    /// second call reaches the backend exactly like the first and the operator
+    /// is handed two competing connect URLs for one account.
+    #[tokio::test]
+    #[ignore = "confirms fail-open: repeat authorize is not deduped or short-circuited"]
+    async fn a_repeated_authorize_for_one_toolkit_is_deduped() {
+        let log: AuthLog = Arc::new(Mutex::new(Vec::new()));
+        async fn authorize(State(log): State<AuthLog>) -> axum::Json<Value> {
+            log.lock().unwrap().push("authorize".to_string());
+            axum::Json(json!({
+                "success": true,
+                "data": { "connectUrl": "https://connect.composio.dev/abc", "connectionId": "conn-1" }
+            }))
+        }
+        let app = Router::new()
+            .route("/agent-integrations/composio/authorize", post(authorize))
+            .with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let config = TenantComposio::new(
+            format!("http://{addr}"),
+            Credential::from_value("token-a"),
+            vec!["gmail".to_string()],
+        );
+        let tool = tool_named(&config, "composio_authorize");
+
+        let first = tool.execute(json!({ "toolkit": "gmail" })).await.unwrap();
+        assert!(!first.is_error, "{}", first.output());
+        let second = tool.execute(json!({ "toolkit": "gmail" })).await.unwrap();
+        assert!(!second.is_error, "{}", second.output());
+
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "a repeat authorize for the same toolkit must not open a second handoff"
+        );
+    }
+
+    /// `composio_execute` runs a real, side-effecting remote action and sends
+    /// no idempotency key: the body is `{tool, arguments}` (plus `connectionId`
+    /// when pinned) and nothing more. Two identical calls — a model retry, a
+    /// re-dispatched turn — are indistinguishable at the backend, so the action
+    /// runs twice. For `GMAIL_SEND_EMAIL` that is two emails.
+    #[tokio::test]
+    #[ignore = "confirms fail-open: composio_execute carries no idempotency key"]
+    async fn a_repeated_execute_carries_an_idempotency_key_the_backend_can_dedupe_on() {
+        type BodyLog = Arc<Mutex<Vec<(Value, Option<String>)>>>;
+        async fn execute(
+            State(log): State<BodyLog>,
+            headers: HeaderMap,
+            axum::Json(body): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            let key = headers
+                .get("idempotency-key")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            log.lock().unwrap().push((body, key));
+            axum::Json(json!({
+                "success": true,
+                "data": { "successful": true, "data": { "id": "msg-1" } }
+            }))
+        }
+        let log: BodyLog = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/agent-integrations/composio/execute", post(execute))
+            .with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let config = TenantComposio::new(
+            format!("http://{addr}"),
+            Credential::from_value("token-a"),
+            vec!["gmail".to_string()],
+        );
+        let tool = tool_named(&config, "composio_execute");
+
+        let args = json!({
+            "tool": "GMAIL_SEND_EMAIL",
+            "arguments": { "to": "ops@acme.test", "subject": "hi", "body": "hello" }
+        });
+        let _ = tool.execute(args.clone()).await.unwrap();
+        let _ = tool.execute(args).await.unwrap();
+
+        let seen = log.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "both calls must have reached the backend");
+        let keys: Vec<Option<String>> = seen.iter().map(|(_, k)| k.clone()).collect();
+        assert!(
+            keys.iter().all(Option::is_some),
+            "a side-effecting execute must carry an idempotency key: {keys:?}"
+        );
+        assert_eq!(
+            keys[0], keys[1],
+            "two identical executes must present the SAME key so the backend can dedupe"
         );
     }
 }

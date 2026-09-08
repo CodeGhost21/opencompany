@@ -697,11 +697,17 @@ tinyinference = { path = "vendor/openhuman/vendor/tinyagents/vendor/tinyinferenc
 # `openhuman` feature is on — so they leave the offline build unaffected.
 # tinyflows split into a workspace too; the package now lives in `crates/`.
 tinyflows = { path = "vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
-tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
+# TinyCortex moved under TinyMemory at the openhuman pin: `vendor/tinycortex`
+# is no longer a submodule there, and the crate is reached through
+# `vendor/tinymemory/vendor/tinycortex` instead. A patch path is resolved
+# eagerly whatever the feature set — the same trap the `tinyplace` note below
+# records — so a stale path here fails `cargo metadata --locked` outright,
+# before any feature gate is consulted.
+tinycortex = { path = "vendor/openhuman/vendor/tinymemory/vendor/tinycortex" }
 # `tinymemory-core` consumes the TinyCortex contract by version while
 # OpenHuman consumes the implementation by path. Keep both on one checkout so
 # their public trait identities remain identical.
-tinycortex-api = { path = "vendor/openhuman/vendor/tinycortex/api" }
+tinycortex-api = { path = "vendor/openhuman/vendor/tinymemory/vendor/tinycortex/api" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
 # No `tinyplace` entry: openhuman dropped the submodule, so the path this
 # patched onto no longer exists at the pin and Cargo fails to load the source

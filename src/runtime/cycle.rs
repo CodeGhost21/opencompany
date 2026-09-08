@@ -1993,7 +1993,13 @@ approval.]"
         //
         // Computed here rather than inline in the literal below, which would
         // borrow `tool` after the field above has moved it.
-        let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
+        let scope = match crate::policy::consequence::standing_mint_scope(&tool, &args, verdict) {
+            crate::policy::consequence::StandingMintScope::Scoped(scope) => Some(scope),
+            crate::policy::consequence::StandingMintScope::Unscoped => None,
+            crate::policy::consequence::StandingMintScope::Refused(why) => {
+                return Err(OpenCompanyError::InvalidRequest(why));
+            }
+        };
         let (agent, workflow) = match &subject {
             GrantSubject::Agent(agent) => (agent.clone(), None),
             GrantSubject::Workflow(workflow) => (String::new(), Some(workflow.clone())),
@@ -7553,6 +7559,53 @@ members = ["writer"]
         assert_eq!(spend.len(), 1);
         // Negative: an outflow, per the ledger convention (issue #1047).
         assert_eq!(spend[0].amount_usd, -0.031);
+    }
+
+    /// Finding MET-004: a `PerCycle`-metered brain's spend charges
+    /// `UNATTRIBUTED_AGENT` unconditionally, even on a single-agent company
+    /// where the cycle can only have been that one teammate's work. That
+    /// makes the spend invisible to `usd_spent_by_agent` for the real
+    /// teammate — and therefore invisible to that teammate's
+    /// `budget_usd_daily` cap, which sums exactly that function's output.
+    #[tokio::test]
+    async fn per_cycle_spend_is_invisible_to_the_real_agents_daily_cap() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(9.99))))
+            .build()
+            .await
+            .unwrap();
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "how are we doing".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+        let samples = rt.usage().query(rt.id(), 0).await.unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(
+            crate::metering::daily_budget::usd_spent_by_agent(&samples, "ceo"),
+            0.0,
+            "the $9.99 this cycle spent is invisible to the only real teammate's daily spend \
+             sum — a budget_usd_daily cap on `ceo` would never see it and could never trip"
+        );
+        assert_eq!(
+            crate::metering::daily_budget::usd_spent_by_agent(
+                &samples,
+                crate::metering::UNATTRIBUTED_AGENT
+            ),
+            9.99,
+            "the spend is real; it is just parked under the company-wide bucket instead of \
+             the teammate whose turn it was"
+        );
     }
 
     /// Tokens without USD (the managed passthrough bills backend-side) still
