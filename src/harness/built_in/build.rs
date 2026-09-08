@@ -3142,4 +3142,144 @@ mod tests {
             "{history}"
         );
     }
+
+    // --- FAIL-axis: the MCP registry belt is wired without a grant check ------
+
+    /// The read half of the MCP registry family must be withheld from an agent
+    /// whose effective grants cover no namespace at all.
+    ///
+    /// `build_agent` pushes it on `#[cfg(feature = "mcp")]` + a configured
+    /// `mcp_home` alone, with no `grants` term in the condition, so an agent
+    /// granted nothing still receives it. Pinned here as the safe behaviour.
+    #[cfg(feature = "mcp")]
+    #[test]
+    #[ignore = "confirms fail-open: mcp_registry_list_tools is wired with no grant term"]
+    fn mcp_registry_list_tools_is_withheld_from_an_agent_granted_nothing() {
+        let names = built_tool_names(&[], false);
+        assert!(
+            !names.contains(&"mcp_registry_list_tools".to_string()),
+            "an agent holding no grant must not receive the MCP registry reader: {names:?}"
+        );
+    }
+
+    /// The mutating half — the one that invokes an arbitrary tool on any server
+    /// the company has installed. Same ungated wiring, higher blast radius: an
+    /// agent granted nothing can drive every connected MCP server.
+    #[cfg(feature = "mcp")]
+    #[test]
+    #[ignore = "confirms fail-open: mcp_registry_tool_call is wired with no grant term"]
+    fn mcp_registry_tool_call_is_withheld_from_an_agent_granted_nothing() {
+        let names = built_tool_names(&[], false);
+        assert!(
+            !names.contains(&"mcp_registry_tool_call".to_string()),
+            "an agent holding no grant must not receive the MCP registry invoker: {names:?}"
+        );
+    }
+
+    /// Narrow grants are not a way in either: an agent granted only `docs`
+    /// holds no MCP namespace, so neither registry tool may appear.
+    #[cfg(feature = "mcp")]
+    #[test]
+    #[ignore = "confirms fail-open: a docs-only agent still receives both registry tools"]
+    fn a_docs_only_agent_receives_no_mcp_registry_tool() {
+        let names = built_tool_names(&["docs.*"], false);
+        for tool in ["mcp_registry_list_tools", "mcp_registry_tool_call"] {
+            assert!(
+                !names.contains(&tool.to_string()),
+                "`docs.*` must not confer `{tool}`: {names:?}"
+            );
+        }
+    }
+
+    /// The server-backed MCP family (`mcp_list_tools` / `mcp_call`) is the
+    /// contrast case, and it fails closed: with no server configured on the
+    /// company, `registry_for_agent` yields nothing and not one of those tools
+    /// is built — even for a `*` agent. This is the gate the registry family
+    /// above is missing, pinned so a change that wires the belt unconditionally
+    /// is caught here.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn no_configured_mcp_server_wires_no_server_backed_mcp_tool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = pin_deps(dir.path().to_path_buf());
+        assert!(
+            deps.mcp_servers.is_empty(),
+            "this test's premise is a company with no configured server"
+        );
+        assert!(
+            crate::harness::mcp::registry_for_agent(&deps.mcp_servers, &["*".to_string()])
+                .is_none(),
+            "no configured server must yield no registry, even under `*`"
+        );
+
+        let names = built_tool_names(&["*"], false);
+        for tool in ["mcp_list_servers", "mcp_list_tools", "mcp_call"] {
+            assert!(
+                !names.contains(&tool.to_string()),
+                "`{tool}` must not be wired without a configured server: {names:?}"
+            );
+        }
+    }
+
+    /// The tool-iteration ceiling is one crate-wide constant with no per-agent
+    /// lever: a tier hint, a declared daily budget and the orchestrator flag all
+    /// build agents that run on exactly [`MAX_TOOL_ITERATIONS`]. An agent that
+    /// needs a longer loop has no way to ask for one, and — the direction that
+    /// matters — no manifest field can raise its own ceiling.
+    #[test]
+    fn the_tool_iteration_cap_is_uniform_and_not_manifest_configurable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = pin_deps(dir.path().to_path_buf());
+
+        let build_with = |tier: Option<&str>, budget: Option<f64>, is_orchestrator: bool| {
+            let manifest_agent = ManifestAgent {
+                global: false,
+                id: "desk".to_string(),
+                role: "Desk Lead".to_string(),
+                name: None,
+                description: None,
+                tier: tier.map(str::to_string),
+                harness: None,
+                tools: None,
+                delegates_to: Vec::new(),
+                context: None,
+                budget_usd_daily: budget,
+                prompt: None,
+                prompt_files: Vec::new(),
+                prompt_files_resolved: Vec::new(),
+                classes: Vec::new(),
+                ledgers: None,
+                can_declare_ledgers: true,
+                model: None,
+            };
+            build_agent(
+                &CompanyId::new("acme"),
+                "Acme",
+                &manifest_agent,
+                ApprovalPolicy::new(&Policy::default(), None),
+                &deps,
+                &["*".to_string()],
+                &[],
+                &[],
+                None,
+                is_orchestrator,
+            )
+            .expect("agent builds")
+            .agent_config()
+            .max_tool_iterations
+        };
+
+        for (label, got) in [
+            ("no tier", build_with(None, None, false)),
+            ("deep tier", build_with(Some("deep"), None, false)),
+            ("fast tier", build_with(Some("fast"), None, false)),
+            ("budgeted", build_with(None, Some(500.0), false)),
+            ("orchestrator", build_with(None, None, true)),
+        ] {
+            assert_eq!(
+                got, MAX_TOOL_ITERATIONS,
+                "`{label}` must run on the one stated ceiling, not its own"
+            );
+        }
+    }
 }
