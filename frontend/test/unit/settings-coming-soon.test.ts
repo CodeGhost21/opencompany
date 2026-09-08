@@ -79,7 +79,7 @@ afterEach(() => {
 
 async function show(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(DomainSettings, { client, company: "acme" }));
+    root.render(createElement(DomainSettings, { client, company: "acme", canManage: true }));
   });
 }
 

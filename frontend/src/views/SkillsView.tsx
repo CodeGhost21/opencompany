@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { me as fetchMe } from "@/api/auth";
+import { hasNoSession, me as fetchMe } from "@/api/auth";
 import {
   createSkill,
   installSkill,
@@ -120,8 +120,18 @@ export function SkillsView({ client, company }: Props) {
       let admin = false;
       try {
         admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
+      } catch (err) {
+        // `resolve_principal` on the host tries a human session first and
+        // only falls back to the platform/tenant bearer when none is
+        // present — a hub console can carry both, and the write routes
+        // below are AdminScopedCompany, which admits that machine principal
+        // unconditionally once it has addressed this company. So a
+        // *confirmed* absence of any session means the bearer is what the
+        // host will actually authorize on. A network error, a timeout, or a
+        // `5xx` is not that confirmation — a member's session could still be
+        // live and still take precedence on the host — so those stay
+        // non-admin rather than assuming the bearer wins (codeRabbit review).
+        admin = client.carriesPlatformBearer && hasNoSession(err);
       }
       if (live) setCanManage(admin);
     })();
@@ -265,6 +275,17 @@ export function SkillsView({ client, company }: Props) {
           <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
         </Alert>
 
+        {!canManage && (
+          <Alert data-testid="skills-admin-only">
+            <Info className="size-4" />
+            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
+            <AlertDescription>
+              A skill's content reaches every teammate, so an admin installs, removes, enables and
+              adds them. You can see what is installed and enabled.
+            </AlertDescription>
+          </Alert>
+        )}
+
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -366,8 +387,6 @@ function InstalledCard({
   onUninstall,
 }: {
   skill: Skill;
-  /** Whether this viewer may flip the switch or uninstall. Read-only content —
-   *  the name, description, category and enabled state — renders either way. */
   canManage: boolean;
   onToggle: () => void;
   onUninstall: () => void;
@@ -380,8 +399,6 @@ function InstalledCard({
             <Sparkles className="size-4 text-muted-foreground" />
             <p className="font-medium">{skill.name}</p>
           </div>
-          {/* Disabled, not hidden: its position is itself the enabled/disabled
-              fact a member still needs to read. */}
           <Switch
             checked={skill.enabled}
             disabled={!canManage}
@@ -427,7 +444,6 @@ function RegistryCard({
 }: {
   skill: RegistrySkill;
   installed: boolean;
-  /** Whether this viewer may install from the registry. */
   canManage: boolean;
   onInstall: () => void;
 }) {

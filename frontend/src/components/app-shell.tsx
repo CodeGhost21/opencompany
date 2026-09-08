@@ -160,7 +160,8 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
-import { canCreateCompanies } from "@/components/create-company-dialog";
+import { forgetSession } from "@/connections/registry";
+import { offersCompanyCreation } from "@/components/create-company-dialog";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
@@ -3391,7 +3392,7 @@ export function AppShell({
             onSwitchCompany={onSwitchCompany}
             onBackToPicker={onBackToPicker}
             onCreateCompany={onCreateCompany}
-            canCreateCompany={canCreateCompanies(client)}
+            canCreateCompany={offersCompanyCreation(client)}
           />
         }
         overview={
@@ -3437,7 +3438,12 @@ export function AppShell({
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
           // session that has just gone — and the row simply closes up.
-          <ProfileRow variant="titlebar" client={client} company={company} />
+          <ProfileRow
+            variant="titlebar"
+            client={client}
+            company={company}
+            onSignedOut={() => void forgetSession(scope.connection)}
+          />
         }
       />
 
