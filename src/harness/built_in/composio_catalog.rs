@@ -208,10 +208,6 @@ fn project_record(value: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
-/// Where a provider hides its list of records, when the payload is not itself
-/// the array.
-const RECORD_ENVELOPES: [&str; 6] = ["data", "items", "results", "issues", "records", "values"];
-
 /// Project an array-of-records payload down to its answering fields, returning
 /// `None` when the body is not that shape.
 ///
@@ -239,7 +235,9 @@ pub fn project_records_value(mut value: serde_json::Value) -> serde_json::Value 
         return value;
     }
     if project_in_place(&mut value) {
-        let after = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(before);
+        let after = serde_json::to_string(&value)
+            .map(|s| s.len())
+            .unwrap_or(before);
         tracing::info!(
             from_bytes = before,
             to_bytes = after,
@@ -306,10 +304,7 @@ pub fn bound_body(body: String, what: &str) -> String {
                 what,
                 from_bytes = body.len(),
                 to_bytes = projected.len(),
-                ratio = format!(
-                    "{:.1}x",
-                    body.len() as f64 / projected.len().max(1) as f64
-                ),
+                ratio = format!("{:.1}x", body.len() as f64 / projected.len().max(1) as f64),
                 fits_now = projected.len() <= MAX_BODY_BYTES,
                 "[composio] projected an array-of-records payload to its answering fields"
             );
@@ -2333,11 +2328,31 @@ mod projection_prototype_tests {
         .to_string();
 
         let projected = project_records(&body).expect("records nested under `data.details`");
-        assert!(projected.len() < body.len(), "must shrink: {} -> {}", body.len(), projected.len());
-        assert!(!projected.contains("avatar_url"), "link fields must go: {projected}");
-        assert!(!projected.contains("html_url"), "link fields must go: {projected}");
-        assert!(projected.contains("octocat"), "nested user collapses to its login: {projected}");
-        assert!(projected.contains("bug"), "label array collapses to names: {projected}");
-        assert!(projected.contains("\"title\""), "answering fields survive: {projected}");
+        assert!(
+            projected.len() < body.len(),
+            "must shrink: {} -> {}",
+            body.len(),
+            projected.len()
+        );
+        assert!(
+            !projected.contains("avatar_url"),
+            "link fields must go: {projected}"
+        );
+        assert!(
+            !projected.contains("html_url"),
+            "link fields must go: {projected}"
+        );
+        assert!(
+            projected.contains("octocat"),
+            "nested user collapses to its login: {projected}"
+        );
+        assert!(
+            projected.contains("bug"),
+            "label array collapses to names: {projected}"
+        );
+        assert!(
+            projected.contains("\"title\""),
+            "answering fields survive: {projected}"
+        );
     }
 }
