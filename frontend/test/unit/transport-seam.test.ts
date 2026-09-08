@@ -34,6 +34,9 @@ import { ApiError } from "@/api/types";
 
 /** Records what it was asked for and answers with whatever the test staged. */
 class StubTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly seen: TransportRequest[] = [];
   readonly subscribed: string[] = [];
   handlers: StreamHandlers | null = null;
@@ -369,5 +372,81 @@ describe("picking a transport", () => {
       __TAURI__: { core: { invoke: () => Promise.resolve(), Channel: class {} } },
     };
     expect(mayCarryACredential("http://192.168.1.20:8080")).toBe(false);
+  });
+});
+
+describe("a request deadline crossing the seam", () => {
+  // The desktop core applies a `reqwest` timeout the console cannot see, and
+  // it was flat: 30 seconds for everything. The host deliberately allows the
+  // teammate design pass 90, so every slow-but-valid design on the desktop app
+  // came back as a transport failure and handed the operator the full form —
+  // a refusal for a pass that was working. Only the caller knows which route
+  // it is asking for, so the deadline has to ride with the request.
+
+  it("carries a caller's deadline to the transport", async () => {
+    const transport = new StubTransport(() => ({ text: "{}" }));
+    const client = clientOn(transport);
+    await client.post("/api/v1/company/team/design", { description: "x" }, { timeoutMs: 105_000 });
+    expect(transport.seen.at(-1)!.timeoutMs).toBe(105_000);
+  });
+
+  it("sends no deadline for an ordinary mutation, so each transport keeps its own default", async () => {
+    // `client.post` leaves a mutation unbounded — its duration is the host's to
+    // decide — and `null` is not a number any transport can act on.
+    const transport = new StubTransport(() => ({ text: "{}" }));
+    const client = clientOn(transport);
+    await client.post("/api/v1/company/team", { name: "Nova" });
+    expect(transport.seen.at(-1)!.timeoutMs).toBeUndefined();
+  });
+
+  it("carries the read default on a GET, so the two transports agree about it", async () => {
+    const transport = new StubTransport(() => ({ text: "[]" }));
+    const client = clientOn(transport);
+    await client.listTeam("acme");
+    expect(typeof transport.seen.at(-1)!.timeoutMs).toBe("number");
+  });
+});
+
+describe("graphqlRequest against a host predating the company-scoped route", () => {
+  it("retries bare /graphql when the scoped route 404s", async () => {
+    const t = new StubTransport((req) =>
+      req.url.endsWith("/api/v1/company/graphql")
+        ? { status: 404, text: "" }
+        : { text: '{"data":{"company":{"id":"acme"}}}' },
+    );
+    const client = clientOn(t, { baseUrl: "https://host.test" });
+
+    await expect(client.graphqlRequest("{ company { id } }")).resolves.toEqual({
+      data: { company: { id: "acme" } },
+    });
+    expect(t.seen.map((r) => r.url)).toEqual([
+      "https://host.test/api/v1/company/graphql",
+      "https://host.test/graphql",
+    ]);
+  });
+
+  it("carries the addressed company on the scoped attempt only", async () => {
+    const t = new StubTransport((req) =>
+      req.url.endsWith("/api/v1/companies/acme/graphql")
+        ? { status: 404, text: "" }
+        : { text: '{"data":{"company":{"id":"acme"}}}' },
+    );
+    const client = clientOn(t, { baseUrl: "https://host.test" });
+
+    await client.graphqlRequest("{ company { id } }", undefined, "acme");
+    expect(t.seen.map((r) => r.url)).toEqual([
+      "https://host.test/api/v1/companies/acme/graphql",
+      "https://host.test/graphql",
+    ]);
+  });
+
+  it("does not retry a refusal that is not a 404", async () => {
+    const t = new StubTransport(() => ({ status: 401, text: "" }));
+    const client = clientOn(t, { baseUrl: "https://host.test" });
+
+    await expect(client.graphqlRequest("{ company { id } }")).rejects.toMatchObject({
+      status: 401,
+    });
+    expect(t.seen).toHaveLength(1);
   });
 });

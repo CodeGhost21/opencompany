@@ -124,8 +124,8 @@ async function show(client: OpenCompanyClient) {
   await act(async () => {
     root.render(
       createElement(Fragment, null, [
-        createElement(DomainCard, { key: "domain", client, company: "acme" }),
-        createElement(SmtpCard, { key: "smtp", client, company: "acme" }),
+        createElement(DomainCard, { key: "domain", client, company: "acme", canManage: true }),
+        createElement(SmtpCard, { key: "smtp", client, company: "acme", canManage: true }),
       ]),
     );
   });

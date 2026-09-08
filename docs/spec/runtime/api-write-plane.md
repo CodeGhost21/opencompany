@@ -51,8 +51,8 @@ DELETE …/team/{agentId}                      remove a teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
 DELETE …/team/{agentId}/budget               reset the cap to the manifest default
-POST   …/team/{agentId}/draft                one copilot turn on this teammate's mandate or persona (writes nothing)
-POST   …/team/draft                          the same, for a teammate being added
+POST   …/team/draft · …/team/{agentId}/draft  one copilot turn on a mandate or persona (api-team-drafting.md)
+POST   …/team/design                         design a whole teammate from a name and a sentence (api-team-drafting.md)
 POST   …/avatars                            upload an image → an avatar reference (avatars.md)
 POST   …/setup/roster                       propose a starting team from three answers (company-setup/overview.md)
 GET    …/policy                              the autonomy tier + spend cap + deadline + always-ask list

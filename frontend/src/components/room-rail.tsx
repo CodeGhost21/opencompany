@@ -24,10 +24,38 @@ import { useSidebar } from "@/components/ui/sidebar";
  * model up to the shell and a second render of the whole console every time an
  * unread count changed.
  *
- * The slot is `null` whenever the Room section is not expanded — a different
- * section is active, or the mobile sheet is closed and has unmounted its
- * contents. `ChatView` renders no rail at all then, which is the intended
- * behaviour rather than a fallback.
+ * ## The rail is permanent, so `ChatView` is mounted permanently (issue #2130)
+ *
+ * The slot used to be `null` whenever Room was not the open section, and
+ * `ChatView` rendered no rail at all then — the intended behaviour, while the
+ * sidebar's middle region belonged to whichever section you were in. It belongs
+ * to the channel list now, on every section, so that gap had to close, and there
+ * were the same two ways out as before.
+ *
+ * It closed the same way, for the same reason: the shell keeps `ChatView`
+ * mounted on every route and hands it `routeOpen`, which is false off Room. The
+ * rail portals as it always did; the transcript, the header and the members pane
+ * render only when `routeOpen`. Lifting the model into the shell was rejected
+ * twice now on the same grounds, and the second time it would have been worse —
+ * the console would re-render on every unread tick from *every* section rather
+ * than only from Room.
+ *
+ * What it costs is honest and worth stating: ~2,400 lines of chat model stay
+ * mounted while an operator is on Company or Flows, with its polls and its SSE
+ * subscriptions live. That was always true *of the data* — the shell owns the
+ * transcripts, the mention feed and the unread map precisely because `ChatView`
+ * used to unmount — so what is newly resident is the view's own state and its
+ * desks/roster reads, not the traffic. In exchange the channel list is never a
+ * round trip away, and returning to Room no longer refetches what it just had.
+ *
+ * `routeOpen` also gates `chatPaneVisible`, which is what stops a mention being
+ * marked read while the operator is somewhere else entirely — a mounted-but-off
+ * -screen transcript must not clear anything, exactly as the phone's covering
+ * sheet must not.
+ *
+ * The slot is still `null` in one case: the mobile sheet is closed and has
+ * unmounted its contents. `ChatView` renders no rail then, which remains the
+ * intended behaviour rather than a fallback.
  *
  * The sidebar's own density travels the same way. `ChatView` used to keep a
  * `collapsed` flag of its own in `localStorage` (`lib/chat-rail.ts`), because the
@@ -37,7 +65,10 @@ import { useSidebar } from "@/components/ui/sidebar";
  * disagree.
  */
 interface RoomRailSlot {
-  /** The sidebar's mount point, or `null` while Room is not expanded. */
+  /**
+   * The sidebar's mount point — present on every section since #2130, and
+   * `null` only while the mobile sheet is closed and has unmounted its contents.
+   */
   element: HTMLElement | null;
   /** Called by the sidebar with its slot node, as a ref callback. */
   setElement: (element: HTMLElement | null) => void;

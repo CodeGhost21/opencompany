@@ -200,6 +200,11 @@ export class OpenCompanyClient {
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal,
+          // Carried so a transport with a deadline of its own can honour this
+          // one. `null` here means "no bound", which no transport can express,
+          // so it is sent as `undefined` and each transport falls back to its
+          // own default — see `TransportRequest.timeoutMs`.
+          timeoutMs: timeoutMs ?? undefined,
         }),
         controller.signal,
       );
@@ -453,9 +458,42 @@ export class OpenCompanyClient {
     );
   }
 
-  /** A typed POST, for surfaces that live outside this class (e.g. auth). */
-  post<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>("POST", path, body);
+  /**
+   * A typed POST, for surfaces that live outside this class (e.g. auth).
+   *
+   * `options` carries the same per-call deadline and cancellation every other
+   * method takes. A mutation is not normally cancellable — the host has already
+   * been told to do the thing — but a POST that only *computes* is, and one of
+   * them runs a model for up to ninety seconds: `POST {scope}/team/design`.
+   * Dropping that connection drops the handler future with it, so the pass is
+   * abandoned before `record_profile_draft_usage` ever runs and the company is
+   * not charged for a design nobody is waiting for.
+   */
+  post<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", path, body, undefined, options);
+  }
+
+  /**
+   * Whether cancelling a request through this client actually stops the work at
+   * the host, or only stops this side waiting for it.
+   *
+   * `Transport.cancelsInFlight`, surfaced here so a view can ask without
+   * knowing which transport it is on — the same reason {@link carriesOwnSession}
+   * lives on the client. `false` on the desktop app, where an in-flight Tauri
+   * `invoke` cannot be cancelled.
+   *
+   * The one caller that must ask is the Add-teammate dialog. It lets the
+   * operator walk away from a running design pass *because* closing tears the
+   * request down and the host stops early; where that is not true, the gesture
+   * would run the pass to completion and throw the answer away, so the dialog
+   * holds itself open and says it is working instead.
+   *
+   * "Stops early" is the whole claim. Work a provider had already done when the
+   * disconnect arrived is not accounted for either way — see
+   * `Transport.cancelsInFlight`.
+   */
+  get cancelsInFlightRequests(): boolean {
+    return this.transport.cancelsInFlight;
   }
 
   /**
@@ -1449,12 +1487,34 @@ export class OpenCompanyClient {
    * Deliberately untyped in `variables`/return shape: the caller (a page
    * author, indirectly) supplies an arbitrary document, so there is no fixed
    * response type to declare here the way every other method has one.
+   *
+   * Routed through {@link scope} like every REST call, so the company travels
+   * in the path. A document's own company argument is invisible to the host's
+   * auth layer, which runs before the body is read; naming it in the URL is
+   * what lets a browser holding a session per company on one origin be matched
+   * to the right one.
    */
   graphqlRequest(
     query: string,
     variables?: Record<string, unknown>,
+    company?: string | null,
   ): Promise<{ data?: unknown; errors?: unknown }> {
-    return this.request("POST", "/graphql", { query, variables });
+    return this.request<{ data?: unknown; errors?: unknown }>(
+      "POST",
+      `${this.scope(company)}/graphql`,
+      { query, variables },
+    ).catch((err) => {
+      // A host predating the company-scoped route only serves bare `/graphql`
+      // and 404s on the scoped path — relevant to a hub/desktop console, whose
+      // hosts redeploy independently of it.
+      if (err instanceof ApiError && err.status === 404) {
+        return this.request<{ data?: unknown; errors?: unknown }>("POST", "/graphql", {
+          query,
+          variables,
+        });
+      }
+      throw err;
+    });
   }
 
   /**

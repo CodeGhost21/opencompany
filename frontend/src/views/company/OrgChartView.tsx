@@ -173,11 +173,22 @@ interface Props {
    * Optional, so the chart still stands alone.
    */
   onBack?: () => void;
+  /**
+   * Open a teammate's detail page, with `edit` opening its edit form too
+   * (issue #1989).
+   *
+   * Where the reduced Add-teammate dialog lands what it just created: it
+   * collects a name and a sentence, and the copilot that drafts the rest lives
+   * in that form. Optional, so the chart still stands alone — but a chart
+   * mounted without it leaves the reduced dialog creating teammates and going
+   * nowhere, so `CompanyView` always passes it.
+   */
+  onOpenAgent?: (agentId: string, options?: { edit?: boolean }) => void;
 }
 
 type Load = "loading" | "ready" | "error";
 
-export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
+export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [tree, setTree] = useState<OrgTree | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -365,7 +376,19 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
    * fallback. A local row could not be placed on a desk and would vanish on
    * the next chart read.
    */
-  async function addMember(fields: NewMemberFields) {
+  /**
+   * Writes the teammate, places it on the desk, and answers whether the create
+   * landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when nothing was written — it used to be
+   * called fire-and-forget and the dialog cleared itself regardless. It is
+   * `createdOnHost` rather than "no exception": once the teammate exists, a
+   * later step failing is something the operator fixes on the chart, and a
+   * retry from a dialog that still held the sentence would make a second
+   * teammate.
+   */
+  async function addMember(fields: NewMemberFields): Promise<boolean> {
     const deskId = addMemberDeskId;
     setBusy("add-member");
     // Whether the host has the teammate, which decides whether the chart needs
@@ -389,6 +412,14 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
             name: fields.name,
             role: fields.role,
             description: fields.description || undefined,
+            // Issue #1989: the reduced dialog arrives with a persona the host
+            // designed alongside the role and the mandate. Dropping it here
+            // would leave a teammate created from this surface holding two of
+            // its three designed fields, while the same dialog opened from the
+            // roster kept all three — the drift two copies of a create path
+            // produce, and the reason an E2E test asserts the wire body rather
+            // than the screen.
+            instructions: fields.instructions?.trim() || undefined,
           },
           company,
         );
@@ -428,16 +459,29 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
       }
       outcome = addOutcome(fields.name, missed);
       setAddMemberOpen(false);
+      // Issue #1989: the reduced dialog collected a name and a sentence, so the
+      // description, the persona, the budget and the inbox are all still to be
+      // written — on the teammate's own page, beside the copilot that drafts
+      // two of them. After the desk placement and the chart re-read, not
+      // before: the operator is told what half-landed (a desk add that failed
+      // is fixed on the chart they are leaving) and only then taken away.
+      if (fields.landOnProfile) onOpenAgent?.(created.id, { edit: true });
     } catch (e) {
-      setAddMemberOpen(false);
       outcome = addMemberFailure(e, "Could not create teammate.");
       if (createdOnHost) {
+        // The teammate exists and something after it threw. Clearing the
+        // dialog is right here: a retry would create a second one.
+        setAddMemberOpen(false);
         await boot();
       }
+      // Otherwise the dialog stays as it is, holding the name, the sentence
+      // and the design, so Create is a retry rather than a re-ask. It used to
+      // close unconditionally and lose all three.
     } finally {
       setBusy(null);
     }
     reportAddMember(outcome);
+    return createdOnHost;
   }
 
   return (
@@ -621,7 +665,9 @@ export function OrgChartView({ client, company, focusDeskId, onBack }: Props) {
       <AddMemberDialog
         open={addMemberOpen}
         onOpenChange={setAddMemberOpen}
-        onAdd={(fields) => void addMember(fields)}
+        onAdd={addMember}
+        client={client}
+        company={company}
       />
     </div>
   );

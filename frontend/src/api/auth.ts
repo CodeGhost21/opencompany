@@ -301,9 +301,11 @@ export async function verifyWalletSignature(
   });
 }
 
+const LOGOUT_TIMEOUT_MS = 30_000;
+
 /** Revokes this session, server-side and in the browser. */
 export async function logout(client: OpenCompanyClient, company: string | null): Promise<void> {
-  await client.post(`${client.scopeFor(company)}/auth/logout`, {});
+  await client.post(`${client.scopeFor(company)}/auth/logout`, {}, { timeoutMs: LOGOUT_TIMEOUT_MS });
 }
 
 // ---------------------------------------------------------------------------

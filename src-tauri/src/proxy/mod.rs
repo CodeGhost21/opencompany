@@ -30,6 +30,7 @@ pub mod sse;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,28 @@ pub struct Connection {
     pub credential: Credential,
 }
 
+/// What a request gets when the caller asks for nothing in particular.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The longest any single request may ask for.
+///
+/// The console is trusted to name a route's deadline, not to remove one: this
+/// value arrives from the webview, and an unbounded request would hold a
+/// connection open for as long as a renderer felt like. Sized above the host's
+/// longest deliberate deadline — the profile design pass at 90 seconds — with
+/// room for the round trip.
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The deadline for one request: what was asked for, clamped, or the default.
+fn request_timeout(asked: Option<u64>) -> Duration {
+    match asked {
+        Some(ms) if ms > 0 => Duration::from_millis(ms).min(MAX_REQUEST_TIMEOUT),
+        // Zero is not "no deadline" — nothing in the console means that, and
+        // reading it as unbounded would turn a bug into a hung connection.
+        _ => DEFAULT_REQUEST_TIMEOUT,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyRequest {
@@ -89,6 +112,21 @@ pub struct ProxyRequest {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub body: Option<String>,
+    /// How long this one request may take, in milliseconds.
+    ///
+    /// `None` — an older console, or a caller with nothing to say — keeps
+    /// [`DEFAULT_REQUEST_TIMEOUT`]. It exists because that default is invisible
+    /// from the console: a route the **host** deliberately allows longer than
+    /// it (the teammate design pass runs a model to 90 seconds) was cut off at
+    /// 30 here and reached the operator as a refusal, on the desktop app only.
+    /// Only the caller knows which route it is asking for, so the deadline
+    /// crosses the bridge with the request.
+    ///
+    /// Clamped to [`MAX_REQUEST_TIMEOUT`] on the way in: this arrives from the
+    /// webview, and a deadline is not a thing to let a renderer set without a
+    /// ceiling.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Mirrors the console's `TransportResponse` exactly.
@@ -262,7 +300,7 @@ impl ProxyRegistry {
             .http
             .request(method, &url)
             // Per-request, not client-wide: `subscribe` must stay long-lived.
-            .timeout(std::time::Duration::from_secs(30));
+            .timeout(request_timeout(request.timeout_ms));
         for (name, value) in &request.headers {
             // The proxy owns the session/authority headers; a caller-supplied
             // copy would be appended rather than replaced, leaving the host to
@@ -479,6 +517,35 @@ pub type SharedProxy = Arc<ProxyRegistry>;
 mod test {
     use super::*;
 
+    /// A route the host allows longer than the core's default gets what it
+    /// asked for, and a renderer cannot ask for forever.
+    ///
+    /// The bug: the core applied a flat 30-second `reqwest` timeout that the
+    /// console could not see, while the host deliberately allows the teammate
+    /// design pass 90 seconds. Every slow-but-valid design on the desktop app
+    /// came back as a transport failure and handed the operator the full form
+    /// — a refusal for a pass that was working.
+    #[test]
+    fn a_request_deadline_is_honoured_clamped_and_defaulted() {
+        // What `designTeammate` asks for: the host's 90s plus the round trip.
+        assert_eq!(
+            request_timeout(Some(105_000)),
+            Duration::from_millis(105_000),
+            "a route that names its own deadline must get it"
+        );
+        // An older console, or a caller with nothing to say.
+        assert_eq!(request_timeout(None), DEFAULT_REQUEST_TIMEOUT);
+        // Zero is not "unbounded" — nothing in the console means that, and
+        // reading it as unbounded would turn a bug into a hung connection.
+        assert_eq!(request_timeout(Some(0)), DEFAULT_REQUEST_TIMEOUT);
+        // The value arrives from the webview, so it is capped.
+        assert_eq!(request_timeout(Some(u64::MAX)), MAX_REQUEST_TIMEOUT);
+        assert!(
+            MAX_REQUEST_TIMEOUT > Duration::from_secs(90),
+            "the cap has to sit above the host's longest deliberate deadline"
+        );
+    }
+
     /// A one-shot host that answers with the request head it received.
     ///
     /// Deliberately raw TCP rather than a framework: what is under test is
@@ -553,6 +620,7 @@ mod test {
                     path: "/api/v1/anything".into(),
                     headers,
                     body: None,
+                    timeout_ms: None,
                 },
             )
             .await
@@ -813,6 +881,7 @@ mod test {
                     path: "/healthz".into(),
                     headers: HashMap::new(),
                     body: None,
+                    timeout_ms: None,
                 },
             )
             .await

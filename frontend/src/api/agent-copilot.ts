@@ -245,3 +245,111 @@ export function draftNewAgentField(
     instructions: teammate.instructions?.trim() || undefined,
   });
 }
+
+/**
+ * A whole teammate, as one design pass wrote it (issue #1989).
+ *
+ * Three fields or none: `source` is `"unavailable"` when the pass could not
+ * run, and `reason` says which of the four. A partial design is not a shape the
+ * host can return — a teammate with a real mandate and a fragment for a role is
+ * exactly what this replaced, and it looks finished.
+ */
+export interface TeammateDesign {
+  /** The job title. Absent on a refusal. */
+  role?: string;
+  /** The mandate — one line on what this teammate owns. Absent on a refusal. */
+  description?: string;
+  /** The standing instructions. Absent on a refusal. */
+  instructions?: string;
+  /** `"model"` when a model designed it, `"unavailable"` when none could. */
+  source: "model" | "unavailable";
+  /** Why there is none. Present only when `source` is `"unavailable"`. */
+  reason?: DraftRefusal;
+}
+
+/**
+ * How long a design pass may take, end to end.
+ *
+ * The host's own `PERSONA_TIMEOUT` is 90 seconds; this is that plus room for
+ * the round trip, so the console never gives up on a pass the host is still
+ * willing to finish. Only the desktop transport reads it — see the note on
+ * {@link designTeammate}.
+ */
+const DESIGN_TIMEOUT_MS = 105_000;
+
+/**
+ * Ask the host to design a whole teammate — role, mandate and persona — from
+ * the name and the sentence the reduced Add-teammate dialog collected.
+ *
+ * ## Why this is not `draftNewAgentField` with `field: "role"`
+ *
+ * {@link DraftableField} excludes `role` and keeps excluding it. Its reason is
+ * that a role is what delegation grounds on, so a drafted one would change who
+ * the company routes work to — a statement about *editing a teammate that
+ * exists*. This route takes no agent id at all, so there is no teammate whose
+ * routing it could change; it is the creation case, where the alternative to a
+ * designed role was the console cutting the operator's sentence at sixty
+ * characters and storing the front half as a job title.
+ *
+ * It is also one call rather than three. The three fields are not independent —
+ * a persona written against a separately-drafted role can disagree with it —
+ * and the operator is watching a spinner while this runs.
+ *
+ * Never throws for a *design* reason: all four refusals come back as a `200`
+ * carrying `source: "unavailable"`, because none of them is a failure of the
+ * request. A rejection here is a genuine transport, auth or not-found failure —
+ * or the caller's own `signal`, which rejects with an `AbortError`.
+ *
+ * ## Why this one takes a signal when the draft routes do not
+ *
+ * It is the only copilot call the operator can walk away from mid-flight. A
+ * field draft is asked for by a control inside a panel that stays open; this is
+ * asked for by **Create**, and the dialog it belongs to has an Escape key, a
+ * backdrop and a close icon. Without a signal, closing during the ninety
+ * seconds this can take leaves the pass running to completion on the host, its
+ * tokens metered against the company's plan, and its answer dropped on the
+ * floor by the dialog's `attempt` guard — spend with nothing at either end of
+ * it. Dropping the connection drops the handler future with it; the route holds
+ * no write lock and returns text (see `design_teammate`), so there is nothing
+ * half-done for an abandoned request to leave behind.
+ *
+ * ## Why it names a deadline when no other mutation does
+ *
+ * A mutation's duration is normally the host's to decide, and `client.post`
+ * leaves it unbounded for exactly that reason. This one has to say a number
+ * anyway, because the **desktop** app imposes a deadline the console cannot
+ * see: `ProxyTransport` goes through the core's `oc_request`, which applied a
+ * flat 30-second `reqwest` timeout. The host deliberately allows this pass 90
+ * seconds (`PERSONA_TIMEOUT`), and a measured persona response has taken 40, so
+ * every slow-but-valid design on desktop came back as a transport failure and
+ * handed the operator the full form — a refusal for a pass that was working.
+ *
+ * The number is the host's deadline plus room for the round trip, and it is
+ * carried across the bridge rather than hard-coded in the core, because only
+ * the caller knows which route it is asking for. In a browser it changes
+ * nothing: `BrowserTransport` has no deadline of its own.
+ *
+ * ## What cancelling does not do
+ *
+ * It does not make the pass free. The drop lands between the provider call and
+ * `record_profile_draft_usage`, so what the provider had already generated is
+ * billed upstream and recorded in no ledger of ours. The host logs that seam
+ * (`DesignSeam`) rather than hiding it, and what a cancelled pass should be
+ * charged is an open decision. Cancelling stops the host early; it is not a
+ * refund.
+ */
+export function designTeammate(
+  client: OpenCompanyClient,
+  company: string | null,
+  teammate: { name?: string; description: string },
+  signal?: AbortSignal,
+): Promise<TeammateDesign> {
+  return client.post<TeammateDesign>(
+    `${client.scopeFor(company)}/team/design`,
+    {
+      name: teammate.name?.trim() || undefined,
+      description: teammate.description.trim(),
+    },
+    { signal, timeoutMs: DESIGN_TIMEOUT_MS },
+  );
+}

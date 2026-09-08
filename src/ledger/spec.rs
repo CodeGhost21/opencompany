@@ -107,12 +107,12 @@ pub struct Field {
     pub description: String,
     /// Whether an entry must carry this field.
     ///
-    /// Enforced at the write by [`crate::company::ledgers::record`] and
-    /// reported at the read by [`Check::RequiredField`] — both only when the
-    /// spec declares that check. The read half still matters after the write
-    /// half exists: a ledger amended to require a field it did not before has
-    /// rows that predate the requirement, and those are reported rather than
-    /// hidden.
+    /// Enforced at the write by [`crate::company::ledgers::record`] whether or
+    /// not the spec also declares [`Check::RequiredField`] — `required` is the
+    /// schema, `checks` only selects what a read reports. The read-time check
+    /// still matters on its own: a ledger amended to require a field it did
+    /// not before has rows that predate the requirement, and declaring the
+    /// check is how those are reported rather than hidden.
     #[serde(default)]
     pub required: bool,
 }

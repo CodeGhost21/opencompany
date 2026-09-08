@@ -745,6 +745,46 @@ function isTitleRequest(messages) {
 }
 
 /**
+ * A teammate-design pass (issue #1989), recognised by its own system prompt.
+ *
+ * Fourth of the not-a-turn arms, and it is here for the reason the other three
+ * are: without it the design prompt falls through to the turn arms, comes back
+ * as `__MOCK_LLM__` prose, and the host reads that as an unreadable answer — so
+ * the reduced Add-teammate dialog would refuse on every create in this lane and
+ * a spec asserting the redesign would be asserting the fallback.
+ *
+ * @param {any[]} messages
+ * @returns {boolean}
+ */
+function isTeammateDesignRequest(messages) {
+  const first = messages[0];
+  return (
+    typeof textOf(first) === "string" &&
+    textOf(first).includes("You design ONE teammate for a small company")
+  );
+}
+
+/**
+ * The teammate this lane designs, whatever it is asked for.
+ *
+ * Fixed rather than echoed, for the reason `MOCK_TITLE` is fixed: echoing the
+ * operator's sentence back into the `role` would reproduce, inside the fixture,
+ * the exact defect this pass exists to remove — a job title that is a piece of
+ * the sentence. A spec that then keyed on the sentence would pass here and be
+ * wrong against any real model.
+ *
+ * The three fields are deliberately unlike each other: a short Title Case noun
+ * phrase, a mandate, and instructions that do not restate it. That is what a
+ * spec can assert about separation without asserting a model's wording.
+ */
+const MOCK_TEAMMATE_DESIGN = JSON.stringify({
+  role: "Wholesale Account Manager",
+  description: "Owns the stockist pipeline: outreach, terms and reorder cadence.",
+  instructions:
+    "Check terms against the current price list before quoting. Escalate anything under 40% margin. Report reorder rates monthly, by account.",
+});
+
+/**
  * The name this lane gives every card it is asked to title.
  *
  * # Why it does not echo the request
@@ -855,6 +895,14 @@ function chatCompletion(body) {
   if (isTitleRequest(messages)) {
     process.stderr.write("[mock brain] card titling pass (no directive consumed)\n");
     return completion(model, { role: "assistant", content: MOCK_TITLE }, "stop");
+  }
+
+  // Fourth of the not-a-turn arms. Without it the reduced Add-teammate dialog
+  // refuses on every create in this lane, because a `__MOCK_LLM__` reply is not
+  // a teammate and the host says so.
+  if (isTeammateDesignRequest(messages)) {
+    process.stderr.write("[mock brain] teammate design pass (no directive consumed)\n");
+    return completion(model, { role: "assistant", content: MOCK_TEAMMATE_DESIGN }, "stop");
   }
 
   // Ahead of the directive arms, and only when the instruction is the LAST
