@@ -47,6 +47,13 @@ DELETE /api/v1/companies/{id}/deep-trace/{run_id} must-change-password-admin ref
 DELETE /api/v1/companies/{id}/deep-trace/{run_id} platform permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/companies/{id}/deep-trace/{run_id} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/companies/{id}/deep-trace/{run_id} tenant-owner permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} admin permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} member permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} platform permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/companies/{id}/grants/{gid} tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
 DELETE /api/v1/companies/{id}/hosting/key admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/hosting/key anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/hosting/key member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -222,6 +229,13 @@ DELETE /api/v1/company/deep-trace/{run_id} must-change-password-admin refused:40
 DELETE /api/v1/company/deep-trace/{run_id} platform permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/company/deep-trace/{run_id} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/company/deep-trace/{run_id} tenant-owner permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/grants/{gid} admin permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/company/grants/{gid} anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/company/grants/{gid} member permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/company/grants/{gid} must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/company/grants/{gid} platform permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/company/grants/{gid} tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
+DELETE /api/v1/company/grants/{gid} tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op." wait=-
 DELETE /api/v1/company/hosting/key admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/hosting/key anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/hosting/key member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -495,6 +509,13 @@ GET /api/v1/companies/{id}/finances must-change-password-admin refused:403:passw
 GET /api/v1/companies/{id}/finances platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/finances tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/finances tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/grants admin permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/companies/{id}/grants anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/companies/{id}/grants member permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/companies/{id}/grants must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/companies/{id}/grants platform permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/companies/{id}/grants tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/companies/{id}/grants tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
 GET /api/v1/companies/{id}/harnesses admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/harnesses anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/harnesses member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1020,6 +1041,13 @@ GET /api/v1/company/finances must-change-password-admin refused:403:password_cha
 GET /api/v1/company/finances platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/finances tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/finances tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/grants admin permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/company/grants anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/company/grants member permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/company/grants must-change-password-admin refused:403:password_change_required source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/company/grants platform permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/company/grants tenant-non-owner refused:403:forbidden source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
+GET /api/v1/company/grants tenant-owner permitted source=operator access=scoped features=openhuman blast=authority note="Lists every standing permission open on the company, including who granted it and what it admits." wait=-
 GET /api/v1/company/harnesses admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/harnesses anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/harnesses member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
