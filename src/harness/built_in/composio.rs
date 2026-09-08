@@ -802,7 +802,16 @@ mod live {
             toolkits: Option<&[String]>,
             tags: Option<&[String]>,
             search: Option<&str>,
-        ) -> Result<ComposioToolsResponse> {
+        ) -> Result<(ComposioToolsResponse, bool)> {
+            // The `bool` is whether the listing was **curated** — the BYOK route
+            // asks Composio for featured actions only when nothing narrows the
+            // call, and the renderer has to say so or it reports ~50 featured
+            // rows as the toolkit's whole catalogue (codex on
+            // tinyhumansai/opencompany#2153). The response type is vendored, so
+            // the flag rides beside it rather than on it.
+            let curated = matches!(self, Self::Byok { .. })
+                && !search.is_some_and(|term| !term.trim().is_empty())
+                && !tags.is_some_and(|tags| !tags.is_empty());
             match self {
                 Self::Managed(client) => {
                     if search.is_some_and(|term| !term.trim().is_empty()) {
@@ -816,13 +825,15 @@ mod live {
                              the term is applied client-side"
                         );
                     }
-                    client.list_tools(toolkits, tags).await
-                }
-                Self::Byok { direct, .. } => {
-                    direct
-                        .list_tools(toolkits.unwrap_or(&[]), search, tags)
+                    client
+                        .list_tools(toolkits, tags)
                         .await
+                        .map(|resp| (resp, curated))
                 }
+                Self::Byok { direct, .. } => direct
+                    .list_tools(toolkits.unwrap_or(&[]), search, tags)
+                    .await
+                    .map(|resp| (resp, curated)),
             }
         }
 
@@ -1583,7 +1594,7 @@ mod live {
             // above is a security decision (allowlist intersection) and stays
             // here; `search` / `detail` / `limit` are presentation and live in
             // the pure catalogue module.
-            let request = catalog::ListRequest::parse(&args, effective.clone());
+            let mut request = catalog::ListRequest::parse(&args, effective.clone());
             tracing::debug!(
                 effective = ?effective,
                 allowlist = ?self.toolkits,
@@ -1618,7 +1629,8 @@ mod live {
             let tags: Option<&[String]> =
                 Some(request.tags.as_slice()).filter(|tags| !tags.is_empty());
             match client.list_tools(query, tags, search).await {
-                Ok(mut resp) => {
+                Ok((mut resp, curated)) => {
+                    request.curated = curated;
                     if !self.toolkits.is_empty() {
                         resp.tools.retain(|schema| {
                             toolkit_allowed(&self.toolkits, &slug_toolkit(&schema.function.name))

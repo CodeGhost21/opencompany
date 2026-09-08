@@ -462,6 +462,15 @@ pub struct ListRequest {
     /// already survived the page budget — the same defect the server-side
     /// `search` forwarding fixed.
     pub tags: Vec<String>,
+    /// Whether the listing that came back was **curated** — Composio's featured
+    /// actions rather than the toolkit's whole catalogue.
+    ///
+    /// Set by the caller from what the client actually asked for, not derived
+    /// here: only the BYOK route requests curation, and only when nothing
+    /// narrows the call. Without it the header reports ~50 featured rows as the
+    /// number "available", and an agent taking an inventory of GitHub is told
+    /// that is everything (codex on tinyhumansai/opencompany#2153).
+    pub curated: bool,
     /// How much per action to render.
     pub detail: Detail,
     /// Entry cap, already clamped to the mode's ceiling.
@@ -501,6 +510,9 @@ impl ListRequest {
             toolkits,
             search,
             tags,
+            // The caller sets this from the client's own answer; parsing the
+            // arguments cannot know which route served them.
+            curated: false,
             detail,
             limit,
         }
@@ -630,9 +642,21 @@ fn render_header(available: usize, matched: usize, shown: usize, request: &ListR
     } else {
         format!(" matching `{}`", request.search.join(" "))
     };
-    let mut header = format!(
-        "Composio actions in {scope} — {available} available, {matched}{filter}, showing {shown}.\n"
-    );
+    let mut header = if request.curated {
+        // Not "available": these are Composio's featured actions, and the long
+        // tail is reachable only by narrowing. Saying "available" here is what
+        // told an agent that ~50 rows were all GitHub could do.
+        format!(
+            "Composio actions in {scope} — showing {shown} of {available} **featured** actions{filter}. \
+             This is a curated preview, not the full catalogue: many more are callable but not \
+             listed. Narrow with `search` or `tags` to reach them, e.g. \
+             {LIST_TOOLS_TOOL}({{\"toolkits\": [\"<slug>\"], \"search\": \"issue\"}}).\n"
+        )
+    } else {
+        format!(
+            "Composio actions in {scope} — {available} available, {matched}{filter}, showing {shown}.\n"
+        )
+    };
     match request.detail {
         Detail::Names => header.push_str(&format!(
             "Each line is `SLUG — description`. Read one action's parameters before calling it:\n  \
@@ -1392,6 +1416,7 @@ mod tests {
             toolkits: toolkits.iter().map(|t| t.to_string()).collect(),
             search: search_terms(search),
             tags: Vec::new(),
+            curated: false,
             detail,
             limit: detail.default_limit(),
         }
@@ -1569,6 +1594,39 @@ mod tests {
         );
         assert!(out.contains("Do NOT guess a slug"), "{out}");
         assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
+    }
+
+    /// A curated listing must not present itself as the full catalogue.
+    ///
+    /// An unnarrowed BYOK browse asks Composio for featured actions only, so
+    /// the count that comes back is a preview. Calling it "available" is what
+    /// told an agent taking an inventory of GitHub that ~50 rows were
+    /// everything it could do (codex on tinyhumansai/opencompany#2153).
+    #[test]
+    fn a_curated_listing_says_it_is_a_preview() {
+        let actions = catalogue("github", 50);
+        let mut curated = request("", Detail::Names, &["github"]);
+        curated.curated = true;
+        let out = render(&actions, &curated);
+
+        assert!(out.contains("featured"), "curation must be named: {out}");
+        assert!(
+            out.contains("not the full catalogue"),
+            "the preview must say what it is not: {out}"
+        );
+        assert!(
+            out.contains("search"),
+            "the way to reach the rest must be given: {out}"
+        );
+        assert!(
+            !out.contains("50 available"),
+            "a curated count is not what is available: {out}"
+        );
+
+        // An unnarrowed listing that was NOT curated still reports plainly.
+        let plain = render(&actions, &request("", Detail::Names, &["github"]));
+        assert!(plain.contains("50 available"), "{plain}");
+        assert!(!plain.contains("featured"), "{plain}");
     }
 
     /// A server-side filter that matches nothing says so about the *filter*.

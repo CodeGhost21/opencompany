@@ -346,6 +346,30 @@ impl PayloadSummarizer for PayloadExtractor {
             ),
             "[payload-extract] extracted the answering content from an oversized tool result"
         );
+        // A summary built from a prefix must say so, in the host's words rather
+        // than the model's (codex on tinyhumansai/opencompany#2153).
+        //
+        // `summary` *replaces* the tool output. If the answering record sat past
+        // the input ceiling the model never saw it, and without this line the
+        // turn would hold a confident summary of a payload it only partly read
+        // — an incomplete list presented as a complete one, which is the precise
+        // failure this extractor exists to end. The full payload is on disk and
+        // pointed at by the artifact contents list, so the recovery is real and
+        // worth naming.
+        //
+        // Host-written because a disclosure the model has to remember is a
+        // disclosure that goes missing exactly when the payload is hardest.
+        let summary = if was_cut {
+            format!(
+                "_Read the first {sent} of {original} bytes of this result; later records were \
+                 not examined. The full output is on disk — see the stored-results list for its \
+                 path, and read it directly if the answer is not below._\n\n{summary}",
+                sent = body.len(),
+                original = original_bytes,
+            )
+        } else {
+            summary
+        };
         Ok(SummarizeOutcome::Summarized(SummarizedPayload {
             summary_bytes: summary.len(),
             summary,
@@ -494,6 +518,62 @@ mod tests {
                 );
             }
             other => panic!("expected a summary, got {other:?}"),
+        }
+    }
+
+    /// A summary built from a prefix must say so. The summary *replaces* the
+    /// tool output, so without this the turn holds a confident account of a
+    /// payload the model only partly read — an incomplete list presented as a
+    /// complete one, which is the failure this extractor exists to end (codex
+    /// on tinyhumansai/opencompany#2153).
+    #[tokio::test]
+    async fn a_summary_from_a_truncated_payload_discloses_the_cut() {
+        let huge = format!("[{}]", vec![r#"{"n":1}"#; 60_000].join(","));
+        assert!(
+            huge.len() > MAX_EXTRACT_INPUT_CHARS,
+            "the fixture must exceed the ceiling or nothing is cut"
+        );
+        let outcome = run(
+            Behaviour::Reply("60000 records"),
+            Some("list the records"),
+            &huge,
+        )
+        .await;
+
+        match outcome {
+            SummarizeOutcome::Summarized(summary) => {
+                assert!(
+                    summary.summary.contains("later records were not examined"),
+                    "the cut must be disclosed: {}",
+                    summary.summary
+                );
+                assert!(
+                    summary.summary.contains("full output is on disk"),
+                    "the recovery route must be named: {}",
+                    summary.summary
+                );
+                assert!(
+                    summary.summary.contains("60000 records"),
+                    "the model's answer is still carried: {}",
+                    summary.summary
+                );
+            }
+            other => panic!("expected a summary, got {other:?}"),
+        }
+
+        // A payload under the ceiling carries no such notice.
+        let small = run(
+            Behaviour::Reply("two records"),
+            Some("list the records"),
+            &format!("[{}]", vec![r#"{"n":1}"#; 400].join(",")),
+        )
+        .await;
+        if let SummarizeOutcome::Summarized(summary) = small {
+            assert!(
+                !summary.summary.contains("not examined"),
+                "nothing was cut, so nothing is disclosed: {}",
+                summary.summary
+            );
         }
     }
 
