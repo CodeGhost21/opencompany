@@ -7154,7 +7154,7 @@ impl CompanyRuntime {
     ///
     /// Returns `true` when this call released the stop, `false` when it did
     /// not (it was not engaged, or a concurrent release already cleared it).
-    pub async fn emergency_resume(&self, by: Actor, reason: Option<String>) -> Result<bool> {
+    pub async fn emergency_resume(self: &Arc<Self>, by: Actor, reason: Option<String>) -> Result<bool> {
         if !self.approval_gate.is_emergency() {
             return Ok(false);
         }
@@ -7184,6 +7184,15 @@ impl CompanyRuntime {
             // releases the stop, instead of leaving a durable decision
             // undelivered until somebody restarts the host.
             self.reconcile_stranded_blocked_nodes().await;
+            // A durable explicit-request continuation whose dispatch this same
+            // stop refused (`spawn_follow_up`'s check, above) is not a blocked-
+            // node stash, so the reconciler above never sees it — it is still
+            // sitting in `self.journal.approval_continuations`, exactly as a
+            // cold boot's replay would find it. Re-arming and re-running the
+            // boot recovery pair catches it up on this live process instead of
+            // leaving it for the next restart.
+            self.arm_replayed_continuation_recovery();
+            self.schedule_replayed_continuations();
         }
         Ok(released)
     }
@@ -13609,12 +13618,14 @@ to = "draft"
         #[tokio::test]
         async fn emergency_resume_reconciles_a_stranded_stash_without_a_restart() {
             let home = seed_home();
-            let rt = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
-                .with_id(CompanyId::new("acme"))
-                .with_seed_dir(home.path().to_path_buf())
-                .build()
-                .await
-                .expect("runtime builds");
+            let rt = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_id(CompanyId::new("acme"))
+                    .with_seed_dir(home.path().to_path_buf())
+                    .build()
+                    .await
+                    .expect("runtime builds"),
+            );
 
             let operator = crate::ports::types::Actor {
                 kind: crate::ports::types::ActorKind::Operator,
@@ -13723,6 +13734,62 @@ to = "draft"
                         cached_input: 0,
                         cost_usd: 0.12,
                     },
+                })
+            }
+        }
+
+        /// A brain that parks an explicit `request_approval` call on every
+        /// `OperatorMessage` and counts every denial it is later told about.
+        #[derive(Default)]
+        struct ExplicitRequestBrain {
+            denials: AtomicUsize,
+        }
+
+        impl ExplicitRequestBrain {
+            fn denials(&self) -> usize {
+                self.denials.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Brain for ExplicitRequestBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                for event in &req.events {
+                    match event {
+                        CompanyEvent::OperatorMessage { .. } => {
+                            host.park_effect(crate::ports::types::Effect {
+                                kind: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.into(),
+                                group: crate::ports::types::EffectGroup::Sign,
+                                amount_usd: Some(42.0),
+                                established_thread: false,
+                                first_time_counterparty: false,
+                                payload: serde_json::json!({
+                                    "title": "Submit the filing",
+                                    "question": "May I submit it?"
+                                }),
+                                agent: Some("ceo".into()),
+                                run_id: None,
+                            })
+                            .await?;
+                        }
+                        CompanyEvent::ApprovalResolved {
+                            verdict: crate::ports::types::Verdict::Deny,
+                            ..
+                        } => {
+                            self.denials.fetch_add(1, Ordering::SeqCst);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses: Vec::new(),
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
                 })
             }
         }
@@ -13934,12 +14001,13 @@ to = "draft"
             drop(first);
 
             let brain = Arc::new(WorkingBrain::default());
-            let rebooted =
+            let rebooted = Arc::new(
                 crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
                     .with_brain(brain.clone())
                     .build()
                     .await
-                    .expect("runtime");
+                    .expect("runtime"),
+            );
             assert!(rebooted.is_emergency_paused(), "the stop replayed");
 
             let refused = rebooted.run_cycle(vec![ask()]).await;
@@ -14005,6 +14073,83 @@ to = "draft"
                 PolicyDecision::Allow,
                 "releasing restores the company's own `full` policy"
             );
+        }
+
+        /// An explicit-request continuation whose dispatch a live stop refused
+        /// is not a blocked-node stash, so `reconcile_stranded_blocked_nodes`
+        /// never sees it. Releasing the stop must still redeliver it on this
+        /// same live process rather than leaving it for the next restart.
+        #[tokio::test]
+        async fn releasing_the_stop_redelivers_a_continuation_the_stop_itself_refused() {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-emergency-continuation-")
+                .tempdir()
+                .expect("tempdir");
+            let gate = Arc::new(
+                crate::policy::ManifestApprovalGate::new(manifest().policy.clone())
+                    .with_ttl_millis(0),
+            );
+            let brain = Arc::new(ExplicitRequestBrain::default());
+            let rt = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_brain(brain.clone())
+                    .with_approvals(gate)
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+
+            let report = rt
+                .run_cycle(vec![ask()])
+                .await
+                .expect("a running company parks the request");
+            assert_eq!(
+                report.parked.len(),
+                1,
+                "the fixture must really park an explicit request"
+            );
+            let approval_id = report.parked[0].clone();
+
+            rt.emergency_pause(operator(), None).await.expect("pause");
+
+            // The gate's zero TTL means the approval is already past its
+            // deadline: the sweep retires it, mints its continuation, and
+            // tries to dispatch it — the dispatch `spawn_follow_up`'s own
+            // check refuses while the company is stopped.
+            rt.sweep_expired_approvals().await.expect("sweep");
+
+            // Let the refused dispatch's spawned task actually run (and fail)
+            // before asserting on it.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(
+                brain.denials(),
+                0,
+                "the stop must have refused the continuation's dispatch"
+            );
+            assert!(
+                rt.grants.peek_continuation(&approval_id).is_some(),
+                "a continuation the stop refused to dispatch must stay durable, not be lost"
+            );
+
+            rt.emergency_resume(operator(), None).await.expect("resume");
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while brain.denials() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "releasing the stop must redeliver the continuation it refused, without a \
+                     restart; continuation_live={}",
+                    rt.grants.peek_continuation(&approval_id).is_some()
+                )
+            });
+            assert_eq!(brain.denials(), 1);
         }
     }
 }
