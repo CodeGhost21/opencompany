@@ -4612,16 +4612,17 @@ async fn park_hive_turn_approvals(brain: &HarnessBrain, host: &dyn CycleHost, ag
     }
 }
 
-/// Turns a terminal budget outcome (`outcome.budget_paused` /
-/// `outcome.halted_for_spend`) into the hard error a hive turn must surface,
-/// or `None` when the turn actually answered.
+/// Turns a terminal outcome (`outcome.budget_paused` / `outcome.halted_for_spend`
+/// / `outcome.abnormal_stop`) into the hard error a hive turn must surface, or
+/// `None` when the turn actually answered.
 ///
-/// Without this, `outcome.reply` on either terminal state is host-authored
-/// pause/halt copy, not the agent's answer — folding it as `Ok(reply)` lets
-/// `EpisodeDriver` journal that copy as a genuine `CompanyEvent::AgentReply`
+/// Without this, `outcome.reply` on any of the three is host-authored
+/// pause/halt/refusal copy, not the agent's answer — folding it as `Ok(reply)`
+/// lets `EpisodeDriver` journal that copy as a genuine `CompanyEvent::AgentReply`
 /// under the member's own identity, and the episode never counts the turn as
 /// failed (`EpisodeOutcome::failed_turns`), so an operator reading the
-/// transcript cannot tell a real answer from a budget wall the room hit.
+/// transcript cannot tell a real answer from a budget wall or a pre-dispatch
+/// refusal the room hit.
 fn terminal_budget_error(
     agent_id: &str,
     outcome: &crate::harness::TurnOutcome,
@@ -4636,6 +4637,11 @@ fn terminal_budget_error(
         return Some(crate::OpenCompanyError::Harness(format!(
             "{agent_id} halted for spend mid-deliberation: spent ${:.2} against a cap of ${:.2}",
             halt.spent_usd, halt.cap_usd
+        )));
+    }
+    if let Some(reason) = &outcome.abnormal_stop {
+        return Some(crate::OpenCompanyError::Harness(format!(
+            "{agent_id} did not complete its turn: {reason}"
         )));
     }
     None
@@ -11430,6 +11436,20 @@ members = ["engineer", "designer"]
         }
     }
 
+    /// A `FixedOutcomeTurn` whose single turn is a pre-dispatch spend
+    /// refusal — the meter that a declared cap needs could not be read, so
+    /// no model call ran and `outcome.reply` is host-authored refusal copy.
+    fn abnormal_stop_outcome(reply: &str) -> crate::harness::built_in::TurnOutcome {
+        crate::harness::built_in::TurnOutcome {
+            reply: reply.to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: Some("[stopped: dispatch refused]".to_string()),
+            halted_for_spend: None,
+            budget_paused: None,
+        }
+    }
+
     /// A bare brain over a fresh temp-dir store, for tests that only need
     /// `HiveDeskRunner`'s `brain`/`host` fields satisfied and are not
     /// exercising the approval-parking path itself.
@@ -11526,6 +11546,52 @@ members = ["engineer", "designer"]
             .refer("platform", "sre", "What is the failover budget?")
             .await
             .expect_err("a spend halt on the far desk must surface as an error too");
+        assert!(err.to_string().contains("sre"), "{err}");
+    }
+
+    /// **A pre-dispatch refusal (`abnormal_stop`) is a hard error too.**
+    ///
+    /// A fail-closed spend gate that cannot read the meter behind a declared
+    /// cap refuses dispatch before any model call runs and reports the
+    /// refusal only through `abnormal_stop` — `budget_paused` and
+    /// `halted_for_spend` both stay `None`, since no turn ran to pause or
+    /// halt. Without this, `speak` folded the refusal notice as `Ok(reply)`
+    /// the same way it once did for a budget pause.
+    #[tokio::test]
+    async fn hive_speak_turns_an_abnormal_stop_into_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(
+            &brain,
+            &host,
+            abnormal_stop_outcome("dispatch refused: spend unreadable"),
+        );
+        let err = runner
+            .speak("theorist", "Settle the derivation.")
+            .await
+            .expect_err("a pre-dispatch refusal must surface as an error, not Ok(reply)");
+        assert!(
+            err.to_string().contains("theorist"),
+            "the error must name the agent: {err}"
+        );
+    }
+
+    /// The same terminal state, on the far-desk referral runner.
+    #[tokio::test]
+    async fn hive_refer_turns_an_abnormal_stop_into_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(
+            &brain,
+            &host,
+            abnormal_stop_outcome("dispatch refused: spend unreadable"),
+        );
+        let err = runner
+            .refer("platform", "sre", "What is the failover budget?")
+            .await
+            .expect_err("a pre-dispatch refusal on the far desk must surface as an error too");
         assert!(err.to_string().contains("sre"), "{err}");
     }
 
