@@ -730,15 +730,23 @@ async fn read_spend_for_gate(
 
 /// The shape every pre-dispatch spend refusal returns: the reply IS the
 /// notice, and none of the in-turn signals apply because no turn ran — no
-/// iteration cap was reached (issue #926), no ACP stop was folded (PR #1880),
-/// no in-turn spend brake armed (issue #1032), and no provider reported the
-/// account out of credits (issue #1846).
+/// iteration cap was reached, no in-turn spend brake armed, and no provider
+/// reported the account out of credits.
+///
+/// `abnormal_stop` IS set: this is a terminal, non-resumable stop with no
+/// checkpoint to continue from, same as an ACP refusal/cancellation. Workflow
+/// and card dispatch already fail the attempt on `abnormal_stop`; leaving it
+/// `None` here let a pre-dispatch refusal settle those attempts `Succeeded`
+/// and bind the refusal notice downstream as if it were the node's answer.
 fn spend_gate_refusal(reply: String) -> TurnOutcome {
     TurnOutcome {
         reply,
         steps: Vec::new(),
         hit_iteration_cap: false,
-        abnormal_stop: None,
+        abnormal_stop: Some(
+            "[stopped: dispatch refused, spend could not be measured against a declared cap]"
+                .to_string(),
+        ),
         halted_for_spend: None,
         budget_paused: None,
     }
@@ -11044,6 +11052,23 @@ description = "Sets direction."
             reply.contains("hello-marker"),
             "no declared cap means no gate: {reply:?}"
         );
+    }
+
+    /// `spend_gate_refusal` must set `abnormal_stop`: `HarnessAgentRunner`
+    /// (`workflows::caps`) and hive's `terminal_budget_error` both key off it
+    /// to keep a pre-dispatch refusal from settling a workflow/card attempt or
+    /// a hive turn `Succeeded` and binding the refusal notice downstream as if
+    /// it were the node's or the teammate's real answer.
+    #[test]
+    fn spend_gate_refusal_carries_an_abnormal_stop() {
+        let outcome = spend_gate_refusal("refused".to_string());
+        assert!(
+            outcome.abnormal_stop.is_some(),
+            "a pre-dispatch refusal must not read like a clean finish downstream"
+        );
+        assert!(!outcome.hit_iteration_cap);
+        assert!(outcome.halted_for_spend.is_none());
+        assert!(outcome.budget_paused.is_none());
     }
 
     // --- The per-agent daily spend cap at dispatch (issue #304) --------------
