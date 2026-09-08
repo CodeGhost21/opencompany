@@ -183,7 +183,10 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
         {page === "search" && (
           <SearchView key={company ?? "self"} client={client} company={company} />
         )}
-        {page === "skills" && <SkillsView client={client} company={company} />}
+        {/* Same remount rule, same reason: canManage (and the Add dialog's
+            draft) must not carry an admin's authority from one company into
+            another's still-resolving read (codeRabbit review). */}
+        {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
         {/* Observatory has a row on this rail but renders nothing here: the row
             is a doorway, and `#/settings/observatory` is rewritten onto
             `#/observatory` before it ever reaches this dispatch.
