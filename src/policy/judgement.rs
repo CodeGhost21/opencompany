@@ -454,11 +454,16 @@ pub fn judge(tool: &str, args: &Value, path: CallPath) -> Judgement {
     // the caller that has one, and this one does not — `auto_approve_under_usd`
     // and the daily budget have both already spoken above.
     //
+    // `evaluate_consequence`, not `evaluate`: `consequence` above is already
+    // this call's answer, and `evaluate` would compute it a second time —
+    // doubling the `catalogue_miss` warning an uncatalogued `composio_execute`
+    // logs on every `consequence_of` call.
+    //
     // The two arms below stay here on purpose. They stop on *mechanism* — a
     // tool nobody declared, or one whose reach cannot be bounded — which is a
     // different question from whether the call commits the company, and one the
     // floor deliberately does not ask.
-    match floor::evaluate(tool, args, None) {
+    match floor::evaluate_consequence(tool, consequence, args, None) {
         floor::FloorVerdict::Irreversible(group) => {
             return Judgement::Stop(StopReason::Irreversible(group));
         }
@@ -823,6 +828,51 @@ mod tests {
         assert_eq!(
             judge_agent("composio_execute", &args),
             Judgement::Stop(StopReason::Irreversible(EffectGroup::Send))
+        );
+    }
+
+    /// Review finding on PR #2152: `judge` computes `consequence_of` for its
+    /// own fail-closed arm and then, before this fix, `floor::evaluate`
+    /// computed it again — for an uncatalogued `composio_execute` slug that
+    /// runs `consequence_of` a second time and doubles the `catalogue_miss`
+    /// warning it logs (issues #754, #1818). Counts every `WARN` emitted by
+    /// one `judge` call rather than reading a captured field: under this
+    /// fixture the only `WARN` either run produces is that one line, so a
+    /// count of 2 is the regression and 1 is the fix.
+    ///
+    /// `openhuman`-gated: the catalogue-miss path only exists once a catalogue
+    /// is linked in to miss against — see `CatalogLookup::CatalogueAbsent`.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn an_uncatalogued_composio_call_logs_the_catalogue_miss_once_not_twice() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct CountWarnings(Arc<Mutex<usize>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountWarnings {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    *self.0.lock().expect("count lock") += 1;
+                }
+            }
+        }
+
+        let warnings = Arc::new(Mutex::new(0usize));
+        let subscriber = tracing_subscriber::registry().with(CountWarnings(Arc::clone(&warnings)));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let args = json!({ "tool": "SOME_TOOLKIT_ACTION_NOBODY_CLASSIFIED" });
+            judge_agent("composio_execute", &args);
+        });
+
+        assert_eq!(
+            *warnings.lock().expect("count lock"),
+            1,
+            "consequence_of must run once per judge call, not twice"
         );
     }
 

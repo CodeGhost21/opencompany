@@ -42,7 +42,7 @@
 
 use serde_json::Value;
 
-use crate::policy::consequence::{Reach, consequence_of, declared_tools};
+use crate::policy::consequence::{Consequence, Reach, consequence_of, declared_tools};
 use crate::ports::types::EffectGroup;
 
 /// The argument key a call declares a dollar amount under.
@@ -143,12 +143,30 @@ pub fn deferred_group(tool: &str, args: &Value) -> Option<EffectGroup> {
 /// Pure, total and deterministic, for the reason `judge` is: a stop has to be
 /// explainable from the trace long after the run.
 pub fn evaluate(tool: &str, args: &Value, cap_usd: Option<f64>) -> FloorVerdict {
+    evaluate_consequence(tool, consequence_of(tool, args), args, cap_usd)
+}
+
+/// Same verdict as [`evaluate`], for a caller that has already computed the
+/// call's [`Consequence`].
+///
+/// [`judge`](crate::policy::judge) is exactly that caller: it needs its own
+/// `consequence_of` result for the fail-closed arm below this one regardless,
+/// and `consequence_of` is not free of side effect for `composio_execute` — an
+/// uncatalogued or unrecognised-toolkit slug logs a `catalogue_miss` warning
+/// each time it runs. Computing it twice per call would double that telemetry
+/// for exactly the traffic issue #754 exists to make visible, which is the
+/// wrong direction to be wrong in.
+pub fn evaluate_consequence(
+    tool: &str,
+    consequence: Consequence,
+    args: &Value,
+    cap_usd: Option<f64>,
+) -> FloorVerdict {
     let name = tool.to_ascii_lowercase();
     if is_deferred(&name) {
         return FloorVerdict::Silent;
     }
 
-    let consequence = consequence_of(tool, args);
     let declared = declared_tools().any(|d| d == name);
 
     // Declared, named as a consequence class, and this call actually has one.
