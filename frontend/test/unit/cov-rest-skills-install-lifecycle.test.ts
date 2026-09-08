@@ -8,12 +8,18 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { RegistrySkill, Skill } from "@/api/skills";
 import { SkillsView } from "@/views/SkillsView";
 
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn(), message: vi.fn() },
+}));
+const { toast } = await import("sonner");
+
 /**
- * `install`/`uninstall` (`server/ops/skills.rs:306,373`) are `ScopedCompany`
- * — the slug-traversal guard the existing Rust suite covers is the only
- * thing gating them, not a role — so `SkillsView` offering both to a plain
- * member with no `canManage` check of its own is correct, matching the
- * route. What had no test at all was the lifecycle itself: install landing
+ * `install`/`uninstall` (`server/ops/skills.rs:370,440`) are
+ * `AdminScopedCompany` — a skill's content lands in every agent's effective
+ * prompt company-wide, so a member's write here would only ever earn a
+ * 403 — and `SkillsView` mirrors that with its own `canManage` gate read
+ * from `/auth/me`, withholding "Install" before the write route is ever
+ * asked. What had no test at all was the lifecycle itself: install landing
  * moves a registry tile to "Installed", and uninstall a refusal must leave
  * the card in place with an honest toast rather than vanishing it on a
  * write that never actually landed.
@@ -38,17 +44,19 @@ const INSTALLED: Skill = {
 
 function clientAs(opts: {
   skills?: Skill[];
+  role?: "admin" | "member";
   install?: () => Promise<Skill>;
   uninstall?: () => Promise<void>;
 }): OpenCompanyClient {
   const install = opts.install ?? (() => Promise.resolve(INSTALLED));
   const uninstall = opts.uninstall ?? (() => Promise.resolve());
+  const role = opts.role ?? "admin";
   return {
     scopeFor: () => "/api/v1/companies/acme",
     get: (path: string) => {
       if (path.includes("/skills/registry")) return Promise.resolve([REGISTRY]);
       if (path.endsWith("/auth/me"))
-        return Promise.resolve({ id: "u1", email: "a@b.c", role: "admin", company: "acme", hasPassword: true });
+        return Promise.resolve({ id: "u1", email: "a@b.c", role, company: "acme", hasPassword: true });
       return Promise.resolve(opts.skills ?? []);
     },
     post: vi.fn((path: string) => {
@@ -88,15 +96,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("SkillsView, a member with no canManage gate of its own", () => {
-  it("offers install on the registry tab, matching the ungated ScopedCompany route", async () => {
-    const client = clientAs({ skills: [] });
+describe("SkillsView, a member without canManage", () => {
+  it("withholds Install on the registry tab, matching the host's AdminScopedCompany route", async () => {
+    const client = clientAs({ skills: [], role: "member" });
     await show(createElement(SkillsView, { client, company: "acme" }));
     await act(async () => {});
     findButton("Registry")!.click();
     await act(async () => {});
 
-    expect(findButton("Install")).not.toBeNull();
+    const card = container.querySelector('[data-testid="registry-card"]')!;
+    expect(card.textContent).toContain("Standup writer");
+    expect(card.querySelector("button")).toBeNull();
   });
 });
 
@@ -139,5 +149,6 @@ describe("uninstall lifecycle", () => {
 
     // Still on screen — the refusal must not have removed the card.
     expect(container.textContent).toContain("Standup writer");
+    expect(toast.error).toHaveBeenCalledWith("this skill is pinned by the manifest");
   });
 });
