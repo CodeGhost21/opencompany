@@ -160,7 +160,7 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
-import { signedOut } from "@/connections/registry";
+import { forgetSession } from "@/connections/registry";
 import { canCreateCompanies } from "@/components/create-company-dialog";
 
 // React Flow is heavy and only used here — load it on demand.
@@ -3442,7 +3442,7 @@ export function AppShell({
             variant="titlebar"
             client={client}
             company={company}
-            onSignedOut={() => signedOut(scope.connection)}
+            onSignedOut={() => void forgetSession(scope.connection)}
           />
         }
       />
