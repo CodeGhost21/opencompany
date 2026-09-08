@@ -258,7 +258,16 @@ mod tests {
         );
     }
 
+    /// A Composio call is classified from its action, and the curated
+    /// catalogue that does the classifying is compiled only under `openhuman`.
+    ///
+    /// Both builds are pinned, in separate tests, because the difference is a
+    /// deliberate seam rather than an accident: without the catalogue every
+    /// action is read as a send, which is the cautious direction and the answer
+    /// a default build must keep giving. Asserting only the catalogued answer
+    /// is what made this test green locally and red on the `tinyplace` lane.
     #[test]
+    #[cfg(feature = "openhuman")]
     fn a_composio_read_is_silent_and_a_composio_send_is_not() {
         assert_eq!(
             evaluate(
@@ -277,6 +286,28 @@ mod tests {
             .requires_human(),
             "sending mail from the company's account is the archetype of a commitment"
         );
+    }
+
+    /// Without the curated catalogue there is nothing to tell a read from a
+    /// send, so every Composio action is a send — including the read.
+    ///
+    /// Pinned rather than tolerated: this is the build a self-hoster gets, and
+    /// "the floor is stricter where it can see less" has to be a stated
+    /// property, not an artefact nobody checked.
+    #[test]
+    #[cfg(not(feature = "openhuman"))]
+    fn without_the_catalogue_every_composio_action_is_a_commitment() {
+        for slug in ["GITHUB_LIST_REPOSITORY_ISSUES", "GMAIL_SEND_EMAIL"] {
+            assert!(
+                evaluate(
+                    crate::policy::consequence::COMPOSIO_EXECUTE,
+                    &composio_args(slug),
+                    None,
+                )
+                .requires_human(),
+                "{slug}: with no catalogue compiled in, cautious is the only honest answer"
+            );
+        }
     }
 
     #[test]
