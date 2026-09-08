@@ -810,7 +810,11 @@ mod tests {
         let direct = DirectComposio::new("ak_live").with_v3_base_for_test(base);
 
         let resp = direct
-            .list_tools(&["gmail".to_string(), "  ".to_string(), "slack".to_string()], None, None)
+            .list_tools(
+                &["gmail".to_string(), "  ".to_string(), "slack".to_string()],
+                None,
+                None,
+            )
             .await
             .expect("tools");
         assert_eq!(resp.tools.len(), 1);

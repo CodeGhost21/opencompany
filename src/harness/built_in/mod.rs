@@ -110,6 +110,10 @@ pub mod native_salvage;
 #[cfg(test)]
 mod native_salvage_turn_test;
 pub mod orchestrator;
+/// Issue #6014: task-aware extraction of an oversized tool result — one
+/// bounded model call that keeps what answers the turn, in place of a byte cut
+/// that keeps whatever happened to come first. See [`payload_extract`].
+pub mod payload_extract;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed
 /// decision are testable at default features; only the tools are gated.
@@ -122,10 +126,6 @@ pub mod paypal;
 /// `planning`, with the host gathering the evidence and verifying every
 /// prerequisite the model claims. See [`planning`].
 pub mod planning;
-/// Issue #6014: task-aware extraction of an oversized tool result — one
-/// bounded model call that keeps what answers the turn, in place of a byte cut
-/// that keeps whatever happened to come first. See [`payload_extract`].
-pub mod payload_extract;
 pub mod policy;
 pub mod provider;
 /// Issue #244: `publish_artifact` — the only way a workspace file becomes a

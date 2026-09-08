@@ -167,32 +167,28 @@ impl PayloadSummarizer for PayloadExtractor {
             ..Default::default()
         };
 
-        let response = match tokio::time::timeout(
-            EXTRACT_TIMEOUT,
-            self.model.invoke(&(), request),
-        )
-        .await
-        {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    tool = tool_name,
-                    bytes = original_bytes,
-                    %error,
-                    "[payload-extract] extraction call failed; the raw payload stands"
-                );
-                return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    tool = tool_name,
-                    bytes = original_bytes,
-                    timeout_s = EXTRACT_TIMEOUT.as_secs(),
-                    "[payload-extract] extraction timed out; the raw payload stands"
-                );
-                return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
-            }
-        };
+        let response =
+            match tokio::time::timeout(EXTRACT_TIMEOUT, self.model.invoke(&(), request)).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        tool = tool_name,
+                        bytes = original_bytes,
+                        %error,
+                        "[payload-extract] extraction call failed; the raw payload stands"
+                    );
+                    return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        tool = tool_name,
+                        bytes = original_bytes,
+                        timeout_s = EXTRACT_TIMEOUT.as_secs(),
+                        "[payload-extract] extraction timed out; the raw payload stands"
+                    );
+                    return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Failed));
+                }
+            };
 
         let summary = response.text();
         if summary.trim().is_empty() {
@@ -220,7 +216,10 @@ impl PayloadSummarizer for PayloadExtractor {
             tool = tool_name,
             from_bytes = original_bytes,
             to_bytes = summary.len(),
-            ratio = format!("{:.1}x", original_bytes as f64 / summary.len().max(1) as f64),
+            ratio = format!(
+                "{:.1}x",
+                original_bytes as f64 / summary.len().max(1) as f64
+            ),
             "[payload-extract] extracted the answering content from an oversized tool result"
         );
         Ok(SummarizeOutcome::Summarized(SummarizedPayload {
