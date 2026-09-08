@@ -484,6 +484,16 @@ pub struct AppState {
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
     nonce: std::sync::Arc<crate::economy::NonceCache>,
+    /// Host-global spent-nonce set for inbound x402 payment authorizations.
+    ///
+    /// Separate from `nonce` because the two guard different values over
+    /// different windows: a SIWX signature is good for the clock-skew window,
+    /// an authorization nonce for
+    /// [`x402::MAX_AGE_SECS`](crate::economy::x402::MAX_AGE_SECS). Sharing one
+    /// set would let either keyspace prune the other's record, and a forgotten
+    /// payment nonce is a free task.
+    #[cfg(feature = "tinyplace")]
+    x402_nonce: std::sync::Arc<crate::economy::NonceCache>,
     /// In-flight console MCP OAuth flows, keyed by the opaque `state` the browser
     /// round-trips (issue #90). The `/mcp/servers/{name}/oauth/start` route parks
     /// a [`PendingOAuth`](crate::company::mcp_oauth::PendingOAuth) here; the
@@ -579,6 +589,10 @@ impl AppState {
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
+            #[cfg(feature = "tinyplace")]
+            x402_nonce: std::sync::Arc::new(crate::economy::NonceCache::with_ttl(
+                crate::economy::x402::MAX_AGE_SECS,
+            )),
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             analytics: crate::analytics::null_tracker(),
@@ -1107,6 +1121,12 @@ impl AppState {
     #[cfg(feature = "tinyplace")]
     pub fn nonce(&self) -> &std::sync::Arc<crate::economy::NonceCache> {
         &self.nonce
+    }
+
+    /// The host-global spent-nonce set for inbound x402 authorizations.
+    #[cfg(feature = "tinyplace")]
+    pub fn x402_nonce(&self) -> &std::sync::Arc<crate::economy::NonceCache> {
+        &self.x402_nonce
     }
 
     /// How long a parked OAuth flow stays reclaimable before it's swept. Longer
