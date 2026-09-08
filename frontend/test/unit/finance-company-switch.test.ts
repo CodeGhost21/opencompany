@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { InvoicingView } from "@/views/finance/InvoicingView";
 
 /**
@@ -55,10 +56,13 @@ let root: Root;
 async function showInvoicing(company: string) {
   await act(async () => {
     root.render(
-      createElement(InvoicingView, {
-        key: company,
-        client: clientFor(company),
-        company,
+      createElement(ConnectionScopeProvider, {
+        scope: { connection: "local", company },
+        children: createElement(InvoicingView, {
+          key: company,
+          client: clientFor(company),
+          company,
+        }),
       }),
     );
   });
@@ -87,6 +91,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  window.localStorage.clear();
 });
 
 afterEach(() => {

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { SendInvoiceDialog } from "@/views/finance/SendInvoiceDialog";
 
 /**
@@ -25,9 +26,9 @@ const CLIENT = {
 // through a portal we mount a fresh instance per input value. The `due` value
 // is used as the key so a brand-new component mounts for each case.
 function Mount({ due }: { due: string }) {
-  return createElement(
-    SendInvoiceDialog,
-    {
+  return createElement(ConnectionScopeProvider, {
+    scope: { connection: "local", company: "acme" },
+    children: createElement(SendInvoiceDialog, {
       key: due,
       client: CLIENT,
       company: "acme",
@@ -35,8 +36,8 @@ function Mount({ due }: { due: string }) {
       open: true,
       onOpenChange: () => {},
       onSent: sent,
-    },
-  );
+    }),
+  });
 }
 
 let container: HTMLDivElement;
@@ -76,6 +77,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  window.localStorage.clear();
 });
 
 afterEach(async () => {
