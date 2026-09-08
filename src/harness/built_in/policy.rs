@@ -1306,6 +1306,53 @@ impl ApprovalPolicy {
     /// **untouched at cap**. A spend cap caps spend; making a teammate unable to
     /// answer a question because it spent its budget this morning would be a
     /// different feature, and a worse one.
+    /// Record what a consequence floor would have done with this call, and
+    /// change nothing (issue #2147).
+    ///
+    /// Epic #1817 asks for outward, irreversible acts — publish, send, sign,
+    /// hire, identity, spend that leaves — to reach a person whatever tier the
+    /// company runs. Since #1925 nothing does: the bypass immediately below
+    /// this call site allows every classification-derived decision. Whether to
+    /// re-introduce a stop is a product question, and the honest input to it is
+    /// how often such a stop would actually fire on live traffic — a
+    /// taxonomically narrow floor can still be practically wide.
+    ///
+    /// So this emits one line per call the floor would have stopped, tagged
+    /// with the reason, the tier, and whether HITL was on at the time. Silent
+    /// calls emit nothing: the denominator is the tool-call trace the runs
+    /// already record, and logging every allowed call to count it would bury
+    /// the signal it exists to produce.
+    ///
+    /// [`floor::deferred_group`] is reported on its own axis so #658's
+    /// `publish_artifact` carve-out can be revisited with a number instead of
+    /// two opinions — it is counted, never folded into the floor's own count.
+    fn record_shadow_floor(&self, tool: &str, args: &serde_json::Value) {
+        // The per-call allowance, which is the cap a single call is measured
+        // against. The daily budget is a different question and has its own arm.
+        let verdict = crate::policy::floor::evaluate(tool, args, self.auto_approve_under_usd);
+        if verdict.requires_human() {
+            log::info!(
+                "[policy:shadow-floor] agent={} tool='{}' would_stop={} mode={:?} hitl={} issue=2147",
+                self.agent.as_deref().unwrap_or("-"),
+                tool,
+                verdict.reason_word(),
+                self.mode,
+                self.policy_hitl_enabled,
+            );
+        }
+        if let Some(group) = crate::policy::floor::deferred_group(tool, args) {
+            log::info!(
+                "[policy:shadow-floor] agent={} tool='{}' deferred_group={:?} mode={:?} hitl={} \
+                 issue=2147",
+                self.agent.as_deref().unwrap_or("-"),
+                tool,
+                group,
+                self.mode,
+                self.policy_hitl_enabled,
+            );
+        }
+    }
+
     fn is_priced_call(tool: &str, args: &serde_json::Value, declared_amount: Option<f64>) -> bool {
         declared_amount.is_some() || classify_group(tool, args) == EffectGroup::Spend
     }
@@ -1693,6 +1740,19 @@ impl ToolPolicy for ApprovalPolicy {
                 format!("'{tool}' explicitly stages a paid media generation for approval"),
             );
         }
+
+        // Shadow measurement for issue #2147 — reads, records, decides nothing.
+        //
+        // Immediately ABOVE the bypass because that is the position the
+        // consequence floor epic #1817 proposes for a real arm, and a
+        // measurement taken anywhere else would be measuring a different
+        // question. Everything above has already returned for the calls it owns
+        // — a hard deny, a redeemed grant, a paid-media card — so what reaches
+        // here is exactly the population a floor would decide.
+        //
+        // It must stay incapable of changing an outcome: no early return, no
+        // mutation, no queue write. The only observable is a log line.
+        self.record_shadow_floor(tool, &request.arguments);
 
         // General approvals come only from `request_approval`; specialized
         // approval-producing tools such as paid media stage themselves above.
@@ -2127,6 +2187,64 @@ mod tests {
             .await,
             ToolPolicyDecision::Allow
         );
+    }
+
+    /// The shadow floor observes; it never decides (issue #2147).
+    ///
+    /// Every tool below is one the consequence floor names — a send, a launch,
+    /// an identity change, a call carrying money. With policy HITL disabled,
+    /// which is the production build, all of them must still be allowed. A
+    /// failure here means the measurement grew teeth, which is the one way this
+    /// instrumentation could do harm.
+    #[tokio::test]
+    async fn the_shadow_floor_decides_nothing_with_hitl_disabled() {
+        for mode in ["auto", "supervised", "full"] {
+            let p = policy(mode, &[], None).with_policy_hitl_disabled();
+            for (tool, args) in [
+                ("chargebee_send_invoice", serde_json::json!({})),
+                ("hosting_launch_site", serde_json::json!({})),
+                ("composio_authorize", serde_json::json!({})),
+                ("publish_artifact", serde_json::json!({})),
+                ("file_write", serde_json::json!({ "amount_usd": 500.0 })),
+                (
+                    "composio_execute",
+                    serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+                ),
+            ] {
+                assert_eq!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::Allow,
+                    "{tool} under {mode}: the shadow floor must observe, not gate"
+                );
+            }
+        }
+    }
+
+    /// The floor's own reading of a call agrees with what the tier does with it
+    /// while HITL is on.
+    ///
+    /// Not a tautology: it pins that the population the shadow counts is the
+    /// population a real floor arm would decide. If a later change moved the
+    /// shadow call site above a hard deny or below the tier, this is what
+    /// notices — the count would silently start describing a different
+    /// question, which is the failure mode a measurement cannot self-report.
+    #[tokio::test]
+    async fn what_the_shadow_counts_is_what_full_autonomy_already_stops() {
+        let p = policy("full", &[], None);
+        for tool in ["chargebee_send_invoice", "hosting_launch_site"] {
+            let args = serde_json::json!({});
+            assert!(
+                crate::policy::floor::evaluate(tool, &args, None).requires_human(),
+                "{tool} is a floor call"
+            );
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} is stopped by the judgement arm under full autonomy today"
+            );
+        }
     }
 
     /// Every tier is reachable from a manifest, parses to its own variant, and
