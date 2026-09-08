@@ -167,9 +167,9 @@ export function SendInvoiceDialog({
   // own: the form is blank, and a blank form is not that invoice.
   useEffect(() => {
     if (!open || !invoiceKey) return;
-    const held = readUnresolvedForceNew(scope);
-    if (held && held.invoiceKey === invoiceKey && forceNewNonce !== held.nonce) {
-      setForceNewNonce(held.nonce);
+    const held = readUnresolvedForceNew(scope, invoiceKey);
+    if (held && forceNewNonce !== held) {
+      setForceNewNonce(held);
       setForceNew(true);
       setForceNewAttempted(true);
     }
@@ -181,7 +181,7 @@ export function SendInvoiceDialog({
     if (forceNew) {
       setForceNewAttempted(true);
       if (forceNewNonce && invoiceKey) {
-        writeUnresolvedForceNew(scope, { invoiceKey, nonce: forceNewNonce });
+        writeUnresolvedForceNew(scope, invoiceKey, forceNewNonce);
       }
     }
     try {
@@ -219,7 +219,7 @@ export function SendInvoiceDialog({
       setForceNew(false);
       setForceNewNonce(undefined);
       setForceNewAttempted(false);
-      clearUnresolvedForceNew(scope);
+      if (invoiceKey) clearUnresolvedForceNew(scope, invoiceKey);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not raise the invoice.");
     } finally {
@@ -330,7 +330,7 @@ export function SendInvoiceDialog({
                 setForceNew(checked);
                 setForceNewNonce(checked ? crypto.randomUUID() : undefined);
                 setForceNewAttempted(false);
-                if (!checked) clearUnresolvedForceNew(scope);
+                if (!checked && invoiceKey) clearUnresolvedForceNew(scope, invoiceKey);
               }}
             />
             <span>

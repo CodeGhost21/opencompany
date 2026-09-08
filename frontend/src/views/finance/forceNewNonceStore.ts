@@ -14,13 +14,20 @@
  *
  * Scoped by `LocalScope` (connection + company), not company alone, for the
  * same reason every other browser-local key in the console is — see
- * `connections/types.ts`.
+ * `connections/types.ts` — and further scoped by the invoice's own
+ * content-derived key, because a nonce is meaningful only for the invoice it
+ * was minted against. A single slot per connection/company let an unrelated
+ * invoice's write or successful resolve clobber a still-unresolved one: start
+ * (or finish) a forced send for invoice B while invoice A's forced send from
+ * earlier is still unresolved, and A's entry was silently overwritten or
+ * erased, so a later retry of A minted a fresh nonce and could bill it twice.
+ * One key per invoice means resolving B never touches A's entry.
  */
 
 import { type LocalScope, scopedKey } from "@/connections/types";
 
-function keyFor(scope: LocalScope): string {
-  return scopedKey("oc.finance.invoice-force-new", scope);
+function keyFor(scope: LocalScope, invoiceKey: string): string {
+  return scopedKey(`oc.finance.invoice-force-new.${invoiceKey}`, scope);
 }
 
 /**
@@ -39,57 +46,36 @@ function storage(): Storage | null {
   }
 }
 
-/** A forced send that was attempted for one specific invoice and never resolved. */
-export interface UnresolvedForceNew {
-  /** The invoice's content-derived key, WITHOUT the nonce folded in. */
-  invoiceKey: string;
-  nonce: string;
-}
-
 /**
- * The unresolved forced send held for this scope, or `undefined`.
- *
- * Carries the invoice it belongs to, because a nonce is meaningful only for
- * the invoice it was minted against: restoring it onto a different invoice
- * would fold one invoice's nonce into another's key and have the host dedupe
- * a genuinely new invoice away as a replay of the old one.
+ * The nonce of a forced send that has not yet resolved for this scope and
+ * invoice, or `undefined` if none is outstanding.
  */
-export function readUnresolvedForceNew(scope: LocalScope): UnresolvedForceNew | undefined {
-  const raw = storage()?.getItem(keyFor(scope));
-  if (!raw) return undefined;
-  try {
-    const held: unknown = JSON.parse(raw);
-    if (
-      typeof held === "object" &&
-      held !== null &&
-      typeof (held as UnresolvedForceNew).invoiceKey === "string" &&
-      typeof (held as UnresolvedForceNew).nonce === "string"
-    ) {
-      return held as UnresolvedForceNew;
-    }
-  } catch {
-    // A value this cannot read is a value it must not act on.
-  }
-  return undefined;
+export function readUnresolvedForceNew(scope: LocalScope, invoiceKey: string): string | undefined {
+  const raw = storage()?.getItem(keyFor(scope, invoiceKey));
+  return raw && raw.length > 0 ? raw : undefined;
 }
 
 /** Marks a forced send of one invoice as attempted and unresolved. */
-export function writeUnresolvedForceNew(scope: LocalScope, held: UnresolvedForceNew): void {
+export function writeUnresolvedForceNew(
+  scope: LocalScope,
+  invoiceKey: string,
+  nonce: string,
+): void {
   const store = storage();
   if (!store) return;
   try {
-    store.setItem(keyFor(scope), JSON.stringify(held));
+    store.setItem(keyFor(scope, invoiceKey), nonce);
   } catch {
     // A full or read-only quota is not worth failing a send over.
   }
 }
 
-/** Clears the latch: the forced send succeeded, or the operator started over. */
-export function clearUnresolvedForceNew(scope: LocalScope): void {
+/** Clears the latch: this invoice's forced send succeeded, or the operator started over. */
+export function clearUnresolvedForceNew(scope: LocalScope, invoiceKey: string): void {
   const store = storage();
   if (!store) return;
   try {
-    store.removeItem(keyFor(scope));
+    store.removeItem(keyFor(scope, invoiceKey));
   } catch {
     // Nothing to do about a store that will not let us clear it either.
   }
