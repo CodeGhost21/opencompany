@@ -30,6 +30,9 @@ import { ApiError, workflowProblemLocator } from "@/api/types";
 
 /** Answers with whatever the test staged, so no `fetch` is involved. */
 class StubTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   constructor(private readonly staged: Partial<TransportResponse>) {}
 
   async request(req: TransportRequest): Promise<TransportResponse> {

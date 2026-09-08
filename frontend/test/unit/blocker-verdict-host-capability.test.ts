@@ -53,6 +53,8 @@ function hostAdvertising(capabilities: string[] | null): Harness {
       };
     },
     subscribe: () => () => {},
+    // Test double: an abort stops the caller; there is no real work to cancel.
+    cancelsInFlight: true,
   };
   return {
     client: new OpenCompanyClient(

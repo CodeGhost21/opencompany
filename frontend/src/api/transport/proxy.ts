@@ -54,6 +54,15 @@ function bridge(): TauriCore {
 
 export class ProxyTransport implements Transport {
   /**
+   * An in-flight Tauri `invoke` cannot be cancelled, so an abort here stops the
+   * caller waiting and nothing else: the request runs to completion inside the
+   * app's Rust core. Callers whose reason for aborting is to stop work at the
+   * host — rather than to stop waiting — must read this and not offer the
+   * gesture. See `Transport.cancelsInFlight`.
+   */
+  readonly cancelsInFlight = false;
+
+  /**
    * @param connectionId Which host this transport speaks for. Explicit, and
    *   passed on every call — the Rust side has no notion of a "current"
    *   connection, deliberately, because that single-valued field is what stops
@@ -76,6 +85,10 @@ export class ProxyTransport implements Transport {
         path: pathOf(req.url),
         headers: req.headers,
         body: req.body,
+        // The core applies its own `reqwest` timeout and the console cannot
+        // see it, so a route the host deliberately allows longer than the
+        // core's default has to say so. Omitted means "use the default".
+        timeoutMs: req.timeoutMs,
       },
     });
 

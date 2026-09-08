@@ -848,7 +848,14 @@ export function AgentDetailView({
                 than halfway down inside one of its cards. */}
             <Section
               title="Instructions"
-              subtitle="What this teammate was defined to do. It frames every turn they take."
+              // Names both halves, because the card holds both and the operator
+              // has to be able to tell them apart. It used to say only "What
+              // this teammate was defined to do. It frames every turn they
+              // take." over a body that was the *description* with no label on
+              // it — so a teammate with no persona showed one sentence under a
+              // heading naming the other field, and nothing on screen said the
+              // persona was empty. See the two labelled blocks below.
+              subtitle="What this teammate owns, and the standing instructions that frame every turn they take."
               action={
                 // Reset is offered only when an override is actually masking the
                 // blueprint, and only to a viewer the host will let write
@@ -967,27 +974,49 @@ export function AgentDetailView({
                 </div>
               ) : (
                 <>
-                  <p
-                    className="whitespace-pre-wrap text-sm text-muted-foreground"
-                    data-testid="agent-description"
-                  >
-                    {agent.description?.trim() ||
-                      "No description was written for this teammate."}
-                  </p>
-                  {agent.instructions?.trim() && (
-                    <div className="space-y-1">
-                      <p className="text-xs font-medium">
-                        Persona instructions
-                        {agent.instructionsOverridden ? " · overriding the blueprint" : ""}
-                      </p>
+                  {/* Labelled, like the persona below it. Unlabelled, this
+                      paragraph was read as the standing instructions the card's
+                      heading names — and for a teammate with no persona it was
+                      the only thing on the card, so the mistake was the default
+                      rather than an edge. */}
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium">What they do</p>
+                    <p
+                      className="whitespace-pre-wrap text-sm text-muted-foreground"
+                      data-testid="agent-description"
+                    >
+                      {agent.description?.trim() ||
+                        "No description was written for this teammate."}
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium">
+                      Persona instructions
+                      {agent.instructions?.trim() && agent.instructionsOverridden
+                        ? " · overriding the blueprint"
+                        : ""}
+                    </p>
+                    {agent.instructions?.trim() ? (
                       <p
                         className="whitespace-pre-wrap text-sm text-muted-foreground"
                         data-testid="agent-instructions"
                       >
                         {agent.instructions.trim()}
                       </p>
-                    </div>
-                  )}
+                    ) : (
+                      // Said rather than left blank. An empty persona is a real
+                      // state with a consequence — this teammate runs on the
+                      // company's default wording — and the operator could
+                      // previously only find out by opening the edit form.
+                      <p
+                        className="text-sm text-muted-foreground"
+                        data-testid="agent-instructions-empty"
+                      >
+                        None yet, so this teammate runs on the company&apos;s default
+                        wording. Edit to write some, or ask the copilot.
+                      </p>
+                    )}
+                  </div>
                   {agent.editable.length === 0 && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
                       This teammate can't be edited from here. Its daily budget can still be changed

@@ -34,24 +34,29 @@ interface Props {
  * three credential forms that argument also covers (Inference, Hosting, Search)
  * deliberately stayed in Settings, beside the things they unlock.
  *
- * # Where the rail went
+ * # Where the rail went, twice
  *
- * This section shipped with a 240px sub-rail inside the content area, modelled
- * on `finance/FinanceSection.tsx`. That rail is gone: sub-navigation lives in
- * the **sidebar** now, under the section's own row
- * (`components/sidebar-navigation.tsx`). Two reasons, and neither is layout
- * fashion. A rail inside the page puts the same kind of list in two different
- * places depending on which section an operator is in — the sidebar for the
- * sections without sub-pages, a rail for the ones with — so there is no rule to
- * learn. And it charges the content pane 240px on every page under it, on a
- * screen that already has a sidebar.
+ * This section shipped with a 240px sub-rail of its own inside the content
+ * area, modelled on `finance/FinanceSection.tsx` (PR #1977). It gave that up
+ * for rows in the sidebar under its own section row, on the argument that a
+ * per-section rail puts the same kind of list in two different places and
+ * charges the content pane 240px on a screen that already has a sidebar.
  *
- * What is left is the dispatch, which is all this component ever did besides
- * draw the rail. `OAuthView` and `McpServersView` are re-parented, not
- * rewritten. The one content change is `OAuthView`'s title: the page is called
- * **Apps** now, because "OAuth" names the protocol a connection happens to use
- * rather than the thing an operator came to find, and under a section already
- * named Connections it said the same word twice.
+ * Sub-navigation is a content rail again (issue #2130) — but the **shared** one,
+ * `components/section-rail.tsx`, built from the same `NAV_SECTIONS` table every
+ * section reads, because the sidebar's middle region is the Room channel list
+ * now and is pinned there on every section. The reversal and what it is worth
+ * are argued on `NAV_SECTIONS` in `components/sidebar-navigation.tsx`; the
+ * "two different places" half of the old argument is answered by there being
+ * exactly one rail implementation and never two rails on screen.
+ *
+ * This file is unchanged by either move, and that is the point worth keeping:
+ * what is left is the dispatch, which is all this component ever did besides
+ * draw a rail. `OAuthView` and `McpServersView` are re-parented, not rewritten.
+ * The one content change was `OAuthView`'s title: the page is called **Apps**
+ * now, because "OAuth" names the protocol a connection happens to use rather
+ * than the thing an operator came to find, and under a section already named
+ * Connections it said the same word twice.
  */
 export function ConnectionsSection({ client, company, sub }: Props) {
   const page = resolveConnectionPage(sub);

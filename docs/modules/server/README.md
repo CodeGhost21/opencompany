@@ -357,10 +357,24 @@ work reaches cognition:
    matching `[company].handle`); a miss is `404`.
 2. Verify the SIWX `Authorization` header (skew window + single-use replay
    protection via a host-global nonce cache). A bad/missing header is `401`.
-3. For a skill priced above `0.00`, require a valid x402 authorization; without
-   one the response is a `402` challenge naming the amount and the company's
-   own tiny.place address.
-4. Sanitize the counterparty payload (a minimal promptguard pass — control
+3. Classify the requested skill against the card's advertised prices: an id
+   the company never advertised is refused with `404` on a company that
+   prices at least one skill above `0.00` — it is a different answer from
+   "free", not the same one. A card that prices nothing above `0.00` charges
+   for nothing, so every id on it is free, including one it does not list.
+   An id priced at `0.00`, or at a price this build cannot parse, is served
+   for free with no payment step at all.
+4. For a skill priced above `0.00`, require a valid x402 authorization bound
+   to this company's own address and to at least its advertised price;
+   without one, or with one addressed to another company or underpaying, the
+   response is a `402` challenge naming the amount and the company's own
+   tiny.place address. A **valid** authorization's nonce is spent atomically
+   with acceptance — signature and freshness (±10 minutes) are checked before
+   the nonce is consumed, and consumption itself happens only once the
+   payment is confirmed bound to this company and sufficient, so the same
+   authorization can never buy two tasks and a mismatch does not burn a nonce
+   the payer could still use correctly elsewhere.
+5. Sanitize the counterparty payload (a minimal promptguard pass — control
    characters are stripped) before it becomes an `A2aTaskReceived` event and
    drives exactly one cycle. Paying customers run under the same approval gates
    as any other stimulus.

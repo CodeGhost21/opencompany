@@ -105,6 +105,36 @@ export const SETTINGS_PAGE_GROUPS = [
 
 export const DEFAULT_SETTINGS_PAGE: SettingsPage = "general";
 
+/**
+ * The readable measure a **form** keeps inside a full-width settings page.
+ *
+ * Every sub-page under this rail used to centre its body on a `max-w-*` column
+ * — `3xl` on General and People, `5xl` on Inference, Hosting, Search and
+ * Skills, `6xl` on Usage. Issue #2131 removes that: on a 1920px window the
+ * settings pane is about 1400px wide, so General's 768px column left roughly
+ * 600px of empty margin either side of cards that had nothing to do with
+ * prose, and the rail beside them made the whole page read as a narrow strip.
+ *
+ * What the column was actually protecting is *fields*, not cards. A card is a
+ * container — its header, its alerts, its DNS and member tables and its
+ * provider grids all get better with width. A text input does not: a single
+ * one stretched across a 27" monitor is a worse control than the constraint
+ * being removed, because the label at the left and the caret at the right are
+ * a head-turn apart.
+ *
+ * So the page is full width and this is the cap on the field grids inside it.
+ * `4xl` (896px) rather than a wider one because these grids are two-column at
+ * `sm` and up, which puts each control at roughly 430px — the width they
+ * already had inside the old `5xl` body, so no field the operator uses today
+ * changes size.
+ *
+ * A class string rather than a component: the grids that need it already exist
+ * and differ (`sm:grid-cols-2`, `sm:items-end`, a nested pair), and wrapping
+ * each in a layout component to pass one number would be a bigger change than
+ * the number.
+ */
+export const SETTINGS_FIELD_COLUMN = "max-w-4xl";
+
 /** Whether a hash segment names a real sub-page. */
 export function isSettingsPage(sub: string | null): sub is SettingsPage {
   return SETTINGS_PAGES.some((page) => page.id === sub);

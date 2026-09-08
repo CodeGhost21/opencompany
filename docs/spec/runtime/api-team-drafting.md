@@ -1,9 +1,9 @@
-# Drafting a mandate or a persona
+# Drafting a mandate, a persona, or a whole teammate
 
-The two read-only routes behind the teammate copilot (issue #1776), split out of
-[`api-write-plane.md`](api-write-plane.md) to keep that file under the
-repository's 500-line ceiling. Everything here is part of the console write
-plane; neither route writes.
+The three read-only routes behind the teammate copilot (issues #1776, #1989),
+split out of [`api-write-plane.md`](api-write-plane.md) to keep that file under
+the repository's 500-line ceiling. Everything here is part of the console write
+plane; **none of these routes writes.**
 
 `POST …/team/{agentId}/draft` runs one turn of a conversation about one of two
 fields — `description` (the mandate on the roster card) or `instructions` (the
@@ -38,6 +38,134 @@ question over one malformed old message would be the worse failure.
 is taken — the response is text, and it becomes a teammate's persona only if the
 operator takes it and then saves through `PATCH …/team/{agentId}` like any edit
 they typed themselves.
+
+## `POST …/team/design` — a whole teammate, at creation only
+
+The reduced Add-teammate dialog (issue #1989) collects a **name and one
+sentence**. This route turns that sentence into the three fields a teammate is
+made of — `role`, `description` and `instructions` — in one model call, and the
+console then creates the teammate through `POST …/team`.
+
+The body is `{name?, description}`; a blank `description` is a `400`, because it
+is the entire input and designing from nothing is a model inventing a job rather
+than reading one. It is bounded by `MAX_DESIGN_BRIEF` (2000 characters, the
+prompt-weight bound every other operator free text going into a copilot prompt
+obeys) — **not** by `MAX_DESCRIPTION`, which is 200 and is a roster-card
+*layout* bound. Applying the card bound to the brief cut the operator's sentence
+at 200 with an `…` on the end before the model read it, and nothing said so: the
+console's box had no limit, and the stored description is the model's rather
+than the operator's, so a requirement written past character 200 left no trace.
+The console now holds the same number on the box itself, so the limit is met
+while typing. The answer is `{role?, description?, instructions?, source,
+reason?}`, with the same `source` / `reason` contract the draft routes use: all
+four refusals (`no_model`, `model_unreachable`, `unreadable`,
+`budget_exhausted`) are a `200`, because none is a failure of the request.
+
+**Three fields or none.** A design missing any of them is refused rather than
+salvaged, and a `role` too long to be a job title is refused rather than
+truncated. A teammate holding a real mandate and a fragment for a role is what
+the console used to produce by splitting the operator's sentence and cutting it
+at sixty characters — and on screen it looks finished, which is what makes it
+worth refusing outright.
+
+**Three non-empty strings is not enough.** `TeammateDesign::from_parts` also
+refuses two answers that pass every length and emptiness check:
+
+- **A role the model truncated itself** — an ellipsis in either spelling
+  (`…` or `...`). The brief tells it never to write one, but a brief is not a
+  validator, and `"Runs wholesale outreach to boutique retailers and keeps
+  the…"` is exactly the stored job title this route replaced. Scoped to the
+  role: a *mandate* may legitimately end in `…`, because that is the mark
+  `clamp_description` itself leaves.
+- **The same text in more than one field.** One sentence appearing as role,
+  mandate and persona at once is the original complaint, and a model that
+  echoes the sentence into two of the three reproduces it in valid JSON.
+  Compared on a normal form — whitespace collapsed, case folded, trailing
+  punctuation dropped — and before the clamps, so a description cut to the card
+  bound cannot come out looking different from the persona it was copied from.
+- **A role that is a sentence.** `MAX_ROLE` bounds characters and a sentence
+  fits inside it: `"Handles payroll and reconciles the books weekly"` is 46 of
+  the 60 allowed. The brief asks for "a noun phrase of one to four words", and
+  `MAX_ROLE_WORDS` enforces that at five — one word of slack, so a real title
+  that runs long ("VP of Brand and Communications") is not thrown away while a
+  sentence still is.
+- **A role that is the operator's brief, or the front of it.** The rule above
+  compares the three answers to each other, and so misses the shape that matters
+  most: a brief of `"Runs wholesale outreach to boutique retailers"` answered
+  with role `"Runs wholesale outreach"`, a real mandate and real instructions
+  beside it, passes everything else. That is the clause split this route
+  replaced, arriving without the ellipsis that used to make it obvious, and only
+  a comparison against the *input* catches it — so `from_parts` takes the brief
+  and refuses a role that is the whole of it or a leading fragment at a word
+  boundary. An operator whose brief opens with the job title has answered a
+  different question from the one the box asks, and gets the full form carrying
+  what they typed, where Role is its own field.
+
+  Not "reject verb-led roles", which is what the brief itself asks for: the same
+  prompt says to answer in the operator's language, so a list of English verbs
+  would refuse valid titles in every other one. The rule catches fragments of
+  the input, which is the shape that actually harms.
+
+Both are refusals rather than repairs, for the same reason the type is
+all-or-nothing: the operator gets the full form carrying what they typed, where
+a salvaged two-thirds looks finished on screen and is not.
+
+### The desktop app has to be told the deadline
+
+The pass runs a model for up to 90 seconds (`PERSONA_TIMEOUT`), and on the
+desktop app every request goes through the Tauri core's `oc_request`, which
+applied a flat 30-second `reqwest` timeout the console could not see. So a
+slow-but-valid design on desktop came back as a transport failure and handed
+the operator the full form — a refusal for a pass that was working, and one
+carrying no reason because there was none to carry.
+
+`ProxyRequest` now takes an optional `timeoutMs`, clamped in the core to a
+ceiling above the host's longest deliberate deadline, and `designTeammate` names
+the host's 90 seconds plus the round trip. Only the caller knows which route it
+is asking for, so the deadline crosses the bridge with the request rather than
+being special-cased in Rust. A browser is unaffected: `BrowserTransport` has no
+deadline of its own, and the client already races its own timer.
+
+### Who can run this pass, and how the console knows
+
+`build_design` needs `runtime.profile_drafter()`, which is built from
+`workflow_harness_deps` — and `RuntimeBuilder::build` assigns that in exactly
+one place, inside the embedded-harness arm. So a company on the `hosted`,
+`sidecar` or `custom` cognition path has no drafter, and this route can only
+answer `no_model` for it.
+
+The console cannot infer that from `cognition`, and when it tried
+(`cognition !== "echo"`) it was wrong for three of the six paths: the reduced
+dialog was offered, the operator typed a sentence, pressed Create, waited on a
+model call that could only refuse, and met the full form anyway.
+`GET …/inference` therefore reports `designsProfiles` — the same
+`profile_drafter().is_some()` this route acts on — so the dialog decides its
+shape from the capability rather than from a label. It is optional on the wire:
+an older host omits it, and the console reads a missing value as "unknown" and
+offers the reduced dialog, exactly as it does while the check is in flight.
+
+### Why a role may be designed here when `DraftableField` excludes one
+
+`POST …/team/{agentId}/draft` refuses anything but `description` and
+`instructions`, and must keep refusing. Its reason — a role is what delegation
+grounds on, so a drafted one would change who the company routes work to — is a
+statement about **editing a teammate that exists**: work is already addressed to
+it, and a model re-pointing that without the operator choosing to is the harm.
+
+At **creation** there is nothing to re-route. The teammate does not exist, no
+work is addressed to it, and no orchestrator has seen it. So the property the
+exclusion protects is not in play, and the alternative was not a safe blank:
+`role` is required by every write path and `persona_prompt` interpolates it
+unguarded.
+
+The separation is **structural, not a flag**: this route takes no agent id at
+all, so there is no request shape that reaches the design pass carrying an
+existing teammate's id. There is no `POST …/team/{agentId}/design`.
+
+The grounding is the same closed set every draft gets — the company, what it
+makes, the name, the operator's sentence, and siblings' ids and roles so the new
+teammate's job is not one the company already has. The operator's sentence is
+framed to the model as data, never as instructions to it.
 
 That is the whole reason a model is allowed near these two fields. First-run
 setup deliberately keeps the design pass **out** of a teammate's standing

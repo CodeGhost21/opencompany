@@ -79,20 +79,29 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
               {group.label}
             </div>
             {SETTINGS_PAGES.filter((item) => item.group === group.id).map((item) => (
+              // One line per row, and the row's own `title` carries what the
+              // second line used to say (issue #2131). The hint was rendered
+              // under every label here, and at `w-60` most of them wrapped:
+              // "Approvals, connection, lifecycle, domain, mail" is three
+              // lines, "What your teammates actually did" is two, and eight
+              // rows of that is a wall rather than a list you can scan. The
+              // count is `SETTINGS_PAGES.length`, so read it there rather than
+              // trusting this sentence after the next page lands. The labels
+              // are the navigation; the hint is a gloss, and a gloss that
+              // triples the height of the thing it explains has stopped
+              // helping.
               <a
                 key={item.id}
                 href={`#/settings/${item.id}`}
+                title={item.hint}
                 aria-current={page === item.id ? "page" : undefined}
                 className={cn(
-                  "flex items-start gap-2.5 rounded-lg px-2 py-2 text-left transition-colors",
+                  "flex items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors",
                   page === item.id ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
                 )}
               >
-                <item.icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                <span className="min-w-0">
-                  <span className="block text-sm font-medium">{item.label}</span>
-                  <span className="block text-xs text-muted-foreground">{item.hint}</span>
-                </span>
+                <item.icon className="size-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate text-sm font-medium">{item.label}</span>
               </a>
             ))}
           </section>
@@ -117,6 +126,12 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
             z-30` gives it its own stacking context above the drag band without
             touching `WindowDragBar` itself, whose absolute-overlay contract
             other pages (the graph, the workflow editor) still rely on. */}
+        {/* Both `hint` readers below survive #2131, which was about the
+            desktop rail. This row is a different surface with a different
+            problem: the chips carry the label alone, so the `title` is the only
+            gloss a chip has, and the line under them describes the *active*
+            page rather than repeating itself under every one of them. Neither
+            is a second line per row, which is the thing that was removed. */}
         <div className="relative z-30 border-b lg:hidden">
           <div className="flex gap-1 overflow-x-auto p-2">
             {SETTINGS_PAGES.map((item) => (
@@ -168,7 +183,10 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
         {page === "search" && (
           <SearchView key={company ?? "self"} client={client} company={company} />
         )}
-        {page === "skills" && <SkillsView client={client} company={company} />}
+        {/* Same remount rule, same reason: canManage (and the Add dialog's
+            draft) must not carry an admin's authority from one company into
+            another's still-resolving read (codeRabbit review). */}
+        {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
         {/* Observatory has a row on this rail but renders nothing here: the row
             is a doorway, and `#/settings/observatory` is rewritten onto
             `#/observatory` before it ever reaches this dispatch.

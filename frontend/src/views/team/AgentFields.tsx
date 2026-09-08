@@ -55,6 +55,7 @@ export function AgentFields({
   draft,
   onChange,
   readOnly,
+  busy,
   copilot,
 }: {
   /** Namespaces the DOM ids, so two of these can be mounted at once. */
@@ -63,6 +64,18 @@ export function AgentFields({
   onChange: (key: AgentFieldKey, value: string) => void;
   /** Whether a given field is read-only. Defaults to all-editable. */
   readOnly?: (key: AgentFieldKey) => boolean;
+  /**
+   * Whether the form is mid-submit, and so should stop taking input.
+   *
+   * `disabled`, not the `readOnly` above, and the two are for different
+   * things. `readOnly` marks a field this surface will never send, and stays
+   * reachable for exactly the reason the note above gives: an operator has to
+   * be able to read and copy it. This is transient — the request has already
+   * captured these values, and an edit made while it is in flight is one the
+   * form is about to discard — so removing the field from the tab order for
+   * the second it lasts is the right answer rather than a regression.
+   */
+  busy?: boolean;
   /**
    * The drafting control for one field, when this surface offers one. Called
    * only for an editable `prose` field; omit it and the fields render exactly
@@ -103,6 +116,7 @@ export function AgentFields({
                 rows={field.rows ?? 4}
                 value={draft[field.key]}
                 readOnly={locked}
+                disabled={busy}
                 onChange={(e) => onChange(field.key, e.target.value)}
                 placeholder={field.placeholder}
                 data-testid={`agent-field-${field.key}`}
@@ -112,6 +126,7 @@ export function AgentFields({
                 id={id}
                 value={draft[field.key]}
                 readOnly={locked}
+                disabled={busy}
                 onChange={(e) => onChange(field.key, e.target.value)}
                 placeholder={field.placeholder}
                 // The codebase's own error idiom (`aria-invalid` styling lives
