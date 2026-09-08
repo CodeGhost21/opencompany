@@ -8,12 +8,14 @@
 // closed the dialog and reopened it to resend the *same* invoice got an
 // unrelated key, and Chargebee billed the customer twice.
 
-import { act, createElement, useState } from "react";
+import { act, createElement, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { Invoice, SendInvoice } from "@/api/finance";
+import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
+import { readUnresolvedForceNew } from "@/views/finance/forceNewNonceStore";
 
 const sendInvoice = vi.fn();
 
@@ -45,6 +47,18 @@ function invoiceReply(overrides: Partial<Invoice> = {}): Invoice {
     payment_url: null,
     ...overrides,
   };
+}
+
+/**
+ * `SendInvoiceDialog` reads `useLocalScope()` to key its unresolved-forced-send
+ * latch, which throws outside a provider — see `ConnectionContext.tsx`. Every
+ * render in this file goes through this one scope so a remount test can prove
+ * the latch actually persists rather than merely not throwing.
+ */
+const SCOPE = { connection: "local", company: "acme" };
+
+function withScope(node: ReactNode): ReactNode {
+  return createElement(ConnectionScopeProvider, { scope: SCOPE, children: node });
 }
 
 let container: HTMLDivElement;
@@ -127,6 +141,7 @@ beforeEach(() => {
     root = createRoot(container);
   });
   sendInvoice.mockReset();
+  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -139,14 +154,14 @@ describe("SendInvoiceDialog idempotency key", () => {
     sendInvoice.mockResolvedValue(invoiceReply());
     act(() => {
       root.render(
-        createElement(SendInvoiceDialog, {
+        withScope(createElement(SendInvoiceDialog, {
           client: CLIENT,
           company: "acme",
           site: "acme-test",
           open: true,
           onOpenChange: () => {},
           onSent: () => {},
-        }),
+        })),
       );
     });
     await settle();
@@ -168,14 +183,14 @@ describe("SendInvoiceDialog idempotency key", () => {
 
     act(() => {
       root.render(
-        createElement(SendInvoiceDialog, {
+        withScope(createElement(SendInvoiceDialog, {
           client: CLIENT,
           company: "acme",
           site: "acme-test",
           open: true,
           onOpenChange: () => {},
           onSent: () => {},
-        }),
+        })),
       );
     });
     await settle();
@@ -223,7 +238,7 @@ describe("SendInvoiceDialog idempotency key", () => {
       );
     }
     act(() => {
-      root.render(createElement(Harness));
+      root.render(withScope(createElement(Harness)));
     });
   }
 
@@ -273,14 +288,14 @@ describe("SendInvoiceDialog idempotency key", () => {
     sendInvoice.mockResolvedValue(invoiceReply());
     act(() => {
       root.render(
-        createElement(SendInvoiceDialog, {
+        withScope(createElement(SendInvoiceDialog, {
           client: CLIENT,
           company: "acme",
           site: "acme-test",
           open: true,
           onOpenChange: () => {},
           onSent: () => {},
-        }),
+        })),
       );
     });
     await settle();
@@ -300,15 +315,17 @@ describe("SendInvoiceDialog idempotency key", () => {
     sendInvoice.mockResolvedValue(invoiceReply());
 
     function Mount({ instance }: { instance: string }) {
-      return createElement(SendInvoiceDialog, {
-        key: instance,
-        client: CLIENT,
-        company: "acme",
-        site: "acme-test",
-        open: true,
-        onOpenChange: () => {},
-        onSent: () => {},
-      });
+      return withScope(
+        createElement(SendInvoiceDialog, {
+          key: instance,
+          client: CLIENT,
+          company: "acme",
+          site: "acme-test",
+          open: true,
+          onOpenChange: () => {},
+          onSent: () => {},
+        }),
+      );
     }
 
     act(() => {
@@ -333,11 +350,14 @@ describe("SendInvoiceDialog idempotency key", () => {
     expect(secondKey).toBe(firstKey);
   });
 
-  it("a deliberate resend forces a different key from the default derivation", async () => {
-    sendInvoice.mockResolvedValue(invoiceReply());
-    act(() => {
-      root.render(
+  it("keeps a forced nonce unresolved across a full remount, until the send succeeds", async () => {
+    sendInvoice.mockRejectedValueOnce(new Error("timeout"));
+    sendInvoice.mockResolvedValueOnce(invoiceReply());
+
+    function Mount({ instance }: { instance: string }) {
+      return withScope(
         createElement(SendInvoiceDialog, {
+          key: instance,
           client: CLIENT,
           company: "acme",
           site: "acme-test",
@@ -345,6 +365,49 @@ describe("SendInvoiceDialog idempotency key", () => {
           onOpenChange: () => {},
           onSent: () => {},
         }),
+      );
+    }
+
+    act(() => {
+      root.render(createElement(Mount, { instance: "first" }));
+    });
+    await settle();
+    await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    await toggleForceNew(true);
+    await clickSend();
+    const firstKey = lastSentKey();
+    expect(readUnresolvedForceNew(SCOPE)).toBeTruthy();
+
+    // Navigating away from Finance and back, or a page reload — a full
+    // unmount + fresh mount, not the close/reopen of the same instance the
+    // earlier test covers. The ambiguous failure is still unresolved.
+    act(() => {
+      root.render(createElement(Mount, { instance: "second" }));
+    });
+    await settle();
+
+    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(true);
+
+    await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    await clickSend();
+    const secondKey = lastSentKey();
+
+    expect(secondKey).toBe(firstKey);
+    expect(readUnresolvedForceNew(SCOPE)).toBeUndefined();
+  });
+
+  it("a deliberate resend forces a different key from the default derivation", async () => {
+    sendInvoice.mockResolvedValue(invoiceReply());
+    act(() => {
+      root.render(
+        withScope(createElement(SendInvoiceDialog, {
+          client: CLIENT,
+          company: "acme",
+          site: "acme-test",
+          open: true,
+          onOpenChange: () => {},
+          onSent: () => {},
+        })),
       );
     });
     await settle();
@@ -367,14 +430,14 @@ describe("SendInvoiceDialog idempotency key", () => {
 
     act(() => {
       root.render(
-        createElement(SendInvoiceDialog, {
+        withScope(createElement(SendInvoiceDialog, {
           client: CLIENT,
           company: "acme",
           site: "acme-test",
           open: true,
           onOpenChange: () => {},
           onSent: () => {},
-        }),
+        })),
       );
     });
     await settle();
@@ -420,14 +483,14 @@ describe("SendInvoiceDialog idempotency key", () => {
     sendInvoice.mockResolvedValue(invoiceReply());
     act(() => {
       root.render(
-        createElement(SendInvoiceDialog, {
+        withScope(createElement(SendInvoiceDialog, {
           client: CLIENT,
           company: "acme",
           site: "acme-test",
           open: true,
           onOpenChange: () => {},
           onSent: () => {},
-        }),
+        })),
       );
     });
     await settle();
