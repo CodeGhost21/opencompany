@@ -269,7 +269,7 @@ pub fn resolve_migrate_configs(
     };
 
     let to_config = match to {
-        "supermemory" | "mem0" | "cognee" => {
+        "supermemory" | "mem0" | "cognee" | "cortexdb" => {
             if to_url
                 .as_deref()
                 .map(str::trim)
@@ -300,7 +300,7 @@ pub fn resolve_migrate_configs(
         }
         other => {
             return Err(OpenCompanyError::Config(format!(
-                "--to {other} names no migratable driver: supermemory, mem0, cognee."
+                "--to {other} names no migratable driver: supermemory, mem0, cognee, cortexdb."
             )));
         }
     };

@@ -1,0 +1,90 @@
+# What the market did, kept apart from what we concluded it meant.
+#
+# The separation is the whole design of the signals desk: a signal is judged on
+# whether it was observed accurately, an inference on whether it holds. One row
+# holding both cannot be reviewed, because a correct observation with a wrong
+# inference and a wrong observation with a lucky inference look identical
+# afterwards.
+
+title = "Signals"
+purpose = """
+Every market signal observed, what the desk inferred from it, which desk it was \
+sent to, and — the field that makes this ledger worth keeping — whether the \
+inference turned out to hold.\
+"""
+written_by = "`record_entry` when a signal is observed or an inference is drawn, `close_entry` once it is clear whether it held"
+checks = ["required-field", "known-status", "closed-needs-reason"]
+
+[[field]]
+name = "id"
+role = "id"
+required = true
+
+[[field]]
+name = "signal"
+role = "title"
+required = true
+description = "What was observed, in the feed's own terms. Not what it means."
+
+[[field]]
+name = "status"
+role = "status"
+required = true
+
+[[field]]
+name = "observed_day"
+role = "date"
+required = true
+
+[[field]]
+name = "inference"
+role = "prose"
+description = "What the desk concluded, stated so it could be wrong."
+
+[[field]]
+name = "holds_if"
+role = "prose"
+description = "The condition the inference depends on. An inference with no condition attached cannot be checked and should not have been escalated."
+
+[[field]]
+name = "sent_to"
+description = "The desk that owns the resulting decision, if any."
+
+[[field]]
+name = "expires_day"
+role = "date"
+description = "The day acting on this stops being possible — a lead time, an event date, a renewal."
+
+[[status]]
+name = "observed"
+description = "Seen and recorded. No inference drawn yet."
+
+[[status]]
+name = "escalated"
+
+[[status]]
+name = "stood_down"
+closed = true
+needs_reason = true
+description = "Real, correctly observed, and not worth acting on. The most common correct outcome."
+
+[[status]]
+name = "held"
+closed = true
+needs_reason = true
+
+[[status]]
+name = "failed"
+closed = true
+needs_reason = true
+description = "The inference did not hold. Worth more than the ones that did."
+
+[[section]]
+heading = "Live"
+statuses = ["observed", "escalated"]
+order = "recent"
+
+[[section]]
+heading = "Resolved"
+statuses = ["stood_down", "held", "failed"]
+order = "recent"

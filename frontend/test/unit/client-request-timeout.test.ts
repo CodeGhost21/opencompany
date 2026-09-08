@@ -27,6 +27,9 @@ import { ApiError } from "@/api/types";
 
 /** A transport whose reply the test stages; records every request it is handed. */
 class StubTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly seen: TransportRequest[] = [];
 
   constructor(

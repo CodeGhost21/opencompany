@@ -64,7 +64,7 @@ use crate::runtime::cycle::{
 /// A `None` `thread_root` is not "no thread". It is the channel-level
 /// conversation: the one every unparented line hangs in, which is every line
 /// in a company that has never opened a thread.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChatTarget<'a> {
     /// The desk / channel the turn is addressed to; `None` is unaddressed and
     /// folds to the General desk downstream.
@@ -72,6 +72,20 @@ pub struct ChatTarget<'a> {
     /// The root message this turn's thread hangs off; `None` is the channel
     /// itself.
     pub thread_root: Option<EventSeq>,
+    /// Whether this turn is seeded with the desk's recent chat history
+    /// (issue #1840).
+    ///
+    /// True for every ordinary reply, and the reason it is a knob at all is the
+    /// **hive-mind episode**: a deliberating turn is handed its own attributed,
+    /// visibility-filtered transcript by the episode prompt, and the recent-chat
+    /// seed would hand it the *same* desk lines a second time — unattributed,
+    /// and in the assistant role, i.e. as though this member had said them.
+    /// That is not a duplicate, it is two contradicted claims: a blind opening
+    /// round stops being blind (a peer's position arrives through the seed
+    /// however carefully the projection withheld it), and the prompt's
+    /// attribution — the thing `^N` citations are read against — is undercut by
+    /// a history that names nobody.
+    pub history_seed: bool,
     /// The journal sequence of the operator message this turn is answering,
     /// when the turn is answering one at all.
     ///
@@ -89,14 +103,26 @@ pub struct ChatTarget<'a> {
     pub message_seq: Option<EventSeq>,
 }
 
+impl Default for ChatTarget<'_> {
+    /// An unaddressed, unthreaded, **seeded** turn answering no journaled
+    /// message — what every caller had before the seed was a knob.
+    fn default() -> Self {
+        Self {
+            chat_id: None,
+            thread_root: None,
+            history_seed: true,
+            message_seq: None,
+        }
+    }
+}
+
 impl<'a> ChatTarget<'a> {
     /// A turn posted straight into a channel — the shape every caller had
     /// before threads were part of the key.
     pub fn channel(chat_id: Option<&'a str>) -> Self {
         Self {
             chat_id,
-            thread_root: None,
-            message_seq: None,
+            ..Self::default()
         }
     }
 
@@ -105,7 +131,20 @@ impl<'a> ChatTarget<'a> {
         Self {
             chat_id,
             thread_root,
-            message_seq: None,
+            ..Self::default()
+        }
+    }
+
+    /// A turn inside `chat_id` that brings **its own** transcript: the desk's
+    /// recent history is not seeded onto it.
+    ///
+    /// The hive-mind episode's turn seam. See [`history_seed`](Self::history_seed).
+    pub fn deliberating(chat_id: Option<&'a str>, thread_root: Option<EventSeq>) -> Self {
+        Self {
+            chat_id,
+            thread_root,
+            history_seed: false,
+            ..Self::default()
         }
     }
 

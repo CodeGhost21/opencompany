@@ -508,6 +508,7 @@ mod test {
                 attachments: Vec::new(),
             },
             CompanyEvent::AgentReply {
+                audience: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
                 chat_id: "desk".into(),

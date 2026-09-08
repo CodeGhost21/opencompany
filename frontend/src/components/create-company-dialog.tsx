@@ -218,11 +218,8 @@ export function CreateCompanyDialog({
     setWallet("");
     setAuthMode("email");
     setPreflightFailed(false);
-    // Re-armed on every open, gated the same way the fetch effect below is:
-    // a client with no platform bearer never runs that fetch (its trigger
-    // is already disabled per `canCreateCompanies`), so nothing will ever
-    // resolve this — leaving it `true` would refuse every submit forever.
-    setPreflightPending(canCreateCompanies(client));
+    // Re-armed on every open, gated the same way the fetch effect below is.
+    setPreflightPending(client.carriesPlatformBearer);
     setPolicyMode(DEFAULT_POLICY_MODE);
     // Reset pre-seeds a fresh id rather than leaving this blank: the name
     // field above is pre-filled with the archived company's own name, and an
@@ -249,10 +246,11 @@ export function CreateCompanyDialog({
   // Read the host's sign-in mode on open, so the form asks for a wallet address
   // on a wallet-mode host and an admin email otherwise — and so a wallet-mode
   // refusal is caught in `submit` BEFORE the reset's archive leg, not after it.
-  // Only a platform bearer can reach the preflight; the triggers are already
-  // gated on that, so a client without one keeps the default email behaviour.
+  // Gated on the raw bearer, not `canCreateCompanies`: whether this client can
+  // reach the preflight route is independent of whether the product currently
+  // offers company creation at all.
   useEffect(() => {
-    if (!request || !canCreateCompanies(client)) return;
+    if (!request || !client.carriesPlatformBearer) return;
     let cancelled = false;
     client
       .provisioningInfo()

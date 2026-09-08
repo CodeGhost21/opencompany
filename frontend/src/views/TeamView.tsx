@@ -31,7 +31,12 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, missingRequired, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
-import { draftNewAgentField } from "@/api/agent-copilot";
+import {
+  designTeammate,
+  draftNewAgentField,
+  refusalNotice,
+  type DraftRefusal,
+} from "@/api/agent-copilot";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
@@ -43,11 +48,20 @@ import {
 } from "@/lib/member-feedback";
 import { usd } from "@/lib/money";
 import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
+import {
+  addTeammateSurface,
+  carriedDescribe,
+  describeBlocked as blockedReason,
+  designedTeammateFields,
+  heldFields,
+  type DesignedTeammateFields,
+} from "@/lib/team-add-surface";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { personName } from "@/lib/person";
 import { cn } from "@/lib/utils";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AgentFields } from "@/views/team/AgentFields";
+import { DescribeTeammate } from "@/views/team/DescribeTeammate";
 import { FieldCopilot } from "@/views/team/FieldCopilot";
 
 interface Props {
@@ -59,8 +73,17 @@ interface Props {
    * agent, refresh onto it, and use Back (issue #264).
    */
   sub: string | null;
-  /** Open an agent, or return to the roster with `null`. */
-  onOpenAgent: (agentId: string | null) => void;
+  /**
+   * Open an agent, or return to the roster with `null`.
+   *
+   * `edit` lands on `#/team/<id>?edit` — the detail page with its edit form
+   * already open (issue #1989). That flag is not a convenience: the reduced
+   * Add-teammate dialog collects a name and a sentence and nothing else, and
+   * the copilot that fills in the rest lives inside that form. Landing beside
+   * it rather than on the read-only profile is what makes the reduction a
+   * handoff instead of a subtraction.
+   */
+  onOpenAgent: (agentId: string | null, options?: { edit?: boolean }) => void;
   /**
    * Bumped when first-run setup staffs the company, so this view re-reads a
    * roster that now has people on it (`docs/spec/runtime/company-setup.md`).
@@ -321,7 +344,16 @@ export function TeamView({
   // above only to attribute the cap it still *displays* on the card via
   // `DailyBudgetLine`.
 
-  async function addMember(fields: AddMemberFields) {
+  /**
+   * Writes the teammate and answers whether the write landed (issue #1989).
+   *
+   * The boolean is what lets the dialog keep the operator's sentence and the
+   * design the host was paid for when this fails — it used to be called
+   * fire-and-forget and the dialog cleared itself regardless. `true` also
+   * covers the console-only fallback below: nothing reached a host, but the
+   * add is as complete as it is going to get and there is nothing to retry.
+   */
+  async function addMember(fields: AddMemberFields): Promise<boolean> {
     let created: TeamMemberDto | null = null;
     try {
       created = await client.addTeamMember(
@@ -349,10 +381,12 @@ export function TeamView({
           note: fields.inbox ? "No inbox was created." : undefined,
         });
         setAddOpen(false);
-        return;
+        return true;
       }
       reportAddMember(addMemberFailure(error));
-      return;
+      // The dialog keeps what it holds: this is the transient case, and a
+      // retry must not cost a second design pass.
+      return false;
     }
 
     const missed: MissedStep[] = [];
@@ -368,6 +402,24 @@ export function TeamView({
         });
       }
     }
+    // Issue #1989: the reduced dialog's write is only half of its flow. It
+    // collected a name and a sentence, so the description, the persona, the
+    // budget and the inbox are all still to be written — on the teammate's own
+    // page, where the copilot that drafts two of them lives.
+    //
+    // The redirect goes BEFORE the roster refetch on purpose. The operator is
+    // being taken off the roster, so blocking the handoff on a read of the list
+    // they are leaving delays it for nothing — and a read that failed would
+    // raise "the roster couldn't be read back" over a page the roster is not on,
+    // which is a sentence about a list nobody is looking at.
+    if (fields.landOnProfile) {
+      setAddOpen(false);
+      onOpenAgent(created.id, { edit: true });
+      reportAddMember(addOutcome(fields.name, missed));
+      // Still re-read, so the roster is current when Back returns to it.
+      void boot();
+      return true;
+    }
     // Persisted on the host — refetch so the card reflects the real record
     // (id, merge order, inbox state) rather than a locally-guessed one.
     if (!(await boot())) {
@@ -382,6 +434,7 @@ export function TeamView({
     // is the one being claimed about, so a read that could not confirm the
     // write must not be toasted over as though it had.
     reportAddMember(addOutcome(fields.name, missed));
+    return true;
   }
 
   async function removeMember(member: TeamMember) {
@@ -601,11 +654,25 @@ interface AddMemberFields {
    * sent. The host has accepted `instructions` at creation since #1530 and
    * `addTeamMember` has carried it since — this was the one link missing, so an
    * operator who wrote a persona in the add dialog watched it vanish.
+   *
+   * Since #1989 the reduced dialog fills it too, from the host's design pass —
+   * so a teammate created from one sentence is born with a persona rather than
+   * with an empty one and a promise that somebody will write it later.
    */
   instructions: string;
   inbox?: boolean;
   /** An optional daily cap. Undefined means "don't set one", never "$0". */
   budgetUsdDaily?: number;
+  /**
+   * Land on the new teammate's detail page with its edit form open, rather than
+   * staying on the roster (issue #1989).
+   *
+   * Set only by the reduced dialog, and it is that dialog's second half: it
+   * collects a name and a sentence, so the description, the instructions, the
+   * budget and the inbox are all still to be filled in — on the page this
+   * flag opens, beside the copilot that drafts two of them.
+   */
+  landOnProfile?: boolean;
 }
 
 function MemberCard({
@@ -928,7 +995,18 @@ function AddMemberDialog({
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
-  onAdd: (fields: AddMemberFields) => void;
+  /**
+   * Writes the teammate, answering whether the write landed.
+   *
+   * Awaited, and the dialog is cleared only on `true`. It used to be `void`
+   * and called fire-and-forget: `onAdd(...)` then `reset()` on the next line,
+   * while `POST {scope}/team` was still in flight. A 5xx or a dropped
+   * connection then left the dialog open, blank and enabled, having thrown
+   * away the operator's name, their sentence, and a design the company had
+   * already been charged a model call for. `false` keeps all three so Create
+   * can simply be pressed again.
+   */
+  onAdd: (fields: AddMemberFields) => boolean | Promise<boolean>;
   /** Whether to offer the cap field — setting one is admin-only on the host. */
   canSetBudget: boolean;
   /** For the copilot's draft call (issue #1776) — this dialog writes nothing. */
@@ -941,6 +1019,52 @@ function AddMemberDialog({
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft);
   const [inbox, setInbox] = useState(false);
   const [budget, setBudget] = useState("");
+  /** Everything the reduced dialog collects: a name and a sentence (issue #1989). */
+  const [described, setDescribed] = useState({ name: "", description: "" });
+  /**
+   * Whether a Create asked the host to design this teammate and got nothing
+   * back, which retires the reduced dialog for this open rather than writing a
+   * teammate the model could not finish.
+   */
+  const [designRefused, setDesignRefused] = useState<DraftRefusal | "unknown" | null>(null);
+  /** A design pass is in flight; the box is held and the button says so. */
+  const [designing, setDesigning] = useState(false);
+  /** The write is in flight. Create is held so one press cannot become two. */
+  const [creating, setCreating] = useState(false);
+  /**
+   * A design the host already returned for exactly what is in the box now.
+   *
+   * Kept so that a write which failed after a successful design can be retried
+   * without paying for a second model call. Cleared by `reset`, and ignored the
+   * moment the operator edits either field — a design belongs to the sentence
+   * it was written from, and reusing it against a different one would store an
+   * answer to a question nobody asked.
+   */
+  const heldDesign = useRef<{
+    name: string;
+    description: string;
+    fields: DesignedTeammateFields;
+  } | null>(null);
+  /**
+   * Which design request the operator is still waiting for. Bumped on every
+   * close and reset, so an answer for a dialog that has been shut cannot create
+   * a teammate nobody is waiting for — a design is a model call and takes
+   * seconds.
+   */
+  const attempt = useRef(0);
+  /**
+   * The design request currently in flight, so shutting the dialog can tear it
+   * down rather than only ignoring its answer.
+   *
+   * `attempt` alone was half the job. It makes a late answer harmless, which is
+   * the correctness half; it does nothing about the cost. A design pass runs a
+   * model for up to ninety seconds and is metered against the company's plan,
+   * and `close()` is reachable from four controls — Cancel, Escape, the
+   * backdrop and the header's close icon. Without this, walking away from the
+   * spinner left the host running a pass to completion, charging for it, and
+   * handing the result to a guard that drops it. See `designTeammate`.
+   */
+  const designAbort = useRef<AbortController | null>(null);
   /**
    * The cognition path this company booted onto (issue #1776), read while the
    * dialog is open so the copilot can say "no model is configured" rather than
@@ -949,6 +1073,12 @@ function AddMemberDialog({
    * `AgentDetailView` for why that is the right way to be wrong.
    */
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
+  /**
+   * Whether the host says a design pass can run for this company. `null` until
+   * the check settles, and on a host that does not report the capability —
+   * both read as "unknown", which the surface function treats as "offer it".
+   */
+  const [designsProfiles, setDesignsProfiles] = useState<boolean | null>(null);
   /**
    * The required fields still blank (issue #1776).
    *
@@ -959,15 +1089,85 @@ function AddMemberDialog({
    */
   const missing = missingRequired(draft);
 
+  /**
+   * Which of the two dialogs is on screen (issue #1989), decided in exactly one
+   * place because the wrong answer is silent in one direction: render the full
+   * form on a company whose copilot works and the dialog looks precisely as it
+   * always did, so nothing reports that the reduction never shipped.
+   */
+  const describing =
+    addTeammateSurface({
+      cognition,
+      designsProfiles,
+      designRefused: designRefused !== null,
+    }) === "describe";
+  /** Why the reduced dialog's Create is dead, or `null` when it is not. */
+  const describeBlocked = blockedReason(described);
+  /**
+   * Whether shutting the dialog right now would actually stop what it started.
+   *
+   * The rule the four exits all obey: **offer the way out only when taking it
+   * does something.** Two cases where it does not, and they fail differently:
+   *
+   * - **A write in flight.** `POST {scope}/team` is not cancellable at all.
+   *   Closing during it leaves the create running, and on success the parent
+   *   still toasts and navigates to the new teammate's page — pulling the
+   *   operator somewhere they just declined to go — while a reopen-and-submit
+   *   in the gap creates a second teammate.
+   * - **A design in flight on a transport that cannot cancel.** The desktop
+   *   app's `ProxyTransport` cannot abort an in-flight Tauri `invoke`
+   *   (`transport/types.ts`), so the pass runs to completion in the app's core
+   *   and is metered, and the abort only stops this side waiting. That is
+   *   exactly the spend the signal was added to save, dressed as a cancel.
+   *
+   * In both, the dialog holds itself open and keeps saying what it is doing.
+   * An honest wait beats a cancel that only looks like one.
+   */
+  const heldOpen = creating || (designing && !client.cancelsInFlightRequests);
+
+  /**
+   * Everything the dialog holds belongs to one company. Dropped if the scope
+   * ever changes under it.
+   *
+   * **A belt, not the fix.** `AppShell` is keyed `${connectionId}:${company}`
+   * (`ConnectionConsole.tsx`), so today a host or company switch remounts this
+   * whole subtree and there is no stale state to clear — this effect fires once
+   * on mount and does nothing. It is here because what it guards is not
+   * obvious from inside this file: `cognition` and `designsProfiles` are one
+   * company's answers and they *decide which form is on screen*, so a scope
+   * change that ever reconciled instead of remounting would leave the previous
+   * company's capability driving the surface, and the flip when the new read
+   * landed would take whatever had been typed with it.
+   *
+   * Cleared rather than carried, which is the opposite of what the
+   * cognition-settling flip does and deliberately so. There, the company is the
+   * same and the surface merely resolved late. A half-written teammate is
+   * addressed to the company it was written for, and carrying it across a
+   * switch would offer to create it somewhere the operator never described it.
+   */
+  useEffect(() => {
+    setCognition(null);
+    setDesignsProfiles(null);
+    reset();
+    // `reset` is stable enough for this: it only closes over setters and refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, company]);
+
   useEffect(() => {
     if (!open) return;
     let live = true;
     (async () => {
       try {
         const status = await getInferenceStatus(client, company);
-        if (live) setCognition(status.cognition);
+        if (live) {
+          setCognition(status.cognition);
+          setDesignsProfiles(status.designsProfiles ?? null);
+        }
       } catch {
-        if (live) setCognition(null);
+        if (live) {
+          setCognition(null);
+          setDesignsProfiles(null);
+        }
       }
     })();
     return () => {
@@ -975,10 +1175,68 @@ function AddMemberDialog({
     };
   }, [open, client, company]);
 
+  /**
+   * Moves the reduced dialog's two values into the full form when the surface
+   * flips under the operator.
+   *
+   * The flip nobody accounted for is a *late* cognition read: `/inference` is
+   * slow, `cognition` is `null`, the reduced dialog renders, the operator
+   * starts typing, and the answer comes back `echo` and swaps the form. The two
+   * dialogs hold separate state, so without this the name and the sentence are
+   * simply gone. `carriedDescribe` decides what to carry and refuses to
+   * overwrite anything already typed into the form, which makes this idempotent
+   * across re-renders and harmless on the hand-over path, where `handOver` has
+   * already carried the same two values.
+   */
+  useEffect(() => {
+    if (describing) return;
+    // A design belongs to the reduced dialog. Once the full form is on screen
+    // the operator is writing the fields by hand, so an answer still in flight
+    // can only create a teammate nobody is waiting for — and, worse, a *second*
+    // one beside the manual create they are about to make. Retired here rather
+    // than guarded at the far end, because the guard is what was missing:
+    // `submit`'s full-form branch never looked at `designing`, so both writes
+    // could be in flight at once.
+    attempt.current += 1;
+    designAbort.current?.abort();
+    designAbort.current = null;
+    setDesigning(false);
+    setDraft((d) => {
+      const carried = carriedDescribe(described, d);
+      return carried ? { ...d, ...carried } : d;
+    });
+  }, [describing, described]);
+
+  /**
+   * A design in flight when this unmounts is one nobody can be shown, so it is
+   * torn down here as well as in `reset` — a route change out of the roster
+   * closes the dialog without going through either.
+   */
+  useEffect(() => {
+    return () => {
+      designAbort.current?.abort();
+      designAbort.current = null;
+    };
+  }, []);
+
   function reset() {
     setDraft(emptyDraft());
     setInbox(false);
     setBudget("");
+    setDescribed({ name: "", description: "" });
+    // The hand-over lasts for one open, not for the session: the next add
+    // starts from the reduced dialog again, because the sentence the host could
+    // not design from is gone with it.
+    setDesignRefused(null);
+    setDesigning(false);
+    setCreating(false);
+    heldDesign.current = null;
+    // Abandons any design still in flight, so its answer cannot create a
+    // teammate into a dialog that has been reset under it — and tears the
+    // request down, so the host stops paying for one nobody is waiting for.
+    attempt.current += 1;
+    designAbort.current?.abort();
+    designAbort.current = null;
   }
 
   const parsedBudget = Number(budget);
@@ -990,108 +1248,302 @@ function AddMemberDialog({
       : undefined;
   const budgetInvalid = budget.trim() !== "" && budgetUsdDaily === undefined;
 
-  function submit() {
-    if (!draft.name.trim() || !draft.role.trim() || budgetInvalid) return;
-    onAdd({
-      name: draft.name,
-      role: draft.role,
-      description: draft.description,
-      instructions: draft.instructions,
-      inbox,
-      budgetUsdDaily,
-    });
+  /**
+   * Shut the dialog and clear it, whichever control did the shutting.
+   *
+   * One function because the reset MUST NOT hang off Radix's `onOpenChange`
+   * alone. Cancel used to call the raw `onOpenChange(false)` prop, which closes
+   * the dialog without going through the wrapper that resets — so Escape and
+   * the overlay cleared the form and Cancel did not. Invisible until the dialog
+   * had a second shape: one hand-over to the full form, cancelled rather than
+   * escaped, left the hand-over state (`designRefused`) set and so retired the
+   * reduced dialog for the rest of the page's life, still carrying the
+   * abandoned attempt's text. The `reset` below promises "the hand-over lasts
+   * for one open"; only this makes that true.
+   */
+  function close() {
+    // Every exit lands here — Cancel, Escape, the backdrop, the header's close
+    // icon — so the one place that can refuse them all is this one.
+    if (heldOpen) return;
+    onOpenChange(false);
     reset();
+  }
+
+  /**
+   * Hands the operator the full form, carrying what they typed, because the
+   * host could not design this teammate. Nothing has been written.
+   */
+  function handOver(reason: DraftRefusal | "unknown") {
+    setDraft((d) => ({
+      ...d,
+      name: described.name.trim(),
+      description: described.description.trim(),
+    }));
+    setDesignRefused(reason);
+    setDesigning(false);
+  }
+
+  async function submit() {
+    if (creating || designing) return;
+    if (describing) {
+      if (blockedReason(described)) return;
+      const mine = attempt.current;
+      // A design already paid for, for exactly this name and sentence. Only a
+      // retry after a failed write can find one here.
+      let fields = heldFields(heldDesign.current, described);
+      if (!fields) {
+        const controller = new AbortController();
+        designAbort.current = controller;
+        setDesigning(true);
+        let design;
+        try {
+          design = await designTeammate(client, company, described, controller.signal);
+        } catch {
+          // Transport, auth or not-found — not one of the four design
+          // refusals, which arrive as a 200. Same move for the operator either
+          // way. An abort lands here too, and is filtered by the guard below
+          // rather than named: the dialog it belonged to is already closed and
+          // reset.
+          if (attempt.current === mine) handOver("unknown");
+          return;
+        }
+        if (attempt.current !== mine) return;
+        fields = designedTeammateFields(described, design);
+        if (!fields) {
+          handOver(design.reason ?? "unknown");
+          return;
+        }
+        heldDesign.current = {
+          name: described.name.trim(),
+          description: described.description.trim(),
+          fields,
+        };
+      }
+      setDesigning(false);
+      // `finally`, because `creating` is what holds the dialog shut: a parent
+      // that rejected rather than answering `false` would otherwise trap the
+      // operator in a dialog with every exit disabled. All three parents catch
+      // their own errors today; this is the guard on that staying true.
+      setCreating(true);
+      let landed: boolean;
+      try {
+        landed = await onAdd({ ...fields, landOnProfile: true });
+      } catch {
+        // A parent that rejected rather than answering. Read as "did not
+        // land", which keeps the sentence and the design for a retry — and
+        // caught rather than left to escape, because `submit` is invoked as
+        // `void submit()` and an escaping rejection is an unhandled one.
+        landed = false;
+      } finally {
+        if (attempt.current === mine) setCreating(false);
+      }
+      if (attempt.current !== mine) return;
+      // Only on a write that landed. A failure keeps the box, the name and the
+      // design, so Create is a retry rather than a re-ask.
+      if (landed) reset();
+      return;
+    }
+    if (!draft.name.trim() || !draft.role.trim() || budgetInvalid) return;
+    setCreating(true);
+    let landed: boolean;
+    try {
+      landed = await onAdd({
+        name: draft.name,
+        role: draft.role,
+        description: draft.description,
+        instructions: draft.instructions,
+        inbox,
+        budgetUsdDaily,
+      });
+    } catch {
+      landed = false;
+    } finally {
+      setCreating(false);
+    }
+    if (landed) reset();
   }
 
   return (
     <Dialog
       open={open}
       onOpenChange={(o) => {
+        if (!o) return close();
         onOpenChange(o);
-        if (!o) reset();
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      {/* The icon goes away rather than going dead while the dialog is held:
+          a control that is present and does nothing reads as a broken dialog,
+          where its absence beside "Adding…" reads as "wait". */}
+      <DialogContent className="sm:max-w-md" showCloseButton={!heldOpen}>
         <DialogHeader>
           <DialogTitle>Add teammate</DialogTitle>
-          <DialogDescription>Add a teammate to your company&apos;s roster.</DialogDescription>
+          <DialogDescription>
+            {describing
+              ? "Name them and say what they should do. You can fill in the rest on their profile."
+              : "Add a teammate to your company's roster."}
+          </DialogDescription>
         </DialogHeader>
-        <AgentFields
-          idPrefix="member"
-          draft={draft}
-          onChange={(key: AgentFieldKey, value) => setDraft((d) => ({ ...d, [key]: value }))}
-          copilot={(key) =>
-            key === "description" || key === "instructions" ? (
-              <FieldCopilot
-                field={key}
-                // No id to address — this teammate does not exist yet — so the
-                // fields being typed ride the request. Everything else the
-                // draft is grounded in still comes from the record host-side.
-                onTurn={(conversation) =>
-                  draftNewAgentField(client, company, key, conversation, {
-                    role: draft.role,
-                    name: draft.name,
-                    description: draft.description,
-                    instructions: draft.instructions,
-                  })
-                }
-                onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
-                // A draft is written FROM the role, so there is nothing to
-                // write one from until it is filled in — the same rule the
-                // host enforces, said here before the operator meets it as a
-                // refusal.
-                disabled={!draft.role.trim() || cognition === "echo"}
-                disabledNotice={
-                  cognition === "echo"
-                    ? "No model is configured, so the copilot can't draft yet."
-                    : !draft.role.trim()
-                      ? "Give this teammate a role first — the copilot drafts from it."
-                      : undefined
-                }
-              />
-            ) : null
-          }
-        />
-        {canSetBudget && (
-          <div className="grid gap-2">
-            <Label htmlFor="member-budget-new">Daily budget (optional)</Label>
-            <Input
-              id="member-budget-new"
-              type="number"
-              min={0}
-              step="0.01"
-              inputMode="decimal"
-              value={budget}
-              onChange={(e) => setBudget(e.target.value)}
-              placeholder="e.g. 5.00 — leave blank for no cap"
-              data-testid="team-add-budget"
+        {describing ? (
+          <DescribeTeammate
+            idPrefix="member"
+            name={described.name}
+            description={described.description}
+            // Both waits, not just the design one. `submit` captured these
+            // values when Create was pressed, so an edit made while the button
+            // says "Adding…" is already not in the request — and a write that
+            // lands then resets or navigates and takes the edit with it. Held
+            // for the same reason the exits are: the dialog should not accept
+            // input it is going to discard.
+            disabled={designing || creating}
+            onNameChange={(name) => setDescribed((d) => ({ ...d, name }))}
+            onDescriptionChange={(description) =>
+              setDescribed((d) => ({ ...d, description }))
+            }
+          />
+        ) : (
+          <>
+            {/* Said only when the full form arrived by hand-over, so the
+                operator knows why the dialog changed under them rather than
+                meeting a different form with no explanation. Never shown on the
+                no-model path, where this form is simply what the dialog is. */}
+            {designRefused && (
+              <p className="text-2xs text-muted-foreground" data-testid="team-add-handover">
+                {/* The host's own reason: "set up a model", "try again", "say
+                    more" and "wait for the period to reset" are four different
+                    next moves, and one line covering all four could only be too
+                    vague to act on. */}
+                {refusalNotice(designRefused === "unknown" ? undefined : designRefused)}
+              </p>
+            )}
+            <AgentFields
+              idPrefix="member"
+              draft={draft}
+              // The write has already captured these; an edit made while the
+              // button says "Adding…" is one the form is about to discard.
+              busy={creating || designing}
+              onChange={(key: AgentFieldKey, value) =>
+                setDraft((d) => ({ ...d, [key]: value }))
+              }
+              copilot={(key) =>
+                key === "description" || key === "instructions" ? (
+                  <FieldCopilot
+                    field={key}
+                    // No id to address — this teammate does not exist yet — so
+                    // the fields being typed ride the request. Everything else
+                    // the draft is grounded in still comes from the record
+                    // host-side.
+                    onTurn={(conversation) =>
+                      draftNewAgentField(client, company, key, conversation, {
+                        role: draft.role,
+                        name: draft.name,
+                        description: draft.description,
+                        instructions: draft.instructions,
+                      })
+                    }
+                    onAccept={(text) => setDraft((d) => ({ ...d, [key]: text }))}
+                    // A draft is written FROM the role, so there is nothing to
+                    // write one from until it is filled in — the same rule the
+                    // host enforces, said here before the operator meets it as
+                    // a refusal.
+                    // `creating`/`designing` beside the two standing
+                    // reasons: a form mid-submit has already captured its
+                    // payload, so a draft accepted now is one the request did
+                    // not carry and the reset after a successful write
+                    // discards. No notice for that case — the button says
+                    // "Adding…" a few pixels away, which is the explanation.
+                    disabled={
+                      !draft.role.trim() || cognition === "echo" || creating || designing
+                    }
+                    disabledNotice={
+                      cognition === "echo"
+                        ? "No model is configured, so the copilot can't draft yet."
+                        : !draft.role.trim()
+                          ? "Give this teammate a role first — the copilot drafts from it."
+                          : undefined
+                    }
+                  />
+                ) : null
+              }
             />
-          </div>
+            {canSetBudget && (
+              <div className="grid gap-2">
+                <Label htmlFor="member-budget-new">Daily budget (optional)</Label>
+                <Input
+                  id="member-budget-new"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  inputMode="decimal"
+                  value={budget}
+                  onChange={(e) => setBudget(e.target.value)}
+                  disabled={creating || designing}
+                  placeholder="e.g. 5.00 — leave blank for no cap"
+                  data-testid="team-add-budget"
+                />
+              </div>
+            )}
+            <label className="flex items-center justify-between rounded-lg border p-3">
+              <span className="flex items-center gap-2 text-sm">
+                <Mail className="size-4 text-muted-foreground" /> Give this teammate an inbox
+              </span>
+              <Switch
+                checked={inbox}
+                onCheckedChange={setInbox}
+                disabled={creating || designing}
+                aria-label="Give this teammate an inbox"
+              />
+            </label>
+          </>
         )}
-        <label className="flex items-center justify-between rounded-lg border p-3">
-          <span className="flex items-center gap-2 text-sm">
-            <Mail className="size-4 text-muted-foreground" /> Give this teammate an inbox
-          </span>
-          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this teammate an inbox" />
-        </label>
         <DialogFooter className="items-center">
           {/* Why the button is dead, next to the button (issue #1776) — the
               same answer the edit form gives, from the same definition, so the
-              two forms cannot come to disagree about what a teammate needs. */}
-          {missing.length > 0 && (
-            <p className="mr-auto text-2xs text-muted-foreground" data-testid="team-add-blocked">
-              {missing.map((field) => field.label).join(" and ")}{" "}
-              {missing.length > 1 ? "are" : "is"} required.
-            </p>
-          )}
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              two forms cannot come to disagree about what a teammate needs.
+              The reduced dialog asks for two things, so it answers for those
+              two rather than from `AGENT_FIELDS`, which describes fields it
+              does not render. */}
+          {describing
+            ? describeBlocked && (
+                <p
+                  className="mr-auto text-2xs text-muted-foreground"
+                  data-testid="team-add-blocked"
+                >
+                  {describeBlocked}
+                </p>
+              )
+            : missing.length > 0 && (
+                <p
+                  className="mr-auto text-2xs text-muted-foreground"
+                  data-testid="team-add-blocked"
+                >
+                  {missing.map((field) => field.label).join(" and ")}{" "}
+                  {missing.length > 1 ? "are" : "is"} required.
+                </p>
+              )}
+          {/* Live whenever leaving would actually stop something — which on a
+              cancellable transport includes the whole "Designing…" wait, and
+              never includes the write. It used to be disabled while `designing`
+              while Escape, the backdrop and the close icon stayed live, so the
+              one control that said what it would do was the one that would not
+              do it. All four take this exit now, and `heldOpen` is the single
+              place that decides whether the exit exists. */}
+          <Button variant="ghost" onClick={close} disabled={heldOpen}>
             Cancel
           </Button>
           <Button
-            onClick={submit}
-            disabled={missing.length > 0 || budgetInvalid}
+            onClick={() => void submit()}
+            disabled={
+              describing
+                ? Boolean(describeBlocked) || designing || creating
+                : missing.length > 0 || budgetInvalid || creating || designing
+            }
           >
-            Add teammate
+            {/* Says what is happening, because both halves take time: the host
+                runs a model over the sentence to write the role, the mandate
+                and the persona, and only then is the teammate written. Two
+                labels rather than one, because they are two waits and only the
+                first is a model call the operator may want to walk away from. */}
+            {designing ? "Designing…" : creating ? "Adding…" : "Add teammate"}
           </Button>
         </DialogFooter>
       </DialogContent>

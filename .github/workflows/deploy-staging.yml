@@ -125,9 +125,18 @@ jobs:
       # Recursing from the repo root instead would also drag in openhuman's
       # desktop-only submodules (tauri-cef is a heavy CEF checkout) that no
       # server build compiles.
+      #
+      # `vendor/tinyhivemind` is also required here even though it is a
+      # top-level submodule, not one nested under `vendor/openhuman`:
+      # `tinyhivemind-hive` is an unconditional path dependency in `Cargo.toml`
+      # (`vendor/tinyhivemind/crates/tinyhivemind-hive`), so Cargo must read its
+      # manifest to resolve the dependency graph on every build, feature-gated
+      # or not. `ci.yml`'s jobs get this for free from `submodules: true` on
+      # their checkout; this job uses `submodules: false` and fetches
+      # everything it needs explicitly, so it must fetch this one too.
       - name: Fetch build vendor submodules
         run: |
-          git submodule update --init vendor/openhuman
+          git submodule update --init vendor/openhuman vendor/tinyhivemind
           scripts/ci/init-vendored-submodules.sh
 
       - name: Configure AWS credentials
@@ -218,17 +227,38 @@ jobs:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Add server to known hosts
-        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
       - name: Point the manager at the new tenant image
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
+          K8S_NAMESPACE: ${{ env.K8S_NAMESPACE }}
+          MANAGER_DEPLOY: ${{ env.MANAGER_DEPLOY }}
+          TENANT_IMAGE_CM: ${{ env.TENANT_IMAGE_CM }}
           REFRESH_ALL: ${{ inputs.refresh_all_tenants }}
         run: |
-          ssh root@${SSH_HOST} \
-            "IMAGE='${IMAGE}' K8S_NAMESPACE='${{ env.K8S_NAMESPACE }}' MANAGER_DEPLOY='${{ env.MANAGER_DEPLOY }}' TENANT_IMAGE_CM='${{ env.TENANT_IMAGE_CM }}' REFRESH_ALL='${REFRESH_ALL:-false}' bash -s" << 'EOF'
+          REFRESH_ALL="${REFRESH_ALL:-false}"
+          IMAGE_B64=$(printf '%s' "$IMAGE" | base64 | tr -d '\n')
+          K8S_NAMESPACE_B64=$(printf '%s' "$K8S_NAMESPACE" | base64 | tr -d '\n')
+          MANAGER_DEPLOY_B64=$(printf '%s' "$MANAGER_DEPLOY" | base64 | tr -d '\n')
+          TENANT_IMAGE_CM_B64=$(printf '%s' "$TENANT_IMAGE_CM" | base64 | tr -d '\n')
+          REFRESH_ALL_B64=$(printf '%s' "$REFRESH_ALL" | base64 | tr -d '\n')
+          {
+            printf 'IMAGE_B64=%s\n' "$IMAGE_B64"
+            printf 'K8S_NAMESPACE_B64=%s\n' "$K8S_NAMESPACE_B64"
+            printf 'MANAGER_DEPLOY_B64=%s\n' "$MANAGER_DEPLOY_B64"
+            printf 'TENANT_IMAGE_CM_B64=%s\n' "$TENANT_IMAGE_CM_B64"
+            printf 'REFRESH_ALL_B64=%s\n' "$REFRESH_ALL_B64"
+            cat <<'EOF'
           set -euo pipefail
+          IMAGE=$(printf '%s' "$IMAGE_B64" | base64 -d)
+          K8S_NAMESPACE=$(printf '%s' "$K8S_NAMESPACE_B64" | base64 -d)
+          MANAGER_DEPLOY=$(printf '%s' "$MANAGER_DEPLOY_B64" | base64 -d)
+          TENANT_IMAGE_CM=$(printf '%s' "$TENANT_IMAGE_CM_B64" | base64 -d)
+          REFRESH_ALL=$(printf '%s' "$REFRESH_ALL_B64" | base64 -d)
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
           # The manager namespace's ecr-creds Secret expires after 12h and is
@@ -502,3 +532,4 @@ jobs:
               -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}fleet tenant image (env, authoritative)={.value}{"\n"}{end}'
           fi
           EOF
+          } | ssh root@"${SSH_HOST}" bash -s

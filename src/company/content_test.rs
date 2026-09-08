@@ -131,15 +131,24 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// `e2e_setup` are deterministic fixtures (a priced network call would make them
 /// non-hermetic and flaky), `openhuman_demo` is a walkthrough nobody opted
 /// into spend for, and `agentic_math_lab` is denied for a reason of its own —
-/// its whole claim is that it *computes* an exact answer, and a lab that can
+/// its whole claim (and `hive_math_lab`'s, the same lab on one deliberating desk) is that it *computes* an exact answer, and a lab that can
 /// search can look one up. A run that looked the answer up passes the lab's
 /// end-to-end spec while proving nothing about whether the roster can solve
 /// anything, so withholding the network is what makes the number evidence.
-const SEARCH_DENIED_COMPANIES: [&str; 4] = [
+///
+/// `vending_machine_co` is denied on a variant of the same argument. Every fact
+/// that bundle reasons from — what is on a shelf, what a line costs today, which
+/// host site is unhappy — is a tool call against its own simulated operation, and
+/// a desk that could reach the web would answer about vending machines in general
+/// instead of about these eight. Withholding the network is what makes a decision
+/// there attributable to the fleet it was made about.
+const SEARCH_DENIED_COMPANIES: [&str; 6] = [
     "agentic_math_lab",
+    "hive_math_lab",
     "e2e_harness",
     "e2e_setup",
     "openhuman_demo",
+    "vending_machine_co",
 ];
 
 /// Templates that simply do not grant `search` today. Unlike
@@ -1317,7 +1326,7 @@ fn every_company_ledger_can_be_closed_and_says_why() {
 /// "the board is empty because this vertical has no setup work" and "the board
 /// is empty because whoever added this bundle forgot" are indistinguishable
 /// afterwards.
-const SETUP_SEEDED_COMPANIES: [&str; 22] = [
+const SETUP_SEEDED_COMPANIES: [&str; 24] = [
     "agentic_accounting_firm",
     "agentic_consultation_firm",
     "agentic_customer_support",
@@ -1338,8 +1347,10 @@ const SETUP_SEEDED_COMPANIES: [&str; 22] = [
     "agentic_software_company",
     "agentic_venture_capital",
     "agentic_venture_studio",
+    "hive_math_lab",
     "signals_opportunity_studio",
     "startup_accelerator",
+    "vending_machine_co",
 ];
 
 /// The bundles that deliberately ship neither, because they are fixtures.

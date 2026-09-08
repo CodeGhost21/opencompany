@@ -140,6 +140,43 @@ export function adoptSessionIntoCore(id: string, session: string): Promise<void>
 }
 
 /**
+ * Drops this machine's stored session for a connection — the sign-out leg of
+ * {@link adoptSessionIntoCore}.
+ *
+ * Local only, and deliberately so: the host's own session record is revoked by
+ * `auth/logout` before this runs, and `oc_forget_device` is documented as not
+ * touching it. Signing out on this machine must not reach into another one.
+ *
+ * Sequenced behind whatever is parked under this id for the same reason the
+ * adoption is: a forget that overtook an in-flight `oc_connect` would be undone
+ * by the registration landing after it, leaving the keychain holding a session
+ * the person has already signed out of.
+ *
+ * Rejects on failure rather than swallowing it, again like the adoption: a
+ * credential that could not be cleared is something the person signing out has
+ * to be told about, not a surprise sign-in on the next launch. The parked
+ * promise is the settled-either-way one so nothing resurfaces.
+ */
+export function forgetSessionInCore(id: string): Promise<void> {
+  const desktop = tauriCore();
+  if (!desktop) return Promise.resolve();
+  const previous = registrations.get(id) ?? Promise.resolve();
+  const forgotten = previous.then(() =>
+    desktop.invoke<void>("oc_forget_device", { connectionId: id }),
+  );
+  registrations.set(
+    id,
+    forgotten.then(
+      () => undefined,
+      (error: unknown) => {
+        console.error(`[desktop] could not forget the session for ${id}`, error);
+      },
+    ),
+  );
+  return forgotten;
+}
+
+/**
  * Drops a host from the core.
  *
  * Sequenced after any registration still in flight. This and

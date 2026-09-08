@@ -1956,8 +1956,9 @@ struct ChatMessage {
     /// those ids here. The host re-resolves each within this company's own
     /// workspace and takes the name / mime / size from the store — so a foreign
     /// or spoofed reference cannot cross a company boundary or misdescribe its
-    /// payload (see `resolve_attachments`). An id that resolves to no binary
-    /// node in this company is a `400`.
+    /// payload (see `resolve_attachments`). Any file in the tree may be
+    /// attached, however it was written; an id naming a folder, or naming
+    /// nothing in this company, is a `400`.
     ///
     /// Additive in both directions: this struct has no `deny_unknown_fields`,
     /// so a newer console against an older host has its ids ignored and its
@@ -2539,24 +2540,38 @@ async fn resolve_attachments(
     let tree = runtime.workspace().tree(id).await?;
     let mut resolved = Vec::with_capacity(node_ids.len());
     for node_id in node_ids {
-        let node = tree
-            .iter()
-            .find(|n| &n.id == node_id && n.is_binary())
-            .ok_or_else(|| {
-                ApiError(OpenCompanyError::InvalidRequest(format!(
-                    "attachment {node_id} is not a file in this company's workspace"
-                )))
-            })?;
-        let extracted_text = extracted_attachment_text(runtime, id, node).await;
+        let node = tree.iter().find(|n| &n.id == node_id).ok_or_else(|| {
+            ApiError(OpenCompanyError::InvalidRequest(format!(
+                "attachment {node_id} is not in this company's workspace"
+            )))
+        })?;
+        if node.kind != crate::ports::workspace::NodeKind::File {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "attachment {node_id} is a folder, not a file"
+            ))));
+        }
+        let (mime, size, extracted_text) = if node.is_binary() {
+            (
+                node.mime.clone().unwrap_or_default(),
+                node.size.unwrap_or(0),
+                extracted_attachment_text(runtime, id, node).await,
+            )
+        } else {
+            let (content, size) = note_within_extract_cap(runtime, id, &node.id).await;
+            (
+                mime_guess::from_path(&node.name)
+                    .first_raw()
+                    .unwrap_or("text/plain")
+                    .to_string(),
+                size,
+                extracted_note_text(&content),
+            )
+        };
         resolved.push(Attachment {
             node_id: node.id.clone(),
             name: node.name.clone(),
-            // A binary node always carries both — `is_binary()` is exactly
-            // `mime.is_some()`, and the store computes `size` alongside it —
-            // so the defaults are unreachable and exist only to keep this
-            // total without an `unwrap` a later store change could break.
-            mime: node.mime.clone().unwrap_or_default(),
-            size: node.size.unwrap_or(0),
+            mime,
+            size,
             extracted_text,
         });
     }
@@ -2591,6 +2606,47 @@ const MAX_ATTACHMENT_EXTRACT_BYTES: u64 = 4 * 1024 * 1024;
 /// carries the operator's own words too, so no single attachment may be free
 /// to crowd out the rest of the turn.
 const MAX_ATTACHMENT_EXTRACT_CHARS: usize = 6_000;
+
+/// One prose node's byte length, and its body only while that length stays
+/// within [`MAX_ATTACHMENT_EXTRACT_BYTES`].
+///
+/// [`WorkspaceStore::read_capped`](crate::ports::workspace::WorkspaceStore::read_capped)
+/// rather than a read and a length check, so the ceiling holds where the binary
+/// path's does — before the transfer, not after it. A plain `read` would
+/// materialise the whole note to discover it must be discarded, and a message
+/// may carry [`MAX_CHAT_ATTACHMENTS`] of them.
+///
+/// Best-effort on the same terms as [`extracted_attachment_text`]: a read that
+/// races a delete or hits a transient store error leaves the reference itself
+/// intact rather than failing the send. The size is then `0`, which is what the
+/// caller can honestly say about a body it could not measure.
+async fn note_within_extract_cap(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    node_id: &str,
+) -> (String, u64) {
+    runtime
+        .workspace()
+        .read_capped(id, node_id, MAX_ATTACHMENT_EXTRACT_BYTES)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, body, len)| (body, len))
+        .unwrap_or_default()
+}
+
+/// A prose attachment's text for the brain, `None` when there is none to carry
+/// — an empty note, or one the store withheld for weighing more than the
+/// extraction cap.
+fn extracted_note_text(content: &str) -> Option<String> {
+    if content.is_empty() {
+        return None;
+    }
+    Some(crate::ledger::budget::truncate(
+        content,
+        MAX_ATTACHMENT_EXTRACT_CHARS,
+    ))
+}
 
 /// Reads and extracts one binary node's text where the format and size allow
 /// it, `None` otherwise (issue #1682, codex review finding).
@@ -3389,6 +3445,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // bubble. `err.0` is the inner error (it carries `Display`);
                 // the `ApiError` newtype does not.
                 let notice = CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Issue #1890 D: threaded on exactly the terms a successful
                     // reply is. This notice IS the answer when there is no
                     // other one, and `reply_thread`'s whole argument is that
@@ -3499,6 +3556,19 @@ pub(crate) async fn journal_chat_replies(
     // made against a bubble the operator can still see names something every
     // other reader can resolve.
     for response in &mut report.responses {
+        // A response that already carries a durable id was journaled by its
+        // producer, not by this loop — a hive desk episode journals its own
+        // turns and closing report directly (`EpisodeDriver::report`) and
+        // hands the report's own sequence back on the bubble precisely so
+        // this generic journal-on-return path does not write it a second
+        // time under a different sequence. `OutboundMessage::message_id` is
+        // documented as "stamped by the chat route after journaling, not
+        // produced by a brain" for every other producer, which is exactly
+        // what makes its presence here a reliable "already durable" signal
+        // rather than something a brain sets for itself.
+        if response.message_id.is_some() {
+            continue;
+        }
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
@@ -3521,6 +3591,7 @@ pub(crate) async fn journal_chat_replies(
             .append(
                 id,
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     // Who this reply names. Rendered as chips and — unlike an
                     // operator message's — never consulted by dispatch, which
                     // is the mention-loop fuse.
@@ -8386,6 +8457,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8403,6 +8475,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8461,6 +8534,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -8561,6 +8635,7 @@ mode = "full"
                 .append(
                     runtime.id(),
                     CompanyEvent::AgentReply {
+                        audience: Vec::new(),
                         mentions: Vec::new(),
                         mention_depth: 0,
                         parent: None,
@@ -8656,6 +8731,7 @@ mode = "full"
                     .append(
                         runtime.id(),
                         CompanyEvent::AgentReply {
+                            audience: Vec::new(),
                             mentions: Vec::new(),
                             mention_depth: 0,
                             parent: None,
@@ -8707,6 +8783,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -9287,6 +9364,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     parent: None,
@@ -11827,6 +11905,7 @@ mode = "full"
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -11861,6 +11940,7 @@ mode = "full"
     fn projects_agent_reply_with_viewer_mention_metadata() {
         use crate::ports::types::{Mention, MentionTarget};
         let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: vec![
                 Mention {
                     target: MentionTarget::User { id: "u-1".into() },
@@ -11903,6 +11983,7 @@ mode = "full"
     #[test]
     fn drops_owner_fallback_report_from_a_non_admin_viewer() {
         let event = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -11951,6 +12032,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_with_its_thread_parent() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: Some(EventSeq::new(4)),
@@ -12130,6 +12212,7 @@ mode = "full"
     #[test]
     fn projects_agent_reply_omits_empty_steps() {
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -12154,6 +12237,7 @@ mode = "full"
     #[test]
     fn projects_task_id_only_when_the_event_is_correlated() {
         let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -14523,6 +14607,7 @@ mode = "full"
             .unwrap();
 
         let owner_fallback_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -14540,6 +14625,7 @@ mode = "full"
         );
 
         let ordinary_item = EventStreamItem::Event(stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
             mentions: Vec::new(),
             mention_depth: 0,
             parent: None,
@@ -14850,6 +14936,7 @@ mode = "full"
             .append(
                 runtime.id(),
                 crate::ports::types::CompanyEvent::AgentReply {
+                    audience: Vec::new(),
                     chat_id: "strategy".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "Here is the draft.".to_string(),

@@ -3,6 +3,7 @@ import {
   Compass,
   Flag,
   Globe,
+  LogOut,
   Pause,
   Play,
   Power,
@@ -13,6 +14,7 @@ import {
 import { toast } from "sonner";
 
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
+import { fetchAuthConfig, logout, me as fetchMe, type Me } from "@/api/auth";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
@@ -46,9 +48,13 @@ import type { CompanyFeed } from "@/hooks/use-company";
 import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
+import { useCanManage, useCanManagePolicy } from "@/hooks/use-can-manage";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { forgetSession } from "@/connections/registry";
+import type { ConnectionId } from "@/connections/types";
 import { lifecycleAffordances } from "@/lib/lifecycle-controls";
 import { canCreateCompanies } from "@/components/create-company-dialog";
+import { personName } from "@/lib/person";
 
 interface Props {
   client: OpenCompanyClient;
@@ -77,6 +83,15 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
   const scope = useLocalScope();
   const { status } = feed;
   const scoped = company ?? client.defaultCompany;
+  // Domain/SMTP are `AdminScopedCompany`, which admits the platform bearer;
+  // Policy is `require_admin` off the request headers, which does not — so
+  // it needs its own narrower gate rather than sharing this one. Neither is
+  // passed to Lifecycle: `pause` and `resume` take `CompanyAuth` and never ask
+  // for a role, so a member's Pause genuinely stops the company. Hiding it
+  // here would make this page lie in the other direction — the missing guard is
+  // the host's to add, and this gate should follow it rather than lead it.
+  const canManage = useCanManage(client, company);
+  const canManagePolicy = useCanManagePolicy(client, company);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -92,8 +107,8 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
         rule — and the rail says "Settings", which is the section, while this
         says "General settings", which is the page.
       */}
-      <PageHeader title="General settings" width="3xl" />
-      <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <PageHeader title="General settings" width="full" />
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* Device pairing was here. Sessions are the frontend client's own
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}
@@ -106,7 +121,7 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
             because they are drowning in approval cards is here for this. */}
-        <PolicySettings client={client} company={company} />
+        <PolicySettings client={client} company={company} canManage={canManagePolicy} />
 
         {/* Connection */}
         <Card>
@@ -147,6 +162,15 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
           </CardContent>
         </Card>
 
+        {/* Account.
+
+            Beside Connection on purpose: that card says where this console is
+            pointed, and this one says who it is pointed as. Signing out is the
+            one control on this page that ends the session rather than changing
+            the company, so it sits with the identity it ends rather than among
+            the company controls below. */}
+        <AccountCard client={client} company={company} connectionId={scope.connection} />
+
         <MemoryEngineCard client={client} company={company} />
 
         {/* Lifecycle */}
@@ -179,7 +203,12 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
             remount a company switch would carry a credential typed for one
             company into another company's Save. `SettingsSection` remounts
             `BillingView`/`HostingView` for exactly this reason. */}
-        <DomainSettings key={company ?? "self"} client={client} company={company} />
+        <DomainSettings
+          key={company ?? "self"}
+          client={client}
+          company={company}
+          canManage={canManage}
+        />
 
         {/* Appearance.
 
@@ -452,6 +481,132 @@ function ConfirmAction({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+/**
+ * Who this console is signed in as, and the way to stop being them.
+ *
+ * Renders nothing at all on a company with no sign-in (`mode: "none"` — the
+ * desktop's default, where the principal is resolved from the request rather
+ * than from a session). There is genuinely no account there: `auth/logout`
+ * refuses with `auth_mode`, and there would be no sign-in screen to land on
+ * afterwards. A card that named a local owner and offered a button whose only
+ * outcome is an error would be worse than the silence.
+ *
+ * Renders nothing while `me` is still in flight or has 401'd either, for the
+ * same reason `ProfileRow` does: a card whose whole content is an identity has
+ * nothing to say without one.
+ *
+ * Exported for the same reason `LifecycleControls` is: rendering the whole
+ * `SettingsView` to assert on one card would drag in
+ * `ExternalHarnesses`/`PolicySettings`/`DomainSettings` and every route they
+ * fetch, none of which this behaviour touches (`settings-sign-out.test.ts`).
+ */
+export function AccountCard({
+  client,
+  company,
+  connectionId,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  connectionId: ConnectionId;
+}) {
+  const [me, setMe] = useState<Me | null>(null);
+  const [hasSignIn, setHasSignIn] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    // Keyed by the scope they were fetched for, and cleared first — the same
+    // rule `ProfileRow` follows. A company switch must not leave the previous
+    // company's person on screen above a Sign out scoped to the new one.
+    setMe(null);
+    setHasSignIn(false);
+    void fetchMe(client, company)
+      .then((who) => {
+        if (live) setMe(who);
+      })
+      // A 401, or a company with no `me` to read. Not worth a toast on a
+      // settings card: the card simply does not appear.
+      .catch(() => {});
+    void fetchAuthConfig(client, company)
+      .then((config) => {
+        if (live) setHasSignIn(config.mode !== "none");
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  /**
+   * Ends the session, and puts the console back on its sign-in screen.
+   *
+   * Both legs matter, in this order:
+   *
+   * 1. `auth/logout` revokes the session server-side and clears the cookie. It
+   *    has to go first, while the credential still authenticates — a console
+   *    that forgot its token and then asked would be asking anonymously, and
+   *    the session would outlive the sign-out on the host.
+   * 2. `forgetSession` drops whatever this machine was carrying (a cross-origin
+   *    token, a desktop keychain entry) and marks the connection
+   *    `unauthenticated`, which is the state `ConnectionConsole` renders
+   *    `Login` from. Without it this page would sit here, signed out, until
+   *    some later request happened to 401.
+   *
+   * A failing first leg reports and stays put rather than signing out locally
+   * anyway: a console on its sign-in screen while the host still honours the
+   * session it believes it revoked is the worse of the two states, and only one
+   * of them is something the person can see and retry from.
+   */
+  async function signOut() {
+    setSigningOut(true);
+    try {
+      await logout(client, company);
+      await forgetSession(connectionId);
+    } catch (error) {
+      setSigningOut(false);
+      toast.error(error instanceof Error ? error.message : "Couldn't sign out.");
+    }
+    // No `finally`: a sign-out that succeeded has already replaced this whole
+    // subtree with the sign-in screen, and clearing the flag on an unmounted
+    // component is a React warning about a button nobody can see.
+  }
+
+  if (!hasSignIn || !me || typeof me !== "object" || !("email" in me)) return null;
+
+  return (
+    <Card data-testid="settings-account">
+      <CardHeader>
+        <CardTitle className="text-base">Account</CardTitle>
+        <CardDescription>Who this console is signed in as.</CardDescription>
+        <CardAction>
+          <Button
+            variant="outline"
+            disabled={signingOut}
+            data-testid="settings-sign-out"
+            onClick={() => void signOut()}
+          >
+            <LogOut className="size-4" /> Sign out
+          </Button>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-0 divide-y">
+        <InfoRow label="Signed in as">
+          <span className="text-sm">{personName(me)}</span>
+        </InfoRow>
+        {/* The address beside the name rather than instead of it: the name may
+            be a display name somebody chose, and the address is what the roster
+            and every invite are keyed on. */}
+        <InfoRow label="Email">
+          <span className="font-mono text-xs">{me.email}</span>
+        </InfoRow>
+        <InfoRow label="Role">
+          <span className="text-sm capitalize">{me.role}</span>
+        </InfoRow>
+      </CardContent>
+    </Card>
   );
 }
 

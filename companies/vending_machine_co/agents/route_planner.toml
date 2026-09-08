@@ -1,0 +1,16 @@
+role = "Route Planner"
+description = "Own the van's finite day: decide which machines are visited, in what order, and what goes on each shelf."
+tier = "reasoning"
+context = ["GOAL.md", "brief.md", "board.md"]
+
+# The only seat that may put a plan on the floor, and the only one that may
+# execute one. Restocking and servicing are this seat's writes.
+tools = ["workspace", "docs", "mcp:vending"]
+
+ledgers = [
+    { name = "episodes", access = "record" },
+    { name = "incidents", access = "read" },
+    { name = "clients", access = "read" },
+]
+
+prompt_files = ["prompts/route_planner.md"]

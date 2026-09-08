@@ -1,0 +1,360 @@
+import { describe, expect, it } from "vitest";
+
+import { ApiError } from "@/api/types";
+import {
+  createSurface,
+  draftCapabilityGap,
+  draftDecline,
+  nameFromDescription,
+  writeRefusalHandsOverForm,
+} from "@/lib/workflow-create-surface";
+
+/**
+ * Which of the two New-workflow dialogs renders.
+ *
+ * This is the branch the redesign lives or dies on, and its failure is silent
+ * in one direction: answer `form` on a create and the dialog looks exactly as
+ * it did before, so nothing reports that the one-box dialog never shipped. A
+ * rendered test can only prove the cases somebody thought to render; the
+ * decision is a pure function so every input can be.
+ *
+ * There are only two inputs left, and that IS the change. The copilot's
+ * availability used to be a third — an `echo` company and a build that answered
+ * a capability gap both got the manual graph form. Running it settled it: a
+ * host with no model showed the operator the full form, in the one case where
+ * hand-authoring a graph is least likely to be what they wanted. What the
+ * copilot can do now changes what Create *does*, never what the dialog *is*,
+ * and that is asserted where it is visible — against the rendered dialog in
+ * `workflow-one-box-dialog.test.ts`, with an `echo` company.
+ */
+
+describe("createSurface", () => {
+  it("is the one box on every create, whatever the copilot can do", () => {
+    expect(createSurface({ editing: false, writeRefused: false })).toBe("describe");
+  });
+
+  it("is the manual form in edit mode — an edit already has a graph", () => {
+    expect(createSurface({ editing: true, writeRefused: false })).toBe("form");
+  });
+
+  it("is the manual form once a one-box create has been refused", () => {
+    // The refusal that actually happens: the host mints a draft's id by
+    // slugging and deduping against SAVED workflows only, so two similar
+    // descriptions drafted before either is created mint the same id and the
+    // second Create is told to pick a different one — by a dialog with no id
+    // field. The fields have to come back or that is a dead end.
+    expect(createSurface({ editing: false, writeRefused: true })).toBe("form");
+  });
+
+  it("answers every combination of its two inputs, so none is left to inference", () => {
+    // Four rows is the whole truth table. Spelled out rather than looped,
+    // because the one that matters is the first: a plain create, on any company
+    // and any build, is the box.
+    const table: [boolean, boolean, "describe" | "form"][] = [
+      [false, false, "describe"],
+      [false, true, "form"],
+      [true, false, "form"],
+      [true, true, "form"],
+    ];
+    for (const [editing, writeRefused, expected] of table) {
+      expect(
+        createSurface({ editing, writeRefused }),
+        `editing=${editing} writeRefused=${writeRefused}`,
+      ).toBe(expected);
+    }
+  });
+});
+
+describe("draftCapabilityGap", () => {
+  it("names the three codes that mean this build cannot draft at all", () => {
+    const cases: [number, string][] = [
+      [404, "not_wired"],
+      [409, "inference_required"],
+      [409, "restart_required"],
+    ];
+    for (const [status, code] of cases) {
+      expect(
+        draftCapabilityGap(new ApiError(status, code, `refused: ${code}`)),
+        `${status} ${code} is a capability gap`,
+      ).toBe(`refused: ${code}`);
+    }
+  });
+
+  it("does not treat an ordinary failure as a missing copilot", () => {
+    // A dropped connection or a 500 says nothing about whether this company can
+    // draft. Collapsing the redesign back to the old form over a flaky network
+    // would be a redesign undone by wifi.
+    expect(draftCapabilityGap(new ApiError(500, "internal", "boom"))).toBeNull();
+    expect(draftCapabilityGap(new ApiError(400, "invalid_request", "describe it"))).toBeNull();
+    expect(draftCapabilityGap(new Error("network down"))).toBeNull();
+    expect(draftCapabilityGap("not_wired")).toBeNull();
+    expect(draftCapabilityGap(null)).toBeNull();
+  });
+
+  it("keys on the code, never on the prose", () => {
+    // A host that rewords its message must not silently change which dialog an
+    // operator sees.
+    expect(
+      draftCapabilityGap(new ApiError(404, "unknown_route", "no copilot is wired here")),
+    ).toBeNull();
+  });
+});
+
+/** UTF-8 byte length — what the host counts, and what JavaScript does not. */
+const utf8 = (s: string): number => new TextEncoder().encode(s).length;
+
+describe("nameFromDescription", () => {
+  it("takes the first clause, which is where a sentence says what the thing is", () => {
+    expect(
+      nameFromDescription(
+        "Every Monday morning, have the writer draft the digest and email it to the team.",
+      ),
+    ).toBe("Every Monday morning");
+    expect(nameFromDescription("Chase overdue invoices. Weekly.")).toBe(
+      "Chase overdue invoices",
+    );
+    expect(nameFromDescription("Publish the changelog")).toBe("Publish the changelog");
+  });
+
+  it("collapses whitespace and capitalises, so the name reads like a title", () => {
+    expect(nameFromDescription("  weekly   digest\t  ")).toBe("Weekly digest");
+  });
+
+  it("caps a rambling clause rather than minting a paragraph-long name", () => {
+    const long = "a".repeat(200);
+    const name = nameFromDescription(long);
+    expect(name.length).toBeLessThanOrEqual(61);
+    expect(name.endsWith("…")).toBe(true);
+  });
+
+  it("never cuts an astral character in half at the cap", () => {
+    // `slice(0, 60)` on UTF-16 units splits a surrogate pair whenever the 60th
+    // unit is a high surrogate — 59 ASCII characters then an emoji. The lone
+    // surrogate that leaves is not representable on the wire: `JSON.stringify`
+    // emits it as a bare `\ud83d`, and a running host answers
+    // `400 Failed to parse the request body as JSON: name: unexpected end of
+    // hex escape`. On the sentence-only path that is a description that can
+    // never be created, however many times Create is pressed.
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (const sentence of [
+      `${"a".repeat(59)}\u{1F600} and then some more words about it`,
+      `${"a".repeat(58)}\u{1F600}\u{1F600} trailing`,
+      `\u{1F600}${"a".repeat(70)}`,
+      // A letter first, because a clause of pure emoji derives no name at all
+      // (see the "nothing usable" case below) and would pass this vacuously.
+      `a${"\u{1F600}".repeat(80)}`,
+    ]) {
+      const name = nameFromDescription(sentence);
+      expect(lone.test(name), `lone surrogate in ${JSON.stringify(name)}`).toBe(false);
+      // …and it survives the round trip the create actually makes.
+      expect(() => JSON.parse(JSON.stringify({ name }))).not.toThrow();
+      expect(JSON.stringify({ name })).not.toContain("\\ud");
+    }
+  });
+
+  it("counts characters rather than code units when the character cap binds", () => {
+    // 200 ASCII characters: the character cap is what stops this, and 60 of
+    // them plus an ellipsis is well inside the byte ceiling.
+    const name = nameFromDescription("a".repeat(200));
+    expect(Array.from(name)).toHaveLength(61); // 60 characters + the ellipsis
+    expect(utf8(name)).toBeLessThanOrEqual(200);
+  });
+
+  it("also stays under the host's byte ceiling, which 60 characters can breach", () => {
+    // The host checks `draft.name.trim().len() > MAX_WORKFLOW_NAME_LEN` and
+    // Rust's `str::len` counts BYTES (`src/company/workflow_create.rs:183`, 200).
+    // Sixty code points of emoji is 240 bytes, so a character-only cap sails
+    // past it — and the refusal is a graph-level 400 with no `problems`, so it
+    // neither hands over the form nor changes on a second press. The sentence
+    // is simply uncreatable.
+    for (const sentence of [
+      `a${"\u{1F600}".repeat(70)}`,
+      // The shape that needs no elision at all to breach it: 51 characters,
+      // 201 bytes. A cap that only counted characters would let this straight
+      // through untouched.
+      `A${"\u{1F600}".repeat(50)}`,
+      `\u{1F600}${"e\u0301".repeat(90)}`,
+    ]) {
+      const name = nameFromDescription(sentence);
+      expect(utf8(name.trim()), `over the byte cap: ${JSON.stringify(name)}`)
+        .toBeLessThanOrEqual(200);
+      expect(Array.from(name).length).toBeLessThanOrEqual(61);
+    }
+  });
+
+  it("derives nothing from a sentence with nothing usable in it", () => {
+    // The caller must ASK for a name here rather than write an empty one: an
+    // empty name derives an empty id, and the id is the permanent join key
+    // nothing can fix after creation.
+    expect(nameFromDescription("")).toBe("");
+    expect(nameFromDescription("   ")).toBe("");
+    expect(nameFromDescription(",,,")).toBe("");
+    expect(nameFromDescription("...")).toBe("");
+    // "Nothing usable" is about letters and digits, not about emptiness. This
+    // one is the case the doc comment always cited and the code never met: it
+    // used to come back as the name "🎉🎉", which slugs to an empty id and was
+    // caught only by a separate check one caller happened to make.
+    expect(nameFromDescription("🎉🎉")).toBe("");
+    expect(nameFromDescription("— ///")).toBe("");
+  });
+
+  it("keeps a name that is usable but not ASCII", () => {
+    // Neither `slugifyWorkflowId` nor the host can make an id out of these, so
+    // the caller still hands over the form — but "no letters in it" would be a
+    // false thing to say about them, and this function's answer is about the
+    // sentence rather than about the id that follows.
+    expect(nameFromDescription("日次レポート")).toBe("日次レポート");
+  });
+});
+
+/**
+ * Which write failures hand the operator the manual form.
+ *
+ * The hand-over is a **one-way door** — it retires the one-box dialog for the
+ * rest of the open — so the cost of the two answers is wildly asymmetric.
+ * Answering `true` too eagerly is what shipped: the write path treated every
+ * throw as a refusal, so a dropped connection or a 500 collapsed the redesign
+ * into the graph form, permanently, over something that would have worked on
+ * the next press.
+ */
+describe("writeRefusalHandsOverForm", () => {
+  it("hands over for a taken id, which is an instruction with a field to obey it", () => {
+    expect(
+      writeRefusalHandsOverForm(
+        // `fromHost` — the fourth argument — is the whole point: this is the
+        // host's own `{error, code}` envelope, which is what makes "pick a
+        // different id" an instruction rather than a hop's opinion.
+        new ApiError(409, "conflict", "A workflow with id `x` already exists.", true),
+      ),
+    ).toBe(true);
+  });
+
+  it("hands over for per-node problems, which each want a control", () => {
+    const err = new ApiError(400, "workflow_invalid", "the graph was refused", true);
+    err.problems = [{ node_id: "write", message: "no such teammate" }];
+    expect(writeRefusalHandsOverForm(err)).toBe(true);
+  });
+
+  it("keeps the box for a 409 the host never said", () => {
+    // `httpError` synthesises the code from the status line when the body is
+    // not the host's envelope — an HTML error page from a proxy, or the empty
+    // body an HTTP/2 gateway sends with no reason phrase. Retiring the one-box
+    // dialog over that is the same bug as retiring it over a 500: an
+    // intermediary said it, about a request the host may never have seen.
+    expect(
+      writeRefusalHandsOverForm(new ApiError(409, "http_409", "HTTP 409")),
+    ).toBe(false);
+    // Belt and braces: even a `problems` array cannot smuggle a non-host error
+    // through, though the client never populates one off an unparsed body.
+    const forged = new ApiError(409, "http_409", "HTTP 409");
+    forged.problems = [{ node_id: "write", message: "no such teammate" }];
+    expect(writeRefusalHandsOverForm(forged)).toBe(false);
+  });
+
+  it("keeps the box for a failure that says nothing about what to do", () => {
+    // Every one of these is `fromHost`, deliberately: they have to fail the
+    // STATUS test, not the origin test added above, or this stops proving that
+    // a host's own 500 leaves the box up.
+    expect(
+      writeRefusalHandsOverForm(new ApiError(500, "internal", "it fell over", true)),
+    ).toBe(false);
+    expect(
+      writeRefusalHandsOverForm(new ApiError(503, "quiescing", "try later", true)),
+    ).toBe(false);
+    // A 400 with no breakdown names no node and no field.
+    expect(writeRefusalHandsOverForm(new ApiError(400, "bad_request", "no", true))).toBe(
+      false,
+    );
+    // An empty `problems` array is "a breakdown with nothing in it".
+    const empty = new ApiError(400, "workflow_invalid", "refused", true);
+    empty.problems = [];
+    expect(writeRefusalHandsOverForm(empty)).toBe(false);
+  });
+
+  it("keeps the box for anything that never reached the host", () => {
+    // What `fetch` throws on a dropped connection, and what a bug throws.
+    expect(writeRefusalHandsOverForm(new TypeError("Failed to fetch"))).toBe(false);
+    expect(writeRefusalHandsOverForm(new Error("boom"))).toBe(false);
+    expect(writeRefusalHandsOverForm(undefined)).toBe(false);
+    expect(writeRefusalHandsOverForm("409")).toBe(false);
+  });
+});
+
+/**
+ * Telling the copilot's judgement from the copilot's failure.
+ *
+ * `automatable: false` is one flag over both, and the dialog rendered both as
+ * advice — so a draft that timed out, errored, or failed the host's own gates
+ * reached the operator as a recommendation, quoting the gate diagnostics
+ * verbatim. Those diagnostics name `trigger` nodes and node ids: the vocabulary
+ * the one-box dialog exists to stop putting in front of people.
+ *
+ * Each stem below is a literal in `not_automatable_reason`
+ * (`src/harness/built_in/workflow_build.rs`), not model output. The unrecognised
+ * case is asserted last and is the one that matters most: it must degrade to a
+ * judgement, which is the behaviour that shipped before this.
+ */
+describe("draftDecline", () => {
+  it("calls a timed-out draft what it was", () => {
+    const d = draftDecline(
+      "drafting the workflow ran out of time before a proposal was ready, so nothing " +
+        "was drafted — try again, or create it by hand",
+    );
+    expect(d.kind).toBe("failure");
+    expect(d.message).toContain("ran out of time");
+    expect(d.action).toBe("Start it on the canvas");
+  });
+
+  it("calls an errored draft what it was", () => {
+    const d = draftDecline(
+      "drafting the workflow could not complete, so nothing was drafted: upstream 500",
+    );
+    expect(d.kind).toBe("failure");
+    // The upstream's own words do not ride along — they are about the model
+    // plumbing, and there is nothing an operator does with them.
+    expect(d.message).not.toContain("upstream 500");
+  });
+
+  it("calls an exhausted step budget what it was", () => {
+    expect(
+      draftDecline(
+        "the workflow copilot reached its step budget before it could draft an " +
+          "acceptable workflow: a workflow needs exactly one `trigger` node",
+      ).kind,
+    ).toBe("failure");
+  });
+
+  it("never repeats the gates at the operator", () => {
+    const d = draftDecline(
+      "the described workflow could not be drafted into one that would be accepted: " +
+        "invalid request: a workflow needs exactly one `trigger` node to say what " +
+        "starts it (found 0).",
+    );
+    expect(d.kind).toBe("failure");
+    expect(d.message).not.toContain("trigger");
+    expect(d.message).not.toContain("invalid request");
+    expect(d.message).toContain("could not turn that into a workflow");
+    expect(d.message).toContain("start it on the canvas");
+  });
+
+  it("passes a real judgement through in the copilot's own words", () => {
+    const d = draftDecline("This is a one-off — just do it once rather than building it.");
+    expect(d.kind).toBe("judgment");
+    expect(d.message).toBe("This is a one-off — just do it once rather than building it.");
+    expect(d.action).toBe("Create it anyway");
+  });
+
+  it("treats an unrecognised reason as a judgement, which is the safe direction", () => {
+    // A reworded stem must degrade to the dialog that shipped before this, not
+    // to a claim about what the copilot did.
+    const d = draftDecline("Some future host phrasing nobody here has seen.");
+    expect(d.kind).toBe("judgment");
+    expect(d.message).toBe("Some future host phrasing nobody here has seen.");
+  });
+
+  it("has something to say when the host sends no reason at all", () => {
+    expect(draftDecline(null).kind).toBe("judgment");
+    expect(draftDecline("").message).toContain("better done once");
+    expect(draftDecline(undefined).message).toContain("better done once");
+  });
+});

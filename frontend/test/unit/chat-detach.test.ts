@@ -41,6 +41,8 @@ function stubTransport(status: number, body: unknown) {
     },
     // Never opened here: these cases are about the POST's answer, not the feed.
     subscribe: () => () => {},
+    // Test double: an abort stops the caller; there is no real work to cancel.
+    cancelsInFlight: true,
   };
   return { transport, sent };
 }
