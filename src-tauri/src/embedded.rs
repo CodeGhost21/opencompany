@@ -36,6 +36,7 @@ pub struct EmbeddedHost {
     /// Dropping it would release the root while this process kept writing.
     _instance: EmbeddedInstance,
     server: tokio::task::JoinHandle<()>,
+    sweeper: tokio::task::JoinHandle<()>,
 }
 
 impl EmbeddedHost {
@@ -71,6 +72,7 @@ impl Drop for EmbeddedHost {
         // The task owns the listener; aborting it closes the port. Without this
         // a restarted embedded host would leak a listener per restart.
         self.server.abort();
+        self.sweeper.abort();
     }
 }
 
@@ -264,7 +266,31 @@ pub async fn start_with(
             .collect::<Vec<_>>(),
     };
 
-    let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
+    // Called before `state` moves into `bind`: the standalone binary spawns
+    // this sweeper from its own `async_main`, which the embedded host never
+    // runs, so nothing here ever reclaimed an idle ACP session — they and
+    // their per-connection and host-wide cap slots piled up for the life of
+    // the process. `AppState::spawn_acp_session_sweeper` is a
+    // no-op in a build without the `acp` feature — this crate's own default
+    // dependency features don't include it (`Cargo.toml`), only the
+    // release/CI feature set does, and this call site has to compile and do
+    // the right thing either way.
+    //
+    // Never notified: `Drop` aborts the task directly, matching how `server`
+    // below is already stopped, rather than plumbing a second shutdown path
+    // through a struct that otherwise has none.
+    let sweeper = state.spawn_acp_session_sweeper(std::sync::Arc::new(tokio::sync::Notify::new()));
+    let (address, serving) = match opencompany::server::bind("127.0.0.1:0", state).await {
+        Ok(bound) => bound,
+        Err(error) => {
+            // The sweeper was already running (an infinite loop with no other
+            // shutdown path here), so a failed bind must abort it explicitly
+            // or it outlives this whole attempt — one more sweeper leaked per
+            // retry a caller makes after a busy-port failure.
+            sweeper.abort();
+            return Err(error);
+        }
+    };
     let server = tokio::spawn(async move {
         if let Err(error) = serving.run().await {
             tracing::error!(%error, "the embedded host stopped");
@@ -284,6 +310,7 @@ pub async fn start_with(
         companies,
         _instance: instance,
         server,
+        sweeper,
     })
 }
 
