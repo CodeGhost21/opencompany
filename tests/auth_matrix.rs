@@ -649,28 +649,10 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Put, "/search", Admin, Credential, ""),
     r!(Delete, "/search/key", Admin, Credential, ""),
     r!(Post, "/setup/roster", Scoped, Ordinary, ""),
-    r!(
-        Post,
-        "/skills/{slug}/install",
-        Scoped,
-        Authority,
-        "Members may install a skill into every agent's prompt."
-    ),
-    r!(
-        Post,
-        "/skills/{slug}/uninstall",
-        Scoped,
-        Destructive,
-        "Members may remove an installed skill."
-    ),
+    r!(Post, "/skills/{slug}/install", Admin, Authority, ""),
+    r!(Post, "/skills/{slug}/uninstall", Admin, Destructive, ""),
     r!(Get, "/skills/registry", Scoped, Ordinary, ""),
-    r!(
-        Put,
-        "/skills/{slug}",
-        Scoped,
-        Authority,
-        "Members may enable or disable a skill for the company."
-    ),
+    r!(Put, "/skills/{slug}", Admin, Authority, ""),
     red!(Post, "/skills", Authority, SkillsBranch),
     r!(Get, "/skills", Scoped, Ordinary, ""),
     r!(Get, "/smtp", Scoped, Ordinary, ""),
@@ -1315,8 +1297,8 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .iter()
             .filter(|route| route.access == Access::Admin)
             .count(),
-        55,
-        "40 signature-admin, seven body-admin, and eight aspirational authority rows",
+        58,
+        "43 signature-admin, seven body-admin, and eight aspirational authority rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES
