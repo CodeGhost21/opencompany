@@ -6293,6 +6293,7 @@ mode = "full"
             .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),

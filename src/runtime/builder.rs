@@ -3268,6 +3268,7 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                emergency_gate: Some(gate.clone()),
                                 // Issue #1861: the same store the console's and
                                 // the scheduler's runs badge through, so a run
                                 // the orchestrator's `run_workflow` started
