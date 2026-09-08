@@ -104,6 +104,10 @@ describe("the queue header's bulk resolve, gated on contents_hidden", () => {
     await show([approval("a1"), approval("a2", true)]);
 
     const readableRow = container.querySelector('[data-approval-id="a1"]');
-    expect(readableRow?.textContent).toContain("Approve");
+    const approve = [...(readableRow?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (button) => button.textContent?.includes("Approve"),
+    );
+    expect(approve).toBeDefined();
+    expect(approve?.disabled).toBe(false);
   });
 });
