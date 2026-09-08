@@ -42,7 +42,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 
 /** The abstract cognition tiers the tenant model table maps. */
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
@@ -212,7 +214,7 @@ function presetFor(
   return preset;
 }
 
-type Load = "loading" | "ready" | "unavailable" | "error";
+type Load = "loading" | "ready" | "unavailable" | "unconfigured" | "error";
 type TestState =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -1057,7 +1059,7 @@ export function InferenceSection({
                 agent's prompts travel to and the key they are billed against
                 (issue #403). */}
             {canManage && (
-              <div className="space-y-3 border-t border-border pt-3">
+              <div className={cn("space-y-3 border-t border-border pt-3", SETTINGS_FIELD_COLUMN)}>
                 <div className="grid gap-2 sm:grid-cols-2 sm:items-end">
                   <div className="space-y-1">
                     <Label htmlFor="inference-provider" className="text-xs">

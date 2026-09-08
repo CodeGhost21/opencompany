@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 /**
  * **Issue #2028 — reachability, which only a real click can prove.**
@@ -26,8 +26,17 @@ import { expect, test, type Page } from "@playwright/test";
  * Real: the host, the console bundle, the session, the routing, the polling
  * feed, and every DOM interaction.
  *
- * Like the rest of `test/e2e`, this drives a running host and is not wired into
- * CI; `npm run typecheck:e2e` compiles it, nothing runs it automatically.
+ * Runs in both Console E2E lanes. On fixed main b4cab3ea3, twenty serial
+ * repetitions without retries failed 10/200 cases across two-step Skip,
+ * single Skip, Cancel, and Retry, all at the company-read stub's response.json.
+ * The verdict assertions finished while the post-resolve company refresh was
+ * still in flight; context teardown disposed the response underneath it.
+ *
+ * Thirty isolated Retry runs with tracing passed: a trace showed the company
+ * fetch finishing 1.6 ms AFTER After Hooks began; with tracing, the context
+ * stayed alive another 65 ms. This is consistent with tracing masking the
+ * teardown race. Drain this spec's routes before context teardown, without
+ * ignoring callback errors or adding sleeps to the verdict assertions.
  */
 
 const BLOCKER_ID = "e2e-2028-blocker";
@@ -114,6 +123,40 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+const pendingRoutes = new WeakMap<Page, Set<Promise<void>>>();
+
+async function stubRoute(
+  page: Page,
+  matches: (url: URL) => boolean,
+  handle: (route: Route) => Promise<void>,
+) {
+  let pending = pendingRoutes.get(page);
+  if (!pending) {
+    pending = new Set();
+    pendingRoutes.set(page, pending);
+  }
+  const calls = pending;
+  await page.route(matches, async (route) => {
+    const call = handle(route);
+    calls.add(call);
+    try {
+      await call;
+    } finally {
+      calls.delete(call);
+    }
+  });
+}
+
+test.afterEach(async ({ page }) => {
+  // Drain while handlers remain registered. unrouteAll(wait) alone failed
+  // 5/200 cases: Playwright removed its handler list before waiting,
+  // so one callback finishing could disable interception under another's
+  // pending fulfill, which then failed with "Route is already handled!".
+  const pending = pendingRoutes.get(page);
+  while (pending?.size) await Promise.all(pending);
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 /**
  * Serve a fixed queue, with the company status stubbed in step with it — both
  * project the journal's parked set, and a fixture that fakes one and leaves the
@@ -121,14 +164,14 @@ test.beforeEach(async ({ page }) => {
  */
 async function stubQueue(page: Page, parked: unknown[]) {
   await advertiseFourWayBlockers(page);
-  await page.route(isApprovalList, async (route) => {
+  await stubRoute(page, isApprovalList, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(parked),
     });
   });
-  await page.route(isCompanyRead, async (route) => {
+  await stubRoute(page, isCompanyRead, async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
     const body = await response.json();
@@ -166,7 +209,7 @@ async function stubQueue(page: Page, parked: unknown[]) {
  * side by taking it back off.
  */
 async function advertiseFourWayBlockers(page: Page) {
-  await page.route(isSpec, async (route) => {
+  await stubRoute(page, isSpec, async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
     const body = await response.json();
@@ -187,7 +230,7 @@ async function advertiseFourWayBlockers(page: Page) {
 /** Capture the resolve body the console composes, and answer it plausibly. */
 async function captureResolve(page: Page) {
   const bodies: Record<string, unknown>[] = [];
-  await page.route(isApprovalResolve, async (route) => {
+  await stubRoute(page, isApprovalResolve, async (route) => {
     const raw = route.request().postData();
     bodies.push(raw ? JSON.parse(raw) : {});
     await route.fulfill({
@@ -336,7 +379,7 @@ test("a skip is refused, not lowered, on a host that cannot perform it", async (
   const bodies = await captureResolve(page);
   await openApprovals(page, [parkedBlocker()]);
   // Registered after `stubQueue`'s, and Playwright prefers the newest match.
-  await page.route(isSpec, async (route) => {
+  await stubRoute(page, isSpec, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     await route.fulfill({
