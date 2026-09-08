@@ -2714,15 +2714,23 @@ export function ChatView({
                     says the replies in this conversation come from the echo brain
                     rather than the teammate they appear under, which is a claim about
                     the messages already on screen. `readOnly` is
-                    `Boolean(channel?.system)`, i.e. the `#Operator` feed, whose
-                    workflow reports are rendered under a teammate's name and avatar
-                    and are stub output whenever the company has no working model.
-                    Those rows carry only `EchoPlaceholder` — a non-focusable `<span>`
-                    whose explanation lives in a `title`, so it reaches neither
-                    keyboard, touch nor screen reader. And a feed nobody can reply to
-                    is where the reader is least able to test the attribution by
-                    asking, so it is the last place to drop the only visible statement
-                    of it.
+                    `Boolean(channel?.system)`, i.e. the `#Operator` feed.
+
+                    Its rows are NOT under a roster teammate, and the difference
+                    matters (codex review on #2159). `DurableOperatorChannel` journals
+                    them under the reserved authors `workflow-report` and
+                    `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
+                    titleizes into "Workflow Report" and "Owner Fallback Report" —
+                    author lines naming no person at all. That makes the case for the
+                    strip stronger, not weaker: `MessageRow` still marks every one of
+                    those rows, because `project` sets `by_person: false` on an
+                    `AgentReply` whichever brain produced it, and the marker they get
+                    is `EchoPlaceholder` — a non-focusable `<span>` whose entire
+                    explanation is a `title`, reaching neither keyboard, touch nor
+                    screen reader, and reading "Workflow Report did not write this".
+                    Without this strip the operator is left with a "Placeholder" pill
+                    against a name that is not a person, on a feed that takes no
+                    replies, and nothing anywhere saying what did write it.
 
                     All four states below say "the replies in this conversation", not
                     "the replies below". They said "below" while this strip sat above
