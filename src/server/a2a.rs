@@ -289,12 +289,19 @@ async fn a2a_task(
                 if auth.recipient != our_id {
                     return payment_required(&state, &runtime, pay).await;
                 }
-                let paid = auth.amount.trim().parse::<f64>().unwrap_or(0.0);
-                let price = pay.price.trim().parse::<f64>().unwrap_or(f64::INFINITY);
-                if paid < price {
-                    // Underpaid: re-challenge for the correct amount.
+                let paid = auth.amount.trim().parse::<f64>().ok();
+                let price = pay.price.trim().parse::<f64>().ok();
+                let sufficient = matches!(
+                    (paid, price),
+                    (Some(paid), Some(price))
+                        if paid.is_finite() && price.is_finite() && paid >= price
+                );
+                if auth.asset != pay.asset || auth.network != pay.network || !sufficient {
+                    // Underpaid, unparsable/non-finite, or paid in the wrong
+                    // asset/network: re-challenge for the correct terms.
                     return payment_required(&state, &runtime, pay).await;
                 }
+                let paid = paid.expect("sufficient implies paid is Some and finite");
                 if let Err(err) = x402::verify(&auth, state.x402_nonce(), now_secs()) {
                     return ApiError(err).into_response();
                 }
@@ -900,6 +907,113 @@ mod test {
             "an underpaid authorization must not burn its nonce — the payer \
              cannot fix the amount without re-signing, but nothing here \
              should have consumed it either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_correctly_priced_authorization_in_the_wrong_asset_is_rechallenged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state.clone());
+
+        let our_id = signer_for(state.home(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        // The payer signs a fully-priced authorization, but in an asset the
+        // card never priced this skill in.
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "NOTUSDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": {}, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(&client, "acme", &body, now_secs());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a signed payment in the wrong asset must not buy work priced in a different one"
+        );
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer"),
+            "the rejected authorization must not have spent its nonce"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_finite_amount_is_rechallenged_not_treated_as_paid() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state.clone());
+
+        let our_id = signer_for(state.home(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        // `"NaN".parse::<f64>()` succeeds and every comparison against NaN is
+        // false, so a naive `paid < price` underpayment check treats this as
+        // sufficient. It must not be.
+        let challenge = X402Challenge {
+            amount: "NaN".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": {}, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(&client, "acme", &body, now_secs());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a non-finite claimed amount must never be treated as sufficient payment"
+        );
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer"),
+            "the rejected authorization must not have spent its nonce"
         );
     }
 
