@@ -2177,6 +2177,84 @@ fn shell_command_is_read(_command: &str, _declared: Option<&str>) -> bool {
     false
 }
 
+/// What scope a standing permission for this call may be minted with — or that
+/// it may not be minted at all (issue #2148).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StandingMintScope {
+    /// Mint with no scope. The tool's name is the whole of what it can do, so
+    /// there is nothing to narrow.
+    Unscoped,
+    /// Mint confined to this slice of the tool — a host, or a Composio toolkit.
+    Scoped(String),
+    /// Do not mint. The sentence says why, and is written to be read by an
+    /// operator rather than by a developer.
+    Refused(String),
+}
+
+/// Whether a standing permission for this call may be minted, and how narrow.
+///
+/// ## The invariant this exists to enforce
+///
+/// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
+/// treats an **unscoped** grant as admitting everything — correct for a journal
+/// line written before the field existed, catastrophic for a permission that
+/// was supposed to name one host or one toolkit. So a tool whose declaration is
+/// [`Standing::ScopedGrantable`] must never reach the journal without a scope.
+///
+/// Today it cannot: the only classification that answers `ScopedGrantable` is
+/// [`web_fetch_consequence`], which answers it exclusively in the arm where the
+/// scope was already read, and degrades to [`Standing::PerCall`] otherwise —
+/// "tying both answers to one read makes that unrepresentable", as it says.
+///
+/// That is a property of one call site, and the next `ScopedGrantable` entry
+/// that derives its scope by a separate route would break it in silence. This
+/// makes the requirement explicit at the mint, where the consequence of getting
+/// it wrong actually lands, and `no_scope_required_tool_can_mint_unscoped`
+/// walks the table so a future violator fails a test rather than an operator.
+///
+/// ## Why a denial may go unscoped and an approval may not
+///
+/// The asymmetry is the whole point of the scope. An unscoped **approval**
+/// admits every host; an unscoped **denial** refuses every host, which is
+/// broader than asked but fails in the safe direction — and refusing to mint it
+/// would leave an operator unable to decline a tool for a period at all. A
+/// standing denial is a real state the console offers (issue #1458), so it
+/// keeps working.
+pub fn standing_mint_scope(
+    tool: &str,
+    args: &serde_json::Value,
+    verdict: crate::ports::types::Verdict,
+) -> StandingMintScope {
+    decide_standing_mint_scope(
+        consequence_of(tool, args).standing,
+        standing_scope_of(tool, args),
+        verdict,
+    )
+}
+
+/// [`standing_mint_scope`] over an explicit declaration.
+///
+/// Split out so the combination the shipped table cannot currently produce —
+/// scope-required, no scope, approving — is still reachable from a test. A rule
+/// whose failing case can only be described in prose is a rule nobody has run.
+fn decide_standing_mint_scope(
+    standing: Standing,
+    scope: Option<String>,
+    verdict: crate::ports::types::Verdict,
+) -> StandingMintScope {
+    match (scope, standing, verdict) {
+        (Some(scope), _, _) => StandingMintScope::Scoped(scope),
+        (None, Standing::ScopedGrantable, crate::ports::types::Verdict::Approve) => {
+            StandingMintScope::Refused(
+                "this permission has to name the account or address it covers, and this call \
+                 does not say which one — approve it once instead"
+                    .to_string(),
+            )
+        }
+        (None, _, _) => StandingMintScope::Unscoped,
+    }
+}
+
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
     // The mint side and the live call must read the host with identical code, or
     // a grant could be minted that never matches its own tool.
@@ -2496,6 +2574,7 @@ fn undeclared_group(name: &str) -> EffectGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::types::Verdict;
     use serde_json::json;
 
     fn c(tool: &str) -> Consequence {
@@ -2697,6 +2776,130 @@ mod tests {
                 "a scoped-grantable tool must park under `auto` wherever it parks \
                  under `supervised` — {reach:?} disagreed"
             );
+        }
+    }
+
+    /// The declaration table, rendered and pinned (issue #2148).
+    ///
+    /// `Standing` decides what an operator may hand a teammate for a week, and
+    /// a one-word edit from `PerCall` to `Grantable` widens that silently — the
+    /// diff reads as a typo-sized change and the review question it should
+    /// raise ("should this run unattended for a week?") never gets asked.
+    /// Rendering the whole table makes every such edit a reviewable line.
+    ///
+    /// Deliberately the **static** table only, not `consequence_of`: the
+    /// argument-classified tools answer differently depending on whether the
+    /// curated Composio catalogue is compiled in, so a snapshot of their live
+    /// verdicts would pass on one CI lane and fail on the next.
+    ///
+    /// Re-bless with `BLESS_TOOL_STANDING=1`, then read the diff. A blessed
+    /// snapshot nobody read is not a pin.
+    #[test]
+    fn the_declared_grantability_table_is_pinned() {
+        let mut rows: Vec<String> = DECLARED
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} group={:?} reach={:?} standing={:?}",
+                    d.tool, d.group, d.reach, d.standing
+                )
+            })
+            .collect();
+        rows.sort_unstable();
+        let rendered = format!("{}\n", rows.join("\n"));
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/tool-standing.txt");
+        if std::env::var_os("BLESS_TOOL_STANDING").is_some() {
+            std::fs::write(&path, &rendered).expect("write the grantability snapshot");
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).expect("read the grantability snapshot");
+        assert_eq!(
+            rendered, committed,
+            "the declared grantability table moved. If that is intended, re-bless with \
+             BLESS_TOOL_STANDING=1 and say in the PR why the tool's standing changed — a tool \
+             becoming Grantable is an operator being newly able to hand it over for a week"
+        );
+    }
+
+    /// A scope-required approval with no scope to give is refused, not minted
+    /// wide (issue #2148).
+    ///
+    /// Driven through the inner rule because the shipped table cannot currently
+    /// produce that combination — `web_fetch_consequence` answers
+    /// `ScopedGrantable` only where the scope was already read. That is exactly
+    /// why the case is worth a test: the rule has to hold for the next entry
+    /// that derives its scope by another route, and a rule whose failing case
+    /// can only be described in prose is one nobody has run.
+    #[test]
+    fn a_scope_required_approval_without_a_scope_is_refused() {
+        let refused = decide_standing_mint_scope(Standing::ScopedGrantable, None, Verdict::Approve);
+        let StandingMintScope::Refused(why) = refused else {
+            panic!("a scope-required approval with no scope must not mint: {refused:?}");
+        };
+        assert!(
+            why.contains("approve it once instead"),
+            "the refusal has to leave the operator somewhere to go: {why}"
+        );
+    }
+
+    /// The asymmetry, stated: an unscoped denial refuses everything, which is
+    /// broad but safe, and refusing to mint it would take away the operator's
+    /// only way to decline a tool for a period (issue #1458).
+    #[test]
+    fn a_scope_required_denial_may_be_unscoped() {
+        assert_eq!(
+            decide_standing_mint_scope(Standing::ScopedGrantable, None, Verdict::Deny),
+            StandingMintScope::Unscoped
+        );
+    }
+
+    #[test]
+    fn a_derived_scope_is_carried_whatever_the_declaration_says() {
+        for standing in [
+            Standing::Grantable,
+            Standing::ScopedGrantable,
+            Standing::PerCall,
+        ] {
+            for verdict in [Verdict::Approve, Verdict::Deny] {
+                assert_eq!(
+                    decide_standing_mint_scope(standing, Some("github".to_string()), verdict),
+                    StandingMintScope::Scoped("github".to_string()),
+                    "{standing:?}/{verdict:?}: a scope that was derived is never dropped"
+                );
+            }
+        }
+    }
+
+    /// No declared tool can reach the mint claiming a scope it cannot produce.
+    ///
+    /// This is the walk that makes the invariant enforced rather than merely
+    /// true today: it fails the moment a classification answers
+    /// `ScopedGrantable` down a path where `standing_scope_of` returns `None`.
+    /// Both probes matter — the rich one reaches the argument-classified
+    /// branches, the empty one is what a mint sees when a call carried nothing
+    /// the classifier could read.
+    #[test]
+    fn no_scope_required_tool_can_mint_unscoped() {
+        let rich = json!({
+            WEB_FETCH_URL_KEY: "https://docs.rs/serde",
+            COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+        });
+        for probe in [&rich, &json!({})] {
+            for tool in declared_tools() {
+                if consequence_of(tool, probe).standing != Standing::ScopedGrantable {
+                    continue;
+                }
+                assert!(
+                    !matches!(
+                        standing_mint_scope(tool, probe, Verdict::Approve),
+                        StandingMintScope::Unscoped
+                    ),
+                    "`{tool}` is scope-required but would mint unscoped, and an unscoped grant \
+                     admits every host and every toolkit"
+                );
+            }
         }
     }
 

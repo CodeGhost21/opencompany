@@ -1993,7 +1993,13 @@ approval.]"
         //
         // Computed here rather than inline in the literal below, which would
         // borrow `tool` after the field above has moved it.
-        let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
+        let scope = match crate::policy::consequence::standing_mint_scope(&tool, &args, verdict) {
+            crate::policy::consequence::StandingMintScope::Scoped(scope) => Some(scope),
+            crate::policy::consequence::StandingMintScope::Unscoped => None,
+            crate::policy::consequence::StandingMintScope::Refused(why) => {
+                return Err(OpenCompanyError::InvalidRequest(why));
+            }
+        };
         let (agent, workflow) = match &subject {
             GrantSubject::Agent(agent) => (agent.clone(), None),
             GrantSubject::Workflow(workflow) => (String::new(), Some(workflow.clone())),
