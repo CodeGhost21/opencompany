@@ -147,6 +147,7 @@
 use serde_json::Value;
 
 use crate::policy::consequence::{Consequence, Reach, consequence_of, declared_tools};
+use crate::policy::floor;
 use crate::ports::types::EffectGroup;
 
 /// Why a call stopped, in the operator's terms.
@@ -245,17 +246,10 @@ impl Judgement {
 /// rather than a "harmless" one — it is where a tool lands when the classifier
 /// found no particular consequence to name — so it is decided by reach below
 /// instead of being waved through here.
-fn is_irreversible_group(group: EffectGroup) -> bool {
-    match group {
-        EffectGroup::Spend
-        | EffectGroup::Send
-        | EffectGroup::Sign
-        | EffectGroup::Publish
-        | EffectGroup::Hire
-        | EffectGroup::Identity => true,
-        EffectGroup::Other => false,
-    }
-}
+///
+/// Lives in [`crate::policy::floor`] with the rest of the consequence rule, and
+/// is re-exported here so this module's own tests keep reading one definition.
+pub use crate::policy::floor::is_irreversible_group;
 
 /// The tools whose reach this layer cannot bound: arbitrary code, an arbitrary
 /// address, or a saved workflow that performs whatever it performs.
@@ -346,10 +340,7 @@ fn is_unbounded(tool: &str, consequence: Consequence) -> bool {
 /// authored-node path and by #338 on the agent path — which is a scoping of the
 /// rule, not an exclusion from it, so it is expressed by [`CallPath`] rather
 /// than here. See the module docs.
-const DEFERRED: &[&str] = &[
-    // Issue #658 — see the note above. Ruled, not pending.
-    "publish_artifact",
-];
+pub use crate::policy::floor::DEFERRED;
 
 /// The prefix tinyflows gives an expression bound at run time.
 ///
@@ -407,21 +398,14 @@ fn any_argument_is_templated(args: &Value) -> bool {
     }
 }
 
-/// The argument key a declared amount of money arrives under.
+/// The argument key a declared amount of money arrives under, and the reader
+/// for it.
 ///
-/// Mirrors the harness policy's own reader, which is where the spend arms
-/// already look. Kept in sync by `amount_key_matches_the_harness_reader`.
-const AMOUNT_KEY: &str = "amount_usd";
-
-/// Money named in the arguments, when it is a positive number.
-///
-/// Zero and negative are not "money leaving": a zero-amount call moves nothing,
-/// and a negative one is a refund shape this layer has no business guessing at.
-fn declared_amount_usd(args: &Value) -> Option<f64> {
-    args.get(AMOUNT_KEY)
-        .and_then(Value::as_f64)
-        .filter(|amount| *amount > 0.0)
-}
+/// Both moved to [`crate::policy::floor`] with the money arm they serve, and
+/// are re-exported so this module's tests keep reading one definition. The key
+/// mirrors the harness policy's own reader, which is where the spend arms
+/// already look; `amount_key_matches_the_harness_reader` keeps them in sync.
+pub use crate::policy::floor::{AMOUNT_KEY, declared_amount_usd};
 
 /// Should this call stop for a human on its own merits?
 ///
@@ -455,43 +439,31 @@ pub fn judge(tool: &str, args: &Value, path: CallPath) -> Judgement {
 
     // Carved out on both paths — see `DEFERRED` and issue #658. Ahead of every
     // rule, so none of them can reach it and so the exclusion is impossible to
-    // miss.
-    if DEFERRED.contains(&name.as_str()) {
+    // miss. It stays here as well as inside the floor because the two arms
+    // below are this module's own: a deferred tool must clear the mechanism
+    // rules too, and the floor does not own those.
+    if floor::is_deferred(&name) {
         return Judgement::Silent;
     }
 
-    // Declared first: a named consequence class is the honest answer and the
-    // one the operator's card already shows.
+    // The consequence arms live in
+    // [`crate::policy::floor`] — the same rule the shadow measurement above the
+    // `policy_hitl_enabled` bypass reads (issue #2147). `None` for the cap is
+    // what preserves this path's answer exactly: with no cap, any declared
+    // amount stops, which is what this arm has always done. The cap belongs to
+    // the caller that has one, and this one does not — `auto_approve_under_usd`
+    // and the daily budget have both already spoken above.
     //
-    // Restricted to DECLARED tools, which is not a detail. An undeclared tool
-    // is given a group by matching words in its name — a fallback that exists
-    // to label a card, not to decide one. `write_file` contains "file" and is
-    // therefore labelled `Sign`; gating on that would stop it while telling the
-    // operator it "signs or files a document". Undeclared tools stop below, on
-    // the honest ground that nobody has said what they do.
-    //
-    // Both halves are required, and the pairing is not obvious. The group names
-    // *what kind* of consequence a tool has; the reach says whether this call
-    // actually has one. `web_search` and the `media_generate_*` tools are
-    // declared `Spend` because the backend bills per request, but their reach is
-    // `Money`: nothing changes anywhere and nothing leaves the company — the
-    // money buys the call itself. Stopping them on the group alone parked every
-    // search, which is worse than useless: openhuman resolves a
-    // `RequireApproval` inline, so a parked search is a search that never
-    // happens and an agent with no search invents citations. The per-company
-    // daily cap is the boundary for that spend, and it has already had its say
-    // above.
-    if declared
-        && is_irreversible_group(consequence.group)
-        && consequence.reach == Reach::Consequence
-    {
-        return Judgement::Stop(StopReason::Irreversible(consequence.group));
-    }
-
-    // Then the arguments of this actual call. A tool the table calls
-    // unclassified can still be carrying money.
-    if declared_amount_usd(args).is_some() {
-        return Judgement::Stop(StopReason::MoneyLeaves);
+    // The two arms below stay here on purpose. They stop on *mechanism* — a
+    // tool nobody declared, or one whose reach cannot be bounded — which is a
+    // different question from whether the call commits the company, and one the
+    // floor deliberately does not ask.
+    match floor::evaluate(tool, args, None) {
+        floor::FloorVerdict::Irreversible(group) => {
+            return Judgement::Stop(StopReason::Irreversible(group));
+        }
+        floor::FloorVerdict::MoneyLeaves => return Judgement::Stop(StopReason::MoneyLeaves),
+        floor::FloorVerdict::Silent => {}
     }
 
     // Fail closed on anything nobody declared that is not a pure read. The
