@@ -13,9 +13,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { me as fetchMe, type UserRole } from "@/api/auth";
+import { fetchAuthConfig, logout, me as fetchMe, type Me, type UserRole } from "@/api/auth";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { fetchAuthConfig, logout, me as fetchMe, type Me } from "@/api/auth";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
