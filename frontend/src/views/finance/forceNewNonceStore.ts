@@ -39,24 +39,48 @@ function storage(): Storage | null {
   }
 }
 
-/**
- * The nonce of a forced send that has not yet resolved for this scope, or
- * `undefined` if none is outstanding.
- */
-export function readUnresolvedForceNew(scope: LocalScope): string | undefined {
-  const raw = storage()?.getItem(keyFor(scope));
-  return raw && raw.length > 0 ? raw : undefined;
+/** A forced send that was attempted for one specific invoice and never resolved. */
+export interface UnresolvedForceNew {
+  /** The invoice's content-derived key, WITHOUT the nonce folded in. */
+  invoiceKey: string;
+  nonce: string;
 }
 
-/** Marks a forced send as attempted and unresolved. */
-export function writeUnresolvedForceNew(scope: LocalScope, nonce: string): void {
+/**
+ * The unresolved forced send held for this scope, or `undefined`.
+ *
+ * Carries the invoice it belongs to, because a nonce is meaningful only for
+ * the invoice it was minted against: restoring it onto a different invoice
+ * would fold one invoice's nonce into another's key and have the host dedupe
+ * a genuinely new invoice away as a replay of the old one.
+ */
+export function readUnresolvedForceNew(scope: LocalScope): UnresolvedForceNew | undefined {
+  const raw = storage()?.getItem(keyFor(scope));
+  if (!raw) return undefined;
+  try {
+    const held: unknown = JSON.parse(raw);
+    if (
+      typeof held === "object" &&
+      held !== null &&
+      typeof (held as UnresolvedForceNew).invoiceKey === "string" &&
+      typeof (held as UnresolvedForceNew).nonce === "string"
+    ) {
+      return held as UnresolvedForceNew;
+    }
+  } catch {
+    // A value this cannot read is a value it must not act on.
+  }
+  return undefined;
+}
+
+/** Marks a forced send of one invoice as attempted and unresolved. */
+export function writeUnresolvedForceNew(scope: LocalScope, held: UnresolvedForceNew): void {
   const store = storage();
   if (!store) return;
   try {
-    store.setItem(keyFor(scope), nonce);
+    store.setItem(keyFor(scope), JSON.stringify(held));
   } catch {
-    // A full or read-only quota is not worth failing a send over — the latch
-    // just does not survive a remount, same as before this fix existed.
+    // A full or read-only quota is not worth failing a send over.
   }
 }
 
