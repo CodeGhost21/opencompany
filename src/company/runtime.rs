@@ -2007,7 +2007,7 @@ impl CompanyRuntime {
     /// company whose effects are denied but whose turns keep running still
     /// executes tools and still bills inference, while reporting itself stopped.
     ///
-    /// Enforced at the three doorways work enters through, each the sole
+    /// Enforced at the four doorways work enters through, each the sole
     /// entrance of its family:
     ///
     /// * [`ensure_accepting`](Self::ensure_accepting) — every ingress asking for
@@ -2018,6 +2018,11 @@ impl CompanyRuntime {
     /// * [`reconcile_stranded_blocked_nodes`](Self::reconcile_stranded_blocked_nodes) —
     ///   the boot-time resume, which reaches a dispatch through neither of the
     ///   other two.
+    /// * [`run_planning_pass`](crate::harness::built_in::planning::run_planning_pass) —
+    ///   a task's own paid-model doorway. It never goes through `run_cycle`, and
+    ///   a card reaches `Planning` through a plain board write
+    ///   ([`upsert_task`](Self::upsert_task)), which leaves lifecycle `running`
+    ///   even while stopped, so none of the other three ever see it.
     ///
     /// # Semantics
     ///

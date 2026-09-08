@@ -343,6 +343,18 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
     }
     let token = card.updated_at_millis;
 
+    // Codex review finding on PR #2140 (`3960203729`). A planning pass is its
+    // own paid-model doorway — it never goes through `run_cycle`, so none of
+    // `ensure_not_emergency_stopped`'s other three call sites see it — and a
+    // card reaches `Planning` through a plain board write
+    // (`CompanyRuntime::upsert_task`), which leaves lifecycle `running` even
+    // while stopped. Checked here rather than earlier so the token above
+    // still names the board state the check was made against.
+    if let Err(err) = runtime.ensure_not_emergency_stopped() {
+        settle_failed(&runtime, &task_id, token, &err.to_string()).await;
+        return;
+    }
+
     let mut evidence = match gather_evidence(&runtime, &card).await {
         Ok(evidence) => evidence,
         Err(err) => {
