@@ -97,7 +97,7 @@ async fn repeated_roster_proposals_are_rate_limited() {
     }
 
     assert!(
-        statuses.iter().any(|s| *s == StatusCode::TOO_MANY_REQUESTS),
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
         "expected at least one 429 across {BURST} rapid calls from the same \
          company, got: {statuses:?}"
     );
