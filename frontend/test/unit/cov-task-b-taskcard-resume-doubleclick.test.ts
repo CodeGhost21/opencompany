@@ -105,6 +105,17 @@ describe("A real double-click on Resume", () => {
   });
 });
 
+describe("Resume is offered from props alone", () => {
+  it("renders live with no client and no role prop at all — nothing to gate it by role", async () => {
+    await render(() => {});
+
+    // `TaskItem` takes no `client` and no `canManage`: there is no read it
+    // could make to withhold Resume, which matches `patch_task`'s member-open
+    // authority. A live button here is the whole of the AUTH property.
+    expect(resumeButton().disabled).toBe(false);
+  });
+});
+
 describe("A resume that did not land", () => {
   it("leaves Resume live rather than stuck disabled — the card holds no busy state of its own", async () => {
     // A rejected `patchTask` inside the caller's `onResume` (e.g. `LedgersView`'s
