@@ -3512,7 +3512,7 @@ mod isolation_tests {
     #[tokio::test]
     async fn an_absent_credential_refuses_every_tool_before_the_network() {
         let (url, log) = spawn_failing_backend().await;
-        let config = TenantComposio::new(url, Credential::from_value(""), Vec::new());
+        let config = TenantComposio::new(url, Credential::None, Vec::new());
 
         for name in [
             "composio_list_toolkits",
