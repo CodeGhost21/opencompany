@@ -114,5 +114,9 @@ describe("InboxView, a failed read", () => {
     expect(at("inbox-messages-error")).not.toBeNull();
     expect(at("inbox-messages-error")!.textContent).toContain("the store timed out");
     expect(at("inbox-empty")).toBeNull();
+    const retry = Array.from(at("inbox-messages-error")!.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Try again"),
+    );
+    expect(retry).toBeDefined();
   });
 });

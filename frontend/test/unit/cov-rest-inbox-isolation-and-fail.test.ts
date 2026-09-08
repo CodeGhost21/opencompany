@@ -120,5 +120,9 @@ describe("a failed mailbox read is never mistaken for an empty one", () => {
     expect(errorPane).not.toBeNull();
     expect(errorPane?.textContent).toContain("mailbox host unreachable");
     expect(container.querySelector('[data-testid="inbox-empty"]')).toBeNull();
+    const retry = Array.from(errorPane?.querySelectorAll("button") ?? []).find((b) =>
+      b.textContent?.includes("Try again"),
+    );
+    expect(retry).toBeDefined();
   });
 });
