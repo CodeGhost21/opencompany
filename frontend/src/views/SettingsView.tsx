@@ -366,11 +366,17 @@ export function LifecycleControls({
     }
   }
 
-  // Through the funnel, not the raw bearer: "Reset / Start clean" archives this
-  // company and re-provisions it through the same dialog "New company" opens, so
-  // it is company creation wearing another label and has to answer the same
-  // question the other triggers do.
-  const platform = canCreateCompanies(client);
+  // The raw bearer, not the funnel: `canCreateCompanies` also folds in
+  // `COMPANY_SWITCHING_HIDDEN`, a UI feature flag that has nothing to do with
+  // whether this client actually carries platform authority. Gating lifecycle
+  // affordances on the funnel would hide Suspend/Archive from a real platform
+  // caller on a deployment where that flag happens to be set.
+  const platform = client.carriesPlatformBearer;
+  // "Reset / Start clean" archives this company and re-provisions it through
+  // the same dialog "New company" opens, so it is company creation wearing
+  // another label and has to answer the same question the other triggers do —
+  // unlike the lifecycle actions above, it rides the funnel on purpose.
+  const canReset = canCreateCompanies(client);
   const { actions, explainPlatformOnly, explainPlatformSuspended, explainAdminOnly, archived } =
     lifecycleAffordances(state, session, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
@@ -467,9 +473,10 @@ export function LifecycleControls({
           {/* Reset = archive this company (data retained, not deleted) and
               provision a fresh empty one in its place — the only truthful
               "start clean" the host offers, since there is no purge route.
-              Platform-scoped like archive, so it rides the same `platform`
-              gate and is left out entirely for a magic-link operator. */}
-          {onReset && platform && !archived && (
+              Gated on `canReset`, not the raw bearer: it goes through the same
+              funnel "New company" does, and is left out entirely for a
+              magic-link operator. */}
+          {onReset && canReset && !archived && (
             <Button variant="destructive" disabled={busy} onClick={onReset}>
               <RotateCcw className="size-4" /> Reset / Start clean
             </Button>
