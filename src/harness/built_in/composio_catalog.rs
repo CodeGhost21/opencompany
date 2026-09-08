@@ -138,7 +138,193 @@ pub const MAX_BODY_BYTES: usize = 12 * 1024;
 /// agent that adjusts and an agent that repeats itself.
 ///
 /// `what` names the payload for the trailer, e.g. `"GITHUB_LIST_ISSUES output"`.
+/// Keys whose value is a link and never an answer. Dropped wholesale from a
+/// projected record.
+///
+/// A provider's record is mostly navigation: GitHub's issue object carries
+/// `url`, `repository_url`, `labels_url`, `comments_url`, `events_url`,
+/// `html_url` and `timeline_url` before it carries a title. None of it helps a
+/// model say what the issues are, and all of it is charged against the same
+/// byte budget the titles compete for.
+fn is_link_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key == "url" || key == "href" || key.ends_with("_url") || key.ends_with("_urls")
+}
+
+/// The single field that stands in for a nested object — a user becomes its
+/// `login`, a label its `name`, a milestone its `title`.
+///
+/// Tried in order, so an object carrying several answers the most specific.
+const NESTED_STAND_INS: [&str; 5] = ["login", "name", "title", "slug", "id"];
+
+/// Reduce one record to the fields that carry an answer.
+///
+/// Scalars are kept as they are. A nested object collapses to its stand-in
+/// (`user` → `"octocat"`), an array of objects to the list of theirs
+/// (`labels` → `["bug", "p2"]`). Anything else — a nested structure with no
+/// obvious name, an empty container — is dropped: it costs bytes and answers
+/// nothing, and a model that needs it can ask the action for that record by id.
+fn project_record(value: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (key, val) in map {
+        if is_link_key(key) {
+            continue;
+        }
+        match val {
+            serde_json::Value::Object(inner) => {
+                if let Some(stand_in) = NESTED_STAND_INS
+                    .iter()
+                    .find_map(|name| inner.get(*name).filter(|v| !v.is_null()))
+                {
+                    out.insert(key.clone(), stand_in.clone());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                let names: Vec<serde_json::Value> = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        serde_json::Value::Object(inner) => NESTED_STAND_INS
+                            .iter()
+                            .find_map(|name| inner.get(*name).filter(|v| !v.is_null()))
+                            .cloned(),
+                        scalar if !scalar.is_null() => Some(scalar.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !names.is_empty() {
+                    out.insert(key.clone(), serde_json::Value::Array(names));
+                }
+            }
+            scalar => {
+                if !scalar.is_null() {
+                    out.insert(key.clone(), scalar.clone());
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Where a provider hides its list of records, when the payload is not itself
+/// the array.
+const RECORD_ENVELOPES: [&str; 6] = ["data", "items", "results", "issues", "records", "values"];
+
+/// Project an array-of-records payload down to its answering fields, returning
+/// `None` when the body is not that shape.
+///
+/// The gap this fills is named in [`bound_body`]'s own docs: "there is no
+/// generic argument that makes *that* smaller". True of the action's
+/// **arguments** — the narrowing lives in the provider's own parameters — but
+/// not of its **encoding**. Most provider output is a list of records, and the
+/// bulk of each record is navigation rather than answer. Cutting the payload on
+/// a byte boundary keeps whole records and discards whole records; projecting it
+/// keeps every record and discards the parts of each that nobody asked for.
+///
+/// Deliberately conservative: a payload that is not a list of objects is left
+/// alone, and every scalar the records do carry survives. This is a lossy
+/// transform, so it is reported (see the `[composio] projected` log) rather than
+/// applied invisibly — and the trailer `bound_body` appends when the projection
+/// is still too big says the same thing it always did.
+/// Project an already-parsed payload, returning it unchanged when it holds no
+/// array of records. The entry point [`scrubbed_ok`] uses, because by the time
+/// a body is a `String` it has been through [`redact`] and is no longer JSON.
+pub fn project_records_value(mut value: serde_json::Value) -> serde_json::Value {
+    let before = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(0);
+    if before <= MAX_BODY_BYTES {
+        // Nothing to gain: the payload already fits, and projecting it would
+        // drop fields for no reason.
+        return value;
+    }
+    if project_in_place(&mut value) {
+        let after = serde_json::to_string(&value).map(|s| s.len()).unwrap_or(before);
+        tracing::info!(
+            from_bytes = before,
+            to_bytes = after,
+            ratio = format!("{:.1}x", before as f64 / after.max(1) as f64),
+            fits_now = after <= MAX_BODY_BYTES,
+            "[composio] projected an array-of-records payload to its answering fields"
+        );
+    }
+    value
+}
+
+pub fn project_records(body: &str) -> Option<String> {
+    let mut parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    // Rewrites every record array in place, wherever it sits. The first cut of
+    // this looked one level down and found nothing: Composio returns the
+    // provider payload inside its own result envelope, so the records are never
+    // where a naive reader expects them, and the shape differs per action. A
+    // recursive walk needs no table of envelope names and cannot be defeated by
+    // the next provider nesting one level deeper.
+    let projected_any = project_in_place(&mut parsed);
+    projected_any.then(|| serde_json::to_string(&parsed).ok())?
+}
+
+/// Project every array-of-records found anywhere in `value`, in place.
+///
+/// Returns whether anything was projected, so the caller can tell "nothing to
+/// do" from "done" without comparing serialisations.
+fn project_in_place(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => {
+            // The premise is many records sharing a shape; one object is better
+            // shown as it came, and a list of scalars has nothing to prune.
+            if items.len() >= 2 && items.iter().all(serde_json::Value::is_object) {
+                for item in items.iter_mut() {
+                    *item = project_record(item);
+                }
+                return true;
+            }
+            let mut any = false;
+            for item in items.iter_mut() {
+                any |= project_in_place(item);
+            }
+            any
+        }
+        serde_json::Value::Object(map) => {
+            let mut any = false;
+            for (_, val) in map.iter_mut() {
+                any |= project_in_place(val);
+            }
+            any
+        }
+        _ => false,
+    }
+}
+
 pub fn bound_body(body: String, what: &str) -> String {
+    if body.len() <= MAX_BODY_BYTES {
+        return body;
+    }
+    // Try to keep every record before resorting to keeping only the first few.
+    let body = match project_records(&body) {
+        Some(projected) if projected.len() < body.len() => {
+            tracing::info!(
+                what,
+                from_bytes = body.len(),
+                to_bytes = projected.len(),
+                ratio = format!(
+                    "{:.1}x",
+                    body.len() as f64 / projected.len().max(1) as f64
+                ),
+                fits_now = projected.len() <= MAX_BODY_BYTES,
+                "[composio] projected an array-of-records payload to its answering fields"
+            );
+            projected
+        }
+        _ => {
+            tracing::info!(
+                what,
+                bytes = body.len(),
+                head = body.chars().take(180).collect::<String>(),
+                "[composio] no array-of-records to project; bounding the payload as it came"
+            );
+            body
+        }
+    };
     if body.len() <= MAX_BODY_BYTES {
         return body;
     }
@@ -2123,5 +2309,35 @@ mod tests {
             web_call_deflection(&connected, "https://api.linkedin.com/rest/posts").is_some(),
             "the LinkedIn API host must be deflected"
         );
+    }
+}
+
+#[cfg(test)]
+mod projection_prototype_tests {
+    use super::*;
+
+    /// The exact shape the live GitHub call returns: records two levels down,
+    /// under Composio's own `data` envelope.
+    #[test]
+    fn projects_records_nested_under_the_composio_envelope() {
+        let body = serde_json::json!({
+            "data": { "details": [
+                { "number": 1, "title": "a", "url": "https://x", "html_url": "https://y",
+                  "user": { "login": "octocat", "avatar_url": "https://z", "id": 5 },
+                  "labels": [ { "name": "bug", "url": "https://l" } ] },
+                { "number": 2, "title": "b", "url": "https://x2", "html_url": "https://y2",
+                  "user": { "login": "hubot", "avatar_url": "https://z2", "id": 6 },
+                  "labels": [ { "name": "p2", "url": "https://l2" } ] }
+            ]}
+        })
+        .to_string();
+
+        let projected = project_records(&body).expect("records nested under `data.details`");
+        assert!(projected.len() < body.len(), "must shrink: {} -> {}", body.len(), projected.len());
+        assert!(!projected.contains("avatar_url"), "link fields must go: {projected}");
+        assert!(!projected.contains("html_url"), "link fields must go: {projected}");
+        assert!(projected.contains("octocat"), "nested user collapses to its login: {projected}");
+        assert!(projected.contains("bug"), "label array collapses to names: {projected}");
+        assert!(projected.contains("\"title\""), "answering fields survive: {projected}");
     }
 }

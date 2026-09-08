@@ -68,8 +68,21 @@ fn v3_base() -> String {
     format!("{DIRECT_BASE_URL}/api/v3")
 }
 
-/// How many rows one page pulls. Composio's own maximum for these endpoints.
-const PAGE_LIMIT: &str = "200";
+/// How many rows one page pulls.
+///
+/// Was `200`, described here as "Composio's own maximum for these endpoints".
+/// That is not what the API documents — `/tools` accepts `limit` up to **1000**
+/// — and `tinyhumansai/backend` has been paging the same endpoint at 1000 since
+/// before this client existed (`REST_PAGE_LIMIT` in
+/// `controllers/agentIntegrations/composio/listTools.ts`). The old value made
+/// the three-page budget a 600-row ceiling, which GitHub's 893-action catalogue
+/// overflows: an agent asking for repo-scoped issue actions was handed 600 rows
+/// that did not contain them and concluded, reasonably and wrongly, that the
+/// capability did not exist.
+///
+/// At 1000 the same three pages reach 3000 rows, GitHub fits in a single
+/// request, and the round-trip count drops with it.
+const PAGE_LIMIT: &str = "1000";
 
 /// How many pages one listing will follow before it stops.
 ///
@@ -212,11 +225,71 @@ impl DirectComposio {
     /// restates it — same endpoint, same `toolkit_versions=latest` pin (without
     /// it v3 answers from a snapshot that lists nothing for any toolkit
     /// published since launch), same envelope.
-    pub(crate) async fn list_tools(&self, toolkits: &[String]) -> Result<ComposioToolsResponse> {
+    pub(crate) async fn list_tools(
+        &self,
+        toolkits: &[String],
+        // Full-text narrowing, applied by Composio over each action's name,
+        // slug and description (`search`), and its declared tags (`tags`).
+        //
+        // Both were absent before, and their absence is what made discovery
+        // fail rather than merely be coarse: the tool surface has taken a
+        // `search` argument all along, but applied it CLIENT-SIDE to whatever
+        // survived the page budget. Searching "issue" among 600 rows cannot
+        // return an action sitting in the 293 that were dropped, so a narrowing
+        // the caller asked for silently narrowed nothing. `tinyhumansai/backend`
+        // threads `tags` server-side for the same reason.
+        //
+        // A `None` for either sends no parameter at all, which leaves the query
+        // exactly as it was — the widening is opt-in, so no existing caller
+        // changes behaviour.
+        search: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> Result<ComposioToolsResponse> {
         let mut params: Vec<(&str, String)> = vec![
             ("limit", PAGE_LIMIT.to_string()),
             ("toolkit_versions", "latest".to_string()),
         ];
+        if let Some(term) = search.map(str::trim).filter(|term| !term.is_empty()) {
+            params.push(("search", term.to_string()));
+        }
+        let tag_values: Vec<&str> = tags
+            .unwrap_or(&[])
+            .iter()
+            .map(|tag| tag.trim())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        // Curated preview when the caller has narrowed nothing (the shape
+        // `tinyhumansai/backend` documents: "when `important` is omitted,
+        // server-side defaults the filter to curated-only — returning ~50
+        // 'featured' tools per toolkit").
+        //
+        // That default does NOT hold on this raw REST path — omitting the
+        // parameter here returns the whole catalogue, which is how a bare
+        // `toolkits: ["github"]` came back as 893 actions and overflowed the
+        // page budget. So the curation is requested explicitly.
+        //
+        // Gated on having no `search` and no `tags`, and that is the whole
+        // design: an unnarrowed call is a **browse**, and ~50 featured actions
+        // is a far better answer to "what can GitHub do" than 893 rows the
+        // reader cannot skim and the budget cannot carry. A call that names
+        // either one is a **search**, and a search must be able to reach the
+        // long tail — `GITHUB_LIST_REPOSITORY_ISSUES` is not featured, and it is
+        // exactly what the last agent went looking for and reported as absent.
+        //
+        // So: browse is curated and small, search is complete. Neither is
+        // truncated silently — `render_header` states `available`, `matched` and
+        // `showing` on every listing.
+        let narrowed = search.is_some_and(|term| !term.trim().is_empty()) || !tag_values.is_empty();
+        if !narrowed {
+            params.push(("important", "true".to_string()));
+        }
+        if !tag_values.is_empty() {
+            // Comma-separated in one parameter, matching `toolkit_slug`'s
+            // handling directly below — repeating a parameter is what returned
+            // an empty body there, and there is no reason to assume this
+            // endpoint treats a second one differently.
+            params.push(("tags", tag_values.join(",")));
+        }
         let slugs: Vec<&str> = toolkits
             .iter()
             .map(|slug| slug.trim())
@@ -244,8 +317,10 @@ impl DirectComposio {
                 toolkits = ?slugs,
                 fetched = paged.items.len(),
                 dropped = paged.dropped,
-                "[composio-byok] list_tools: stopped at the page budget; narrow the toolkit list \
-                 to see the rest"
+                search,
+                tags = ?tag_values,
+                "[composio-byok] list_tools: stopped at the page budget; narrow with `search` or \
+                 `tags`, or name fewer toolkits, to see the rest"
             );
         }
         Ok(ComposioToolsResponse {
@@ -735,7 +810,7 @@ mod tests {
         let direct = DirectComposio::new("ak_live").with_v3_base_for_test(base);
 
         let resp = direct
-            .list_tools(&["gmail".to_string(), "  ".to_string(), "slack".to_string()])
+            .list_tools(&["gmail".to_string(), "  ".to_string(), "slack".to_string()], None, None)
             .await
             .expect("tools");
         assert_eq!(resp.tools.len(), 1);
@@ -968,7 +1043,7 @@ mod tests {
 
         // 1. The listing the agent discovers actions through.
         let tools = direct
-            .list_tools(&["github".to_string()])
+            .list_tools(&["github".to_string()], None, None)
             .await
             .expect("list_tools");
         let target = tools
