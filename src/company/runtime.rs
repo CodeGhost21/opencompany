@@ -7232,6 +7232,17 @@ impl CompanyRuntime {
                             "[approval] a workflow gate batch released by an emergency-resume \
                              redrive failed"
                         );
+                        // CodeRabbit review finding on PR #2140 (`3960328835`):
+                        // matches `resume_workflow_run`'s own failure path — a
+                        // silent log here is every sign-off already in, with
+                        // nothing telling the operator the run still needs a
+                        // manual re-run.
+                        rt.announce_to_operator(&format!(
+                            "Every sign-off on a workflow step blocked by the emergency stop is \
+                             in, but the run could not be restarted after release: {error}. \
+                             Re-run the workflow to pick it back up."
+                        ))
+                        .await;
                     }
                 });
             }
