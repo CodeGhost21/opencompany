@@ -2707,9 +2707,22 @@ export function ChatView({
                     the order read correct with nobody typing and wrong with someone
                     typing.
 
-                    Suppressed on a read-only channel: nothing can be sent there, so a
-                    caveat about what sending produces has nothing left to qualify —
-                    and the composer it would sit above is not rendered at all.
+                    Kept on a read-only channel, where there is no composer at all.
+                    The suppression this replaced argued that nothing can be sent
+                    there, so a caveat about what sending produces has nothing left to
+                    qualify. But the sentence is not about sending — every state below
+                    says the replies in this conversation come from the echo brain
+                    rather than the teammate they appear under, which is a claim about
+                    the messages already on screen. `readOnly` is
+                    `Boolean(channel?.system)`, i.e. the `#Operator` feed, whose
+                    workflow reports are rendered under a teammate's name and avatar
+                    and are stub output whenever the company has no working model.
+                    Those rows carry only `EchoPlaceholder` — a non-focusable `<span>`
+                    whose explanation lives in a `title`, so it reaches neither
+                    keyboard, touch nor screen reader. And a feed nobody can reply to
+                    is where the reader is least able to test the attribution by
+                    asking, so it is the last place to drop the only visible statement
+                    of it.
 
                     All four states below say "the replies in this conversation", not
                     "the replies below". They said "below" while this strip sat above
@@ -2722,7 +2735,7 @@ export function ChatView({
                     `role="status"` (not `alert`) for the reason
                     `components/ui/alert.tsx` gives — a notice present on mount should
                     not interrupt a screen reader. */}
-                {echoing && !readOnly && (
+                {echoing && (
                   <p
                     role="status"
                     data-testid="chat-cognition-banner"
