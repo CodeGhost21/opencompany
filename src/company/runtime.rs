@@ -567,6 +567,7 @@ impl CompanyRuntime {
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         let run_supervisor_gate = approval_gate.clone();
+        let workflow_gates_gate = approval_gate.clone();
         Self {
             inert_board_reported: std::sync::atomic::AtomicBool::new(false),
             // Install-wide, not per-company, so it is set by the builder from
@@ -606,7 +607,7 @@ impl CompanyRuntime {
                 .with_emergency_gate(run_supervisor_gate),
             grants,
             continuations: ContinuationQueue::default(),
-            workflow_gates: WorkflowGateQueue::default(),
+            workflow_gates: WorkflowGateQueue::default().with_emergency_gate(workflow_gates_gate),
             blocked_nodes: BlockedNodeQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
@@ -7197,6 +7198,37 @@ impl CompanyRuntime {
             // leaving it for the next restart.
             self.arm_replayed_continuation_recovery();
             self.schedule_replayed_continuations();
+            // Codex review finding on PR #2140 (`3955615146`): a durable
+            // blocker answer whose settlement this same stop refused
+            // (`settle_approval`'s emergency check) is neither an explicit
+            // continuation nor a blocked-node stash, so neither call above
+            // sees it — it is still sitting in `self.journal.blocker_resolutions`,
+            // exactly as a cold boot's replay would find it (`recover`, above).
+            // Re-arming and re-running that pair catches it up on this live
+            // process instead of leaving it for the next restart.
+            self.arm_replayed_blocker_recovery();
+            self.schedule_replayed_blocker_resolutions();
+            // Codex review finding on PR #2140 (`3955615141`): a workflow gate
+            // batch this same stop refused to release
+            // (`WorkflowGateQueue::release`'s emergency check) is left fully
+            // decided in the queue rather than destroyed, exactly so this can
+            // hand it back to `resume_run` the moment the stop lifts instead of
+            // requiring an operator to notice and manually re-run the workflow.
+            for turn in self.workflow_gates.ready_for_release() {
+                let rt = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(error) = crate::runtime::workflow_resume::resume_run(&rt, &turn).await
+                    {
+                        tracing::error!(
+                            company = %rt.id,
+                            %turn,
+                            %error,
+                            "[approval] a workflow gate batch released by an emergency-resume \
+                             redrive failed"
+                        );
+                    }
+                });
+            }
         }
         Ok(released)
     }
@@ -12655,6 +12687,75 @@ mod tests {
             assert!(
                 !runtime.journal.is_executed(&format!("approval:{id}")),
                 "a console Approve of a blocker must resume, never perform_effect"
+            );
+        }
+
+        /// **Codex review finding on PR #2140 (`3955615146`).** A durable
+        /// blocker answer banked but not yet settled — the exact window between
+        /// `arm_console_blocker_resolution` and `settle_claimed_blocker` a crash
+        /// or a stop can land in — is neither an explicit continuation nor a
+        /// blocked-node stash, so releasing the stop must redrive it itself
+        /// rather than leaving it for the next restart.
+        #[tokio::test]
+        async fn releasing_the_stop_redrives_a_blocker_answer_the_stop_itself_refused() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            // Bank the operator's answer durably without settling it — the same
+            // intermediate state a crash or a stop between the claim and the
+            // resume leaves behind.
+            runtime
+                .arm_console_blocker_resolution(&id, crate::ports::types::Verdict::Approve)
+                .await
+                .expect("arms the resolution")
+                .then_some(())
+                .expect("the parked blocker must actually arm");
+
+            runtime.emergency_pause(operator(), None).await.expect("pause");
+
+            assert!(
+                runtime
+                    .journal
+                    .replayed_blocker_resolutions()
+                    .iter()
+                    .any(|(rid, _)| rid == &id),
+                "the banked answer is durable and still owed a settle"
+            );
+
+            runtime
+                .emergency_resume(operator(), None)
+                .await
+                .expect("resume");
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while runtime
+                    .journal
+                    .replayed_blocker_resolutions()
+                    .iter()
+                    .any(|(rid, _)| rid == &id)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("releasing the stop must redrive the banked answer, not strand it")
+            });
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_IN_PROGRESS,
+                "the redriven answer re-enters the paused card through the dispatch edge"
             );
         }
 
