@@ -82,8 +82,8 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::ACP_AGENTS;
 use crate::company::profile_draft::{
-    CopilotTurn, DraftRefusal, ProfileDraft, ProfileField, ProfileSubject, Sibling, TurnRole,
-    clamp_conversation,
+    CopilotTurn, DesignedTeammate, DraftRefusal, ProfileDraft, ProfileField, ProfileSubject,
+    Sibling, TurnRole, clamp_conversation, clamp_design_brief,
 };
 use crate::company::setup::clamp_description;
 use crate::error::OpenCompanyError;
@@ -1543,6 +1543,264 @@ pub(super) async fn draft_profile(
         "[draft] answered a teammate profile turn"
     );
     Ok(Json(DraftDto::from_draft(field, draft)))
+}
+
+/// What the reduced Add-teammate dialog sends to have a teammate designed
+/// (issue #1989): a name, and the one sentence the operator typed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesignRequest {
+    /// The name the operator gave, which nothing can derive and nothing here
+    /// changes. Carried only as grounding, so the mandate can address the
+    /// teammate as they will.
+    #[serde(default)]
+    name: Option<String>,
+    /// What the operator said this teammate should do. The whole input.
+    description: String,
+}
+
+/// A teammate as one design pass wrote it, or the reason there is none.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesignDto {
+    /// The job title. Absent when the pass refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    /// The mandate. Absent when the pass refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// The standing instructions. Absent when the pass refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    /// `model` when a model designed this, `unavailable` when none could.
+    source: &'static str,
+    /// Why there is none. Present only when `source` is `unavailable`, and one
+    /// of the four [`DraftRefusal`] spellings — the console says a different
+    /// sentence for each, because "wire up a model", "try again", "say more"
+    /// and "wait for the period to reset" are four different next moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+impl DesignDto {
+    fn from_designed(designed: DesignedTeammate) -> Self {
+        match designed {
+            DesignedTeammate::Designed(design) => Self {
+                role: Some(design.role),
+                description: Some(design.description),
+                instructions: Some(design.instructions),
+                source: "model",
+                reason: None,
+            },
+            DesignedTeammate::Refused(reason) => Self {
+                role: None,
+                description: None,
+                instructions: None,
+                source: "unavailable",
+                reason: Some(reason.as_str()),
+            },
+        }
+    }
+}
+
+/// `POST {scope}/team/design` — design a whole teammate from a name and a
+/// sentence (issue #1989).
+///
+/// # Why this route exists at all
+///
+/// The reduced Add-teammate dialog collects a name and one sentence. Something
+/// has to turn that into the three fields a teammate is actually made of, and
+/// until this route the console did it by **splitting the sentence**: first
+/// clause for the role, cut at sixty characters with an ellipsis. That shipped
+/// teammates whose stored job title was `"Runs wholesale outreach to boutique
+/// retailers and keeps the…"`, interpolated verbatim into `persona_prompt` and
+/// rendered beside their id in the orchestrator's Team block. A string split
+/// cannot tell a job from an adverbial, and no amount of tuning makes it able
+/// to; a model reading the sentence can.
+///
+/// # Why drafting a role is allowed here and nowhere else
+///
+/// `POST {scope}/team/{agent_id}/draft` still refuses anything but
+/// `description` and `instructions`, and must keep refusing. Its reason — a
+/// role is what delegation grounds on, so a drafted one would change who the
+/// company routes work to — is a statement about **editing a teammate that
+/// exists**: work is already addressed to it, and a model re-pointing that is
+/// the harm.
+///
+/// This route takes **no agent id**. There is no teammate yet, nothing is
+/// routed to it, and no orchestrator has seen it, so the property that
+/// exclusion protects is not in play. The separation is structural rather than
+/// a flag: there is no request shape that reaches this pass carrying an
+/// existing teammate's id, so it cannot rewrite one.
+///
+/// # This route never writes
+///
+/// Like the two draft routes, and for the same reason: it loads the record,
+/// composes a prompt from it, and returns text. The console writes the teammate
+/// afterwards through `POST {scope}/team`, which validates what it is given.
+/// The record is byte-identical when this returns, so it takes no write lock.
+///
+/// # Who may ask
+///
+/// Any signed-in member, matching `POST {scope}/team` — the write this feeds.
+/// Wider would let a caller spend the company's tokens on a teammate they could
+/// not then create.
+///
+/// # Refusals
+///
+/// A blank description is a `400`: it is the entire input, and designing from
+/// nothing is a model inventing a job rather than reading one. Everything else
+/// — no model wired, a provider that did not answer, an answer that could not
+/// be read, the plan's token ceiling reached — is a `200` carrying a reason,
+/// exactly as the draft routes answer, because none of those is a failure of
+/// the request. The console's answer to all four is the same: show the full
+/// form, carrying what was typed, and let the operator write the fields
+/// themselves.
+pub(super) async fn design_teammate(
+    company: ScopedCompany,
+    State(_state): State<AppState>,
+    Json(body): Json<DesignRequest>,
+) -> Result<Json<DesignDto>, ApiError> {
+    let description = body.description.trim();
+    if description.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "say what the teammate should do — a design is written from it".to_string(),
+        )));
+    }
+
+    let record = company
+        .runtime
+        .store()
+        .load(company.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
+
+    let subject = ProfileSubject {
+        company_name: record.manifest.company.name.clone(),
+        company_output: record.manifest.company.output.clone(),
+        // No id, and none invented: "the one being added" is what an empty id
+        // means here, exactly as on `POST {scope}/team/draft`.
+        agent_id: String::new(),
+        name: blank_to_none(body.name.as_deref().map(clamp_description)),
+        // Empty, and this is the point of the route: the role is what the pass
+        // produces, not what grounds it.
+        role: String::new(),
+        // Bounded by prompt weight, NOT by the roster card. This used to be
+        // `ProfileField::Description.clamp`, which is `MAX_DESCRIPTION` — a
+        // *layout* bound, 200 characters, because a card has one line for a
+        // mandate. Applied to the operator's brief it cut their sentence at 200
+        // with an `…` on the end before the model ever read it, and nothing
+        // said so: the console's box had no limit, and the record stores the
+        // model's description rather than the operator's, so a requirement
+        // written past character 200 vanished without a trace. See
+        // `MAX_DESIGN_BRIEF`; the console holds the same number on the box.
+        description: Some(clamp_design_brief(description)),
+        instructions: None,
+        // Ids and roles only, the same closed grounding every draft gets, so a
+        // designed teammate does not duplicate a job the company already has.
+        siblings: siblings_of(&record, ""),
+        // A design is one shot. There is no conversation to carry, and adding
+        // one would make this the draft route with a wider field list.
+        conversation: Vec::new(),
+    };
+
+    // Armed across the one await a disconnect can land inside. See `DesignSeam`.
+    let mut seam = DesignSeam {
+        company: company.id().to_string(),
+        finished: false,
+    };
+    let designed = build_design(&company, &record, &subject).await;
+    seam.finished = true;
+    tracing::info!(
+        company = %company.id(),
+        outcome = designed.refusal().map(|r| r.as_str()).unwrap_or("designed"),
+        "[design] answered a teammate design request"
+    );
+    Ok(Json(DesignDto::from_designed(designed)))
+}
+
+/// Makes an abandoned design pass loud instead of silent.
+///
+/// A design pass is the one place in this file where the caller can walk away
+/// mid-flight: the console's Add-teammate dialog aborts the request when it is
+/// shut, and `axum` drops this handler's future when the socket closes. That
+/// drop lands **between** the provider call and `record_profile_draft_usage`,
+/// so the `DraftBudget` reservation is released and nothing is recorded — while
+/// whatever the provider had already generated may still have been billed.
+///
+/// This does not fix that; it makes it countable. Deciding what a cancelled
+/// pass *should* cost is a product question with two defensible answers — let
+/// the pass finish so real usage is recorded (and abandoning it saves nothing),
+/// or charge a conservative estimate on the way out (and over-charge a pass
+/// cancelled after 200ms) — and neither should be picked silently inside a
+/// review cycle. Issue #2138 carries that decision; until it is made, a grep
+/// for this line is how the size of the gap gets measured rather than guessed
+/// at.
+struct DesignSeam {
+    company: String,
+    finished: bool,
+}
+
+impl Drop for DesignSeam {
+    fn drop(&mut self) {
+        if !self.finished {
+            tracing::warn!(
+                company = %self.company,
+                "[design] the caller went away before the pass finished — the budget \
+                 reservation is released and any provider work already done is not metered"
+            );
+        }
+    }
+}
+
+/// Runs the design pass, reserving its ceiling first.
+///
+/// The same order and the same reasoning as [`build_draft`]: a company with
+/// nothing wired has a truer answer than "out of budget", and a company that is
+/// out of budget must not reach the provider at all.
+#[cfg(feature = "openhuman")]
+async fn build_design(
+    company: &ScopedCompany,
+    record: &CompanyRecord,
+    subject: &ProfileSubject,
+) -> DesignedTeammate {
+    let Some(drafter) = company.runtime.profile_drafter() else {
+        return DesignedTeammate::Refused(DraftRefusal::NoModel);
+    };
+    let Some(_budget) = reserve_draft_budget(
+        company.id(),
+        company.runtime.usage().as_ref(),
+        &record.manifest.plan,
+        crate::harness::profile_draft::design_output_ceiling(),
+    )
+    .await
+    else {
+        return DesignedTeammate::Refused(DraftRefusal::BudgetExhausted);
+    };
+    let provider = drafter.provider_slug();
+    let (designed, usage) = drafter.design(subject).await;
+    let model = drafter.model_slug();
+    crate::metering::record_profile_draft_usage(
+        &usage,
+        &provider,
+        model,
+        company.id(),
+        company.runtime.store().as_ref(),
+        company.runtime.usage().as_ref(),
+    )
+    .await;
+    designed
+}
+
+/// The default build links no harness, so there is no model to design with and
+/// saying so is the whole answer.
+#[cfg(not(feature = "openhuman"))]
+async fn build_design(
+    _company: &ScopedCompany,
+    _record: &CompanyRecord,
+    _subject: &ProfileSubject,
+) -> DesignedTeammate {
+    DesignedTeammate::Refused(DraftRefusal::NoModel)
 }
 
 /// `POST {scope}/team/draft` — draft a field for a teammate the operator is
@@ -4447,6 +4705,88 @@ agent = "claude"
         assert_eq!(status, StatusCode::OK, "{drafted}");
         assert_eq!(drafted["source"], "unavailable", "{drafted}");
         assert_eq!(drafted["reason"], "no_model", "{drafted}");
+    }
+
+    /// The design pass is creation-only, and it is the only pass that may write
+    /// a `role` (issue #1989).
+    ///
+    /// Asserted as a **route** property rather than a flag, because that is what
+    /// keeps `DraftableField`'s exclusion of `role` meaningful: the exclusion
+    /// protects an existing teammate's delegation grounding from being
+    /// re-pointed by a model, and this route takes no agent id at all, so there
+    /// is no request shape that reaches it carrying one. `only_the_two_prose_fields_can_be_asked_for`
+    /// beside this is the other half — the id-bearing route still refuses
+    /// `role`, and must keep refusing.
+    #[tokio::test]
+    async fn designing_a_teammate_takes_no_agent_id_and_a_company_with_no_model_says_so() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, designed) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team/design",
+            Some(json!({
+                "name": "Sable",
+                "description": "Runs wholesale outreach to boutique retailers.",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{designed}");
+        // The same honest refusal the draft routes give, and for the same
+        // reason: a company with nothing wired asked a reasonable thing.
+        assert_eq!(designed["source"], "unavailable", "{designed}");
+        assert_eq!(designed["reason"], "no_model", "{designed}");
+        assert!(
+            designed["role"].is_null()
+                && designed["description"].is_null()
+                && designed["instructions"].is_null(),
+            "nothing was invented: {designed}"
+        );
+
+        // And there is no id-bearing spelling of it. A teammate that exists
+        // cannot be routed through this pass, which is what makes the role a
+        // creation-only field rather than a flag somebody could set.
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team/ceo/design",
+            Some(json!({"description": "Runs wholesale outreach."})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "no per-teammate design route may exist: {body}"
+        );
+    }
+
+    /// The sentence is the entire input, so a blank one is a `400` rather than a
+    /// model inventing a job from nothing.
+    ///
+    /// The same rule `a_teammate_being_added_needs_a_role_to_draft_from` states
+    /// for the draft route, about the field that route leans on. Here the
+    /// leaned-on field is the description, because the role is what this pass
+    /// produces.
+    #[tokio::test]
+    async fn designing_a_teammate_needs_something_to_design_from() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for description in ["", "   ", "\n\t "] {
+            let (status, body) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team/design",
+                Some(json!({"name": "Sable", "description": description})),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "description {description:?}: {body}"
+            );
+        }
     }
 
     /// A draft is written FROM the role, so a blank one is refused rather than

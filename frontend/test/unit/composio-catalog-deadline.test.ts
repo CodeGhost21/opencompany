@@ -34,6 +34,9 @@ import { classifyLoadFailure } from "@/lib/section-load";
 
 /** A transport whose reply the test stages, per URL, with an optional delay. */
 class DelayedTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly seen: TransportRequest[] = [];
   readonly aborted: string[] = [];
 

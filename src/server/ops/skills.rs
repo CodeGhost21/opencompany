@@ -11,9 +11,18 @@
 //! The console holds no skill catalog of its own; it browses the shared library
 //! over `GET …/skills/registry` and installs by slug, with the host resolving
 //! the content.
+//!
+//! Every write here is gated
+//! [`AdminScopedCompany`](crate::server::ops::AdminScopedCompany): a skill's
+//! content becomes part of every agent's effective prompt, company-wide, so
+//! installing, uninstalling, toggling, or authoring one decides something for
+//! the company rather than for the caller alone. The two reads —
+//! `GET …/skills` and `GET …/skills/registry` — stay open to any member; only
+//! the writes decide anything.
 
 use std::collections::HashMap;
 use std::path::Path as FsPath;
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -25,14 +34,26 @@ use crate::AppState;
 use crate::company::{SkillDoc, parse_skill_md, render_skill_md};
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
+use crate::ports::types::CompanyId;
 use crate::server::error::ApiError;
 use crate::server::ops::language;
-use crate::server::ops::{ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The default category stamped on a skill whose doc carries none.
 const DEFAULT_CATEGORY: &str = "Ops";
 /// The publisher stamped on shared-library skills (mirrors the GraphQL type).
 const REGISTRY_PUBLISHER: &str = "OpenCompany";
+
+/// The largest a skill's persisted `SKILL.md` (frontmatter and body together)
+/// may be.
+///
+/// A skill's content lands in every agent's effective prompt, company-wide, so
+/// this is a prompt budget rather than a storage limit. A quarter mebibyte
+/// matches the codebase's existing ceiling for inline prose,
+/// `MAX_ARTIFACT_BODY_BYTES` — generous for hand-authored instructions, and
+/// still small enough that no single skill can quietly dominate what every
+/// agent reads on every turn.
+const MAX_SKILL_DOC_BYTES: usize = 256 * 1024;
 
 /// Whether `slug` is a safe skill id: `^[a-z0-9][a-z0-9-]*$`. A slug is also a
 /// directory name in the agent's scratch tree (`skills/<slug>/`), so a
@@ -45,6 +66,49 @@ fn valid_slug(slug: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Refuses a skill document over [`MAX_SKILL_DOC_BYTES`].
+///
+/// Checked on the assembled `SKILL.md` rather than the raw request fields, so
+/// it bounds what actually lands in the agent's prompt regardless of which
+/// field (name, description, or body) grew.
+fn check_skill_doc_size(doc: &str) -> Result<(), ApiError> {
+    if doc.len() > MAX_SKILL_DOC_BYTES {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "that skill is {:.1} KB — a skill's content has to be under {} KB.",
+            doc.len() as f64 / 1024.0,
+            MAX_SKILL_DOC_BYTES / 1024
+        ))));
+    }
+    Ok(())
+}
+
+/// Per-company serialization for the skill write routes.
+///
+/// `install` and `create_custom` write a fresh [`SkillState`] straight through
+/// [`SkillStateStore::set`](crate::ports::SkillStateStore::set) and are
+/// raceless on their own — the store upserts by slug, so two of them landing
+/// concurrently is an ordinary last-write-wins. `set_enabled` is the one
+/// genuine read-modify-write: it lists the existing delta so it can preserve
+/// the slug's `source` and `custom_doc`, then writes a new one back. An
+/// install or an authoring landing in the middle of that window would be
+/// silently reverted — its fresh doc and source overwritten by whatever
+/// `set_enabled` read before it ran. Taking this lock unconditionally in every
+/// write handler, exactly as `smtp.rs`'s `write_lock` does for its own
+/// read-modify-write, keeps that ordering rule in one place rather than in
+/// each handler.
+fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CompanyId, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(Default::default);
+    let mut locks = locks.lock().expect("skill write locks poisoned");
+    Arc::clone(
+        locks
+            .entry(company.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
 }
 
 /// Builds the skills route fragment.
@@ -305,7 +369,7 @@ fn company_bundles(source_dir: Option<&FsPath>) -> Vec<InstalledSkill> {
 /// be server-authoritative.
 async fn install(
     State(state): State<AppState>,
-    company: ScopedCompany,
+    company: AdminScopedCompany,
     Path(SlugPath { slug }): Path<SlugPath>,
     body: Option<Json<InstallSkill>>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
@@ -315,6 +379,8 @@ async fn install(
              is `[a-z0-9][a-z0-9-]*`."
         ))));
     }
+    let lock = write_lock(company.id());
+    let _guard = lock.lock().await;
     let registry = state.shared_skill_registry()?;
     let doc = match registry.iter().find(|doc| doc.slug == slug) {
         Some(doc) => render_skill_md(doc),
@@ -337,6 +403,7 @@ async fn install(
             skill_md(&name, &description, meta.category.as_deref(), &description)
         }
     };
+    check_skill_doc_size(&doc)?;
     let delta = SkillState {
         slug,
         enabled: true,
@@ -371,9 +438,11 @@ async fn list_registry(
 }
 
 async fn uninstall(
-    company: ScopedCompany,
+    company: AdminScopedCompany,
     Path(SlugPath { slug }): Path<SlugPath>,
 ) -> Result<StatusCode, ApiError> {
+    let lock = write_lock(company.id());
+    let _guard = lock.lock().await;
     let existing = company
         .runtime
         .skills()
@@ -396,7 +465,7 @@ async fn uninstall(
 }
 
 async fn set_enabled(
-    company: ScopedCompany,
+    company: AdminScopedCompany,
     Path(SlugPath { slug }): Path<SlugPath>,
     Json(body): Json<SetEnabled>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
@@ -406,6 +475,8 @@ async fn set_enabled(
              is `[a-z0-9][a-z0-9-]*`."
         ))));
     }
+    let lock = write_lock(company.id());
+    let _guard = lock.lock().await;
     // Preserve an existing delta's source and custom doc; a first toggle of a
     // built-in company skill records a Company-sourced override.
     let existing = company
@@ -429,7 +500,7 @@ async fn set_enabled(
 }
 
 async fn create_custom(
-    company: ScopedCompany,
+    company: AdminScopedCompany,
     Json(body): Json<CreateSkill>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
     if body.name.trim().is_empty() || body.description.trim().is_empty() {
@@ -437,6 +508,8 @@ async fn create_custom(
             language::SKILL_FIELDS_REQUIRED.to_string(),
         )));
     }
+    let lock = write_lock(company.id());
+    let _guard = lock.lock().await;
     let slug = slugify(&body.name);
     let doc = skill_md(
         &body.name,
@@ -444,6 +517,7 @@ async fn create_custom(
         body.category.as_deref(),
         body.body.as_deref().unwrap_or(""),
     );
+    check_skill_doc_size(&doc)?;
     let state = SkillState {
         slug,
         enabled: true,
@@ -647,6 +721,58 @@ mod tests {
         assert!(valid_slug("seo-audit"), "typical slug");
     }
 
+    #[test]
+    fn check_skill_doc_size_rejects_only_over_cap() {
+        assert!(check_skill_doc_size(&"x".repeat(MAX_SKILL_DOC_BYTES)).is_ok());
+        let err = check_skill_doc_size(&"x".repeat(MAX_SKILL_DOC_BYTES + 1))
+            .expect_err("over-cap doc must be refused");
+        assert!(matches!(err.0, OpenCompanyError::InvalidRequest(_)));
+    }
+
+    /// The mutual-exclusion property [`write_lock`] exists for: two holders of
+    /// the same company's lock run strictly one after the other, never
+    /// interleaved, which is what keeps `set_enabled`'s
+    /// list-then-preserve-then-write window from landing between another
+    /// handler's write and its own read.
+    #[tokio::test]
+    async fn write_lock_serializes_same_company_writes() {
+        let id = CompanyId::new("acme");
+        let lock_a = write_lock(&id);
+        let lock_b = write_lock(&id);
+        assert!(
+            Arc::ptr_eq(&lock_a, &lock_b),
+            "the same company id must resolve to the same lock"
+        );
+        // A different company gets its own lock, so one tenant's writes never
+        // block another's.
+        let other = write_lock(&CompanyId::new("other"));
+        assert!(!Arc::ptr_eq(&lock_a, &other));
+
+        let order: Arc<tokio::sync::Mutex<Vec<&'static str>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let guard = lock_a.lock().await;
+
+        let order_clone = Arc::clone(&order);
+        let waiter = tokio::spawn(async move {
+            // Blocks here until the holder below drops its guard.
+            let _guard = lock_b.lock().await;
+            order_clone.lock().await.push("second");
+        });
+
+        // Give the spawned task a chance to actually reach the blocked
+        // `.lock().await` before the holder records its own turn.
+        tokio::task::yield_now().await;
+        order.lock().await.push("first");
+        drop(guard);
+        waiter.await.expect("waiter task did not panic");
+
+        assert_eq!(
+            *order.lock().await,
+            vec!["first", "second"],
+            "the second acquirer must not have run until the first released"
+        );
+    }
+
     /// HTTP-level coverage of the two path-slug handlers. A slug that fails
     /// `valid_slug` must be rejected with `400` **before** any write, so the
     /// effective skill set is untouched; a valid slug succeeds and lands.
@@ -666,8 +792,11 @@ mod tests {
         use crate::ports::CompanyStore;
         use crate::ports::types::{CompanyId, CompanyRecord};
         use crate::runtime::RuntimeBuilder;
+        use crate::server::ops::skills::MAX_SKILL_DOC_BYTES;
         use crate::server::router;
-        use crate::server::test_support::{fixed_cookie, seed_fixed_admin};
+        use crate::server::test_support::{
+            fixed_cookie, member_cookie, seed_fixed_admin, seed_fixed_member,
+        };
         use crate::{AppConfig, AppState};
 
         async fn state_with_company(home: &std::path::Path) -> AppState {
@@ -711,16 +840,31 @@ mod tests {
             state
         }
 
+        /// Sends as the fixed admin session — the common case, since every write
+        /// route here is admin-gated.
         async fn send(
             state: &AppState,
             method: &str,
             uri: &str,
             body: Option<&str>,
         ) -> (StatusCode, Value, String) {
-            let request = Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("cookie", fixed_cookie("acme"));
+            send_as(state, method, uri, body, Some(&fixed_cookie("acme"))).await
+        }
+
+        /// [`send`], with the caller's cookie explicit — `None` for no session at
+        /// all, so the privilege boundary can be driven with an admin session, a
+        /// member session, or nothing.
+        async fn send_as(
+            state: &AppState,
+            method: &str,
+            uri: &str,
+            body: Option<&str>,
+            cookie: Option<&str>,
+        ) -> (StatusCode, Value, String) {
+            let mut request = Request::builder().method(method).uri(uri);
+            if let Some(cookie) = cookie {
+                request = request.header("cookie", cookie);
+            }
             let request = match body {
                 Some(body) => request
                     .header("content-type", "application/json")
@@ -804,6 +948,141 @@ mod tests {
             assert!(
                 slugs(&state).await.iter().any(|s| s == "a-1"),
                 "the valid slug lands in the effective set"
+            );
+        }
+
+        /// Every write route here decides something for the whole company (see
+        /// the module doc): a Member is refused exactly like an unauthenticated
+        /// caller, on all four of them, and neither refusal lands a delta.
+        #[tokio::test]
+        async fn every_write_route_refuses_a_member_and_an_unauthenticated_caller() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+            seed_fixed_member(&state, "acme").await;
+            let member = member_cookie("acme");
+
+            let attempts: [(&str, &str, Option<&str>); 4] = [
+                ("POST", "/api/v1/company/skills/seo-audit/install", None),
+                (
+                    "PUT",
+                    "/api/v1/company/skills/seo-audit",
+                    Some(r#"{"enabled":true}"#),
+                ),
+                (
+                    "POST",
+                    "/api/v1/company/skills",
+                    Some(r#"{"name":"Member Skill","description":"a member tried this"}"#),
+                ),
+                ("POST", "/api/v1/company/skills/seo-audit/uninstall", None),
+            ];
+
+            for (method, uri, body) in attempts {
+                let (status, resp, raw) = send_as(&state, method, uri, body, Some(&member)).await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{method} {uri} as a member: {raw}"
+                );
+                assert_eq!(resp["code"], "forbidden", "{method} {uri}: {raw}");
+
+                let (status, resp, raw) = send_as(&state, method, uri, body, None).await;
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {uri} with no session: {raw}"
+                );
+                assert_eq!(resp["code"], "unauthorized", "{method} {uri}: {raw}");
+            }
+
+            assert!(
+                slugs(&state).await.is_empty(),
+                "no member or unauthenticated attempt landed a delta"
+            );
+        }
+
+        /// The other half of the boundary: an admin is not caught by the same
+        /// gate, and every write route still does its job end to end —
+        /// install, toggle, author, then uninstall the one route that allows
+        /// it.
+        #[tokio::test]
+        async fn an_admin_can_use_every_write_route() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+
+            let (status, _, raw) = send(
+                &state,
+                "POST",
+                "/api/v1/company/skills/seo-audit/install",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "admin install: {raw}");
+
+            let (status, _, raw) = send(
+                &state,
+                "PUT",
+                "/api/v1/company/skills/seo-audit",
+                Some(r#"{"enabled":false}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "admin set_enabled: {raw}");
+
+            let (status, resp, raw) = send(
+                &state,
+                "POST",
+                "/api/v1/company/skills",
+                Some(r#"{"name":"Admin Skill","description":"authored by an admin"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "admin create_custom: {raw}");
+            assert_eq!(resp["id"], "admin-skill");
+
+            let (status, _, raw) = send(
+                &state,
+                "POST",
+                "/api/v1/company/skills/seo-audit/uninstall",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "admin uninstall: {raw}");
+
+            let after = slugs(&state).await;
+            assert!(
+                !after.iter().any(|s| s == "seo-audit"),
+                "the uninstall landed: {after:?}"
+            );
+            assert!(
+                after.iter().any(|s| s == "admin-skill"),
+                "the authored skill landed: {after:?}"
+            );
+        }
+
+        /// A skill's document becomes part of every agent's effective prompt,
+        /// so [`MAX_SKILL_DOC_BYTES`] is enforced on the assembled `SKILL.md`,
+        /// not just accepted and truncated later — and the refusal is the same
+        /// `400 invalid_request` shape every other bad-input write already
+        /// uses, not a bespoke code.
+        #[tokio::test]
+        async fn an_over_cap_custom_skill_body_is_refused() {
+            let home = tempfile::tempdir().unwrap();
+            let state = state_with_company(home.path()).await;
+
+            let oversized = "x".repeat(MAX_SKILL_DOC_BYTES);
+            let body = serde_json::json!({
+                "name": "Huge Skill",
+                "description": "short",
+                "body": oversized,
+            })
+            .to_string();
+
+            let (status, resp, raw) =
+                send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+            assert_eq!(resp["code"], "invalid_request", "{raw}");
+
+            assert!(
+                slugs(&state).await.is_empty(),
+                "an over-cap body must not land a delta"
             );
         }
     }

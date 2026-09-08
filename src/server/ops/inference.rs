@@ -159,6 +159,24 @@ struct InferenceStatusDto {
     /// dead end — the setup dialog uses this to omit it rather than send the
     /// operator round a redesign loop that cannot end.
     harness_reachable: bool,
+    /// Whether this company can run a **profile design pass** — the one behind
+    /// `POST {scope}/team/design` and the two `/team/…/draft` routes.
+    ///
+    /// Reported because the console had no way to ask, and was inferring it
+    /// from [`Self::cognition`]: the reduced Add-teammate dialog treated every
+    /// path but `echo` as able to draft. That is wrong for three of the six.
+    /// `profile_drafter()` is built from `workflow_harness_deps`, which
+    /// `RuntimeBuilder` assigns in exactly one place — inside the embedded
+    /// harness arm — so `hosted`, `sidecar` and `custom` companies have no
+    /// drafter either, and every one of their creates went: type a sentence,
+    /// press Create, wait on a model call that could only answer `no_model`,
+    /// then meet the full form and fill it in by hand.
+    ///
+    /// Distinct from [`Self::harness_reachable`], which is
+    /// `runtime.harness().is_some()` — the pool being *attached*, not the
+    /// company having *booted onto* it. A company whose config failed to
+    /// resolve at boot reports `harness_reachable: true` and has no drafter.
+    designs_profiles: bool,
     /// Whether this host can rebuild a company's runtime in place, so the
     /// console may offer the restart instead of only naming it (issue #1736).
     ///
@@ -281,6 +299,27 @@ pub(crate) fn harness_reachable(runtime: &CompanyRuntime) -> bool {
 
 #[cfg(not(feature = "openhuman"))]
 pub(crate) fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
+    false
+}
+
+/// Whether a profile design pass can actually run for this company.
+///
+/// The same question `build_design` and `build_draft` ask before they do
+/// anything (`server::ops::team_agent`), asked from the one route the console
+/// reads at boot — so a dialog can decide its shape from the capability rather
+/// than guessing at it from a cognition label. `false` here and `NoModel` there
+/// are the same fact, which is the point: two answers to one question is how
+/// the console came to offer a reduced dialog on three paths that can only
+/// refuse it.
+#[cfg(feature = "openhuman")]
+pub(crate) fn designs_profiles(runtime: &CompanyRuntime) -> bool {
+    runtime.profile_drafter().is_some()
+}
+
+/// No harness compiled in, so there is no drafter to build and nothing that
+/// could make one — the same unconditional `NoModel` `build_design` answers.
+#[cfg(not(feature = "openhuman"))]
+pub(crate) fn designs_profiles(_runtime: &CompanyRuntime) -> bool {
     false
 }
 
@@ -486,6 +525,7 @@ async fn effective_status_with(
             usage_metering: cognition.metering,
             restart_required,
             harness_reachable: harness_reachable(runtime),
+            designs_profiles: designs_profiles(runtime),
             can_rebuild_in_place,
         },
         None => InferenceStatusDto {
@@ -504,6 +544,7 @@ async fn effective_status_with(
             // drift apart.
             restart_required,
             harness_reachable: harness_reachable(runtime),
+            designs_profiles: designs_profiles(runtime),
             can_rebuild_in_place,
         },
     })
@@ -1327,6 +1368,39 @@ base_url = "https://byo.example/v1"
         assert!(
             !dto.harness_reachable,
             "a runtime built without a harness pool cannot reach the design path"
+        );
+    }
+
+    /// A company with no profile drafter says so, on the one route the console
+    /// reads before it decides which Add-teammate dialog to render.
+    ///
+    /// The console used to answer this question itself, from `cognition`, with
+    /// `!== "echo"`. `profile_drafter()` is built from `workflow_harness_deps`,
+    /// which `RuntimeBuilder` assigns in exactly one place — inside the
+    /// embedded-harness arm — so a `hosted`, `sidecar` or `custom` company has
+    /// no drafter and the guess was wrong for three of the six paths. Every
+    /// create through the reduced dialog on one of them cost the operator a
+    /// sentence, a Create, a wait on a design pass that could only answer
+    /// `no_model`, and then the full form anyway.
+    ///
+    /// Pinned against `harness_reachable` deliberately: they are different
+    /// questions and the DTO carries both, so a future edit that collapses
+    /// them fails here.
+    #[tokio::test]
+    async fn the_status_reports_whether_a_design_pass_can_run() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert!(
+            !dto.designs_profiles,
+            "a runtime with no harness deps has no profile drafter, so the \
+             reduced dialog must not be offered"
+        );
+        assert_eq!(
+            dto.designs_profiles,
+            designs_profiles(&runtime),
+            "the DTO must report the same fact `build_design` acts on"
         );
     }
 

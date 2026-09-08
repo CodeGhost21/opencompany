@@ -121,12 +121,16 @@ test.describe("sidebar toggle reachability", () => {
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("aria-modal", "true");
 
-    // Work is a child row under Company, so it is on screen because the sheet
-    // opened on a Company-section address. That is the pattern under test as
-    // much as the sheet is: picking a destination inside an expanded section
-    // still closes the sheet behind it.
-    await sheet.getByRole("button", { name: "Work", exact: true }).click();
-    await expect(page).toHaveURL(/#\/ledgers\/tasks$/);
+    // A channel, not a section's child row. Since #2130 the sheet holds the four
+    // sections and the Room rail — a section's own pages are a content rail, so
+    // "Work" is not in here to pick any more. The channel list is the thing this
+    // sheet now has that nothing else does, and it is the harder case: it is
+    // portalled in from `ChatView` rather than rendered by the sidebar, so a
+    // dismiss that only fired for the sidebar's own rows would miss it (which is
+    // what `room-rail.tsx`'s `dismiss` exists for). Picking one still closes the
+    // sheet behind it, which is the pattern under test.
+    await sheet.getByRole("button", { name: "general", exact: true }).click();
+    await expect(page).toHaveURL(/#\/chat\//);
     await expect(sheet).toBeHidden();
   });
 

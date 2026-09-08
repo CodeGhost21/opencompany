@@ -142,6 +142,9 @@ describe("taskProposalDiff", () => {
 
 /** Records every request body so the test can read what reached the wire. */
 class RecordingTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly seen: TransportRequest[] = [];
   async request(req: TransportRequest): Promise<TransportResponse> {
     this.seen.push(req);
