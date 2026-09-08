@@ -371,13 +371,15 @@ describe("the harness-unavailable notice sits next to the composer, or without o
   /**
    * The read-only feed keeps it, and that is the case it matters most in.
    *
-   * `#Operator` renders the company's own workflow reports under a teammate's
-   * name and avatar. In an echo state nobody wrote those words — and the only
-   * thing on the row that says so is `EchoPlaceholder`, a non-focusable
-   * `<span>` carrying its reason in a `title`, which reaches neither keyboard,
-   * touch nor screen reader. Suppressing the strip here left the reader with a
-   * status report from a named colleague and no way to ask whether the
-   * colleague sent it, because the feed takes no replies.
+   * `#Operator` renders the company's own workflow reports under the reserved
+   * authors `workflow-report` / `owner-fallback-report` — titleized into
+   * "Workflow Report" and "Owner Fallback Report", names belonging to no
+   * person. In an echo state nobody wrote those words, and the only thing on
+   * the row that says so is `EchoPlaceholder`, a non-focusable `<span>`
+   * carrying its reason in a `title`, which reaches neither keyboard, touch nor
+   * screen reader. Suppressing the strip here left the reader with a status
+   * report, a "Placeholder" pill against a name that is not a colleague, and no
+   * way to ask anything — the feed takes no replies.
    */
   it("stays on the read-only feed, which the reader cannot interrogate", async () => {
     await mount("operator", "unavailable");

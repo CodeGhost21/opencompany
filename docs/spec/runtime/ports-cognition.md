@@ -149,7 +149,10 @@ composer rather than being glued to it: `InflightRunBar` renders between the
 two whenever a run is in flight, since stopping a run is not posting. And it is
 rendered on a read-only channel too, where there is no composer at all: the
 sentence is about attribution, not about sending, and `#Operator` is precisely a
-feed of company-authored reports rendered under a teammate's name. `ChatMessage`
+feed of company-authored reports, marked like any other company-side row but
+rendered under the reserved authors `workflow-report` and
+`owner-fallback-report` — names that belong to no person, so the reader has
+nobody to ask even in principle. `ChatMessage`
 carries no provenance, so a company-level state is the only shape that answer
 has — see `MessageRow`'s `cognition` prop for why marking beats suppressing.
 The same state reaches `ThreadPanel`, because a reply read inside a thread is
