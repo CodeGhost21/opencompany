@@ -130,7 +130,7 @@ impl ChatSeedRequest {
         company: &CompanyId,
         desk_id: &str,
         desk_name: &str,
-    ) -> Option<Vec<(String, String)>> {
+    ) -> Option<Vec<SeedEntry>> {
         use tinyhivemind::session::{Conversation, SessionAuthor, SessionQuery, project_session};
 
         let record = self.store.load(company).await.ok()??;
@@ -172,16 +172,30 @@ impl ChatSeedRequest {
             projected
                 .into_iter()
                 .map(|message| match &message.author {
-                    SessionAuthor::Agent { id, .. } if *id == self.reader => {
-                        ("agent".to_string(), message.content)
-                    }
-                    SessionAuthor::Operator => ("user".to_string(), message.content),
+                    // Mapped onto the same `Speaker` the native seed uses
+                    // (issue #1956) rather than onto a role string: attribution
+                    // is that type's whole job, and rendering it here would put
+                    // a second, drifting answer beside `SeedEntry::flatten`.
+                    SessionAuthor::Agent { id, .. } if *id == self.reader => SeedEntry {
+                        role: "agent",
+                        speaker: Speaker::Viewer,
+                        text: message.content,
+                        parent: None,
+                    },
+                    SessionAuthor::Operator => SeedEntry {
+                        role: "user",
+                        speaker: Speaker::Operator(OPERATOR_LABEL.to_string()),
+                        text: message.content,
+                        parent: None,
+                    },
                     SessionAuthor::Person { label, .. }
                     | SessionAuthor::Agent { label, .. }
-                    | SessionAuthor::System { label, .. } => (
-                        "user".to_string(),
-                        format!("{label} said: {}", message.content),
-                    ),
+                    | SessionAuthor::System { label, .. } => SeedEntry {
+                        role: "user",
+                        speaker: Speaker::Other(label.clone()),
+                        text: message.content,
+                        parent: None,
+                    },
                 })
                 .collect(),
         )
