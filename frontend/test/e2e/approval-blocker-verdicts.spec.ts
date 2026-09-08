@@ -26,8 +26,17 @@ import { expect, test, type Page } from "@playwright/test";
  * Real: the host, the console bundle, the session, the routing, the polling
  * feed, and every DOM interaction.
  *
- * Like the rest of `test/e2e`, this drives a running host and is not wired into
- * CI; `npm run typecheck:e2e` compiles it, nothing runs it automatically.
+ * Runs in both Console E2E lanes. On fixed main b4cab3ea3, twenty serial
+ * repetitions without retries failed 10/200 cases across two-step Skip,
+ * single Skip, Cancel, and Retry, all at the company-read stub's response.json.
+ * The verdict assertions finished while the post-resolve company refresh was
+ * still in flight; context teardown disposed the response underneath it.
+ *
+ * Thirty isolated Retry runs with tracing passed: a trace showed the company
+ * fetch finishing 1.6 ms AFTER After Hooks began, then trace collection kept
+ * the context alive another 65 ms. Tracing changed the timing, not the lifetime
+ * contract. Drain this spec's routes before context teardown, without ignoring
+ * callback errors or adding sleeps to the verdict assertions.
  */
 
 const BLOCKER_ID = "e2e-2028-blocker";
@@ -112,6 +121,10 @@ test.beforeEach(async ({ page }) => {
       return key.startsWith("oc-tour:") ? '{"skipped":true}' : real.call(this, key);
     };
   });
+});
+
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
 });
 
 /**
