@@ -1286,7 +1286,7 @@ async fn attach_referral_origins(
 /// **The journal keeps the original.** The fold reads markers off the stored
 /// line, so this rewrite lives here and nowhere earlier — a room whose own
 /// transcript had been cleaned could not count itself.
-fn readable_moves(text: String) -> String {
+pub(crate) fn readable_moves(text: String) -> String {
     if !text
         .lines()
         .any(|line| crate::hivemind::line_kind(line).is_some())

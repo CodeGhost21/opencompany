@@ -3142,7 +3142,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = report.responses.clone();
+    let responses = readable_responses(report.responses.clone());
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -3609,6 +3609,69 @@ pub(crate) async fn refer_committed_replies(
             Err(err) => tracing::warn!(error = %err, "[referral] decision failed"),
         }
     }
+}
+
+#[cfg(test)]
+mod readable_responses_test {
+    use super::readable_responses;
+    use crate::ports::types::OutboundMessage;
+
+    fn reply(text: &str) -> OutboundMessage {
+        OutboundMessage {
+            channel: "engineering".to_string(),
+            agent: Some("software_engineer".to_string()),
+            text: text.to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+            task_id: None,
+            message_id: None,
+            mentions: Vec::new(),
+        }
+    }
+
+    /// **A row must read the same live as it does after a reload.**
+    ///
+    /// The history projection cleaned deliberation grammar; the POST did not.
+    /// So a turn arriving live showed `!support #lazy-load ^3 agreed` and the
+    /// same turn after a refresh showed `agreed` — one message, two renderings,
+    /// separated by a page reload.
+    #[test]
+    fn a_live_reply_reads_as_the_reloaded_one_will() {
+        let cleaned = readable_responses(vec![
+            reply("!support #lazy-load ^3 agreed, and it is reversible"),
+            reply("here is the summary you asked for"),
+        ]);
+
+        assert_eq!(
+            cleaned[0].text, "agreed, and it is reversible",
+            "the grammar is gone on the live path too"
+        );
+        assert_eq!(
+            cleaned[1].text, "here is the summary you asked for",
+            "and an ordinary reply is untouched"
+        );
+    }
+}
+
+/// The same rendering `chat_history` applies, for replies going out on the POST
+/// rather than being read back.
+///
+/// A deliberation turn is journaled with its grammar and cleaned when the
+/// history is projected — but a reply returned to the caller never passes
+/// through that projection, so the console showed `!support #lazy-load ^3` on
+/// a row that arrived live and plain prose on the same row after a reload.
+/// Two readers of one message, disagreeing, with a page refresh between them.
+///
+/// The stored row keeps its markers either way; the fold reads them off the
+/// journal, not off this.
+fn readable_responses(
+    mut responses: Vec<crate::ports::types::OutboundMessage>,
+) -> Vec<crate::ports::types::OutboundMessage> {
+    for response in &mut responses {
+        response.text =
+            crate::server::chat_history::readable_moves(std::mem::take(&mut response.text));
+    }
+    responses
 }
 
 /// Awaits a spawned chat turn, turning a task that never finished into an error.
@@ -5110,7 +5173,7 @@ async fn run_resolve(
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         message_id: None,
-        responses: report.responses,
+        responses: readable_responses(report.responses),
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
         review_feedback_applied: None,
