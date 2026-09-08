@@ -3540,15 +3540,22 @@ fn selector_candidate(
     record: &CompanyRecord,
     id: &str,
 ) -> Option<crate::harness::selector::SelectorCandidate> {
+    let allow = &record.manifest.tools.allow;
     if let Some(agent) = record.effective_agent(id) {
         return Some(crate::harness::selector::SelectorCandidate {
             id: agent.id.clone(),
             role: agent.role.clone(),
             description: agent.description.clone(),
+            tools: crate::runtime::builder::agent_effective_grants(allow, agent.tools.as_deref()),
         });
     }
     let agent = record.overlay_agents.iter().find(|a| a.id == id)?;
     let edit = record.overlay_agent_edits.iter().find(|e| e.agent_id == id);
+    // An edit that states `tools` replaces the teammate's own list; one that
+    // says nothing leaves it, matching how role and description resolve above.
+    let tools = edit
+        .and_then(|e| e.tools.clone())
+        .unwrap_or_else(|| agent.tools.clone());
     Some(crate::harness::selector::SelectorCandidate {
         id: agent.id.clone(),
         role: edit
@@ -3558,6 +3565,7 @@ fn selector_candidate(
             .and_then(|e| e.description.clone())
             .filter(|d| !d.is_empty())
             .or_else(|| agent.description.clone()),
+        tools: crate::runtime::builder::agent_effective_grants(allow, tools.as_deref()),
     })
 }
 
