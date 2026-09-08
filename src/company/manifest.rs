@@ -990,6 +990,23 @@ impl CompanyManifest {
             }
         }
 
+        // A duplicate skill id is not two skills — it is one id with two
+        // conflicting answers to "what does this cost", and a lookup by id
+        // alone (Agent Card generation, x402 charging) can only ever return
+        // one of them. Rejecting the manifest outright, rather than picking a
+        // resolution order, is what keeps that lookup free to change without
+        // reopening a way to advertise a skill above zero and serve it for
+        // free.
+        let mut seen_skill_ids = std::collections::HashSet::new();
+        for skill in &self.place.skills {
+            if !seen_skill_ids.insert(skill.id.as_str()) {
+                problems.push(format!(
+                    "skill `{}` is declared more than once in `[place].skills` — each id must be unique.",
+                    skill.id
+                ));
+            }
+        }
+
         if let Some(monthly) = self.budget.monthly_usd
             && monthly < 0.0
         {
@@ -2463,6 +2480,30 @@ mod tests {
         let problems = manifest.validate();
         assert!(problems.iter().any(|p| p.contains("price_usd")));
         assert!(problems.iter().any(|p| p.contains("5 fields")));
+    }
+
+    #[test]
+    fn rejects_a_duplicate_skill_id() {
+        let manifest = parse(
+            r#"
+            [company]
+            name = "X"
+            handle = "x"
+            [place]
+            discoverable = true
+            skills = [
+                { id = "seo.audit", price_usd = "0.00" },
+                { id = "seo.audit", price_usd = "25.00" },
+            ]
+            "#,
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("seo.audit") && p.contains("more than once")),
+            "{problems:?}"
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! or `{ "manifest_toml", "id"? }` JSON), validates it, builds a
 //! [`CompanyRuntime`](crate::company::runtime::CompanyRuntime) over the data
 //! dir, registers it, and records its owning tenant. Provisioning and suspension
-//! require the `platform` scope; archive is owner-scoped; pause, resume and the
-//! emergency-stop pair additionally require authority over the company —
+//! require the `platform` scope; archive is owner-scoped; the pause, resume and
+//! emergency-stop routes additionally require authority over the company —
 //! [`AdminScopedCompany`] — because they decide something for the whole company
 //! rather than for the caller. None of them cross tenants.
 //!
@@ -671,12 +671,13 @@ async fn transition(state: &AppState, auth: &GqlAuth, id: &CompanyId, to: &str) 
     transition_runtime(&runtime, auth, to).await
 }
 
-/// Applies a lifecycle transition to an already-resolved `runtime`.
+/// Applies a lifecycle transition directly to an already-resolved `runtime`,
+/// returning the fresh status.
 ///
-/// A caller holding an authorized runtime must use this rather than
-/// [`transition`]: looking the id back up in the registry can return a
-/// different runtime than the one authorization approved, if a rebuild swap
-/// lands in between.
+/// A caller holding an authorized runtime (e.g. [`AdminScopedCompany`]) must
+/// use this rather than [`transition`]: looking `id` back up in the registry
+/// can return a different runtime than the one authorization approved, if a
+/// rebuild swap lands in between.
 async fn transition_runtime(
     runtime: &crate::runtime::CompanyRuntime,
     auth: &GqlAuth,
@@ -772,8 +773,8 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 /// `POST /api/v1/companies/{id}/emergency-pause` — the governance kill switch
 /// (admin-scoped, issue #86).
 ///
-/// The confirmation phrase is a step-up against a stray click, not an authority
-/// check: it is a fixed, published string every member knows. Authority is
+/// The confirmation phrase below is a step-up against a stray click, not an
+/// authority check: it is a fixed, published string every member knows. Authority is
 /// [`AdminScopedCompany`] in the signature.
 ///
 /// Denies every new effect outside `EffectGroup::Other` until an operator

@@ -23,12 +23,27 @@
 //! Isolated in [`canonical_bytes`] so it is a one-function change to reconcile
 //! with the real tiny.place server when reachable.
 //!
+//! ## Single use is enforced, not merely documented
+//!
+//! The signature covers the whole payload including the nonce, so a payer
+//! cannot re-point one authorization at different work — but nothing about a
+//! signature stops the *same* authorization being presented again. [`verify`]
+//! therefore takes the spent-nonce set and the current time, and refuses both a
+//! nonce it has already seen and an authorization older than
+//! [`MAX_AGE_SECS`]. Neither is optional, because a verified-but-unspent
+//! authorization is a bearer token: one signature buying unlimited work.
+//!
+//! Bounding acceptance by age is what makes forgetting a nonce safe. The spent
+//! set prunes on the same constant, so a nonce is dropped only once the
+//! authorization carrying it would be refused on age anyway, and there is no
+//! window in which a replay outlives the memory of it.
+//!
 //! ## The nonce comes from the OS CSPRNG
 //!
-//! `nonce` is documented as single-use and is signed into the payload above,
-//! so a counterparty's replay check is only as good as the value's
-//! unpredictability and uniqueness. It is therefore minted by [`mint_nonce`]
-//! from 256 bits of OS randomness through the same
+//! The nonce is signed into the payload above, so a counterparty's replay check
+//! is only as good as the value's unpredictability and uniqueness. It is
+//! therefore minted by [`mint_nonce`] from 256 bits of OS randomness through
+//! the same
 //! [`TokenSource`](crate::server::users::token::TokenSource) seam the user-auth
 //! secrets use — **not** from
 //! [`generate_id`](crate::ports::generate_id), whose epoch-millis-plus-counter
@@ -39,12 +54,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::economy::signer::{LocalSigner, verify_b58};
+use crate::economy::siwx::{NonceCache, SKEW_SECS};
 use crate::error::OpenCompanyError;
 use crate::server::platform_auth::b64url_encode;
 use crate::server::users::token::{OsTokens, TokenSource};
 
 /// The domain-separation tag pinning the x402 canonical layout version.
 pub const X402_DOMAIN: &str = "tiny.place-x402-v1";
+
+/// How long an authorization stays acceptable, and therefore how long its nonce
+/// is remembered as spent. Ten minutes.
+///
+/// Twice the SIWX clock-skew tolerance. An authorization only ever arrives
+/// inside a SIWX-signed request, and that request is already refused unless its
+/// own timestamp is within [`SKEW_SECS`] of the verifier's clock, so this
+/// covers a payer at the far edge of tolerated clock offset plus a full
+/// challenge → authorize → resend round trip — a round trip that in practice
+/// takes under a second. Anything older is a request the transport layer would
+/// have turned away, so accepting it buys the payer nothing and costs the spent
+/// set unbounded memory.
+pub const MAX_AGE_SECS: i64 = 2 * SKEW_SECS;
 
 /// A payment challenge parsed from a counterparty's `402` response body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,9 +132,10 @@ pub struct X402Authorization {
     pub network: String,
     /// A single-use nonce: 256 bits of OS randomness, base64url, 43 chars.
     ///
-    /// Opaque to every reader — nothing parses, stores, or matches its shape —
-    /// so the counterparty only needs it to be unpredictable and unique. See
-    /// [`mint_nonce`].
+    /// [`verify`] rejects any value that is not exactly [`NONCE_LEN`]
+    /// base64url characters before it ever reaches the shared
+    /// [`NonceCache`], so a counterparty cannot grow the cache's memory
+    /// footprint by signing an oversized nonce. See [`mint_nonce`].
     pub nonce: String,
     /// The authorization timestamp, epoch seconds.
     pub timestamp: i64,
@@ -118,6 +148,10 @@ pub struct X402Authorization {
 /// matching the user-auth secrets, so two mints colliding is not a scenario.
 const NONCE_BYTES: usize = 32;
 
+/// The exact length of a [`mint_nonce`] output: unpadded base64url of
+/// [`NONCE_BYTES`] bytes.
+const NONCE_LEN: usize = (NONCE_BYTES * 4).div_ceil(3);
+
 /// Mints an authorization nonce: 256 bits from `src`, base64url, 43 chars.
 ///
 /// A pure function of the source bytes — no clock, no counter, no process
@@ -127,6 +161,18 @@ pub fn mint_nonce(src: &dyn TokenSource) -> String {
     let mut bytes = [0u8; NONCE_BYTES];
     src.fill(&mut bytes);
     b64url_encode(&bytes)
+}
+
+/// Whether `nonce` has the exact shape [`mint_nonce`] produces: [`NONCE_LEN`]
+/// unpadded base64url characters. [`verify`] enforces this before the nonce
+/// ever reaches the shared [`NonceCache`], so a counterparty cannot grow that
+/// cache's memory footprint by signing an authorization around an oversized
+/// nonce.
+fn has_nonce_shape(nonce: &str) -> bool {
+    nonce.len() == NONCE_LEN
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Builds the canonical bytes an x402 authorization signs. See module docs.
@@ -191,8 +237,29 @@ fn authorize_amount(
     }
 }
 
-/// Verifies an authorization's signature against its own declared `agentId`.
-pub fn verify(auth: &X402Authorization) -> Result<()> {
+/// Verifies an authorization and spends its nonce, so one signature buys one
+/// task.
+///
+/// Enforces, in order: the nonce's shape, the signature against the declared
+/// `agentId`, freshness within [`MAX_AGE_SECS`], and single use of the nonce
+/// against `spent`.
+///
+/// `spent` and `now` are parameters rather than something a caller may choose
+/// to consult. A signature proves who authorized the payment, not that the
+/// payment has not already been collected; a caller that could verify without
+/// spending would be treating the authorization as a bearer token, which is
+/// precisely the bug this signature shape exists to prevent.
+///
+/// The signature is checked before the nonce is spent, so an unverifiable
+/// authorization cannot burn a nonce — otherwise anyone who observed a payer's
+/// nonce could spend it on their behalf with a forged signature.
+pub fn verify(auth: &X402Authorization, spent: &NonceCache, now: i64) -> Result<()> {
+    if !has_nonce_shape(&auth.nonce) {
+        return Err(OpenCompanyError::InvalidRequest(
+            "x402 authorization nonce is not a valid mint_nonce value".into(),
+        ));
+    }
+
     let msg = canonical_bytes(
         &auth.agent_id,
         &auth.amount,
@@ -202,7 +269,21 @@ pub fn verify(auth: &X402Authorization) -> Result<()> {
         &auth.nonce,
         auth.timestamp,
     );
-    verify_b58(&auth.agent_id, &msg, &auth.signature_b58)
+    verify_b58(&auth.agent_id, &msg, &auth.signature_b58)?;
+
+    if now.abs_diff(auth.timestamp) > MAX_AGE_SECS as u64 {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "x402 authorization timestamp is outside the ±{MAX_AGE_SECS}s window"
+        )));
+    }
+
+    if !spent.check_and_insert(&auth.nonce, now, auth.timestamp)? {
+        return Err(OpenCompanyError::InvalidRequest(
+            "x402 authorization nonce has already been spent (replay)".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn string_field(obj: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -267,7 +348,8 @@ mod test {
         assert_eq!(auth.agent_id, signer.agent_id());
         assert_eq!(auth.amount, "25.00");
         assert_eq!(auth.recipient, "RecipientAddr");
-        verify(&auth).expect("authorization verifies against its own key");
+        verify(&auth, &NonceCache::new(), 1_700_000_000)
+            .expect("authorization verifies against its own key");
     }
 
     #[test]
@@ -276,7 +358,7 @@ mod test {
         let ch = sample_challenge();
         let auth = authorize_upto(&signer, &ch, "100.00", 1_700_000_000);
         assert_eq!(auth.amount, "100.00");
-        verify(&auth).expect("upto authorization verifies");
+        verify(&auth, &NonceCache::new(), 1_700_000_000).expect("upto authorization verifies");
     }
 
     #[test]
@@ -286,7 +368,7 @@ mod test {
         let mut auth = authorize(&signer, &ch, 1_700_000_000);
         auth.amount = "0.01".into();
         assert!(
-            verify(&auth).is_err(),
+            verify(&auth, &NonceCache::new(), 1_700_000_000).is_err(),
             "changed amount must break the signature"
         );
     }
@@ -379,9 +461,192 @@ mod test {
         let mut auth = authorize(&signer, &sample_challenge(), 1_700_000_000);
         auth.nonce = mint_nonce(&OsTokens);
         assert!(
-            verify(&auth).is_err(),
+            verify(&auth, &NonceCache::new(), 1_700_000_000).is_err(),
             "changed nonce must break the signature"
         );
+    }
+
+    #[test]
+    fn a_replayed_authorization_is_refused() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let auth = authorize(&signer, &sample_challenge(), now);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        verify(&auth, &spent, now).expect("first presentation is the payment");
+        assert!(
+            verify(&auth, &spent, now).is_err(),
+            "one signed authorization must not buy a second task"
+        );
+    }
+
+    #[test]
+    fn a_second_authorization_is_still_admitted() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        for _ in 0..3 {
+            let auth = authorize(&signer, &sample_challenge(), now);
+            verify(&auth, &spent, now).expect("each fresh nonce pays its own way");
+        }
+    }
+
+    #[test]
+    fn a_stale_authorization_is_refused() {
+        let signer = LocalSigner::generate();
+        let signed_at = 1_700_000_000;
+        let auth = authorize(&signer, &sample_challenge(), signed_at);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, signed_at + MAX_AGE_SECS + 1).is_err(),
+            "an authorization older than the spent set's memory must not verify"
+        );
+    }
+
+    #[test]
+    fn an_extreme_timestamp_is_refused_rather_than_wrapping() {
+        let signer = LocalSigner::generate();
+        let auth = authorize(&signer, &sample_challenge(), i64::MIN);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, 0).is_err(),
+            "a timestamp whose distance from now cannot be held in an i64 must be refused"
+        );
+    }
+
+    /// Builds a validly-signed authorization around an arbitrary nonce, so a
+    /// test can prove `verify` rejects a malformed nonce on its own merits
+    /// rather than piggybacking on a broken signature.
+    fn authorization_with_nonce(
+        signer: &LocalSigner,
+        ch: &X402Challenge,
+        now: i64,
+        nonce: &str,
+    ) -> X402Authorization {
+        let agent_id = signer.agent_id();
+        let msg = canonical_bytes(
+            &agent_id,
+            &ch.amount,
+            &ch.recipient,
+            &ch.asset,
+            &ch.network,
+            nonce,
+            now,
+        );
+        X402Authorization {
+            agent_id,
+            amount: ch.amount.clone(),
+            recipient: ch.recipient.clone(),
+            asset: ch.asset.clone(),
+            network: ch.network.clone(),
+            nonce: nonce.to_string(),
+            timestamp: now,
+            signature_b58: signer.sign_b58(&msg),
+        }
+    }
+
+    #[test]
+    fn an_oversized_nonce_is_refused_before_touching_the_cache() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let oversized = "A".repeat(NONCE_LEN + 1);
+        let auth = authorization_with_nonce(&signer, &sample_challenge(), now, &oversized);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, now).is_err(),
+            "a validly-signed authorization around an oversized nonce must still be refused, \
+             so a counterparty cannot grow the shared cache with unbounded nonce strings"
+        );
+    }
+
+    #[test]
+    fn a_nonce_outside_the_base64url_alphabet_is_refused() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let mut malformed = mint_nonce(&OsTokens);
+        malformed.replace_range(0..1, "/");
+        let auth = authorization_with_nonce(&signer, &sample_challenge(), now, &malformed);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        assert!(
+            verify(&auth, &spent, now).is_err(),
+            "a nonce containing a character mint_nonce never produces must be refused"
+        );
+    }
+
+    #[test]
+    fn a_stale_authorization_is_refused_before_its_nonce_is_forgotten() {
+        // The two windows are the same constant, so at the moment the spent set
+        // would prune a nonce the authorization carrying it is already too old.
+        // This is the property that makes a bounded store sufficient.
+        let signer = LocalSigner::generate();
+        let signed_at = 1_700_000_000;
+        let auth = authorize(&signer, &sample_challenge(), signed_at);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        verify(&auth, &spent, signed_at).expect("fresh");
+        // Late enough for the prune to drop the nonce — and late enough for the
+        // age check to refuse the authorization anyway.
+        assert!(verify(&auth, &spent, signed_at + MAX_AGE_SECS * 2).is_err());
+    }
+
+    #[test]
+    fn a_future_dated_authorization_cannot_outlive_its_own_nonce() {
+        // A future-dated authorization is accepted (the age check is
+        // symmetric), but its nonce must be remembered for as long as the
+        // authorization itself would still be considered fresh — not merely
+        // for MAX_AGE_SECS past the moment it happened to be verified. A
+        // nonce recorded under the verification time rather than the
+        // authorization's own timestamp would be forgotten while a replay of
+        // the same future-dated authorization still passes the age check.
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        // Maximally future-dated: still exactly inside the ±MAX_AGE_SECS window.
+        let auth = authorize(&signer, &sample_challenge(), now + MAX_AGE_SECS);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        verify(&auth, &spent, now).expect("future-dated but within tolerance");
+        // Past the point at which keying the nonce off verification time
+        // (`now`) would have pruned it, but the authorization's own claimed
+        // timestamp is still within MAX_AGE_SECS of this later clock.
+        let replay_at = now + MAX_AGE_SECS + 1;
+        assert!(
+            verify(&auth, &spent, replay_at).is_err(),
+            "a future-dated authorization's nonce must not be forgotten while \
+             the authorization is still within its own age window"
+        );
+    }
+
+    #[test]
+    fn an_unusable_spent_set_refuses_the_payment() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let auth = authorize(&signer, &sample_challenge(), now);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+        spent.poison_for_tests();
+
+        assert!(
+            verify(&auth, &spent, now).is_err(),
+            "a spent set that cannot answer must refuse, not admit"
+        );
+    }
+
+    #[test]
+    fn an_unverifiable_authorization_cannot_burn_a_nonce() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let auth = authorize(&signer, &sample_challenge(), now);
+        let spent = NonceCache::with_ttl(MAX_AGE_SECS);
+
+        let mut forged = auth.clone();
+        forged.amount = "0.01".into();
+        assert!(verify(&forged, &spent, now).is_err(), "forgery is refused");
+
+        verify(&auth, &spent, now).expect("the payer's own nonce is still unspent");
     }
 
     #[test]

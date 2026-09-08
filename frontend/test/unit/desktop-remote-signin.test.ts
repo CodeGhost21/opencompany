@@ -47,6 +47,9 @@ function desktop(present: boolean, invoke?: (cmd: string, args: unknown) => Prom
 
 /** Answers each path with what the test staged; 404 for anything unstaged. */
 class RouteTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   constructor(private readonly routes: Record<string, { status: number; text: string }>) {}
   async request(req: TransportRequest): Promise<TransportResponse> {
     const path = new URL(req.url).pathname;

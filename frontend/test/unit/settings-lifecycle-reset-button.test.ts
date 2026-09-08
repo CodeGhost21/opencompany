@@ -9,24 +9,6 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyStatus } from "@/api/types";
 import { LifecycleControls } from "@/views/SettingsView";
 
-// The company-creation funnel is closed at the product level:
-// `canCreateCompanies` is `!COMPANY_SWITCHING_HIDDEN && carriesPlatformBearer`
-// (#2074), and with the flag set it answers `false` for every client — so the
-// dialog and the Reset button this file renders never mount, and every case
-// here fails on an element that cannot exist.
-//
-// The flag is neutralised rather than the tests skipped, because what they
-// cover is not the funnel. It is the dialog's own behaviour once open — the
-// wallet field, the preflight race, the pre-archive guard, the lifecycle
-// disable — and that code still ships and can still regress. The *gate* has its
-// own coverage in `product-scope-hidden-surfaces.test.ts`, which pins the
-// absence directly and is where a change to the hide belongs.
-vi.mock("@/product-scope", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/product-scope")>()),
-  COMPANY_SWITCHING_HIDDEN: false,
-}));
-
-
 /**
  * The Reset / Start clean button (#1807, SettingsView.tsx `LifecycleControls`)
  * had no render test of its own — tinysweeper flagged the gap (PR comment
@@ -110,12 +92,16 @@ async function render(client: OpenCompanyClient, lifecycle: string, onReset?: ()
 }
 
 describe("the Reset / Start clean button's render gate", () => {
-  it("renders when the client is platform-scoped, the company is live, and onReset is given", async () => {
+  it("is left out while the product does not offer company creation", async () => {
+    // Reset archives this company and provisions a replacement through the same
+    // dialog "New company" opens — it is company creation wearing another
+    // label, so it answers the same presentation question the other four
+    // triggers do (`offersCompanyCreation`).
     await render(clientWith(true), "running", () => {});
-    expect(resetButton()).not.toBeUndefined();
+    expect(resetButton()).toBeUndefined();
   });
 
-  it("is left out when onReset is not given (mirrors the `canCreateCompanies` gate upstream)", async () => {
+  it("is left out when onReset is not given (mirrors the `offersCompanyCreation` gate upstream)", async () => {
     await render(clientWith(true), "running", undefined);
     expect(resetButton()).toBeUndefined();
   });
@@ -131,35 +117,19 @@ describe("the Reset / Start clean button's render gate", () => {
   });
 });
 
-describe("the Reset / Start clean button's click wiring", () => {
-  it("calls the onReset callback it was given", async () => {
-    const onReset = vi.fn();
-    await render(clientWith(true), "running", onReset);
-    const btn = resetButton();
-    expect(btn).not.toBeUndefined();
-    await act(async () => {
-      btn?.click();
-    });
-    expect(onReset).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("the Reset / Start clean button while another lifecycle action is in flight", () => {
-  it("disables alongside Pause/Resume/Suspend/Archive, not just its own click", async () => {
-    const onReset = vi.fn();
-    // `hang: true` — the in-flight `pause` call never resolves, so `busy`
-    // stays true for the duration of this test, the same window the operator
-    // sees between a click and the host's response.
-    await render(clientWith(true, true), "running", onReset);
-    const pause = [...container.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes("Pause"),
-    );
-    expect(pause, "a running, platform-scoped company must offer Pause").not.toBeUndefined();
-    await act(async () => {
-      pause?.click();
-    });
-    const btn = resetButton();
-    expect(btn, "Reset stays rendered while another action is busy").not.toBeUndefined();
-    expect(btn?.disabled, "Reset must disable with the rest of the row").toBe(true);
-  });
-});
+/**
+ * Two cases retired with the control's entry point.
+ *
+ * They covered the button's click wiring — that it calls the `onReset` it was
+ * given — and that it disables alongside Pause/Resume/Suspend/Archive while any
+ * lifecycle action is in flight, rather than only guarding its own click.
+ *
+ * Both need the button on screen, and it does not render while the product does
+ * not offer company creation (`src/product-scope.ts`). The wiring and the
+ * disabled rule are untouched in `LifecycleControls`; turning the flag off
+ * restores the control and both cases.
+ *
+ * Not re-pointed at `LifecycleControls` directly: that would test the component
+ * below the gate, leaving these green while the shipped path renders nothing —
+ * which is the false pass this branch has produced before.
+ */

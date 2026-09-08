@@ -106,7 +106,39 @@ describe("Settings navigation (issue #1468)", () => {
     // #1763 makes it visible at every width, because every one of its siblings
     // above sits beside that same rail and shows one.
     expect(read("views/SettingsView.tsx")).toContain(
-      '<PageHeader title="General settings" width="3xl" />',
+      '<PageHeader title="General settings" width="full" />',
     );
+  });
+
+  it("gives every settings page the whole pane, not a centred column", () => {
+    // Issue #2131. Each page used to centre its body on a fixed column — `3xl`
+    // on General and People, `5xl` on Inference, Hosting, Search and Skills,
+    // `6xl` on Usage — which on a 1920px window left General's cards in a
+    // 768px strip with ~600px of empty margin either side, beside a rail that
+    // already narrows the pane.
+    //
+    // Swept rather than restated per page, and derived from `SETTINGS_NAMED_BY`
+    // for the same reason the header check above is: a page added to the rail
+    // with a centred body would otherwise pass by not being on anyone's list.
+    //
+    // Observatory is excluded and is the one honest exception: its row here is
+    // a doorway, `#/settings/observatory` is rewritten onto `#/observatory`
+    // before this section ever dispatches, and the view is routed by the shell
+    // rather than rendered inside this pane. It is already full width.
+    const paneRendered = SETTINGS_PAGES.filter(({ id }) => id !== "observatory");
+    expect(paneRendered.length).toBe(SETTINGS_PAGES.length - 1);
+
+    for (const { id } of paneRendered) {
+      const source = read(`views/${SETTINGS_NAMED_BY[id]}`);
+      // Said explicitly even though `full` is `PageHeader`'s default: the
+      // header's row has to track the body's column, and a page that states
+      // its width is a page whose next editor knows the two are paired.
+      expect(source, `${id} header width`).toContain('width="full"');
+      // The body. `mx-auto` is what a centred column needs and what none of
+      // these pages has any other use for, so its absence is the property —
+      // narrower than banning `max-w-*`, which these pages still legitimately
+      // use on a search box, a dialog, and the field measure inside a form.
+      expect(source, `${id} body column`).not.toContain("mx-auto");
+    }
   });
 });

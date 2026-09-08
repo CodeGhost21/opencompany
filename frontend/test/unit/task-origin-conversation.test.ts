@@ -91,7 +91,12 @@ describe("the origin thread rides the card → Room jump, not just the channel",
   });
 
   it("Room reads the thread the query names and opens it", () => {
-    expect(chatView).toContain('params.get("thread")');
-    expect(chatView).toContain("setOpenThreadId(threadId)");
+    // Read reactively since #2130: `useHashView` parses only the path segments,
+    // so a link that changes nothing but `?thread=` re-renders nothing an effect
+    // keyed on the channel would see. The read moved into its own `hashchange`
+    // subscription — the one `useHashFlag` uses — and the effect opens whatever
+    // it names.
+    expect(chatView).toContain('new URLSearchParams(query).get("thread")');
+    expect(chatView).toContain("setOpenThreadId(threadQuery.value)");
   });
 });

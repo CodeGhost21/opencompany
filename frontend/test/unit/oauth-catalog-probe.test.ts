@@ -34,6 +34,11 @@ interface Staged extends Partial<TransportResponse> {
 }
 
 class RoutedTransport implements Transport {
+
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+
+  readonly cancelsInFlight = true;
+
   readonly aborted: string[] = [];
 
   constructor(private readonly route: (path: string) => Staged) {}

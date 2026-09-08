@@ -13,8 +13,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { fetchAuthConfig, logout, me as fetchMe, type Me, type UserRole } from "@/api/auth";
 import type { LifecycleAction, OpenCompanyClient } from "@/api/client";
-import { fetchAuthConfig, logout, me as fetchMe, type Me } from "@/api/auth";
 import { memoryEngine, type MemoryEngineState } from "@/api/memory";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
@@ -48,11 +48,12 @@ import type { CompanyFeed } from "@/hooks/use-company";
 import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
+import { useCanManage, useCanManagePolicy } from "@/hooks/use-can-manage";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { forgetSession } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { lifecycleAffordances } from "@/lib/lifecycle-controls";
-import { canCreateCompanies } from "@/components/create-company-dialog";
+import { offersCompanyCreation } from "@/components/create-company-dialog";
 import { personName } from "@/lib/person";
 
 interface Props {
@@ -82,6 +83,15 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
   const scope = useLocalScope();
   const { status } = feed;
   const scoped = company ?? client.defaultCompany;
+  // Domain/SMTP are `AdminScopedCompany`, which admits the platform bearer;
+  // Policy is `require_admin` off the request headers, which does not — so
+  // it needs its own narrower gate rather than sharing this one. Neither is
+  // passed to Lifecycle: `pause` and `resume` take `CompanyAuth` and never ask
+  // for a role, so a member's Pause genuinely stops the company. Hiding it
+  // here would make this page lie in the other direction — the missing guard is
+  // the host's to add, and this gate should follow it rather than lead it.
+  const canManage = useCanManage(client, company);
+  const canManagePolicy = useCanManagePolicy(client, company);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -97,8 +107,8 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
         rule — and the rail says "Settings", which is the section, while this
         says "General settings", which is the page.
       */}
-      <PageHeader title="General settings" width="3xl" />
-      <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <PageHeader title="General settings" width="full" />
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* Device pairing was here. Sessions are the frontend client's own
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}
@@ -111,7 +121,7 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
         {/* Approvals: the autonomy tier and the always-ask list (issue #562).
             High in the page on purpose — an operator who comes to settings
             because they are drowning in approval cards is here for this. */}
-        <PolicySettings client={client} company={company} />
+        <PolicySettings client={client} company={company} canManage={canManagePolicy} />
 
         {/* Connection */}
         <Card>
@@ -193,7 +203,12 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
             remount a company switch would carry a credential typed for one
             company into another company's Save. `SettingsSection` remounts
             `BillingView`/`HostingView` for exactly this reason. */}
-        <DomainSettings key={company ?? "self"} client={client} company={company} />
+        <DomainSettings
+          key={company ?? "self"}
+          client={client}
+          company={company}
+          canManage={canManage}
+        />
 
         {/* Appearance.
 
@@ -302,15 +317,28 @@ export function LifecycleControls({
   const [pending, setPending] = useState<string | null>(null);
   const state = pending ?? feed.status.lifecycle;
 
-  const [me, setMe] = useState<Me | null>(null);
+  /**
+   * The signed-in caller's role, or `null` when the console found no session.
+   *
+   * `null` is not "non-admin" — `resolve_principal` prefers a resolved
+   * session over a platform bearer whenever both are present, so whether a
+   * session exists at all changes which credential `pause` / `resume`
+   * actually authorize against. Defaults to `null` so an unresolved read
+   * never renders an enabled Pause/Resume, matching the closed-by-default
+   * pattern every other admin-gated view uses (`HostingView`, `TeamView`, ...).
+   */
+  const [session, setSession] = useState<UserRole | null>(null);
   useEffect(() => {
     let live = true;
-    setMe(null);
-    void fetchMe(client, company)
-      .then((who) => {
-        if (live) setMe(who);
-      })
-      .catch(() => {});
+    void (async () => {
+      let role: UserRole | null = null;
+      try {
+        role = (await fetchMe(client, company)).role;
+      } catch {
+        // No user plane on this host, or not signed in — no session.
+      }
+      if (live) setSession(role);
+    })();
     return () => {
       live = false;
     };
@@ -338,14 +366,20 @@ export function LifecycleControls({
     }
   }
 
-  // Through the funnel, not the raw bearer: "Reset / Start clean" archives this
-  // company and re-provisions it through the same dialog "New company" opens, so
-  // it is company creation wearing another label and has to answer the same
-  // question the other triggers do.
-  const platform = canCreateCompanies(client);
-  const isAdmin = me?.role === "admin";
-  const { actions, explainPlatformOnly, explainPlatformSuspended, explainMemberOnly, archived } =
-    lifecycleAffordances(state, platform, isAdmin);
+  // The raw bearer, not the funnel: the product-scope predicate also folds in
+  // `COMPANY_SWITCHING_HIDDEN`, a UI feature flag that has nothing to do with
+  // whether this client actually carries platform authority. Gating lifecycle
+  // affordances on it would hide Suspend/Archive from a real platform caller
+  // on a deployment where that flag happens to be set.
+  const platform = client.carriesPlatformBearer;
+  // "Reset / Start clean" archives this company and re-provisions it through
+  // the same dialog "New company" opens, so it is company creation wearing
+  // another label and answers the same presentation question the other
+  // triggers do — unlike the lifecycle actions above, it rides the funnel on
+  // purpose.
+  const canReset = offersCompanyCreation(client);
+  const { actions, explainPlatformOnly, explainPlatformSuspended, explainAdminOnly, archived } =
+    lifecycleAffordances(state, session, platform);
   const offers = (action: LifecycleAction) => actions.includes(action);
 
   return (
@@ -385,13 +419,13 @@ export function LifecycleControls({
             </AlertDescription>
           </Alert>
         )}
-        {explainMemberOnly && (
-          <Alert data-testid="lifecycle-member-only">
+        {explainAdminOnly && (
+          <Alert data-testid="lifecycle-admin-only">
             <TriangleAlert className="size-4" />
             <AlertDescription>
-              Pausing and resuming a company now take admin authority. A member's session reaches
-              these routes but the host refuses them, so the controls are left out here rather than
-              shown failing — ask a company admin.
+              Pausing and resuming a company now take admin authority. A member&rsquo;s session
+              reaches these routes but the host refuses them, so the controls are left out here
+              rather than shown failing — ask a company admin.
             </AlertDescription>
           </Alert>
         )}
@@ -441,9 +475,10 @@ export function LifecycleControls({
           {/* Reset = archive this company (data retained, not deleted) and
               provision a fresh empty one in its place — the only truthful
               "start clean" the host offers, since there is no purge route.
-              Platform-scoped like archive, so it rides the same `platform`
-              gate and is left out entirely for a magic-link operator. */}
-          {onReset && platform && !archived && (
+              Gated on `canReset`, not the raw bearer: it goes through the same
+              funnel "New company" does, and is left out entirely for a
+              magic-link operator. */}
+          {onReset && canReset && !archived && (
             <Button variant="destructive" disabled={busy} onClick={onReset}>
               <RotateCcw className="size-4" /> Reset / Start clean
             </Button>

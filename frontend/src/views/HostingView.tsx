@@ -8,9 +8,12 @@ import {
   saveHosting,
   type HostingStatus,
 } from "@/api/hosting";
-import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import { AdminOnlyNotice } from "@/components/admin-only-notice";
 import { PageHeader } from "@/components/page-header";
+import { cn } from "@/lib/utils";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
+import { useCanManage } from "@/hooks/use-can-manage";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
@@ -75,15 +78,12 @@ export function HostingView({ client, company }: Props) {
   const [status, setStatus] = useState<HostingStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Whether this viewer may widen the company's tool grants (issue #1796).
+  // Whether this viewer may change what this company deploys through.
   //
-  // Resolved the way `OAuthView` resolves the same question, and defaulted
-  // CLOSED for the same reason: every write behind the control is admin-only,
-  // so an unresolved role must not render an enabled button. Courtesy, not
-  // enforcement — the host refuses a non-admin's `PUT` whatever this says. What
-  // it prevents is offering an operator an action whose only possible outcome
-  // is a 403 toast, which on this page would replace one dead end with another.
-  const [canManage, setCanManage] = useState(false);
+  // Governs the whole page, not just the grant control: `PUT …/hosting` and
+  // `DELETE …/hosting/key` are both `AdminScopedCompany`, so for a member the
+  // token field, Save and Disconnect could each only ever produce a refusal.
+  const canManage = useCanManage(client, company);
 
   const [apiKey, setApiKey] = useState("");
   const [team, setTeam] = useState("");
@@ -104,22 +104,6 @@ export function HostingView({ client, company }: Props) {
     } catch (err) {
       setLoadError(reason(err));
     }
-  }, [client, company]);
-
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
-      }
-      if (live) setCanManage(admin);
-    })();
-    return () => {
-      live = false;
-    };
   }, [client, company]);
 
   useEffect(() => {
@@ -176,7 +160,7 @@ export function HostingView({ client, company }: Props) {
   const header = (
     <PageHeader
       title="Hosting"
-      width="5xl"
+      width="full"
       description={
         <>
           Connect a hosting provider so your teammates can put a site from this
@@ -191,7 +175,7 @@ export function HostingView({ client, company }: Props) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
-        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+        <div className="w-full px-4 py-6">
           <Alert variant="destructive" data-testid="hosting-load-error">
             <TriangleAlert className="size-4" />
             <AlertDescription>Could not load hosting settings: {loadError}</AlertDescription>
@@ -217,7 +201,18 @@ export function HostingView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="hosting-view">
       {header}
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
+
+        {!canManage && (
+          <AdminOnlyNotice
+            testId="hosting-read-only"
+            title="Only an admin can change where this company deploys"
+          >
+            This token deploys the company&rsquo;s files to the public internet under its
+            own account, and a database provisioned through it is a bill that account
+            pays &mdash; so an admin holds it. You can see what is connected.
+          </AdminOnlyNotice>
+        )}
 
         {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}
@@ -264,25 +259,27 @@ export function HostingView({ client, company }: Props) {
               ) : null}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="hosting-key">API token</Label>
-                <Input
-                  id="hosting-key"
-                  data-testid="hosting-api-key"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={
-                    status.apiKeyConfigured ? "Configured — type to replace" : "vercel_…"
-                  }
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Create one at vercel.com → Account Settings → Tokens. Stored
-                  write-only: it is never shown again, here or anywhere else.
-                </p>
-              </div>
+            <div className={cn("grid gap-4 sm:grid-cols-2", SETTINGS_FIELD_COLUMN)}>
+              {canManage ? (
+                <div className="space-y-2">
+                  <Label htmlFor="hosting-key">API token</Label>
+                  <Input
+                    id="hosting-key"
+                    data-testid="hosting-api-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={
+                      status.apiKeyConfigured ? "Configured — type to replace" : "vercel_…"
+                    }
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Create one at vercel.com → Account Settings → Tokens. Stored
+                    write-only: it is never shown again, here or anywhere else.
+                  </p>
+                </div>
+              ) : null}
 
               <div className="space-y-2">
                 <Label htmlFor="hosting-team">Team (optional)</Label>
@@ -291,6 +288,7 @@ export function HostingView({ client, company }: Props) {
                   data-testid="hosting-team"
                   placeholder="team_…"
                   value={team}
+                  disabled={!canManage}
                   onChange={(e) => setTeam(e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
@@ -301,11 +299,13 @@ export function HostingView({ client, company }: Props) {
             </div>
 
             <div className="flex items-center gap-2">
-              <Button onClick={() => void onSave()} disabled={busy} data-testid="hosting-save">
-                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                Save
-              </Button>
-              {status.apiKeyConfigured ? (
+              {canManage ? (
+                <Button onClick={() => void onSave()} disabled={busy} data-testid="hosting-save">
+                  {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  Save
+                </Button>
+              ) : null}
+              {canManage && status.apiKeyConfigured ? (
                 <AlertDialog>
                   <AlertDialogTrigger
                     render={
