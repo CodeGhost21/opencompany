@@ -514,6 +514,61 @@ mod test {
         );
     }
 
+    /// **Codex review findings on PR #2140 (`3952368160`, `3952368162`,
+    /// `3951723397`).** This is the choke point every workflow-run entry point
+    /// funnels through — the manual run route, the cron scheduler, an approved
+    /// gate's resume, a reconciled blocked-node dispatch, an expiry that
+    /// releases a workflow run, and the orchestrator's `run_workflow` tool.
+    /// Each already asks `CompanyRuntime::ensure_not_emergency_stopped` early,
+    /// but that ask sits behind at least one `.await` before the run is
+    /// actually admitted — this proves the recheck under `begin`'s own lock
+    /// closes that window, and that it correctly leaves every other supervisor
+    /// (the ones with no company to ask) admitting exactly as before.
+    #[test]
+    fn begin_refuses_once_the_installed_emergency_gate_engages() {
+        let gate = std::sync::Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            crate::company::Policy {
+                mode: "full".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+        ));
+        let supervisor = RunSupervisor::with_limit(2).with_emergency_gate(gate.clone());
+
+        let (_ctx, _guard) = supervisor
+            .begin("digest", false)
+            .expect("not stopped yet, so the first run is admitted");
+
+        gate.set_emergency(true);
+        match supervisor.begin("digest", false) {
+            Err(OpenCompanyError::EmergencyStop(_)) => {}
+            Ok(_) => panic!("a run must be refused once the installed gate is stopped"),
+            Err(other) => panic!("expected an emergency-stop refusal, got {other:?}"),
+        }
+        assert_eq!(
+            supervisor.len(),
+            1,
+            "the refused run registers nothing — only the pre-stop run is in the map"
+        );
+
+        gate.set_emergency(false);
+        let (_ctx2, _guard2) = supervisor
+            .begin("digest", false)
+            .expect("releasing the stop restores ordinary admission");
+    }
+
+    /// A supervisor built with no [`with_emergency_gate`](RunSupervisor::with_emergency_gate)
+    /// call — every construction site with no company to ask — admits
+    /// regardless of any flag, exactly as before this recheck existed.
+    #[test]
+    fn begin_ignores_emergency_state_with_no_gate_installed() {
+        let supervisor = RunSupervisor::with_limit(1);
+        supervisor
+            .begin("digest", false)
+            .expect("no gate installed, so nothing here can refuse on that basis");
+    }
+
     /// Issue #401: dropping a guard frees the slot it held, so a run refused at
     /// the ceiling succeeds once an in-flight run settles. This is the RAII
     /// release the whole design leans on — no second ledger to keep in step.
