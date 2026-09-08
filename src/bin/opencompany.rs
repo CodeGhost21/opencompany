@@ -1871,6 +1871,46 @@ fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
     }
 }
 
+/// Resolves a base-URL env var (`TINYHUMANS_API_URL`, `TINYPLACE_API_URL`)
+/// for `serve`'s manual `AppConfig` build. Mirrors
+/// `opencompany::app::config::resolve_base_url`'s precedence — kept as a
+/// small local twin because `serve` builds `AppConfig` field-by-field rather
+/// than through `app::config::resolve` — including the `config.toml`
+/// candidate, so `doctor` (which goes through `resolve_base_url`) and `serve`
+/// agree on whether a hosted tenant's backend URL counts as set.
+///
+/// A hosted tenant is handed its whole environment by the platform that
+/// provisions it, so a value named by neither the env var nor `config.toml`
+/// refuses to boot instead of silently applying `default_val` — which for
+/// both callers is a production base URL. Every other deployment kind keeps
+/// the default: the operator running it owns the choice, and no-override *is*
+/// that choice.
+fn resolve_serve_base_url(
+    var_name: &str,
+    deployment: opencompany::app::deployment::Deployment,
+    toml_val: Option<String>,
+    default_val: String,
+) -> Result<String> {
+    if let Some(value) = std::env::var(var_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(value);
+    }
+    if let Some(value) = toml_val.filter(|value| !value.trim().is_empty()) {
+        return Ok(value);
+    }
+    if deployment == opencompany::app::deployment::Deployment::HostedTenant {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "{var_name} is not set. This is a hosted-tenant deployment, which is handed its \
+             whole environment by the platform that provisions it — so this refuses to boot \
+             rather than silently default to production. Set {var_name} explicitly (the \
+             production hub, or the staging hub for a staging tenant)."
+        )));
+    }
+    Ok(default_val)
+}
+
 async fn async_main() -> Result<()> {
     // Crash reporting first, before the subscriber and before any other work.
     // The panic hook is installed inside `init`, so anything that panics ahead
@@ -2031,13 +2071,22 @@ async fn async_main() -> Result<()> {
                     );
                 }
             }
+            // Which kind of install this process is — a hosted tenant gets its
+            // whole environment from the platform that provisions it, so the
+            // production defaults below are refused rather than silently
+            // applied for that kind alone. See `resolve_serve_base_url`.
+            let deployment = opencompany::app::deployment::Deployment::from_env(&ProcessEnv);
             // tiny.place economy + public-card configuration resolved from the
             // environment (with built-in defaults); the a2a routes and boot
             // going-public flow read these off `AppConfig`.
-            let tinyplace_api_url = std::env::var("TINYPLACE_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| opencompany::app::config::DEFAULT_TINYPLACE_API_URL.to_string());
+            let tinyplace_api_url = resolve_serve_base_url(
+                "TINYPLACE_API_URL",
+                deployment,
+                config_file
+                    .as_ref()
+                    .and_then(|c| c.tinyplace_api_url.clone()),
+                opencompany::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
+            )?;
             let public_url = std::env::var("OPENCOMPANY_PUBLIC_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
@@ -2086,10 +2135,12 @@ async fn async_main() -> Result<()> {
             // Honor TINYHUMANS_API_URL (e.g. staging) — the config layer reads
             // it, but this manual AppConfig build otherwise falls to the prod
             // default, so a staging credential could never reach staging.
-            let api_url = std::env::var("TINYHUMANS_API_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| AppConfig::default().api_url);
+            let api_url = resolve_serve_base_url(
+                "TINYHUMANS_API_URL",
+                deployment,
+                config_file.as_ref().and_then(|c| c.api_url.clone()),
+                AppConfig::default().api_url,
+            )?;
             // The listener address, across every layer that may name it. Until
             // issue #425 only the flag reached this struct, so the manager's
             // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
@@ -3186,5 +3237,74 @@ mod test {
             matches!(&err, opencompany::error::OpenCompanyError::Config(_)),
             "expected a Config refusal, got: {err:?}"
         );
+    }
+
+    // These use a var name no environment (local or CI) ever sets, so the
+    // env-var branch of `resolve_serve_base_url` never fires here — no
+    // `std::env::set_var` needed, and so nothing to race against the rest of
+    // this binary's tests.
+    const UNSET_VAR: &str = "OPENCOMPANY_TEST_RESOLVE_SERVE_BASE_URL_UNSET_PROBE";
+
+    /// Codex review finding on PR #2141: `doctor` (via
+    /// `app::config::resolve_base_url`) accepts a hosted tenant's backend URL
+    /// from `config.toml`, but `serve`'s manual `AppConfig` build checked only
+    /// the process environment — so a tenant configured entirely through
+    /// `config.toml` passed `doctor` and then refused to boot.
+    #[test]
+    fn serve_base_url_accepts_config_toml_for_a_hosted_tenant() {
+        let resolved = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            Some("https://toml.example".to_string()),
+            "https://default.example".to_string(),
+        )
+        .expect("a config.toml value must satisfy the hosted-tenant gate");
+
+        assert_eq!(resolved, "https://toml.example");
+    }
+
+    #[test]
+    fn serve_base_url_still_refuses_a_hosted_tenant_with_neither_env_nor_toml() {
+        let err = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            None,
+            "https://default.example".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            opencompany::error::OpenCompanyError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn serve_base_url_ignores_a_blank_config_toml_value() {
+        let err = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            Some("   ".to_string()),
+            "https://default.example".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            opencompany::error::OpenCompanyError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn serve_base_url_self_hosted_still_defaults_when_neither_env_nor_toml() {
+        let resolved = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::SelfHosted,
+            None,
+            "https://default.example".to_string(),
+        )
+        .expect("self-hosted must not refuse to boot");
+
+        assert_eq!(resolved, "https://default.example");
     }
 }
