@@ -1584,6 +1584,39 @@ struct Scan {
     allowed_nonliteral: BTreeMap<&'static str, usize>,
 }
 
+/// Every HTTP verb a `.route("/p", …)` call wires, including Axum's chained
+/// form `post(handler).delete(other)`. Reading only the first identifier
+/// records `POST` and silently drops the `DELETE`, which is the same
+/// path-shaped blindness this check exists to remove.
+fn route_verbs(tokens: &[Token], open_paren: usize) -> BTreeSet<String> {
+    const VERBS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+    let mut verbs = BTreeSet::new();
+    let mut depth = 0usize;
+    for index in open_paren..tokens.len() {
+        match punct_at(tokens, index) {
+            Some('(') => depth += 1,
+            Some(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        if depth == 1
+            && punct_at(tokens, index + 1) == Some('(')
+            && let Some(name) = ident_at(tokens, index)
+            && VERBS.contains(&name)
+        {
+            verbs.insert(name.to_ascii_uppercase());
+        }
+    }
+    if verbs.is_empty() {
+        verbs.insert("?".to_string());
+    }
+    verbs
+}
+
 fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     let source = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
     let tokens = lex(&source).map_err(|error| format!("{}: {error}", file.display()))?;
@@ -1619,11 +1652,9 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
                     // `.route("/p", post(h))` — the verb is the identifier
                     // after the comma. An unreadable one is recorded as
                     // `?` rather than skipped, so it cannot vanish quietly.
-                    let verb = match ident_at(&tokens, index + 5) {
-                        Some(name) => name.to_ascii_uppercase(),
-                        None => "?".to_string(),
-                    };
-                    direct_methods.insert(format!("{verb} {path}"));
+                    for verb in route_verbs(&tokens, index + 2) {
+                        direct_methods.insert(format!("{verb} {path}"));
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -1700,11 +1731,9 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
                 match tokens.get(index + 3).map(|token| &token.kind) {
                     Some(TokenKind::String(path)) => {
                         direct.insert(path.clone());
-                        let verb = match ident_at(&tokens, index + 5) {
-                            Some(name) => name.to_ascii_uppercase(),
-                            None => "?".to_string(),
-                        };
-                        direct_methods.insert(format!("{verb} {path}"));
+                        for verb in route_verbs(&tokens, index + 2) {
+                            direct_methods.insert(format!("{verb} {path}"));
+                        }
                     }
                     _ => {
                         let Some(fingerprint) =
@@ -2163,4 +2192,16 @@ mod scanner_tests {
         assert!(visible);
         assert!(!hidden);
     }
+}
+
+#[test]
+fn chained_route_verbs_are_all_recorded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let setup = scan_file_route_literals(&root.join("setup.rs")).expect("scan");
+    assert!(
+        setup.direct_methods.contains("GET /api/v1/setup")
+            && setup.direct_methods.contains("POST /api/v1/setup"),
+        "chained get(read).post(apply) must yield both verbs, got {:?}",
+        setup.direct_methods
+    );
 }
