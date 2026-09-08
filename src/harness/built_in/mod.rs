@@ -738,17 +738,38 @@ async fn read_spend_for_gate(
 /// and card dispatch already fail the attempt on `abnormal_stop`; leaving it
 /// `None` here let a pre-dispatch refusal settle those attempts `Succeeded`
 /// and bind the refusal notice downstream as if it were the node's answer.
-fn spend_gate_refusal(reply: String) -> TurnOutcome {
+fn spend_gate_refusal(reply: String, cause: SpendGateCause) -> TurnOutcome {
     TurnOutcome {
         reply,
         steps: Vec::new(),
         hit_iteration_cap: false,
-        abnormal_stop: Some(
-            "[stopped: dispatch refused, spend could not be measured against a declared cap]"
-                .to_string(),
-        ),
+        abnormal_stop: Some(cause.abnormal_stop().to_string()),
         halted_for_spend: None,
         budget_paused: None,
+    }
+}
+
+/// Why a pre-dispatch spend gate refused.
+///
+/// The two read differently to whoever is looking: an unreadable meter is a
+/// host fault to go and fix, an exhausted cap is a healthy meter reporting a
+/// real ceiling, and waiting for the reset or raising the cap is the move.
+/// Reporting both as the former sends operators to troubleshoot a meter that
+/// is working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpendGateCause {
+    Unmeasurable,
+    Exhausted,
+}
+
+impl SpendGateCause {
+    fn abnormal_stop(self) -> &'static str {
+        match self {
+            Self::Unmeasurable => {
+                "[stopped: dispatch refused, spend could not be measured against a declared cap]"
+            }
+            Self::Exhausted => "[stopped: dispatch refused, a declared spend cap is exhausted]",
+        }
     }
 }
 
@@ -3912,7 +3933,10 @@ impl HarnessPool {
                         "[capability-budget] total-ceiling spend query failed; refusing dispatch (no model call) rather than spending against a ceiling that cannot be checked"
                     ),
                 }
-                return Some(spend_gate_refusal(unmeasurable_ceiling_notice(&fault)));
+                return Some(spend_gate_refusal(
+                    unmeasurable_ceiling_notice(&fault),
+                    SpendGateCause::Unmeasurable,
+                ));
             }
         };
 
@@ -3951,6 +3975,7 @@ impl HarnessPool {
             );
             return Some(spend_gate_refusal(
                 TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
+                SpendGateCause::Exhausted,
             ));
         }
         None
@@ -4186,9 +4211,10 @@ impl HarnessPool {
                             "[agent-budget] daily-spend query failed; refusing dispatch to this teammate (no model call) rather than spending against a cap that cannot be checked"
                         ),
                     }
-                    return Ok(spend_gate_refusal(unmeasurable_agent_budget_notice(
-                        agent_id, cap, &fault,
-                    )));
+                    return Ok(spend_gate_refusal(
+                        unmeasurable_agent_budget_notice(agent_id, cap, &fault),
+                        SpendGateCause::Unmeasurable,
+                    ));
                 }
             };
 
@@ -4223,9 +4249,10 @@ impl HarnessPool {
                     cap,
                     "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
                 );
-                return Ok(spend_gate_refusal(agent_budget_exhausted_notice(
-                    agent_id, cap,
-                )));
+                return Ok(spend_gate_refusal(
+                    agent_budget_exhausted_notice(agent_id, cap),
+                    SpendGateCause::Exhausted,
+                ));
             }
         }
 
@@ -11061,7 +11088,7 @@ description = "Sets direction."
     /// it were the node's or the teammate's real answer.
     #[test]
     fn spend_gate_refusal_carries_an_abnormal_stop() {
-        let outcome = spend_gate_refusal("refused".to_string());
+        let outcome = spend_gate_refusal("refused".to_string(), SpendGateCause::Unmeasurable);
         assert!(
             outcome.abnormal_stop.is_some(),
             "a pre-dispatch refusal must not read like a clean finish downstream"
@@ -11127,6 +11154,23 @@ description = "Builds the product."
     /// inference and inference never reaches a `ToolPolicy`. Gating only priced
     /// tool calls would leave a capped teammate free to burn its budget many
     /// times over on model turns alone.
+    #[test]
+    fn an_exhausted_cap_and_an_unreadable_meter_do_not_read_alike() {
+        let exhausted = spend_gate_refusal("refused".to_string(), SpendGateCause::Exhausted);
+        let unmeasurable = spend_gate_refusal("refused".to_string(), SpendGateCause::Unmeasurable);
+        assert_ne!(
+            exhausted.abnormal_stop, unmeasurable.abnormal_stop,
+            "an exhausted cap sent to the meter-fault reason points the operator at a meter that works"
+        );
+        assert!(
+            exhausted
+                .abnormal_stop
+                .as_deref()
+                .is_some_and(|stop| stop.contains("exhausted")),
+            "the exhausted reason must name the cap, not the measurement"
+        );
+    }
+
     #[tokio::test]
     async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
         let dir = tempfile::tempdir().unwrap();
