@@ -372,11 +372,18 @@ describe("SendInvoiceDialog idempotency key", () => {
       root.render(createElement(Mount, { instance: "first" }));
     });
     await settle();
+    const alanInvoiceKey = deriveInvoiceIdempotencyKey({
+      customerEmail: "alan@example.com",
+      currencyCode: "USD",
+      dueDays: undefined,
+      lineItems: [{ description: "Consulting", amountInMinorUnits: 125_000 }],
+    });
+
     await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
     await toggleForceNew(true);
     await clickSend();
     const firstKey = lastSentKey();
-    expect(readUnresolvedForceNew(SCOPE)).toBeTruthy();
+    expect(readUnresolvedForceNew(SCOPE, alanInvoiceKey)).toBeTruthy();
 
     // Navigating away from Finance and back, or a page reload — a full
     // unmount + fresh mount, not the close/reopen of the same instance the
@@ -396,7 +403,7 @@ describe("SendInvoiceDialog idempotency key", () => {
     const secondKey = lastSentKey();
 
     expect(secondKey).toBe(firstKey);
-    expect(readUnresolvedForceNew(SCOPE)).toBeUndefined();
+    expect(readUnresolvedForceNew(SCOPE, alanInvoiceKey)).toBeUndefined();
   });
 
   it("never lends one invoice's forced nonce to a different invoice", async () => {
@@ -439,6 +446,59 @@ describe("SendInvoiceDialog idempotency key", () => {
 
     await clickSend();
     expect(lastSentKey()).not.toBe(forcedKey);
+  });
+
+  it("resolving a different invoice's forced send does not erase an unrelated invoice's still-unresolved nonce", async () => {
+    sendInvoice.mockRejectedValueOnce(new Error("timeout")); // Alan's forced send: ambiguous
+    sendInvoice.mockResolvedValueOnce(invoiceReply()); // Beth's forced send: resolves clean
+    sendInvoice.mockResolvedValueOnce(invoiceReply()); // Alan's retry
+
+    function Mount({ instance }: { instance: string }) {
+      return withScope(
+        createElement(SendInvoiceDialog, {
+          key: instance,
+          client: CLIENT,
+          company: "acme",
+          site: "acme-test",
+          open: true,
+          onOpenChange: () => {},
+          onSent: () => {},
+        }),
+      );
+    }
+
+    act(() => {
+      root.render(createElement(Mount, { instance: "first" }));
+    });
+    await settle();
+    await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    await toggleForceNew(true);
+    await clickSend();
+    const alanForcedKey = lastSentKey();
+
+    // Navigate away — Alan's forced send is still unresolved. A DIFFERENT
+    // invoice is entered, forced, and this time succeeds outright.
+    act(() => {
+      root.render(createElement(Mount, { instance: "second" }));
+    });
+    await settle();
+    await fillInvoiceFields({ email: "beth@example.com", description: "Design", amount: "400.00" });
+    await toggleForceNew(true);
+    await clickSend();
+
+    // Back to Alan's invoice, retyped exactly, without ever having resolved
+    // it directly. Beth's unrelated success must not have discarded Alan's
+    // latch — a fresh nonce here would mint a different key on retry and can
+    // bill Alan twice for the same ambiguous send.
+    act(() => {
+      root.render(createElement(Mount, { instance: "third" }));
+    });
+    await settle();
+    await fillInvoiceFields({ email: "alan@example.com", description: "Consulting", amount: "1250.00" });
+    expect((at("invoice-force-new") as HTMLInputElement).checked).toBe(true);
+
+    await clickSend();
+    expect(lastSentKey()).toBe(alanForcedKey);
   });
 
   it("a deliberate resend forces a different key from the default derivation", async () => {
