@@ -73,9 +73,6 @@ export interface LifecycleAffordances {
  * @param lifecycle the host's `status.lifecycle` (or the optimistic pending one)
  * @param session the signed-in caller's role, or `null` when the console found no session
  * @param platform whether this client carries a platform bearer
- * @param isAdmin whether the signed-in person administers this company;
- *   ignored when `platform` is true. Defaults to `true` for a caller that
- *   has not resolved role yet.
  */
 export function lifecycleAffordances(
   lifecycle: string,
