@@ -1499,9 +1499,21 @@ export class OpenCompanyClient {
     variables?: Record<string, unknown>,
     company?: string | null,
   ): Promise<{ data?: unknown; errors?: unknown }> {
-    return this.request("POST", `${this.scope(company)}/graphql`, {
-      query,
-      variables,
+    return this.request<{ data?: unknown; errors?: unknown }>(
+      "POST",
+      `${this.scope(company)}/graphql`,
+      { query, variables },
+    ).catch((err) => {
+      // A host predating the company-scoped route only serves bare `/graphql`
+      // and 404s on the scoped path — relevant to a hub/desktop console, whose
+      // hosts redeploy independently of it.
+      if (err instanceof ApiError && err.status === 404) {
+        return this.request<{ data?: unknown; errors?: unknown }>("POST", "/graphql", {
+          query,
+          variables,
+        });
+      }
+      throw err;
     });
   }
 

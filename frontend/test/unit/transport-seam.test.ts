@@ -406,3 +406,47 @@ describe("a request deadline crossing the seam", () => {
     expect(typeof transport.seen.at(-1)!.timeoutMs).toBe("number");
   });
 });
+
+describe("graphqlRequest against a host predating the company-scoped route", () => {
+  it("retries bare /graphql when the scoped route 404s", async () => {
+    const t = new StubTransport((req) =>
+      req.url.endsWith("/api/v1/company/graphql")
+        ? { status: 404, text: "" }
+        : { text: '{"data":{"company":{"id":"acme"}}}' },
+    );
+    const client = clientOn(t, { baseUrl: "https://host.test" });
+
+    await expect(client.graphqlRequest("{ company { id } }")).resolves.toEqual({
+      data: { company: { id: "acme" } },
+    });
+    expect(t.seen.map((r) => r.url)).toEqual([
+      "https://host.test/api/v1/company/graphql",
+      "https://host.test/graphql",
+    ]);
+  });
+
+  it("carries the addressed company on the scoped attempt only", async () => {
+    const t = new StubTransport((req) =>
+      req.url.endsWith("/api/v1/companies/acme/graphql")
+        ? { status: 404, text: "" }
+        : { text: '{"data":{"company":{"id":"acme"}}}' },
+    );
+    const client = clientOn(t, { baseUrl: "https://host.test" });
+
+    await client.graphqlRequest("{ company { id } }", undefined, "acme");
+    expect(t.seen.map((r) => r.url)).toEqual([
+      "https://host.test/api/v1/companies/acme/graphql",
+      "https://host.test/graphql",
+    ]);
+  });
+
+  it("does not retry a refusal that is not a 404", async () => {
+    const t = new StubTransport(() => ({ status: 401, text: "" }));
+    const client = clientOn(t, { baseUrl: "https://host.test" });
+
+    await expect(client.graphqlRequest("{ company { id } }")).rejects.toMatchObject({
+      status: 401,
+    });
+    expect(t.seen).toHaveLength(1);
+  });
+});
