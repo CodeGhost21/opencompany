@@ -51,6 +51,13 @@ use crate::ports::types::EffectGroup;
 /// money arm moved here with it.
 pub const AMOUNT_KEY: &str = "amount_usd";
 
+/// The alias [`AMOUNT_KEY`] accepts. `ApprovalPolicy::amount_usd`
+/// (`src/harness/built_in/policy.rs`) reads both `amount_usd` and `amount`,
+/// so [`declared_amount_usd`] has to as well — reading only [`AMOUNT_KEY`]
+/// would undercount every `amount`-only call the shadow measurement exists to
+/// count.
+const AMOUNT_KEY_ALIAS: &str = "amount";
+
 /// Tools withheld from the consequence rule by an explicit product ruling.
 ///
 /// `publish_artifact` publishes into the company's own shared workspace, which
@@ -203,10 +210,14 @@ pub fn evaluate_consequence(
 
 /// The dollar amount this call declares, when it declares a positive one.
 ///
+/// Reads [`AMOUNT_KEY`] first and [`AMOUNT_KEY_ALIAS`] second, same order and
+/// same two keys as `ApprovalPolicy::amount_usd`.
+///
 /// Zero and negative are not "money leaving": a zero-amount call moves nothing,
 /// and a negative one is a refund shape this layer has no business guessing at.
 pub fn declared_amount_usd(args: &Value) -> Option<f64> {
     args.get(AMOUNT_KEY)
+        .or_else(|| args.get(AMOUNT_KEY_ALIAS))
         .and_then(Value::as_f64)
         .filter(|amount| *amount > 0.0)
 }
@@ -348,6 +359,29 @@ mod tests {
             evaluate("file_write", &json!({ AMOUNT_KEY: 0.01 }), None),
             FloorVerdict::MoneyLeaves,
             "this is the caller judge passes, and it must keep judge's answer"
+        );
+    }
+
+    /// `ApprovalPolicy::amount_usd` (`src/harness/built_in/policy.rs`) reads
+    /// both `amount_usd` and `amount`; this reader has to recognise the same
+    /// two keys or the shadow measurement undercounts every call that
+    /// declares money under the alias.
+    #[test]
+    fn the_amount_alias_is_read_too() {
+        assert_eq!(
+            declared_amount_usd(&json!({ "amount": 12.5 })),
+            Some(12.5),
+            "amount is the alias ApprovalPolicy::amount_usd also accepts"
+        );
+        assert_eq!(
+            declared_amount_usd(&json!({ AMOUNT_KEY: 5.0, "amount": 99.0 })),
+            Some(5.0),
+            "amount_usd outranks amount when a call declares both"
+        );
+        assert_eq!(
+            evaluate("file_write", &json!({ "amount": 0.01 }), None),
+            FloorVerdict::MoneyLeaves,
+            "evaluate must see money declared under the alias too"
         );
     }
 

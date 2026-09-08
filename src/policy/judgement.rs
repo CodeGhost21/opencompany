@@ -831,14 +831,14 @@ mod tests {
         );
     }
 
-    /// Review finding on PR #2152: `judge` computes `consequence_of` for its
-    /// own fail-closed arm and then, before this fix, `floor::evaluate`
-    /// computed it again — for an uncatalogued `composio_execute` slug that
-    /// runs `consequence_of` a second time and doubles the `catalogue_miss`
-    /// warning it logs (issues #754, #1818). Counts every `WARN` emitted by
-    /// one `judge` call rather than reading a captured field: under this
-    /// fixture the only `WARN` either run produces is that one line, so a
-    /// count of 2 is the regression and 1 is the fix.
+    /// `judge` computes `consequence_of` once for its own fail-closed arm and
+    /// must not ask `floor::evaluate` to compute it a second time — for an
+    /// uncatalogued `composio_execute` slug that call is not free of side
+    /// effect, and running it twice doubles the `catalogue_miss` warning it
+    /// logs (issues #754, #1818). Counts every `WARN` emitted by one `judge`
+    /// call rather than reading a captured field: under this fixture the
+    /// only `WARN` either run produces is that one line, so a count of 2 is
+    /// the regression and 1 is the fix.
     ///
     /// `openhuman`-gated: the catalogue-miss path only exists once a catalogue
     /// is linked in to miss against — see `CatalogLookup::CatalogueAbsent`.
