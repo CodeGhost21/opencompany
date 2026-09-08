@@ -2006,7 +2006,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
-        assert_eq!(body["code"], "conflict", "{body}");
+        #[cfg(not(feature = "composio"))]
+        assert_eq!(body["code"], "not_in_build", "{body}");
+        #[cfg(feature = "composio")]
+        assert_eq!(body["code"], "not_configured", "{body}");
     }
 
     // --- Who may change what the company connects through (issue #403) -------
@@ -2304,7 +2307,10 @@ mod tests {
         let (status, body, raw) =
             send(&state, "GET", "/api/v1/company/composio/connections", None).await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
-        assert_eq!(body["code"], "conflict", "{body}");
+        #[cfg(not(feature = "composio"))]
+        assert_eq!(body["code"], "not_in_build", "{body}");
+        #[cfg(feature = "composio")]
+        assert_eq!(body["code"], "not_configured", "{body}");
     }
 
     /// The disconnect added for #404 is wired on the same terms as the rest of
@@ -2330,7 +2336,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
-        assert_eq!(body["code"], "conflict", "{body}");
+        #[cfg(not(feature = "composio"))]
+        assert_eq!(body["code"], "not_in_build", "{body}");
+        #[cfg(feature = "composio")]
+        assert_eq!(body["code"], "not_configured", "{body}");
     }
 
     /// The ops tests that are decidable only in a build carrying `composio`.
@@ -2546,7 +2555,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
-        assert_eq!(body["code"], "conflict", "{body}");
+        #[cfg(not(feature = "composio"))]
+        assert_eq!(body["code"], "not_in_build", "{body}");
+        #[cfg(feature = "composio")]
+        assert_eq!(body["code"], "not_configured", "{body}");
     }
 
     /// Clearing is the deliberate exception: it takes no upstream call, so it
