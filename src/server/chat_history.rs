@@ -1117,6 +1117,13 @@ pub async fn history_for_desk(
     // memory note keeps the long form, and the chat POST still returns it to
     // its caller. This is a rendering decision about one channel, on the same
     // terms the referral relay is dropped below.
+    //
+    // **Only the closing row.** A failed turn's notice is journaled under its
+    // own reserved id for exactly this reason: the turn it describes does not
+    // exist, so there is no gap for a reader to notice, and dropping it would
+    // leave "a transcript with a hole in it that nothing accounts for". The
+    // report restates a tally whose inputs are the visible turns; a failure
+    // notice is the only record that a seat was asked and could not answer.
     messages.retain(|message| message.channel != crate::hivemind::HIVE_REPORT_AUTHOR);
 
     drop_dead_cards(runtime, &mut messages).await?;
@@ -3168,6 +3175,69 @@ mod referral_origin_test {
         assert!(
             !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
             "and the room's own bookkeeping is not a participant in it: {voices:?}"
+        );
+    }
+
+    /// **A failed turn still shows.** The report restates a tally whose inputs
+    /// are the visible turns, so hiding it costs nothing. A failure notice
+    /// describes a turn that does not exist — there is no gap for a reader to
+    /// notice — so hiding it would leave a transcript with an unaccounted hole.
+    #[tokio::test]
+    async fn a_failed_turn_is_still_reported_to_the_room() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        for (agent, text) in [
+            (
+                crate::hivemind::HIVE_FAILURE_AUTHOR,
+                "qa_engineer was asked and could not answer.",
+            ),
+            (
+                crate::hivemind::HIVE_REPORT_AUTHOR,
+                "The desk settled after 2 turns.",
+            ),
+        ] {
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::AgentReply {
+                        chat_id: "engineering".to_string(),
+                        agent_id: agent.to_string(),
+                        text: text.to_string(),
+                        steps: Vec::new(),
+                        task_id: None,
+                        parent: None,
+                        mentions: Vec::new(),
+                        mention_depth: 0,
+                        audience: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        let voices: Vec<&str> = history.iter().map(|m| m.channel.as_str()).collect();
+
+        assert!(
+            voices.contains(&crate::hivemind::HIVE_FAILURE_AUTHOR),
+            "a seat that could not answer is accounted for: {voices:?}"
+        );
+        assert!(
+            !voices.contains(&crate::hivemind::HIVE_REPORT_AUTHOR),
+            "while the closing summary stays out of the room: {voices:?}"
         );
     }
 

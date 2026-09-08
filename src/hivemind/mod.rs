@@ -112,6 +112,21 @@ pub use types::{
 /// outcome row from a teammate's line without consulting a roster.
 pub const HIVE_REPORT_AUTHOR: &str = "hive-report";
 
+/// The `agent_id` a failed turn's notice is journaled under.
+///
+/// Hyphenated for the same reason [`HIVE_REPORT_AUTHOR`] is, and read back as
+/// a system row on the same terms — but a DIFFERENT id, because the two rows
+/// answer to different readers.
+///
+/// The closing report restates a tally whose inputs are already on screen as
+/// the turns that produced them, so a console may reasonably decline to draw
+/// it. A failure notice is the opposite: the turn it describes does not exist,
+/// so there is no gap for a reader to notice and nothing else records that a
+/// seat was asked and could not answer. Sharing one id forced the two to be
+/// shown or hidden together, and hiding this one leaves "a transcript with a
+/// hole in it that nothing accounts for".
+pub const HIVE_FAILURE_AUTHOR: &str = "hive-failure";
+
 /// The `agent_id` an answer carried back from another desk is journaled under.
 ///
 /// Hyphenated for exactly the reason [`HIVE_REPORT_AUTHOR`] is — no roster id

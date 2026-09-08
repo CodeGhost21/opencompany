@@ -516,7 +516,7 @@ impl<'a> EpisodeDriver<'a> {
                             &self.company,
                             CompanyEvent::AgentReply {
                                 chat_id: self.desk.id.clone(),
-                                agent_id: super::HIVE_REPORT_AUTHOR.to_string(),
+                                agent_id: super::HIVE_FAILURE_AUTHOR.to_string(),
                                 text: failure_note(&turn.agent_id, &error),
                                 // The room's own report is never private: a
                                 // reader who could not see that a turn failed
