@@ -138,17 +138,64 @@ pub const MAX_BODY_BYTES: usize = 12 * 1024;
 /// agent that adjusts and an agent that repeats itself.
 ///
 /// `what` names the payload for the trailer, e.g. `"GITHUB_LIST_ISSUES output"`.
-/// Keys whose value is a link and never an answer. Dropped wholesale from a
-/// projected record.
+/// Keys carrying a provider's *self-referential* API plumbing — the endpoints
+/// a client would call to re-fetch related collections, never a value anyone
+/// asked for.
 ///
-/// A provider's record is mostly navigation: GitHub's issue object carries
-/// `url`, `repository_url`, `labels_url`, `comments_url`, `events_url`,
-/// `html_url` and `timeline_url` before it carries a title. None of it helps a
-/// model say what the issues are, and all of it is charged against the same
-/// byte budget the titles compete for.
+/// **This list used to include `url`, `href` and every `*_url`, and that was
+/// wrong** (codex and CodeRabbit on tinyhumansai/opencompany#2153). The
+/// premise was that a link is never an answer. It plainly can be: "list the
+/// issues with their browser links" makes `html_url` *the* answer, and this
+/// projection runs **before** the task-aware extractor and before the artifact
+/// store, so a field dropped here cannot be recovered by anything downstream.
+///
+/// That is the exact mistake this whole change exists to correct — a
+/// task-blind reduction deciding what matters without knowing what was asked.
+/// Dropping generic link fields bought about 1.6x on measured payloads; the
+/// extraction pass is worth orders of magnitude more and knows the task. The
+/// trade is not close.
+///
+/// What remains are the `*_url` siblings that are unambiguously navigation
+/// *within the API*: they address collections rather than the record, and a
+/// caller that wants them has the record's own id to build them from.
 fn is_link_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    key == "url" || key == "href" || key.ends_with("_url") || key.ends_with("_urls")
+    matches!(
+        key.as_str(),
+        "labels_url"
+            | "comments_url"
+            | "events_url"
+            | "timeline_url"
+            | "notifications_url"
+            | "collaborators_url"
+            | "contributors_url"
+            | "subscribers_url"
+            | "subscription_url"
+            | "commits_url"
+            | "git_commits_url"
+            | "issue_comment_url"
+            | "issue_events_url"
+            | "assignees_url"
+            | "branches_url"
+            | "tags_url"
+            | "blobs_url"
+            | "trees_url"
+            | "statuses_url"
+            | "languages_url"
+            | "stargazers_url"
+            | "forks_url"
+            | "downloads_url"
+            | "releases_url"
+            | "deployments_url"
+            | "compare_url"
+            | "merges_url"
+            | "archive_url"
+            | "hooks_url"
+            | "keys_url"
+            | "teams_url"
+            | "milestones_url"
+            | "pulls_url"
+    )
 }
 
 /// The single field that stands in for a nested object — a user becomes its
@@ -407,6 +454,14 @@ pub struct ListRequest {
     /// Lowercased search words. Every word must match the slug or the
     /// description.
     pub search: Vec<String>,
+    /// Composio's own action tags, forwarded server-side.
+    ///
+    /// Carried through to `LiveClient::list_tools` rather than applied here:
+    /// tags are a property of the catalogue, not of the text this module
+    /// renders, so a tag filter applied client-side could only narrow what
+    /// already survived the page budget — the same defect the server-side
+    /// `search` forwarding fixed.
+    pub tags: Vec<String>,
     /// How much per action to render.
     pub detail: Detail,
     /// Entry cap, already clamped to the mode's ceiling.
@@ -424,6 +479,19 @@ impl ListRequest {
             .and_then(Value::as_str)
             .map(search_terms)
             .unwrap_or_default();
+        let tags = args
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         let limit = args
             .get("limit")
             .and_then(Value::as_u64)
@@ -432,6 +500,7 @@ impl ListRequest {
         Self {
             toolkits,
             search,
+            tags,
             detail,
             limit,
         }
@@ -688,6 +757,11 @@ pub fn list_tools_parameters_schema() -> Value {
             "search": {
                 "type": "string",
                 "description": "Narrow the listing to actions whose slug or description contains ALL of these words (case-insensitive), e.g. `list issues` or `send email`. Pass an exact slug here with `detail: \"schemas\"` to read just that action's parameters."
+            },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Composio action tags to narrow by, server-side (e.g. `important`). Combine with `search` to cut a large toolkit down before it is paged."
             },
             "detail": {
                 "type": "string",
@@ -1291,6 +1365,7 @@ mod tests {
         ListRequest {
             toolkits: toolkits.iter().map(|t| t.to_string()).collect(),
             search: search_terms(search),
+            tags: Vec::new(),
             detail,
             limit: detail.default_limit(),
         }
@@ -2309,6 +2384,64 @@ mod tests {
 
 #[cfg(test)]
 mod projection_prototype_tests {
+    /// The projection runs **before** the task-aware extractor and before the
+    /// artifact store, so anything it drops is gone for every consumer. A link
+    /// can be the answer — "list the issues with their browser links" — and the
+    /// first cut of this dropped `url`, `href` and every `*_url` on the premise
+    /// that a link never is (codex and CodeRabbit on
+    /// tinyhumansai/opencompany#2153).
+    #[test]
+    fn answering_links_survive_the_projection() {
+        // Two records, not one: the projection declines an array shorter than
+        // that, so a single-record payload would pass every assertion below
+        // without the projection having run at all.
+        let record = |n: u64| {
+            serde_json::json!({
+                "number": n,
+                "title": "flaky login",
+                "url": format!("https://api.github.com/repos/o/r/issues/{n}"),
+                "html_url": format!("https://github.com/o/r/issues/{n}"),
+                "href": format!("https://example.test/{n}"),
+                "avatar_urls": ["https://example.test/a.png"],
+                "comments_url": format!("https://api.github.com/repos/o/r/issues/{n}/comments"),
+                "labels_url": format!("https://api.github.com/repos/o/r/issues/{n}/labels"),
+                "user": { "login": "octocat", "id": 7 }
+            })
+        };
+        // Over `MAX_BODY_BYTES`: the projection declines anything already small
+        // enough, so a short payload passes every assertion below without it
+        // having run. Two earlier versions of this test did exactly that.
+        let records: Vec<serde_json::Value> = (1..=60).map(record).collect();
+        let payload = serde_json::json!({ "data": records });
+        assert!(
+            serde_json::to_string(&payload).unwrap().len() > MAX_BODY_BYTES,
+            "the fixture must exceed the projection threshold or nothing runs"
+        );
+
+        let projected = project_records_value(payload);
+        let record = &projected["data"][0];
+
+        // The fields a caller can actually have asked for.
+        assert_eq!(record["html_url"], "https://github.com/o/r/issues/1");
+        assert_eq!(record["url"], "https://api.github.com/repos/o/r/issues/1");
+        assert_eq!(record["href"], "https://example.test/1");
+        assert!(
+            !record["avatar_urls"].is_null(),
+            "a `*_urls` field is content, not API plumbing: {record}"
+        );
+        // Proof the projection actually ran. Without this the link assertions
+        // above pass trivially on a payload the projection declined — which is
+        // exactly what the first version of this test did.
+        assert_eq!(
+            record["user"], "octocat",
+            "the nested object did not collapse, so the projection never ran: {record}"
+        );
+        assert_eq!(record["title"], "flaky login");
+        // Only self-referential collection endpoints go.
+        assert!(record["comments_url"].is_null(), "collection endpoint kept");
+        assert!(record["labels_url"].is_null(), "collection endpoint kept");
+    }
+
     use super::*;
 
     /// The exact shape the live GitHub call returns: records two levels down,
@@ -2334,13 +2467,18 @@ mod projection_prototype_tests {
             body.len(),
             projected.len()
         );
+        // These used to assert that `avatar_url` and `html_url` were dropped.
+        // They are answers a caller can ask for, and this projection runs ahead
+        // of the task-aware extractor and the artifact store, so dropping them
+        // was unrecoverable (codex and CodeRabbit on
+        // tinyhumansai/opencompany#2153). What goes now is API plumbing only.
         assert!(
-            !projected.contains("avatar_url"),
-            "link fields must go: {projected}"
+            projected.contains("html_url"),
+            "a browser link can be the answer and must survive: {projected}"
         );
         assert!(
-            !projected.contains("html_url"),
-            "link fields must go: {projected}"
+            !projected.contains("comments_url"),
+            "self-referential collection endpoints still go: {projected}"
         );
         assert!(
             projected.contains("octocat"),

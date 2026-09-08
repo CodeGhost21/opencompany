@@ -1612,7 +1612,12 @@ mod live {
             // string over name/slug/description.
             let search_term = request.search.join(" ");
             let search = Some(search_term.as_str()).filter(|term| !term.trim().is_empty());
-            match client.list_tools(query, None, search).await {
+            // The parsed tags, not `None`: without this the tag narrowing added
+            // to the BYOK route was unreachable from the agent tool that is
+            // supposed to use it (CodeRabbit on tinyhumansai/opencompany#2153).
+            let tags: Option<&[String]> =
+                Some(request.tags.as_slice()).filter(|tags| !tags.is_empty());
+            match client.list_tools(query, tags, search).await {
                 Ok(mut resp) => {
                     if !self.toolkits.is_empty() {
                         resp.tools.retain(|schema| {

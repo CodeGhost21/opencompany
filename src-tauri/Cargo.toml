@@ -168,7 +168,11 @@ tinyinference = { path = "../vendor/openhuman/vendor/tinyagents/vendor/tinyinfer
 
 [patch.crates-io]
 tinyflows = { path = "../vendor/openhuman/vendor/tinyflows/crates/tinyflows" }
-tinycortex = { path = "../vendor/openhuman/vendor/tinycortex" }
-tinycortex-api = { path = "../vendor/openhuman/vendor/tinycortex/api" }
+# TinyCortex moved under TinyMemory at the openhuman pin — see the note on the
+# same two entries in the root manifest. Both worlds patch it and both had the
+# stale path; fixing only the root left the Desktop lane failing with the same
+# eager-path-resolution error.
+tinycortex = { path = "../vendor/openhuman/vendor/tinymemory/vendor/tinycortex" }
+tinycortex-api = { path = "../vendor/openhuman/vendor/tinymemory/vendor/tinycortex/api" }
 tinychannels = { path = "../vendor/openhuman/vendor/tinychannels" }
 motosan-ai-oauth = { path = "../vendor/openhuman/vendor/motosan-ai-oauth" }

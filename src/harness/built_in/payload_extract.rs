@@ -71,6 +71,38 @@ const EXTRACT_TIMEOUT: Duration = Duration::from_secs(25);
 /// budget problem with a second one.
 const MAX_SUMMARY_TOKENS: u32 = 1_500;
 
+/// The most of an oversized payload that is worth sending to the extractor.
+///
+/// `raw` arrives here *because* it exceeded the per-result budget, so it has no
+/// upper bound of its own — a multi-megabyte result would be sent, and billed,
+/// in full, once per oversized tool result, and a payload past the model's
+/// context window fails the call outright and spends the latency to return
+/// `Unavailable` (CodeRabbit on tinyhumansai/opencompany#2153).
+///
+/// 256 KiB is far above the per-result budget that got us here and far below
+/// any context window this runs against, so the ceiling only ever bites the
+/// pathological case. The head of a payload is the right part to keep: record
+/// arrays lead with records, and the archetype prompt asks for the count and
+/// the page boundaries, which the head carries.
+const MAX_EXTRACT_INPUT_CHARS: usize = 256 * 1024;
+
+/// Cut `raw` to the input ceiling **on a character boundary**.
+///
+/// Slicing a `&str` by byte index panics mid-character, and provider payloads
+/// carry plenty of multi-byte text (issue titles, names, emoji). Returns the
+/// text to send and whether it was cut, so the prompt can say so — an extractor
+/// told it is reading a prefix will not claim the payload ended there.
+fn cap_input(raw: &str) -> (&str, bool) {
+    if raw.len() <= MAX_EXTRACT_INPUT_CHARS {
+        return (raw, false);
+    }
+    let mut end = MAX_EXTRACT_INPUT_CHARS;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&raw[..end], true)
+}
+
 /// One bounded model call that pulls the answering content out of an oversized
 /// tool result. See the module docs.
 pub struct PayloadExtractor {
@@ -154,12 +186,25 @@ impl PayloadSummarizer for PayloadExtractor {
             return Ok(SummarizeOutcome::Unavailable(UnavailableReason::Disabled));
         };
 
+        let (body, was_cut) = cap_input(raw);
+        let cut_note = if was_cut {
+            tracing::warn!(
+                tool = tool_name,
+                bytes = original_bytes,
+                sent_bytes = body.len(),
+                "[payload-extract] payload exceeded the extraction input ceiling; \
+                 the head was sent and the prompt says so"
+            );
+            " (truncated — this is the head of a larger payload)"
+        } else {
+            ""
+        };
         let request = tinyinference::model::ModelRequest {
             messages: vec![
                 tinyinference::message::Message::system(system_prompt()),
                 tinyinference::message::Message::user(format!(
                     "The agent is trying to: {task}\n\nTool that ran: `{tool_name}`\n\n\
-                     Raw output:\n{raw}"
+                     Raw output{cut_note}:\n{body}"
                 )),
             ],
             model: Some(self.model_name.clone()),
@@ -234,19 +279,175 @@ impl PayloadSummarizer for PayloadExtractor {
 mod tests {
     use super::*;
 
+    use tinyinference::Result as TaResult;
+    use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+
+    /// What the model does when the extractor calls it.
+    enum Behaviour {
+        Reply(&'static str),
+        Fail,
+        Hang,
+    }
+
+    struct Scripted(Behaviour);
+
+    #[async_trait::async_trait]
+    impl ChatModel<()> for Scripted {
+        async fn invoke(&self, _state: &(), _request: ModelRequest) -> TaResult<ModelResponse> {
+            match self.0 {
+                Behaviour::Reply(text) => Ok(ModelResponse::assistant(text)),
+                Behaviour::Fail => Err(tinyinference::Error::Model("provider exploded".into())),
+                Behaviour::Hang => {
+                    // Longer than EXTRACT_TIMEOUT, so the timeout arm is the one
+                    // under test rather than a race.
+                    tokio::time::sleep(EXTRACT_TIMEOUT * 4).await;
+                    Ok(ModelResponse::assistant("too late"))
+                }
+            }
+        }
+    }
+
+    fn extractor(behaviour: Behaviour) -> PayloadExtractor {
+        PayloadExtractor {
+            model: Arc::new(Scripted(behaviour)),
+            model_name: "test-model".to_string(),
+        }
+    }
+
+    async fn run(behaviour: Behaviour, hint: Option<&str>, raw: &str) -> SummarizeOutcome {
+        let ctx = tinyagents_harness::context::RunContext::new(
+            tinyagents_harness::context::RunConfig::new("payload-extract-test"),
+            (),
+        );
+        extractor(behaviour)
+            .maybe_summarize_in_parent(&ctx, "GITHUB_LIST_ISSUES", hint, raw)
+            .await
+            .expect("the extractor degrades, it never errors")
+    }
+
+    fn big() -> String {
+        // Comfortably over anything the summary will be, so `NotNeeded` is only
+        // reached when the model genuinely fails to shrink it.
+        format!(
+            "[{}]",
+            vec![r#"{"number":1,"title":"a flaky test"}"#; 400].join(",")
+        )
+    }
+
+    /// Without a hint the extraction has nothing to select against and would be
+    /// guessing as blindly as the byte cut it replaces, so it declines.
+    #[tokio::test]
+    async fn no_task_hint_declines_rather_than_guessing() {
+        let outcome = run(Behaviour::Reply("30 issues"), None, &big()).await;
+        assert!(matches!(
+            outcome,
+            SummarizeOutcome::Unavailable(UnavailableReason::Disabled)
+        ));
+    }
+
+    /// A provider failure must leave the turn holding the raw payload, not fail
+    /// the turn: extraction is an improvement on truncation, never a dependency.
+    #[tokio::test]
+    async fn a_provider_error_leaves_the_raw_payload_standing() {
+        let outcome = run(Behaviour::Fail, Some("list the issues"), &big()).await;
+        assert!(matches!(
+            outcome,
+            SummarizeOutcome::Unavailable(UnavailableReason::Failed)
+        ));
+    }
+
+    /// The deadline is the point: a slow extraction is worse than none, because
+    /// the turn is already at its cap when this runs.
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_provider_times_out_rather_than_stalling_the_turn() {
+        let outcome = run(Behaviour::Hang, Some("list the issues"), &big()).await;
+        assert!(matches!(
+            outcome,
+            SummarizeOutcome::Unavailable(UnavailableReason::Failed)
+        ));
+    }
+
+    /// An empty answer is a failed extraction, not an empty tool result — the
+    /// difference decides whether the model sees the payload at all.
+    #[tokio::test]
+    async fn an_empty_answer_is_treated_as_a_failure() {
+        let outcome = run(Behaviour::Reply("   \n  "), Some("list the issues"), &big()).await;
+        assert!(matches!(
+            outcome,
+            SummarizeOutcome::Unavailable(UnavailableReason::Failed)
+        ));
+    }
+
+    /// A "summary" at least as long as the payload has extracted nothing, and
+    /// substituting it would spend a model call to make the result no smaller.
+    #[tokio::test]
+    async fn a_summary_that_does_not_shrink_is_not_used() {
+        let raw = r#"[{"number":1}]"#;
+        let outcome = run(
+            Behaviour::Reply("this reply is considerably longer than the payload it summarises"),
+            Some("list the issues"),
+            raw,
+        )
+        .await;
+        assert!(matches!(outcome, SummarizeOutcome::NotNeeded));
+    }
+
+    /// The path that matters: a hint, a working model, and an answer shorter
+    /// than what it replaces.
+    #[tokio::test]
+    async fn a_shorter_answer_is_returned_as_the_summary() {
+        let outcome = run(
+            Behaviour::Reply("400 issues; #1 a flaky test"),
+            Some("list the issues"),
+            &big(),
+        )
+        .await;
+        match outcome {
+            SummarizeOutcome::Summarized(summary) => {
+                assert!(
+                    summary.summary.contains("400 issues"),
+                    "the model's answer must be what is carried: {}",
+                    summary.summary
+                );
+            }
+            other => panic!("expected a summary, got {other:?}"),
+        }
+    }
+
+    /// The input ceiling exists so a multi-megabyte payload is neither billed in
+    /// full nor sent past a context window. Slicing must land on a character
+    /// boundary — a byte index inside a multi-byte character panics, and
+    /// provider payloads are full of them.
+    #[test]
+    fn the_input_ceiling_cuts_on_a_character_boundary() {
+        let (kept, cut) = cap_input("short");
+        assert_eq!(kept, "short");
+        assert!(!cut, "a small payload is not cut");
+
+        // Every character is 4 bytes, so a byte-index slice at the ceiling would
+        // land mid-character unless the boundary walk works.
+        let wide = "\u{1F600}".repeat(MAX_EXTRACT_INPUT_CHARS);
+        let (kept, cut) = cap_input(&wide);
+        assert!(cut, "an oversized payload is cut");
+        assert!(kept.len() <= MAX_EXTRACT_INPUT_CHARS);
+        assert!(
+            wide.starts_with(kept),
+            "the cut keeps the head of the payload"
+        );
+    }
+
     /// The archetype is referenced, not restated. A copy would drift from
     /// upstream the moment either side edited the extraction contract, and the
     /// first version of this file learned that the expensive way — a
     /// hand-written prompt that omitted the per-record identifier line produced
     /// thirty issue numbers with no titles.
+    ///
+    /// This asserts the *clauses this crate depends on are present in what is
+    /// sent*. It deliberately no longer compares `system_prompt()` with the
+    /// constant it returns, which was `assert_eq!(X, X)` and could not fail
+    /// (tinysweeper on tinyhumansai/opencompany#2153).
     #[test]
-    fn the_prompt_is_openhumans_own_archetype() {
-        assert_eq!(
-            system_prompt(),
-            oh::agent::registry::agents::summarizer::prompt::ARCHETYPE,
-            "the prompt must stay the vendored archetype, not a local copy"
-        );
-        // The clauses whose absence was actually observed to cost something.
+    fn the_prompt_carries_the_clauses_this_crate_relies_on() {
         assert!(
             system_prompt().contains("Identifiers preserved"),
             "the per-record identifier section is what gives each kept record a line"
