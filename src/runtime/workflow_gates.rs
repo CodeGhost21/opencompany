@@ -365,7 +365,11 @@ mod test {
         queue.arm("turn-1", &b, &gate_effect("node-b"));
         queue.decide("turn-1", &a, Verdict::Approve);
         queue.decide("turn-1", &b, Verdict::Deny);
-        assert_eq!(queue.undecided("turn-1"), 0, "both gates on the turn are decided");
+        assert_eq!(
+            queue.undecided("turn-1"),
+            0,
+            "both gates on the turn are decided"
+        );
 
         gate.set_emergency(true);
         match queue.release("turn-1") {

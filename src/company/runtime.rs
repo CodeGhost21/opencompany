@@ -7217,7 +7217,8 @@ impl CompanyRuntime {
             for turn in self.workflow_gates.ready_for_release() {
                 let rt = Arc::clone(self);
                 tokio::spawn(async move {
-                    if let Err(error) = crate::runtime::workflow_resume::resume_run(&rt, &turn).await
+                    if let Err(error) =
+                        crate::runtime::workflow_resume::resume_run(&rt, &turn).await
                     {
                         tracing::error!(
                             company = %rt.id,
@@ -12721,7 +12722,10 @@ mod tests {
                 .then_some(())
                 .expect("the parked blocker must actually arm");
 
-            runtime.emergency_pause(operator(), None).await.expect("pause");
+            runtime
+                .emergency_pause(operator(), None)
+                .await
+                .expect("pause");
 
             assert!(
                 runtime
