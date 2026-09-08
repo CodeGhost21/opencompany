@@ -3,6 +3,7 @@ import { Check, Copy, Globe, Loader2, Mail, ShieldAlert, TriangleAlert, X } from
 import { toast } from "sonner";
 
 import { ApiError } from "@/api/types";
+import { AdminOnlyNotice } from "@/components/admin-only-notice";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   clearDomain,
@@ -39,6 +40,15 @@ import { cn } from "@/lib/utils";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Whether this viewer may change the company's mail identity.
+   *
+   * `PUT …/domain` and the SMTP writes are `AdminScopedCompany`. The reads are
+   * not, and neither is `POST …/domain/verify` — re-checking DNS for a domain
+   * only an admin could have set changes nothing a member could not already
+   * read — so a member keeps the whole card except the controls that write.
+   */
+  canManage: boolean;
 }
 
 const SECURITY_LABELS: Record<SmtpSecurity, string> = {
@@ -295,7 +305,7 @@ function SmtpPreview() {
  * directly and pinning the guarantee that matters here: every field is read
  * from and written to the host, and none of it is cached in the browser.
  */
-export function DomainCard({ client, company }: Props) {
+export function DomainCard({ client, company, canManage }: Props) {
   const [status, setStatus] = useState<DomainStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -387,6 +397,16 @@ export function DomainCard({ client, company }: Props) {
         <CardDescription>Send and receive on your own domain instead of the default.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {!canManage && (
+          <AdminOnlyNotice
+            testId="domain-read-only"
+            title="Only an admin can change this company's domain"
+          >
+            The domain is how this company signs its outgoing mail, so it is the
+            company&rsquo;s identity rather than any one member&rsquo;s. You can see
+            what is configured and re-check the DNS records.
+          </AdminOnlyNotice>
+        )}
         {loadError ? (
           <Alert variant="destructive" data-testid="domain-load-error">
             <TriangleAlert className="size-4" />
@@ -397,6 +417,11 @@ export function DomainCard({ client, company }: Props) {
             <Loader2 className="size-4 animate-spin" /> Loading domain…
           </p>
         ) : !configured ? (
+          !canManage ? (
+            <p className="text-sm text-muted-foreground">
+              No custom domain is configured, so this company sends on the default one.
+            </p>
+          ) : (
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
               value={draft}
@@ -419,6 +444,7 @@ export function DomainCard({ client, company }: Props) {
               Add domain
             </Button>
           </div>
+          )
         ) : (
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
@@ -439,15 +465,17 @@ export function DomainCard({ client, company }: Props) {
                     <span className="size-1.5 rounded-full bg-status-blocked" /> Pending
                   </Badge>
                 )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void remove()}
-                  data-testid="domain-remove"
-                >
-                  Remove
-                </Button>
+                {canManage && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void remove()}
+                    data-testid="domain-remove"
+                  >
+                    Remove
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -599,7 +627,7 @@ function CopyCell({ value }: { value: string }) {
  * write-only three ways, and `test/unit/domain-settings-host-backed.test.ts`
  * is what holds that property while nothing renders the card.
  */
-export function SmtpCard({ client, company }: Props) {
+export function SmtpCard({ client, company, canManage }: Props) {
   const [status, setStatus] = useState<SmtpStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -733,6 +761,45 @@ export function SmtpCard({ client, company }: Props) {
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" /> Loading email settings…
           </p>
+        ) : !canManage ? (
+          // The mutations are withheld (`save`, `test`, and the password
+          // field), not the routing: `GET …/smtp` is member-readable and
+          // never carries a password by construction (`docs/modules/server/
+          // authority.md`), so a member keeps the same read the admin form
+          // shows them, just not editable.
+          <>
+            <AdminOnlyNotice
+              testId="smtp-read-only"
+              title="Only an admin can change how this company sends mail"
+            >
+              These are the credentials for the company&rsquo;s own outbound mail
+              server, so an admin holds them.
+            </AdminOnlyNotice>
+            {status?.configured ? (
+              <div className="grid gap-4 sm:grid-cols-2" data-testid="smtp-routing">
+                <ReadOnlyField label="SMTP host" id="smtp-host" value={status.host} />
+                <div className="grid grid-cols-2 gap-3">
+                  <ReadOnlyField
+                    label="Port"
+                    id="smtp-port"
+                    value={status.port === undefined ? undefined : String(status.port)}
+                  />
+                  <ReadOnlyField
+                    label="Security"
+                    id="smtp-security"
+                    value={status.security ? SECURITY_LABELS[status.security] : undefined}
+                  />
+                </div>
+                <ReadOnlyField label="Username" id="smtp-username" value={status.username} />
+                <ReadOnlyField label="From name" id="smtp-from-name" value={status.from_name} />
+                <ReadOnlyField label="From email" id="smtp-from-email" value={status.from_email} />
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground" data-testid="smtp-member-summary">
+                No outbound mail server is configured, so this company sends on the host's default.
+              </p>
+            )}
+          </>
         ) : (
           <>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -873,6 +940,18 @@ function Field({
       <Label htmlFor={id}>{label}</Label>
       {children}
       {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}
+
+/** A field a member reads but cannot edit. Same `id` an editable form uses for it. */
+function ReadOnlyField({ label, id, value }: { label: string; id: string; value?: string }) {
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>{label}</Label>
+      <p id={id} data-testid={id} className="text-sm">
+        {value || <span className="text-muted-foreground">Not set</span>}
+      </p>
     </div>
   );
 }
