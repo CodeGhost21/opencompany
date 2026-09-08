@@ -1439,22 +1439,22 @@ fn external_authority_router_files_have_no_unclassified_paths() {
     // or a fix that gives these rows, fails this assertion rather than
     // quietly joining a set nobody checks.
     let unexercised: BTreeSet<String> = provision
-        .direct
+        .direct_methods
         .iter()
-        .filter(|path| {
+        .filter(|entry| {
             !EXTERNAL_AUTHORITY_ROUTES
                 .iter()
-                .any(|route| route.path == path.as_str())
+                .any(|route| *entry == &format!("{} {}", route.method.label(), route.path))
         })
         .cloned()
         .collect();
     assert_set_eq(
-        "provisioning paths no principal probes",
+        "provisioning routes no principal probes",
         &string_set(&[
-            "/api/v1/companies",
-            "/api/v1/companies/provisioning",
-            "/api/v1/companies/{id}/suspend",
-            "/api/v1/companies/{id}/archive",
+            "POST /api/v1/companies",
+            "GET /api/v1/companies/provisioning",
+            "POST /api/v1/companies/{id}/suspend",
+            "POST /api/v1/companies/{id}/archive",
         ]),
         &unexercised,
     );
@@ -1577,6 +1577,10 @@ fn declared_method_sets() -> BTreeMap<String, BTreeSet<String>> {
 struct Scan {
     scoped: BTreeSet<String>,
     direct: BTreeSet<String>,
+    /// `"POST /api/v1/companies"` — the method matters as much as the path.
+    /// A path already in the inventory can gain a second method, and a
+    /// path-only set stays green while that new method goes unprobed.
+    direct_methods: BTreeSet<String>,
     allowed_nonliteral: BTreeMap<&'static str, usize>,
 }
 
@@ -1586,6 +1590,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     let skipped = test_only_token_indexes(&tokens);
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     for index in 0..tokens.len() {
         if skipped.contains(&index) {
             continue;
@@ -1611,6 +1616,14 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
             match tokens.get(index + 3).map(|token| &token.kind) {
                 Some(TokenKind::String(path)) => {
                     direct.insert(path.clone());
+                    // `.route("/p", post(h))` — the verb is the identifier
+                    // after the comma. An unreadable one is recorded as
+                    // `?` rather than skipped, so it cannot vanish quietly.
+                    let verb = match ident_at(&tokens, index + 5) {
+                        Some(name) => name.to_ascii_uppercase(),
+                        None => "?".to_string(),
+                    };
+                    direct_methods.insert(format!("{verb} {path}"));
                 }
                 _ => {
                     return Err(format!(
@@ -1625,6 +1638,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral: BTreeMap::new(),
     })
 }
@@ -1648,6 +1662,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     files.sort();
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     let mut allowed_nonliteral = BTreeMap::new();
     for file in files {
         let relative = file.strip_prefix(root).expect("collected under root");
@@ -1685,6 +1700,11 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
                 match tokens.get(index + 3).map(|token| &token.kind) {
                     Some(TokenKind::String(path)) => {
                         direct.insert(path.clone());
+                        let verb = match ident_at(&tokens, index + 5) {
+                            Some(name) => name.to_ascii_uppercase(),
+                            None => "?".to_string(),
+                        };
+                        direct_methods.insert(format!("{verb} {path}"));
                     }
                     _ => {
                         let Some(fingerprint) =
@@ -1705,6 +1725,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral,
     })
 }
