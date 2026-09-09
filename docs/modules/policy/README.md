@@ -62,13 +62,21 @@ decide, in this order, and all of them sit **above** the
 
 | Arm | Answer |
 |---|---|
+| Explicit `request_approval` | `Allow` — asking is not itself an effect to decide |
 | Emergency stop | `Deny` for every effect outside `EffectGroup::Other` |
 | Web deflection | `Deny` for a raw web call at a connected Composio provider's host |
 | `readonly` brake | `Deny` for anything that mutates or reaches outside |
 | Single-use grant | `Allow` — the operator approved exactly this call |
 | Standing deny / standing grant | Refuse or admit, per the operator's period decision |
 | Paid media | `RequireApproval` — these tools stage their own card |
-| Explicit `request_approval` | `RequireApproval` — the agent asked |
+
+`request_approval` is first, and its answer is `Allow` rather than
+`RequireApproval`, because the call being judged *is* the question: `check`
+returns `Allow` and `RequestApprovalTool::execute` then queues the card itself.
+A second ask inside one turn is refused by the boundary above this row, so the
+early `Allow` cannot be used to spin cards. Reading it as `RequireApproval`
+suggests policy stages the card, which is the wrong place to look when an
+approval surface misbehaves.
 
 The emergency-stop row is enforced directly inside `ApprovalPolicy::check`
 itself, not delegated to the gate: a harness tool call never reaches
