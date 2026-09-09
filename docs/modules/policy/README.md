@@ -129,7 +129,11 @@ kubectl logs -n <ns> <tenant-pod> --since=168h | scripts/aggregate-shadow-floor.
 `evaluate` **before** every policy rule including `always_approve`. While it is
 engaged, any effect outside `EffectGroup::Other` is `Deny` — not
 `RequireApproval`, so the approval queue cannot be used to work around the
-switch. `Other` is exempt so chat keeps working.
+switch. The `Other` exemption no longer means chat keeps working: admission
+itself is gated one layer up, in `CompanyRuntime::ensure_not_emergency_stopped`
+(checked at every cycle entry point, including chat), so nothing reaches this
+gate to take the exemption while the stop is engaged. It stays in place so
+release restores evaluation to its exact pre-stop shape.
 
 The durable state is the event log, not a record field: `replayed_emergency`
 scans for the last `CompanyEvent::EmergencyPauseChanged` at boot and

@@ -889,6 +889,17 @@ pub struct ApprovalPolicy {
     /// S1 tells the agent to route these providers through Composio, this refuses
     /// the raw `http_request` / `curl` / `web_fetch` that ignores it.
     connected_composio_toolkits: Vec<String>,
+    /// The company's emergency-stop flag, consulted ahead of the mode dispatch
+    /// so a consequential call still refuses under `full` autonomy — the one
+    /// tier with no per-call gate to reach `ManifestApprovalGate::evaluate` or
+    /// `park` at all.
+    ///
+    /// `None` at every non-harness construction site and every test with no
+    /// company gate to ask, which keeps them dispatching exactly as before.
+    /// Only `build_roster` chains
+    /// [`with_emergency_gate`](Self::with_emergency_gate), from
+    /// `deps.emergency_gate`.
+    emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
 }
 
 #[derive(Clone)]
@@ -943,6 +954,10 @@ impl ApprovalPolicy {
             // No connected toolkits by default, so the S2 web-deflection arm is
             // inert — see `with_connected_composio_toolkits`.
             connected_composio_toolkits: Vec::new(),
+            // No gate by default, so every non-harness construction site and
+            // every test with no company to ask dispatches exactly as before —
+            // see `with_emergency_gate`.
+            emergency_gate: None,
         }
     }
 
@@ -974,6 +989,17 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    /// Installs the company's emergency-stop flag, so `check` refuses a
+    /// consequential call under `full` autonomy the same way `evaluate` and
+    /// `park` already refuse one on every other tier.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Arc<crate::policy::gate::ManifestApprovalGate>,
+    ) -> Self {
+        self.emergency_gate = Some(gate);
         self
     }
 
@@ -1610,6 +1636,37 @@ impl ToolPolicy for ApprovalPolicy {
             return ToolPolicyDecision::Allow;
         }
 
+        // The emergency stop (issue #86), computed and enforced HERE — above
+        // every unconditional `Allow` this function can still reach below: a
+        // redeemed single-use grant, a standing grant, `policy_hitl_enabled ==
+        // false`, and `auto_approve_under_usd`. `ManifestApprovalGate` enforces
+        // the same veto at `evaluate`/`park`, but a harness tool call never
+        // reaches either — `check` decides `Allow` on its own, so any one of
+        // those branches returning first is a live bypass, not just `full`
+        // autonomy's blanket allow. Without this, an in-flight turn that
+        // survives the stop (by design — see
+        // `CompanyRuntime::ensure_not_emergency_stopped`) could still dispatch
+        // a consequential tool the containment story assumes the gate denies.
+        // `EffectGroup::Other` stays exempt, matching `evaluate`/`park`.
+        //
+        // `consequence_for` is computed here rather than at its original site
+        // near the mode dispatch, and reused there (see `let reach =
+        // consequence.reach;` below) — it depends only on `tool`/`args` and
+        // `self.mode`/`self.workspace`/`self.agent`, none of which the branches
+        // between here and there can change.
+        let consequence = self.consequence_for(tool, &request.arguments).await;
+        if consequence.group != EffectGroup::Other
+            && self
+                .emergency_gate
+                .as_deref()
+                .is_some_and(|gate| gate.is_emergency())
+        {
+            return ToolPolicyDecision::deny(format!(
+                "'{tool}' was not run because the company is stopped and will run no work \
+                 until an operator releases it"
+            ));
+        }
+
         // 0. `never_do` hard-deny — RESERVED SLOT, deliberately empty.
         //
         // The manifest's `never_do` list is compiled by the delegation-rule
@@ -1818,7 +1875,8 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let consequence = self.consequence_for(tool, &request.arguments).await;
+        // `consequence` was computed, and the emergency stop already enforced
+        // against it, above — see the comment there for why this moved.
         let reach = consequence.reach;
         let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
@@ -2611,6 +2669,167 @@ mod tests {
                 "{tool} leaves the company or spends money and must still park under auto"
             );
         }
+    }
+
+    /// **Codex review finding on PR #2140 (`3952368155`).** `full` autonomy is
+    /// the one tier with no per-call gate at all
+    /// ([`PolicyMode::Full`](PolicyMode::Full) allows every consequential call
+    /// outright), so it never reaches `ManifestApprovalGate::evaluate` or
+    /// `park` — the choke point the emergency stop is enforced at everywhere
+    /// else. An in-flight turn that survives the stop by design (see
+    /// `CompanyRuntime::ensure_not_emergency_stopped`) could dispatch a
+    /// consequential harness tool through this tier with nothing to refuse it.
+    ///
+    /// `EffectGroup::Other` calls (`spawn_task` and the like) still run, matching
+    /// `evaluate`/`park`'s own exemption.
+    #[tokio::test]
+    async fn full_autonomy_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None).with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a consequential call must refuse under `full` once the company is stopped, \
+             the same way `evaluate`/`park` already refuse one on every other tier"
+        );
+
+        assert_eq!(
+            p.check(&request("spawn_task", serde_json::json!({}))).await,
+            ToolPolicyDecision::Allow,
+            "an `EffectGroup::Other` call is exempt while stopped, matching evaluate/park"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores `full`'s ordinary blanket allow"
+        );
+    }
+
+    /// **CodeRabbit review finding on PR #2140 (`3960328855`, CWE-863).** The
+    /// emergency-stop veto above used to sit AFTER a redeemed single-use
+    /// grant, `policy_hitl_enabled == false`, and `auto_approve_under_usd` —
+    /// each an unconditional `Allow` on its own, so any one of them let a
+    /// consequential call through on every tier, not just `full`. This one
+    /// pins the single-use-grant path.
+    #[tokio::test]
+    async fn a_redeemed_grant_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let (p, grants) = granting_policy("supervised", &[], "finance");
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        let p = p.with_emergency_gate(gate.clone());
+        let args = composio_send_args();
+        grants.grant(granted("finance", "composio_execute", args.clone()));
+
+        gate.set_emergency(true);
+        assert!(
+            matches!(
+                p.check(&request("composio_execute", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a live single-use grant must not let a consequential call through while stopped"
+        );
+        assert_eq!(
+            grants.live_count(),
+            1,
+            "the refused call must not consume the grant it never redeemed"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("composio_execute", args)).await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop lets the still-live grant redeem normally"
+        );
+    }
+
+    /// See the single-use-grant test above for the finding this pins. This one
+    /// covers the `policy_hitl_enabled == false` path — every production
+    /// roster (`with_policy_hitl_disabled` at construction).
+    #[tokio::test]
+    async fn disabled_policy_hitl_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_emergency_gate(gate.clone());
+
+        assert!(
+            matches!(
+                p.check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "a roster built with policy HITL disabled must still refuse a consequential call \
+             while stopped"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("publish_artifact", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores the HITL-disabled blanket allow"
+        );
+    }
+
+    /// See the single-use-grant test above for the finding this pins. This one
+    /// covers the `auto_approve_under_usd` path.
+    #[tokio::test]
+    async fn auto_approve_under_usd_still_refuses_a_consequential_call_while_stopped() {
+        use crate::policy::ManifestApprovalGate;
+
+        let gate = Arc::new(ManifestApprovalGate::new(Policy {
+            mode: "supervised".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: Some(50.0),
+            approval_ttl_hours: None,
+        }));
+        gate.set_emergency(true);
+        let p = policy("supervised", &[], Some(50.0)).with_emergency_gate(gate.clone());
+        let args = serde_json::json!({ "amount_usd": 10.0 });
+
+        assert!(
+            matches!(
+                p.check(&request("payment.send", args.clone())).await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "an under-threshold auto-approved spend must still refuse while stopped"
+        );
+
+        gate.set_emergency(false);
+        assert_eq!(
+            p.check(&request("payment.send", args)).await,
+            ToolPolicyDecision::Allow,
+            "releasing the stop restores the auto-approve-under-threshold allow"
+        );
     }
 
     /// **Issue #1124, end to end at the policy layer.** A bridge call to a

@@ -3097,7 +3097,8 @@ impl RuntimeBuilder {
                             // route both hold — enforces that cap on every run.
                             let supervisor = crate::runtime::RunSupervisor::with_limit(
                                 self.manifest.workflows.max_in_flight_runs,
-                            );
+                            )
+                            .with_emergency_gate(gate.clone());
                             run_supervisor = Some(supervisor.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
@@ -3271,6 +3272,7 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                emergency_gate: Some(gate.clone()),
                                 // Issue #1861: the same store the console's and
                                 // the scheduler's runs badge through, so a run
                                 // the orchestrator's `run_workflow` started

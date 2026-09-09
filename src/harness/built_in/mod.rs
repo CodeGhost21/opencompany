@@ -234,6 +234,14 @@ use crate::runtime::builder::agent_scoped_grants;
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
 pub struct HarnessDeps {
+    /// The company's emergency-stop flag, consulted by every agent's
+    /// [`ApprovalPolicy`](crate::harness::built_in::policy::ApprovalPolicy) so a
+    /// harness tool dispatched under `full` autonomy — which reaches no other
+    /// gate — still refuses a consequential call once the switch is pulled.
+    ///
+    /// `None` at every non-harness construction site and every test that has no
+    /// company gate to ask, which keeps them admitting exactly as before.
+    pub emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
     /// The inference model shared across a company's agents. A [`HarnessModel`]
     /// is a tinyinference [`ChatModel<()>`](tinyinference::model::ChatModel)
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
@@ -5347,6 +5355,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the per-server read-only MCP declaration, so a
             // server-declared read-only bridge call does not park under `auto`.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5448,6 +5459,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the same per-server read-only MCP declaration the
             // manifest agents get — an overlay teammate calls the same servers.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5579,6 +5593,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        emergency_gate: None,
         provider: Arc::new(provider::MockProvider::default()),
         provider_slug: "mock".to_string(),
         serves: None,
@@ -6420,6 +6435,7 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                emergency_gate: None,
                 notifications: None,
                 ledgers: None,
                 ledger_registry: Default::default(),
@@ -6637,6 +6653,7 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -7768,6 +7785,7 @@ description = "Builds the product."
     fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8600,6 +8618,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8735,6 +8754,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8881,6 +8901,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9014,6 +9035,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9157,6 +9179,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9277,6 +9300,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9388,6 +9412,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9529,6 +9554,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9660,6 +9686,7 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10157,6 +10184,7 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10611,6 +10639,7 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10774,6 +10803,7 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),

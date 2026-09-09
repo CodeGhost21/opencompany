@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 use crate::Result;
 use crate::company::DEFAULT_MAX_IN_FLIGHT_RUNS;
 use crate::error::OpenCompanyError;
+use crate::policy::ManifestApprovalGate;
 use crate::ports::{RunCancel, WorkflowRunContext};
 
 /// One registered run: its stop signal, plus the graph it belongs to for the log
@@ -81,6 +82,16 @@ pub struct RunSupervisor {
     /// The most runs that may be registered at once. Enforced by
     /// [`begin`](Self::begin) under the map lock.
     limit: usize,
+    /// The company's emergency-stop flag, consulted by [`begin`](Self::begin)
+    /// under the same lock as the concurrency ceiling.
+    ///
+    /// `None` at every construction site except the two that build a
+    /// company's real supervisor
+    /// ([`CompanyRuntime::new`](crate::company::runtime::CompanyRuntime::new)
+    /// and the manifest-limited build in
+    /// [`RuntimeBuilder`](crate::runtime::builder::RuntimeBuilder)), so every
+    /// test and every non-harness caller admits exactly as before.
+    emergency: Option<Arc<ManifestApprovalGate>>,
 }
 
 impl Default for RunSupervisor {
@@ -109,7 +120,18 @@ impl RunSupervisor {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             limit,
+            emergency: None,
         }
+    }
+
+    /// Installs the emergency-stop flag [`begin`](Self::begin) refuses new runs
+    /// against.
+    ///
+    /// Without this the supervisor admits regardless of the flag — the default
+    /// for every construction site that has no company to ask.
+    pub fn with_emergency_gate(mut self, gate: Arc<ManifestApprovalGate>) -> Self {
+        self.emergency = Some(gate);
+        self
     }
 
     /// This supervisor's concurrency ceiling. For diagnostics and tests.
@@ -137,12 +159,29 @@ impl RunSupervisor {
     /// lingering as a cancellable one *and* frees the slot it held against the
     /// ceiling — and because it is a `Drop`, that holds on the error and panic
     /// paths too.
+    ///
+    /// Also refuses — ahead of the ceiling — while the company's emergency
+    /// stop is engaged, when [`with_emergency_gate`](Self::with_emergency_gate)
+    /// installed one. Every caller that reaches `begin` has already asked
+    /// [`ensure_not_emergency_stopped`](crate::company::runtime::CompanyRuntime::ensure_not_emergency_stopped)
+    /// earlier, but that ask sits behind at least one `.await` before this
+    /// call; checking again here, under the same lock as the ceiling, closes
+    /// that window instead of leaving it open at every call site.
     pub fn begin(
         &self,
         workflow_id: &str,
         scheduled: bool,
     ) -> Result<(WorkflowRunContext, RunGuard)> {
         let mut map = self.inner.lock().expect("run supervisor poisoned");
+        if self
+            .emergency
+            .as_deref()
+            .is_some_and(|gate| gate.is_emergency())
+        {
+            return Err(OpenCompanyError::EmergencyStop(format!(
+                "refusing to start workflow `{workflow_id}` while stopped"
+            )));
+        }
         if map.len() >= self.limit {
             return Err(OpenCompanyError::WorkflowRunLimit { limit: self.limit });
         }
@@ -473,6 +512,61 @@ mod test {
             2,
             "a refused run registers nothing — the map is untouched"
         );
+    }
+
+    /// **Codex review findings on PR #2140 (`3952368160`, `3952368162`,
+    /// `3951723397`).** This is the choke point every workflow-run entry point
+    /// funnels through — the manual run route, the cron scheduler, an approved
+    /// gate's resume, a reconciled blocked-node dispatch, an expiry that
+    /// releases a workflow run, and the orchestrator's `run_workflow` tool.
+    /// Each already asks `CompanyRuntime::ensure_not_emergency_stopped` early,
+    /// but that ask sits behind at least one `.await` before the run is
+    /// actually admitted — this proves the recheck under `begin`'s own lock
+    /// closes that window, and that it correctly leaves every other supervisor
+    /// (the ones with no company to ask) admitting exactly as before.
+    #[test]
+    fn begin_refuses_once_the_installed_emergency_gate_engages() {
+        let gate = std::sync::Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            crate::company::Policy {
+                mode: "full".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+        ));
+        let supervisor = RunSupervisor::with_limit(2).with_emergency_gate(gate.clone());
+
+        let (_ctx, _guard) = supervisor
+            .begin("digest", false)
+            .expect("not stopped yet, so the first run is admitted");
+
+        gate.set_emergency(true);
+        match supervisor.begin("digest", false) {
+            Err(OpenCompanyError::EmergencyStop(_)) => {}
+            Ok(_) => panic!("a run must be refused once the installed gate is stopped"),
+            Err(other) => panic!("expected an emergency-stop refusal, got {other:?}"),
+        }
+        assert_eq!(
+            supervisor.len(),
+            1,
+            "the refused run registers nothing — only the pre-stop run is in the map"
+        );
+
+        gate.set_emergency(false);
+        let (_ctx2, _guard2) = supervisor
+            .begin("digest", false)
+            .expect("releasing the stop restores ordinary admission");
+    }
+
+    /// A supervisor built with no [`with_emergency_gate`](RunSupervisor::with_emergency_gate)
+    /// call — every construction site with no company to ask — admits
+    /// regardless of any flag, exactly as before this recheck existed.
+    #[test]
+    fn begin_ignores_emergency_state_with_no_gate_installed() {
+        let supervisor = RunSupervisor::with_limit(1);
+        supervisor
+            .begin("digest", false)
+            .expect("no gate installed, so nothing here can refuse on that basis");
     }
 
     /// Issue #401: dropping a guard frees the slot it held, so a run refused at
