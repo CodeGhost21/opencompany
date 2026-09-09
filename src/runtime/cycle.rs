@@ -7678,7 +7678,7 @@ members = ["writer"]
         assert_eq!(spend[0].amount_usd, -0.031);
     }
 
-    /// Finding MET-004: a `PerCycle`-metered brain's spend charges
+    /// a `PerCycle`-metered brain's spend charges
     /// `UNATTRIBUTED_AGENT` unconditionally, even on a single-agent company
     /// where the cycle can only have been that one teammate's work. That
     /// makes the spend invisible to `usd_spent_by_agent` for the real
@@ -7722,6 +7722,51 @@ members = ["writer"]
             9.99,
             "the spend is real; it is just parked under the company-wide bucket instead of \
              the teammate whose turn it was"
+        );
+    }
+
+    /// A stopped company does not take the turn at all — not "takes it and
+    /// performs no effect".
+    ///
+    /// The switch used to be read only inside the native-effect path, so the
+    /// model call itself still ran and still billed; the turn was refused only
+    /// at whatever it tried to *do*. The refusal belongs at admission, where
+    /// nothing has been spent yet.
+    #[tokio::test]
+    async fn emergency_pause_stops_a_turn_from_running_and_spending() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(9.99))))
+            .build()
+            .await
+            .unwrap();
+
+        rt.emergency_pause(operator(), Some("incident".to_string()))
+            .await
+            .unwrap();
+        assert!(rt.is_emergency_paused());
+
+        let refused = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "how are we doing".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await;
+        assert!(
+            matches!(refused, Err(OpenCompanyError::EmergencyStop(_))),
+            "{refused:?}"
+        );
+
+        let samples = rt.usage().query(rt.id(), 0).await.unwrap();
+        assert!(
+            samples.is_empty(),
+            "and nothing was billed, because the model was never called: {samples:?}"
         );
     }
 
@@ -10653,6 +10698,128 @@ members = ["writer"]
         let listed = rt.standing_grants();
         assert_eq!(listed.len(), 1, "the grant is revoked by the newer refusal");
         assert_eq!(listed[0].verdict, Verdict::Deny);
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that fails the
+    /// Nth `StandingGrantMinted` append it sees and passes every other line
+    /// straight through to an in-memory backend.
+    struct FailNthStandingMintStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        seen: std::sync::atomic::AtomicUsize,
+        fail_at: usize,
+    }
+
+    impl FailNthStandingMintStore {
+        fn new(fail_at: usize) -> Self {
+            Self {
+                inner: crate::ports::journal::MemoryJournalStore::default(),
+                seen: std::sync::atomic::AtomicUsize::new(0),
+                fail_at,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for FailNthStandingMintStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> Result<()> {
+            if line.contains("StandingGrantMinted") {
+                let n = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n == self.fail_at {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "FailNthStandingMintStore: forced failure on the mint".to_string(),
+                    ));
+                }
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// the reconcile's own steps are not atomic. Revoking the
+    /// shadowed opposite-polarity policy is journaled and applied in memory
+    /// *before* the new policy's own mint is journaled, so a failure on that
+    /// second append — the durable store erroring, a disk momentarily full —
+    /// leaves the company with the old policy gone and no new one in its
+    /// place. Nothing rolls the revoke back.
+    #[tokio::test]
+    async fn a_failed_mint_after_a_successful_revoke_leaves_neither_policy_live() {
+        let home_dir = tmp_home();
+        let store = std::sync::Arc::new(FailNthStandingMintStore::new(2));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain {
+                    effect: grantable_effect(
+                        "ops",
+                        crate::policy::consequence::WEB_FETCH,
+                        serde_json::json!({ "url": "https://docs.rs/x" }),
+                    ),
+                }))
+                .with_journal_store(store)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+
+        // First resolution: a standing denial. Its own mint is the first
+        // `StandingGrantMinted` line, which the store lets through.
+        rt.resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect("the first mint succeeds");
+        assert_eq!(rt.standing_grants().len(), 1);
+        assert_eq!(rt.standing_grants()[0].verdict, Verdict::Deny);
+
+        // Second resolution: a standing approval of the same scope. The
+        // reconcile revokes the denial (succeeds — a different record), then
+        // mints the approval — the second `StandingGrantMinted` line, which
+        // the store refuses.
+        let second = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope())
+            .await;
+        assert!(
+            second.is_err(),
+            "the forced failure on the mint must surface, not be swallowed"
+        );
+
+        assert!(
+            rt.standing_grants().is_empty(),
+            "the revoke already landed and nothing rolled it back, so neither the old \
+             denial nor the new approval governs this scope: {:?}",
+            rt.standing_grants()
+        );
     }
 
     /// Issue #1458 under concurrency: two opposite-polarity resolutions of the
