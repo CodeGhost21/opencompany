@@ -843,15 +843,20 @@ mode = "full"
             credential: crate::ports::SessionKind::Browser,
         });
 
-        state.acp_sessions().insert(
-            "conn-1",
-            crate::server::acp::AcpSession {
-                id: "s-1".to_string(),
-                company: company.clone(),
-                chat: "engineering".to_string(),
-                agent_id: None,
-            },
-        );
+        state
+            .acp_sessions()
+            .open(
+                "conn-1",
+                &owner(&auth),
+                crate::server::acp::AcpSession {
+                    id: "s-1".to_string(),
+                    company: company.clone(),
+                    chat: "engineering".to_string(),
+                    agent_id: None,
+                },
+                crate::ports::now_millis(),
+            )
+            .expect("open session");
 
         let result = prompt(
             &state,
