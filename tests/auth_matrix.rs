@@ -13,13 +13,16 @@
 //!
 //! `operator.rs` is a third source, closed the same way the ops inventory is:
 //! `source_path_set_equals_the_ops_matrix_path_set` scans its `scoped(...)`
-//! calls alongside the ops directory's and asserts the union equals
-//! `OPS_SCOPED_ROUTES` plus `OPERATOR_AUTHORITY_ROUTES`; its direct
+//! calls on their own and asserts that set equals `OPERATOR_AUTHORITY_ROUTES`,
+//! separately from the ops directory scan asserted against
+//! `OPS_SCOPED_ROUTES` — a route whose registration moves between the two
+//! sources without changing its suffix still fails, because each side is
+//! checked against its own table rather than a combined one. Its direct
 //! `.route(...)` calls (dual-address writes not registered through `scoped`,
 //! e.g. chat and approvals) are asserted against `OPERATOR_DIRECT_ROUTES` plus
 //! the operator-sourced subset of `EXTERNAL_AUTHORITY_ROUTES` and
 //! `OVERLAPPING_EXTERNAL_ROUTES`. A route added to `operator.rs` without a
-//! matrix row fails one of those two set-equality assertions — the same
+//! matrix row fails one of those set-equality assertions — the same
 //! closed-set guarantee the ops scan gives, not a hand-maintained list a new
 //! route could silently miss.
 //!
@@ -31,6 +34,15 @@
 //!   unexpected canonical suffix `/matrix-canary`.
 //! - Added `.delete(get_activation)` to `/activation`: the method gate failed
 //!   on both forms with runtime `{DELETE, GET}` versus declared `{GET}`.
+//! - Duplicated `scoped("/activation", ...)` (an ops-owned suffix) into an
+//!   unreferenced `operator.rs` function, leaving `OPS_SCOPED_ROUTES` and
+//!   `OPERATOR_AUTHORITY_ROUTES` untouched — the same suffix now surfaces
+//!   from both scans, simulating a route whose registration crossed sources
+//!   without the matrix following it. The pre-fix union-of-both-scans
+//!   comparison stayed green, because the suffix was already present in the
+//!   combined actual set from the ops side. The per-source comparison this
+//!   file now runs failed as intended: `operator scoped suffix set drifted;
+//!   missing=[]; unexpected=["/activation"]`.
 
 #![cfg(feature = "openhuman")]
 
@@ -954,13 +966,12 @@ const fn external_admin(
     }
 }
 
-// Every `scoped(...)` route `operator.rs` registers (issue #2148 part 2, plus
-// the closed-set follow-up): `ScopedCompany` governs all of them exactly as it
-// governs the ops inventory, so a member may list or revoke a grant, staff a
-// desk, or settle an in-review card — not just an admin. Folded into
-// `source_path_set_equals_the_ops_matrix_path_set` alongside the ops
-// directory scan, so a `scoped(...)` call added to `operator.rs` without a row
-// here fails that assertion instead of joining a set nobody checks.
+// Every `scoped(...)` route `operator.rs` registers: `ScopedCompany` governs
+// all of them exactly as it governs the ops inventory, so a member may list
+// or revoke a grant, staff a desk, or settle an in-review card — not just an
+// admin. Checked against the `operator.rs` scan on its own in
+// `source_path_set_equals_the_ops_matrix_path_set`, so a `scoped(...)` call
+// added there without a row here fails that assertion.
 const OPERATOR_AUTHORITY_ROUTES: &[Route] = &[
     Route {
         method: Verb::Post,
@@ -1748,18 +1759,29 @@ fn source_path_set_equals_the_ops_matrix_path_set() {
     let operator_scan =
         scan_file_route_literals(&operator_file).unwrap_or_else(|error| panic!("{error}"));
 
-    let expected_suffixes: BTreeSet<_> = OPS_SCOPED_ROUTES
+    // Each scan is checked against its own matrix constant, not a union of
+    // both. A route whose registration moves from the ops directory to
+    // `operator.rs` (or back) keeps the same suffix, so a unioned check
+    // stays green on that move alone while the matrix still labels the
+    // route under its old source and the wrong table declares it. Comparing
+    // per-source is what turns that provenance drift into a failure instead
+    // of a set membership that never notices which side lost a suffix and
+    // which side gained one.
+    let ops_expected_suffixes: BTreeSet<_> = OPS_SCOPED_ROUTES
         .iter()
-        .chain(OPERATOR_AUTHORITY_ROUTES)
         .map(|route| route.path.to_string())
         .collect();
-    let actual_suffixes: BTreeSet<_> = scanned
-        .scoped
+    assert_set_eq("ops scoped suffix", &ops_expected_suffixes, &scanned.scoped);
+
+    let operator_expected_suffixes: BTreeSet<_> = OPERATOR_AUTHORITY_ROUTES
         .iter()
-        .chain(operator_scan.scoped.iter())
-        .cloned()
+        .map(|route| route.path.to_string())
         .collect();
-    assert_set_eq("scoped suffix", &expected_suffixes, &actual_suffixes);
+    assert_set_eq(
+        "operator scoped suffix",
+        &operator_expected_suffixes,
+        &operator_scan.scoped,
+    );
 
     let expected_direct: BTreeSet<_> = OPS_EXACT_ROUTES
         .iter()
