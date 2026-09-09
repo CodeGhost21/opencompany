@@ -36,7 +36,7 @@ total=$(wc -l <<<"$lines" | tr -d ' ')
 stops=$(grep -c 'would_stop=' <<<"$lines" || true)
 deferred=$(grep -c 'deferred_group=' <<<"$lines" || true)
 
-field() { grep -oE "$1=[^ ]+" <<<"$lines" | cut -d= -f2- | sort | uniq -c | sort -rn; }
+field() { { grep -oE "$1=[^ ]+" <<<"$lines" || true; } | cut -d= -f2- | sort | uniq -c | sort -rn; }
 
 echo "shadow-floor measurement"
 echo "  lines:            $total"
@@ -49,7 +49,7 @@ field 'would_stop' | sed 's/^/  /'
 echo
 
 echo "by tool"
-grep -oE "tool='[^']+'" <<<"$lines" | cut -d"'" -f2 | sort | uniq -c | sort -rn | sed 's/^/  /'
+{ grep -oE "tool='[^']+'" <<<"$lines" || true; } | cut -d"'" -f2 | sort | uniq -c | sort -rn | sed 's/^/  /'
 echo
 
 echo "by desk"
