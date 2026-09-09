@@ -381,6 +381,7 @@ members = []
             description: None,
             members: vec!["engineer".into(), "ceo".into()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         assert_eq!(
             resolve(&record, "launch"),

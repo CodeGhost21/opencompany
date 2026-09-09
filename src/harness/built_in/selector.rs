@@ -75,6 +75,25 @@ pub struct SelectorCandidate {
     pub role: String,
     /// The teammate's mandate, when one is declared.
     pub description: Option<String>,
+    /// What this teammate can actually DO — its effective tool grants.
+    ///
+    /// Role and description say what a teammate is *for*; this says what it can
+    /// reach. The two come apart exactly where routing matters most: "Support
+    /// Specialist" does not tell a selector that this is the only member of the
+    /// desk holding `composio`, and so the only one that can answer a question
+    /// about a GitHub repository at all. Routed on prose alone, such a message
+    /// goes to whoever reads as the best thematic fit and fails for a reason no
+    /// amount of reasoning could have fixed.
+    ///
+    /// Narrowed per agent (`[tools].allow ∩ [[agent]].tools`). The desk ceiling
+    /// is deliberately not applied: every candidate here sits on the same desk,
+    /// so that level is common to all of them and cannot separate one from
+    /// another — the ranking is identical with or without it.
+    ///
+    /// Empty means "nothing declared", and renders as nothing at all rather
+    /// than as an empty list, so a company that grants tools nowhere sees the
+    /// prompt it saw before this field existed.
+    pub tools: Vec<String>,
 }
 
 /// What a selection decided.
@@ -147,6 +166,11 @@ fn selection_request(message: &str, candidates: &[SelectorCandidate]) -> String 
         if let Some(description) = c.description.as_deref().filter(|d| !d.trim().is_empty()) {
             out.push_str(": ");
             out.push_str(description);
+        }
+        if !c.tools.is_empty() {
+            out.push_str(" [can use: ");
+            out.push_str(&c.tools.join(", "));
+            out.push(']');
         }
         out.push('\n');
     }
@@ -323,11 +347,13 @@ mod tests {
                 id: "backend_engineer".to_string(),
                 role: "Backend Engineer".to_string(),
                 description: Some("Owns the API surface.".to_string()),
+                tools: Vec::new(),
             },
             SelectorCandidate {
                 id: "designer".to_string(),
                 role: "Product Designer".to_string(),
                 description: None,
+                tools: Vec::new(),
             },
         ]
     }
@@ -384,5 +410,50 @@ mod tests {
         assert!(request.contains("- backend_engineer — Backend Engineer: Owns the API surface."));
         assert!(request.contains("- designer — Product Designer\n"));
         assert!(request.contains("Message:\nwho owns the login flow?"));
+    }
+    /// **Capability is routed on, not just prose.**
+    ///
+    /// The failure this exists for: "fetch the latest issues of <repo>" was
+    /// routed to a product manager on role and description alone, and could
+    /// never have succeeded — that teammate holds no `composio` grant, so it
+    /// cannot reach GitHub at all. The one member that could was reachable only
+    /// by being named. A selector told what each member can USE has the fact
+    /// that decides the question; one told only what they are FOR does not.
+    #[test]
+    fn selection_request_says_what_each_member_can_use() {
+        let candidates = vec![
+            SelectorCandidate {
+                id: "product_manager".to_string(),
+                role: "Product Manager".to_string(),
+                description: Some("Owns the roadmap.".to_string()),
+                tools: vec!["workspace.read".to_string()],
+            },
+            SelectorCandidate {
+                id: "support_specialist".to_string(),
+                role: "Support Specialist".to_string(),
+                description: None,
+                tools: vec!["composio".to_string(), "web.*".to_string()],
+            },
+        ];
+        let request = selection_request("fetch the latest open issues", &candidates);
+        assert!(
+            request
+                .contains("- support_specialist — Support Specialist [can use: composio, web.*]"),
+            "the member that can reach GitHub says so: {request}"
+        );
+        assert!(
+            request.contains(
+                "- product_manager — Product Manager: Owns the roadmap. [can use: workspace.read]"
+            ),
+            "and capability rides beside the mandate, not instead of it: {request}"
+        );
+    }
+
+    /// A company that grants nothing renders exactly the prompt it did before
+    /// this field existed — an empty list is absent, never `[can use: ]`.
+    #[test]
+    fn a_member_with_no_grants_renders_no_capability_clause() {
+        let request = selection_request("who owns the login flow?", &candidates());
+        assert!(!request.contains("can use"), "{request}");
     }
 }

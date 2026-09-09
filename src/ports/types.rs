@@ -617,6 +617,29 @@ impl StartedBy {
     }
 }
 
+/// Separates the other desk's actual answer from the note addressed to the
+/// asker, in a returning relay.
+///
+/// # Why the two have to be separable
+///
+/// The relay is normally dropped from the projection, so the note is private to
+/// the asker and can say things only the asker should read. But the drop is
+/// conditional: if the asker's report never lands — a failed turn, an empty
+/// model response — the relay renders instead, because a line in the wrong
+/// voice is a smaller failure than an answer nobody can see.
+///
+/// That fallback used to publish the note along with it. An operator watching
+/// #engineering was told "you are the only one who has seen it" by an agent
+/// that is not on their desk. So the answer goes FIRST and everything the host
+/// added goes after this marker, and the projection renders only what precedes
+/// it — which is exactly the other desk's own words, the thing the fallback
+/// exists to preserve.
+///
+/// Written to be unmistakable rather than pretty: a bare `---` is a markdown
+/// rule an answer may legitimately contain, and truncating on one would eat
+/// half of it.
+pub const RELAY_NOTE_MARKER: &str = "\n\n[referral-note]\n";
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -624,6 +647,56 @@ impl StartedBy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum CompanyEvent {
+    /// A crossing referral's child turn was durably created (tinyhivemind P15).
+    ///
+    /// The idempotency marker, and the only reason this is journaled at all: a
+    /// referral is triggered by a COMMITTED reply, so anything that reprocesses
+    /// that reply — a restart, a redelivered frame, a retry — would decide the
+    /// same referral again and ask the target desk twice. The queue writes this
+    /// under the trigger's identity and refuses a second enqueue that finds it.
+    ///
+    /// Not a conversational line: `chat_history::owns` does not admit it and no
+    /// transcript renders it.
+    ReferralEnqueued {
+        /// The desk the triggering reply was committed on.
+        from_desk: String,
+        /// Sequence of that reply — with `from_desk`, the idempotency key.
+        trigger_sequence: u64,
+        /// The asking desk's display name, captured now.
+        ///
+        /// The console renders this on the referred message, and a desk renamed
+        /// later must not rewrite what the transcript said at the time — the
+        /// same rule `SessionAuthor` follows for its own labels.
+        ///
+        /// **Defaulted, because the journal is append-only.** Markers written
+        /// before this field existed must still deserialize: a required field
+        /// here made every older marker unreadable, and because the history
+        /// projection reads the journal, that took the whole transcript with
+        /// it. Any field added to a journaled event has to default.
+        #[serde(default)]
+        from_desk_name: String,
+        /// Whether this marker is a RETURN — the answer coming home — rather
+        /// than the outbound ask. Defaulted for the reason above.
+        ///
+        /// The console draws a different word for each ("Asked by Design" vs
+        /// "Answered by Design"), and it cannot work this out for itself: both
+        /// legs are agent-authored lines on a desk, so every signal the console
+        /// holds says the same thing about each. `tinyhivemind` decided it
+        /// already — `ReferralKind` — and this carries that decision rather
+        /// than letting the render side infer a second, disagreeing answer.
+        #[serde(default)]
+        returning: bool,
+        /// The agent that asked. Defaulted for the reason above.
+        #[serde(default)]
+        asker: String,
+        /// That agent's display label, captured now, for the same reason.
+        #[serde(default)]
+        asker_label: String,
+        /// The desk the child turn runs on.
+        to_desk: String,
+        /// The agent the child turn runs as.
+        target: String,
+    },
     /// A human sent a chat message.
     OperatorMessage {
         /// The message text.
@@ -2025,6 +2098,7 @@ impl CompanyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::ReferralEnqueued { .. } => "ReferralEnqueued",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnFailed { .. } => "TurnFailed",
             Self::RunStatusChanged { .. } => "RunStatusChanged",
@@ -2100,6 +2174,16 @@ impl CompanyEvent {
     pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
         use crate::ports::events::RetentionClass::{Permanent, Prunable};
         match self {
+            // **Permanent, and this one is load-bearing** (tinyhivemind P15).
+            //
+            // It is the idempotency marker for a crossing referral: the queue
+            // refuses a second enqueue that finds it. Prune it and a replayed
+            // trigger stops finding it, so the target desk is asked twice —
+            // silently, and only for triggers old enough to have been swept.
+            // It passes the doc's three questions the other way round from its
+            // neighbours: nothing points at it, but something very much reads
+            // it back, and that read is the whole reason it exists.
+            Self::ReferralEnqueued { .. } => Permanent,
             Self::WorkflowRunStarted { .. }
             | Self::WorkflowRunFinished { .. }
             | Self::WorkflowNodeStarted { .. }
@@ -3467,6 +3551,26 @@ pub struct OverlayDesk {
     /// no such field.
     #[serde(default, skip_serializing_if = "ResponderMode::is_lead")]
     pub responder: ResponderMode,
+    /// How this desk deliberates and whether it may refer across desks — the
+    /// overlay analogue of `[[group_chat]].hive`.
+    ///
+    /// Without it a console-created desk could not answer either question. The
+    /// hive config was read from the manifest only, and the responder mode from
+    /// the overlay only, so the two surfaces each carried half the settings and
+    /// a desk could never hold both: an overlay desk deliberated because the
+    /// default says so and could not opt out, and could never opt IN to
+    /// referral, because there was no `[[group_chat]]` entry to hang the block
+    /// on. A company whose desks are all operator-created — which is every
+    /// company that builds its desks in the console — therefore had cross-desk
+    /// referral permanently unavailable.
+    ///
+    /// Defaulted and skipped when empty, so every record written before this
+    /// field existed deserializes and re-serializes unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::hivemind::HiveConfig::is_default"
+    )]
+    pub hive: crate::hivemind::HiveConfig,
 }
 
 /// A workflow graph body authored at runtime (the console's create dialog or
@@ -4192,8 +4296,8 @@ impl OverlayBlob {
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
 ///
-/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
-/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// [`MAIN_THREAD_ID`](tinyhivemind_core::chat::MAIN_THREAD_ID) and
+/// [`GENERAL_DESK`](tinyhivemind_core::chat::GENERAL_DESK) join them for
 /// issue #1743, and both are ordinary slugs — a teammate named "Main" or
 /// "General" mints straight onto one. That id is a chat address: `responder_for`
 /// checks roster ids before it falls back to the orchestrator, so the teammate
@@ -4201,13 +4305,22 @@ impl OverlayBlob {
 /// console would render the line's transcript as that teammate's DM. Desk ids
 /// and names are already excluded a few lines below; these are the two keys
 /// that route like a desk without being one.
+///
+/// The General entry is the **identity** constant, not
+/// `server::ops::language::DEFAULT_DESK`, the operator-facing glossary word
+/// that happens to be the same literal. What is reserved here is a chat
+/// address, and this is the port layer: a port naming a server constant is the
+/// upward reach the shared crate exists to remove. The two cannot drift — a
+/// `const` assertion in [`crate::server::chat_history`] pins them together at
+/// compile time — so the reservation still covers a teammate named "General"
+/// however the host chooses to spell that word.
 pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
-    crate::server::chat_history::MAIN_THREAD_ID,
-    crate::server::ops::language::DEFAULT_DESK,
+    tinyhivemind_core::chat::MAIN_THREAD_ID,
+    tinyhivemind_core::chat::GENERAL_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -4624,11 +4737,11 @@ impl CompanyRecord {
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
         }
-        if !crate::server::chat_history::is_general_chat(Some(key))
+        if !tinyhivemind_core::chat::is_general_chat(Some(key))
             && let Some(exact) = self
                 .overlay_desks
                 .iter()
-                .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
                 .find(|d| d.id == key)
         {
             return Some(exact.id.clone());
@@ -4640,7 +4753,7 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
-                if crate::server::chat_history::is_general_chat(Some(key)) {
+                if tinyhivemind_core::chat::is_general_chat(Some(key)) {
                     return None;
                 }
                 self.overlay_desks
@@ -4653,7 +4766,7 @@ impl CompanyRecord {
                     // that every desk mutation refuses. Its lead would answer,
                     // and the reply would be journaled under a thread the
                     // console renders no channel for.
-                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                    .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -4680,10 +4793,11 @@ impl CompanyRecord {
     /// overlay tier only when the manifest has no match at all.
     pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
         if self.manifest.group_chats.iter().any(|c| c.id == key)
-            || (!crate::server::chat_history::is_general_chat(Some(key))
-                && self.overlay_desks.iter().any(|d| {
-                    d.id == key && !crate::server::chat_history::is_general_chat(Some(&d.id))
-                }))
+            || (!tinyhivemind_core::chat::is_general_chat(Some(key))
+                && self
+                    .overlay_desks
+                    .iter()
+                    .any(|d| d.id == key && !tinyhivemind_core::chat::is_general_chat(Some(&d.id))))
         {
             return false;
         }
@@ -4696,12 +4810,12 @@ impl CompanyRecord {
         if manifest_matches > 0 {
             return manifest_matches > 1;
         }
-        if crate::server::chat_history::is_general_chat(Some(key)) {
+        if tinyhivemind_core::chat::is_general_chat(Some(key)) {
             return false;
         }
         self.overlay_desks
             .iter()
-            .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+            .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
             .filter(|d| d.name.eq_ignore_ascii_case(key))
             .count()
             > 1
@@ -7406,6 +7520,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "sales".into(),
@@ -7413,6 +7528,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(
@@ -7441,6 +7557,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -7470,6 +7587,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
         // …while the overlay desk's id is reserved exactly like a manifest one.
@@ -8520,6 +8638,7 @@ mod test {
             description: None,
             members: vec!["eng".into()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         // Resolves by id and by case-insensitive name.
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -8566,6 +8685,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "ops".into(),
@@ -8573,6 +8693,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["ceo".into()],
+            hive: Default::default(),
         });
 
         for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
@@ -8617,6 +8738,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             record.resolve_desk_id("Front office"),
@@ -8641,6 +8763,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             ordinary.resolve_desk_id("Front office").as_deref(),

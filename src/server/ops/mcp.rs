@@ -1189,6 +1189,7 @@ role = "Chief Executive"
             description: None,
             members: vec!["jamie".to_string()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         scoped
             .overlay_desk_tools

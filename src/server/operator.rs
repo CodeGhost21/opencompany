@@ -824,6 +824,9 @@ async fn create_desk(
         description: description.clone(),
         members: members.clone(),
         responder: body.responder,
+        // A desk created here starts with no hive block of its own and takes
+        // the defaults, exactly as a manifest desk that declares none does.
+        hive: crate::hivemind::HiveConfig::default(),
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
@@ -3139,7 +3142,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = report.responses.clone();
+    let responses = readable_responses(report.responses.clone());
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -3482,9 +3485,193 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         };
         let reply_parent = reply_thread(parent, accepted.message_seq);
         journal_chat_replies(&runtime, &company, &desk, reply_parent, &mut report).await;
+        // SPIKE (tinyhivemind P15): a committed reply may refer work to another
+        // desk. AFTER journaling, never before — the referral is keyed on the
+        // reply's own sequence, so it has to exist first.
+        #[cfg(feature = "hivemind")]
+        refer_committed_replies(&runtime, &company, &desk, &report, None, 0).await;
         settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
+}
+
+/// Offer each committed agent reply to the referral decision (tinyhivemind P15).
+///
+/// The decision is pure and the queue is the only thing that acts, so this is
+/// safe to run over every reply: a message that refers nobody costs one
+/// in-memory decision and calls the queue zero times.
+///
+/// Policy is deliberately hard-coded here for the spike. In production it is an
+/// operator setting — `ReferralPolicy::DEFAULT` has every knob off, and that is
+// the shipping default the library intends.
+#[cfg(feature = "hivemind")]
+pub(crate) async fn refer_committed_replies(
+    runtime: &Arc<CompanyRuntime>,
+    company: &CompanyId,
+    desk: &str,
+    report: &CycleReport,
+    // The referral these replies are ANSWERING, when they are answering one.
+    //
+    // This is the back edge, and it is the host's to carry: "when a host runs
+    // a child turn that carried a `ReferralOrigin`, it must pass that origin
+    // back in the next `ReferralInput`, or the answer has no way home. Nothing
+    // in the library remembers it."
+    origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
+    // Depth of the reply being offered — NOT of the child it might spawn.
+    //
+    // A reply to an operator message is 0, so every operator message starts a
+    // fresh chain. Otherwise it is the depth of the turn that produced this
+    // reply, which is what makes the count accumulate: the policy compares it
+    // against `max_hops` and hands the child `hop + 1`, and that child's own
+    // replies come back here at that number. Passing a constant here — as this
+    // did — makes every generation claim the same depth, and a bound that never
+    // advances bounds nothing.
+    hop: u32,
+) {
+    use tinyhivemind::referral::dispatch_referral;
+
+    let Ok(Some(record)) = runtime.store().load(company).await else {
+        return;
+    };
+    let members = crate::runtime::hivemind::roster_members(&record);
+    let people: Vec<tinyhivemind_core::roster::Person> = Vec::new();
+    let retired: Vec<String> = Vec::new();
+    let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
+    let desks = crate::runtime::hivemind::desk_snapshots(&record);
+    let gate = runtime.referral_gate();
+
+    // **The desk's own `[[group_chat]].hive.referral` block, not a constant.**
+    //
+    // Referral is opt-in per desk and off by default: crossing costs a full
+    // model turn on somebody else's desk, and tinyhivemind's own benchmark
+    // measured it changing no answer and costing twice the turns on desks that
+    // are individually unbiased. A company that says nothing therefore behaves
+    // exactly as it did before this existed, which is the direction a mechanism
+    // that spends other people's turns should fail in.
+    //
+    // This replaces a hardcoded `enabled: true` with `max_hops` fixed in the
+    // source — a policy no operator could see, let alone change.
+    let config = crate::runtime::hivemind::referral_config(&record, desk);
+    let policy = config.policy();
+    if !policy.enabled {
+        return;
+    }
+
+    // ONE queue for the whole report, which is what makes `peer_cap` mean
+    // anything: the cap counts crossing questions across every reply this turn
+    // produced, and a queue rebuilt per reply would start each count at zero.
+    let queue = crate::runtime::hivemind::JournalReferralQueue::new(
+        runtime.clone(),
+        gate.clone(),
+        config.peer_cap(),
+        policy.max_hops,
+    );
+
+    for response in &report.responses {
+        let (Some(agent), Some(id)) = (response.agent.as_deref(), response.message_id.as_deref())
+        else {
+            continue;
+        };
+        let Ok(sequence) = id.parse::<u64>() else {
+            continue;
+        };
+        let mentions = tinyhivemind_core::mention::resolve(
+            &response.text,
+            None,
+            &tinyhivemind_core::mention::MentionAuthor::Agent {
+                id: agent.to_string(),
+            },
+            &roster,
+            &desks.set(),
+        );
+        let input = tinyhivemind_core::referral::ReferralInput {
+            key: tinyhivemind_core::dispatch::DispatchKey {
+                trigger_sequence: sequence,
+            },
+            conversation: tinyhivemind_core::dispatch::DispatchConversation {
+                desk_id: desk.to_string(),
+                thread_root: None,
+            },
+            author_id: agent.to_string(),
+            content: response.text.clone(),
+            mentions,
+            hop,
+            origin: origin.clone(),
+        };
+        match dispatch_referral(&queue, policy, &input, &roster, &desks.set()).await {
+            Ok(outcome) => tracing::info!(
+                company = %company,
+                desk = %desk,
+                author = %agent,
+                ?outcome,
+                "[referral] decided"
+            ),
+            Err(err) => tracing::warn!(error = %err, "[referral] decision failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod readable_responses_test {
+    use super::readable_responses;
+    use crate::ports::types::OutboundMessage;
+
+    fn reply(text: &str) -> OutboundMessage {
+        OutboundMessage {
+            channel: "engineering".to_string(),
+            agent: Some("software_engineer".to_string()),
+            text: text.to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+            task_id: None,
+            message_id: None,
+            mentions: Vec::new(),
+        }
+    }
+
+    /// **A row must read the same live as it does after a reload.**
+    ///
+    /// The history projection cleaned deliberation grammar; the POST did not.
+    /// So a turn arriving live showed `!support #lazy-load ^3 agreed` and the
+    /// same turn after a refresh showed `agreed` — one message, two renderings,
+    /// separated by a page reload.
+    #[test]
+    fn a_live_reply_reads_as_the_reloaded_one_will() {
+        let cleaned = readable_responses(vec![
+            reply("!support #lazy-load ^3 agreed, and it is reversible"),
+            reply("here is the summary you asked for"),
+        ]);
+
+        assert_eq!(
+            cleaned[0].text, "agreed, and it is reversible",
+            "the grammar is gone on the live path too"
+        );
+        assert_eq!(
+            cleaned[1].text, "here is the summary you asked for",
+            "and an ordinary reply is untouched"
+        );
+    }
+}
+
+/// The same rendering `chat_history` applies, for replies going out on the POST
+/// rather than being read back.
+///
+/// A deliberation turn is journaled with its grammar and cleaned when the
+/// history is projected — but a reply returned to the caller never passes
+/// through that projection, so the console showed `!support #lazy-load ^3` on
+/// a row that arrived live and plain prose on the same row after a reload.
+/// Two readers of one message, disagreeing, with a page refresh between them.
+///
+/// The stored row keeps its markers either way; the fold reads them off the
+/// journal, not off this.
+fn readable_responses(
+    mut responses: Vec<crate::ports::types::OutboundMessage>,
+) -> Vec<crate::ports::types::OutboundMessage> {
+    for response in &mut responses {
+        response.text =
+            crate::server::chat_history::readable_moves(std::mem::take(&mut response.text));
+    }
+    responses
 }
 
 /// Awaits a spawned chat turn, turning a task that never finished into an error.
@@ -3754,6 +3941,39 @@ struct ChatHistoryQuery {
 
 /// One desk-history message, as the console renders it. Mirrors `ChatMessage`
 /// in `frontend/src/lib/chat.ts`.
+/// Where a crossing referral came from, when another desk caused this message
+/// (tinyhivemind P15).
+///
+/// Mirrors `ReferredFromDto` in `frontend/src/api/types.ts`.
+///
+/// The labels are **captured with the row** rather than resolved when the
+/// transcript is read, for the reason [`SessionAuthor`] captures its own: a
+/// desk renamed later must not rewrite what the conversation said at the time.
+///
+/// [`SessionAuthor`]: tinyhivemind::session::SessionAuthor
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferredFromDto {
+    /// The desk that asked, by id — for the link, never for display.
+    desk_id: String,
+    /// The desk's display name as it stood when the referral was made.
+    desk_name: String,
+    /// The agent that asked, by id.
+    asker_id: String,
+    /// That agent's display label as it stood when the referral was made.
+    asker_label: String,
+    /// The asking message, so the chip links straight to it.
+    sequence: u64,
+    /// Which word the chip uses. `"asked"` on the outbound leg, `"answered"`
+    /// when the answer has come home.
+    ///
+    /// Sent as the word rather than a bool because the console renders it and
+    /// nothing else: a `returning: true` would have the render side translating
+    /// a host decision back into English, which is how it came to guess in the
+    /// first place.
+    direction: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatHistoryMessageDto {
@@ -3765,6 +3985,10 @@ struct ChatHistoryMessageDto {
     author: String,
     /// The message text.
     text: String,
+    /// Set only when another desk's referral caused this line. Absent on every
+    /// ordinary message, so the wire shape is unchanged for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referred_from: Option<ReferredFromDto>,
     /// When it was journaled, epoch millis.
     at_millis: f64,
     /// Whether it is the operator's own message.
@@ -3903,6 +4127,18 @@ impl From<ReactionView> for ChatReactionDto {
 impl From<MessageView> for ChatHistoryMessageDto {
     fn from(view: MessageView) -> Self {
         Self {
+            referred_from: view.referred_from.map(|origin| ReferredFromDto {
+                desk_id: origin.desk_id,
+                desk_name: origin.desk_name,
+                asker_id: origin.asker_id,
+                asker_label: origin.asker_label,
+                sequence: origin.sequence,
+                direction: if origin.returning {
+                    "answered"
+                } else {
+                    "asked"
+                },
+            }),
             id: view.id,
             channel: view.channel,
             author: view.author,
@@ -4937,7 +5173,7 @@ async fn run_resolve(
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         message_id: None,
-        responses: report.responses,
+        responses: readable_responses(report.responses),
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
         review_feedback_applied: None,
@@ -6481,6 +6717,7 @@ mode = "full"
             description: None,
             members: vec!["ceo".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "main".to_string(),
@@ -6488,6 +6725,7 @@ mode = "full"
             description: None,
             members: vec!["eng".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -6615,6 +6853,7 @@ mode = "full"
             description: None,
             members: vec!["ceo".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -7484,6 +7723,7 @@ mode = "full"
             description: None,
             members: vec![],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 

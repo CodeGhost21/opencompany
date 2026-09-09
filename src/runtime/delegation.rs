@@ -740,6 +740,15 @@ pub(crate) struct TaskHandoff {
     /// it, the same way `direct_card` and this hand-off's own card already
     /// do.
     pub(crate) budget_paused: Option<crate::harness::BudgetPause>,
+    /// SPIKE (async hand-off): the delegate owns the card but has NOT run yet.
+    ///
+    /// The synchronous model awaits the delegate inside the delegator's
+    /// attempt, which is why `TaskRunEnd::Delegated` was documented as
+    /// "unreachable as a run settle today". Handing over without running makes
+    /// it reachable: the delegator settles `Delegated`, and the delegate is
+    /// dispatched as its own attempt with its own cost and its own lock
+    /// acquisition.
+    pub(crate) pending: bool,
 }
 
 /// Drives the brain-agnostic delegation orchestration over a [`RunTurn`]: run the
@@ -1132,6 +1141,16 @@ impl<'a> DelegationRunner<'a> {
     pub(crate) fn for_task(mut self, task_id: &str) -> Self {
         self.task = Some(task_id.to_string());
         self
+    }
+
+    /// [`for_task`](Self::for_task) for a caller that may or may not have one —
+    /// a chat turn scopes itself to the card its THREAD already opened, and to
+    /// nothing when the thread has none.
+    pub(crate) fn maybe_for_task(self, task_id: Option<&str>) -> Self {
+        match task_id {
+            Some(id) => self.for_task(id),
+            None => self,
+        }
     }
 
     /// Scopes this runner to the card's **attempt** (issue #242), so a delegated
@@ -2207,10 +2226,62 @@ impl<'a> DelegationRunner<'a> {
             // card marked cancelled. So an empty hand-off is *provisional* and a
             // later one that answers takes the card over from it (issue #213
             // review finding 3).
-            let owns_card = handoff.as_ref().is_none_or(|prior| prior.reply.is_none());
+            // Once a hand-off owns the card, no LATER one in this turn runs.
+            //
+            // The synchronous model could let a second hand-off run and take the
+            // card from an empty first (issue #213 finding 3). Asynchronously it
+            // cannot: the first hand-off's delegate is already dispatched, so a
+            // second that ran here would produce work under a card whose owner
+            // is somebody else — and if that owner is then cancelled, the card
+            // settles `todo` carrying output that really did run. That is the
+            // exact "work filed under a card marked cancelled" #213 fixed,
+            // reached the other way round.
+            //
+            // So it is recorded and not started. One card, one owner, one
+            // dispatch — and the operator can see what else was asked for.
+            if handoff.as_ref().is_some_and(|prior| prior.pending) {
+                if let Some(target) = hand_off_target_of(&delegation) {
+                    card.note = Some(append_note(
+                        card.note.as_deref(),
+                        delegator,
+                        &format!(
+                            "also asked {target}: {} — not started, this card is already with \
+                             its new owner",
+                            instruction_of(&delegation)
+                        ),
+                    ));
+                }
+                continue;
+            }
+            // A hand-off that produced nothing is PROVISIONAL and a later one
+            // that answers takes the card from it (issue #213 finding 3) — but
+            // a PENDING hand-off is not "produced nothing", it is "has not run
+            // yet". It already owns the card and the delegate is about to be
+            // dispatched for it, so a second hand-off in the same turn must not
+            // move the card again; its instruction is recorded on the note
+            // instead, exactly as a non-owning hand-off's answer is.
+            let owns_card = handoff
+                .as_ref()
+                .is_none_or(|prior| prior.reply.is_none() && !prior.pending);
             if owns_card {
                 self.hand_card_over(card, delegator, &member, instruction_of(&delegation))
                     .await?;
+                // SPIKE: hand over and STOP. The delegate is not run inside this
+                // attempt — the card now names them, the delegator settles
+                // `Delegated`, and the dispatch edge re-fires for the new owner.
+                //
+                // What that buys, and why the synchronous version could not:
+                // one attempt row per agent (so cost is attributable), the
+                // per-company cycle lock released between hops, and a card
+                // whose `assignee` is a real reassignment rather than a
+                // mid-turn display concession.
+                handoff = Some(TaskHandoff {
+                    delegate: member,
+                    reply: None,
+                    budget_paused: None,
+                    pending: true,
+                });
+                continue;
             }
             let outcome = self
                 .run_delegation(delegation, None, MessageContext::default())
@@ -2223,6 +2294,7 @@ impl<'a> DelegationRunner<'a> {
                         delegate: member,
                         reply: Some(desk.reply),
                         budget_paused: desk.budget_paused,
+                        pending: false,
                     });
                 }
                 // An operator cancelled their run mid-flight, so it produced
@@ -2233,6 +2305,7 @@ impl<'a> DelegationRunner<'a> {
                         delegate: member,
                         reply: None,
                         budget_paused: None,
+                        pending: false,
                     });
                 }
                 // Nothing produced and NOT a cancellation. `run_delegation`'s
@@ -2988,6 +3061,20 @@ impl<'a> DelegationRunner<'a> {
         member: &str,
         instruction: &str,
     ) -> Result<()> {
+        // **An owner is an agent. A desk is a channel, not an owner.**
+        //
+        // `member` is the agent that will run the card, and that is exactly who
+        // now owns it — for a teammate hand-off the teammate, for a desk
+        // hand-off that desk's lead.
+        //
+        // This briefly wrote the hand-off target reduced by
+        // `AssigneeResolution::canonical` instead, on the reading that a desk
+        // hand-off should leave the DESK on the card. That put a channel id in
+        // an ownership field: `assignee` is also what the thread's overseer is
+        // read from, so a card handed to a desk named nobody who could answer
+        // for it. `canonical` maps a desk to its own id because it is the
+        // stored-key helper for whatever a card happens to say — not a claim
+        // that a desk is a thing which owns work.
         card.assignee = member.to_string();
         card.note = Some(append_note(
             card.note.as_deref(),
@@ -9052,6 +9139,24 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// On the DISPATCHED-card path the card stays owned by the level-1 member
     /// the orchestrator handed it to — nested delegation is visible in the note
     /// and the steps, not by the card changing hands again.
+    ///
+    /// # This test changed with the async hand-off, and the change is the point
+    ///
+    /// It used to additionally assert that `handed.reply` carried the level-1
+    /// member's answer, with the nested researcher's reply folded into it. That
+    /// was a true statement about a SYNCHRONOUS hand-off: the delegate ran
+    /// inside the delegator's attempt, so its answer came back up the stack.
+    ///
+    /// It cannot be true of an asynchronous one. The delegator now hands over
+    /// and settles `Delegated`; the delegate is dispatched as its OWN attempt,
+    /// which is what buys one attempt row per agent (so spend is attributable)
+    /// and releases the per-company serial lock between hops. The answer still
+    /// reaches the operator — through the delegate's own settle and relay —
+    /// just not on the delegator's reply.
+    ///
+    /// What the test was *named* for is unchanged and still asserted: the card
+    /// belongs to the member the orchestrator handed it to, and nested
+    /// delegation does not move it a second time.
     #[tokio::test]
     async fn a_dispatched_card_stays_with_the_level_one_member() {
         let fx = Fixture::nested();
@@ -9105,14 +9210,30 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             handed.delegate, "engineer",
             "the card belongs to the member the ORCHESTRATOR handed it to"
         );
-        let reply = handed.reply.expect("the level-1 member answered");
         assert!(
-            reply.contains("researcher (delegated by engineer) replied"),
-            "the nested answer rides on the level-1 member's reply: {reply}"
+            handed.pending,
+            "the hand-off is pending: the delegate has NOT run inside this attempt"
         );
+        assert!(
+            handed.reply.is_none(),
+            "a pending hand-off carries no reply — the delegate answers from its own \
+             attempt, which is what makes the spend attributable to them: {:?}",
+            handed.reply
+        );
+        // **An owner is an agent; a desk is a channel.** Handing to a desk hands
+        // the work to that desk's lead, and it is the lead the card names.
+        //
+        // This assertion previously demanded `eng_desk`, on the reading that a
+        // desk hand-off leaves the DESK owning the card. That put a channel id
+        // in an ownership field — and `assignee` is what the thread's overseer
+        // is read from, so a card handed to a desk named nobody who could
+        // answer for it. `AssigneeResolution::canonical` maps a desk to its own
+        // id because it is the stored-key helper for whatever a card happens to
+        // say, not a claim that a desk owns work.
         assert_eq!(
             card.assignee, "engineer",
-            "nested delegation must not move the card a second time"
+            "the desk's lead owns the card; nested delegation must not move it \
+             a second time"
         );
     }
 

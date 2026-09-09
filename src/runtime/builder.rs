@@ -8758,6 +8758,7 @@ needs_reason = true
                     description: None,
                     members: vec!["ceo".to_string()],
                     responder: crate::ports::types::ResponderMode::default(),
+                    hive: Default::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -9111,6 +9112,7 @@ needs_reason = true
                     description: None,
                     members: vec!["ceo".to_string()],
                     responder: crate::ports::types::ResponderMode::default(),
+                    hive: Default::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -9681,6 +9683,7 @@ needs_reason = true
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desk_members.push(OverlayDeskMember {
             desk_id: "design".to_string(),

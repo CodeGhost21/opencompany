@@ -184,6 +184,7 @@ impl EventLogSessionLog {
 /// spell (all are hyphenated, and every id minter rejects a hyphen).
 fn is_system_author(agent_id: &str) -> bool {
     agent_id == super::HIVE_REPORT_AUTHOR
+        || agent_id == super::HIVE_FAILURE_AUTHOR
         || agent_id == super::HIVE_REFERRAL_AUTHOR
         || agent_id == crate::runtime::channel::WORKFLOW_REPLY_AUTHOR
         || agent_id == crate::runtime::channel::OWNER_FALLBACK_REPORT_AUTHOR
