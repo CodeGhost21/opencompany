@@ -1572,6 +1572,74 @@ members = ["engineer", "ceo"]
         );
     }
 
+    /// The other two wordings [`ambiguity_note`] can produce, both reachable
+    /// from ordinary company state and neither exercised by the test above
+    /// (coderabbit on #2161).
+    ///
+    /// **Two people called Sam** is the commonest collision there is, and it is
+    /// the one case where naming the kinds says nothing: both claimants are
+    /// `a person`, so "matches a person and a person here" would be a sentence
+    /// that reads like a bug. The equal-noun arm collapses it to "two of
+    /// these" instead, and that arm is only reachable when the nouns match.
+    ///
+    /// **Two refused spans in one message** switches both the head and the
+    /// subject — "each match", "they" rather than "it" — because the sentence
+    /// is now about a list. A regression in either is invisible until someone
+    /// reads a live note.
+    #[test]
+    fn the_collapsed_and_plural_wordings_are_produced_too() {
+        let record = record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"priya\"\nrole = \"Merchandiser\"\n",
+        );
+        // Two Sams for the equal-noun arm, and a Priya who collides with the
+        // `priya` teammate so the message carries a *second* refusal.
+        let users = vec![
+            user("u1", "sam.a@acme.test", Some("Sam")),
+            user("u2", "sam.b@acme.test", Some("Sam")),
+            user("u3", "priya@acme.test", Some("Priya")),
+        ];
+        let found = resolve_reporting(
+            "@Sam and @Priya — who owns this?",
+            None,
+            None,
+            &record,
+            &users,
+        );
+
+        assert!(found.mentions.is_empty(), "both spans ping nobody");
+        assert_eq!(found.ambiguous.len(), 2, "{:?}", found.ambiguous);
+
+        // The plural head, over both spans.
+        let both = ambiguity_note(&found.ambiguous).expect("a refusal produces a note");
+        assert!(both.contains("@Sam"), "names both literals: {both}");
+        assert!(both.contains("@Priya"), "names both literals: {both}");
+        assert!(
+            both.contains("each match more than one thing here"),
+            "the plural head: {both}"
+        );
+        assert!(
+            both.contains("they pinged nobody"),
+            "a list takes the plural subject: {both}"
+        );
+
+        // The same first span alone takes the equal-noun arm, because two
+        // people share one noun.
+        let sam = ambiguity_note(&found.ambiguous[..1]).expect("note");
+        assert!(
+            sam.contains("matches two of these here"),
+            "two claimants of one kind collapse rather than repeating the noun: {sam}"
+        );
+        assert!(
+            !sam.contains("a person and a person"),
+            "which is the whole point of the arm: {sam}"
+        );
+        assert!(
+            sam.contains("it pinged nobody"),
+            "one span takes the singular subject: {sam}"
+        );
+    }
+
     /// The negative half. Nothing is reported for a message whose names all
     /// resolve, or for one that names nobody at all — otherwise the notice
     /// would fire on every message and be worth nothing.
