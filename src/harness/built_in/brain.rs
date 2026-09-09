@@ -1146,6 +1146,18 @@ impl HarnessBrain {
         let run_turn = self.run_turn();
         // Bound for the runner's whole lifetime (issue #707): one turn, one record.
         let record = self.record();
+        // Issue #2150: this dispatch's trust window. Captured once, against
+        // the responder frozen above — a redirect re-runs the same claim, and
+        // a hand-off inside `handle_task_delegations` below inherits it
+        // unchanged rather than re-deriving one for the delegate (see
+        // `crate::harness::built_in::run_origin`).
+        let dispatch_origin = crate::harness::built_in::run_origin::claim(
+            crate::harness::built_in::run_origin::RunOrigin::Dispatched {
+                agent: responder.clone(),
+                source: crate::harness::built_in::run_origin::DispatchSource::Task,
+                scope: None,
+            },
+        );
         // Issue #242: where this attempt's own approval requests begin. The
         // queue is shared with any chat turn earlier in the same cycle and is
         // append-only until the cycle-end drain, so a position taken here stays
@@ -1176,26 +1188,30 @@ impl HarnessBrain {
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
             self.deps.workflow_refs.clear();
-            let outcome = run_turn
-                // A dispatched task card carries no chat bubble (its steps are
-                // discarded into the note), so its live turn frames must not leak
-                // onto the console timeline — run it un-streamed (#125 review).
-                .run_steered_background(
-                    &self.record().id,
-                    &responder,
-                    &instruction,
-                    &control,
-                    // No conversation to bind to: a dispatched card's turn
-                    // answers the board, not a thread (#1890 I). Unchanged
-                    // behaviour — including that it does not clear history,
-                    // since one task can span several turns.
-                    ChatTarget::default(),
-                    // Issue #242: un-streamed does not mean unrecorded. The
-                    // trace this turn produces is written to the attempt row as
-                    // it happens, which is what a redirect re-run appends to
-                    // rather than restarting.
-                    sink.clone(),
-                )
+            let outcome = dispatch_origin
+                .scoped(Box::pin(
+                    run_turn
+                        // A dispatched task card carries no chat bubble (its steps
+                        // are discarded into the note), so its live turn frames
+                        // must not leak onto the console timeline — run it
+                        // un-streamed (#125 review).
+                        .run_steered_background(
+                            &self.record().id,
+                            &responder,
+                            &instruction,
+                            &control,
+                            // No conversation to bind to: a dispatched card's turn
+                            // answers the board, not a thread (#1890 I). Unchanged
+                            // behaviour — including that it does not clear
+                            // history, since one task can span several turns.
+                            ChatTarget::default(),
+                            // Issue #242: un-streamed does not mean unrecorded. The
+                            // trace this turn produces is written to the attempt
+                            // row as it happens, which is what a redirect re-run
+                            // appends to rather than restarting.
+                            sink.clone(),
+                        ),
+                ))
                 .await;
             // One-shot read of what (if anything) the operator asked for. `None`
             // is the ordinary, unsteered path.
@@ -1516,6 +1532,13 @@ impl HarnessBrain {
                     scan_partial,
                     &control,
                     sink.clone(),
+                    Some(
+                        crate::harness::built_in::run_origin::RunOrigin::Dispatched {
+                            agent: responder.to_string(),
+                            source: crate::harness::built_in::run_origin::DispatchSource::Task,
+                            scope: None,
+                        },
+                    ),
                 )
                 .await;
         }
@@ -2041,20 +2064,33 @@ impl HarnessBrain {
         scan_partial: bool,
         control: &crate::company::steer::SteerControl,
         sink: Option<Arc<RunTraceSink>>,
+        dispatched: Option<crate::harness::built_in::run_origin::RunOrigin>,
     ) -> Option<String> {
         let instruction = publish::nudge_instruction(brief, reply, unpublished, scan_partial);
-        let outcome = run_turn
-            .run_steered_background(
-                &self.record().id,
-                responder,
-                &instruction,
-                control,
-                // A hand-off inside a dispatched card: the board is the
-                // conversation, not a thread (#1890 I).
-                ChatTarget::default(),
-                sink,
-            )
-            .await;
+        let company = self.record().id.clone();
+        let turn = Box::pin(run_turn.run_steered_background(
+            &company,
+            responder,
+            &instruction,
+            control,
+            // A hand-off inside a dispatched card: the board is the
+            // conversation, not a thread (#1890 I).
+            ChatTarget::default(),
+            sink,
+        ));
+        // Only the caller knows whether this nudge belongs to a dispatched
+        // card. The cycle runs the operator's own turn, its delegated desk
+        // turns, a dispatched card and a re-dispatch after an approval through
+        // one path, so minting a `Dispatched` origin here would hand a turn
+        // that followed an operator's message the trust a card earned.
+        let outcome = match dispatched {
+            Some(origin) => {
+                crate::harness::built_in::run_origin::claim(origin)
+                    .scoped(turn)
+                    .await
+            }
+            None => turn.await,
+        };
         // A steer that landed during the nudge is consumed here so it cannot
         // leak into a later `control.take()` and be mistaken for a steer of the
         // primary run, which has already ended.
@@ -4248,6 +4284,7 @@ impl HarnessBrain {
                                     changed.partial,
                                     &nudge_control,
                                     None,
+                                    None,
                                 )
                                 .await;
                             let nudge_published = self.deps.pending_publishes.drain();
@@ -4630,6 +4667,7 @@ impl HarnessBrain {
                                     &unpublished,
                                     changed.partial,
                                     &nudge_control,
+                                    None,
                                     None,
                                 )
                                 .await;

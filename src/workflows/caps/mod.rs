@@ -1216,6 +1216,7 @@ impl HarnessAgentRunner {
             turn: self.turn.as_ref(),
             record: &self.record,
             exclude_agent: agent_ref,
+            workflow_id: &self.workflow_id,
         };
         let approval_claim = self
             .deps
@@ -2595,6 +2596,17 @@ impl HarnessAgentRunner {
             .deps
             .approval_requests
             .claim(ApprovalScope::Run(self.run_id.clone()));
+        // Issue #2150: this node's trust window, named by the agent it
+        // dispatched to and the workflow it belongs to.
+        let origin_claim = crate::harness::built_in::run_origin::claim(
+            crate::harness::built_in::run_origin::RunOrigin::Dispatched {
+                agent: agent_ref.to_string(),
+                source: crate::harness::built_in::run_origin::DispatchSource::Workflow {
+                    workflow_id: self.workflow_id.clone(),
+                },
+                scope: None,
+            },
+        );
         // Issue #661 (M5): the turn AND its post-turn drains run inside the run's
         // board scope, so a `spawn_task` the model calls files into this run's
         // bucket and the drain below reads that same bucket back. The claim itself
@@ -2603,27 +2615,31 @@ impl HarnessAgentRunner {
         //
         // **Every layer here is `Box::pin`ed, and that is load-bearing.** This
         // nests one task-local scope inside another (`ApprovalScope` inside
-        // `DelegationScope`), and `TaskLocalFuture` stores its inner future
-        // *inline* — so without boxing, an openhuman agent turn (already a very
-        // large future) is held by value inside two nested wrappers and the
-        // composed state blows the thread's stack. Verified: it overflows on the
-        // first spawning run without these.
+        // `DelegationScope`, now also the dispatch-origin scope), and
+        // `TaskLocalFuture` stores its inner future *inline* — so without
+        // boxing, an openhuman agent turn (already a very large future) is held
+        // by value inside these nested wrappers and the composed state blows
+        // the thread's stack. Verified: it overflows on the first spawning run
+        // without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(Box::pin(self.turn.run_background_workflow(
-                    &self.company,
-                    agent_ref,
-                    &message,
-                    run_sink.clone(),
-                    // The workflow run + node this turn belongs to (issue #1702):
-                    // its live tool-call frames stream tagged with these so the
-                    // console's run-trace sheet appends them under the right run
-                    // while the node is still executing. `lineage_node` is the
-                    // resolved node id (graph node, else the agent ref) — the
-                    // same id the durable trace attributes the node's steps to.
-                    &self.run_id,
-                    &lineage_node,
-                )))
+                .scoped(Box::pin(origin_claim.scoped(Box::pin(
+                    self.turn.run_background_workflow(
+                        &self.company,
+                        agent_ref,
+                        &message,
+                        run_sink.clone(),
+                        // The workflow run + node this turn belongs to (issue
+                        // #1702): its live tool-call frames stream tagged with
+                        // these so the console's run-trace sheet appends them
+                        // under the right run while the node is still
+                        // executing. `lineage_node` is the resolved node id
+                        // (graph node, else the agent ref) — the same id the
+                        // durable trace attributes the node's steps to.
+                        &self.run_id,
+                        &lineage_node,
+                    ),
+                ))))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
             // had a tool call gated before it failed, and that request is just as
