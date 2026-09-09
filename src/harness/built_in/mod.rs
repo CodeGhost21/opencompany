@@ -11327,6 +11327,93 @@ description = "Builds the product."
         );
     }
 
+    /// A company whose `treasurer` carries a `budget_usd_daily` of exactly
+    /// `0.0` — the value `validate_cap` in `server::ops::team` accepts as a
+    /// non-negative, finite number with no special-case.
+    fn zero_capped_record() -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "treasurer"
+role = "Treasurer"
+description = "Handles spend."
+budget_usd_daily = 0.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// a cap of exactly `0.0` passes validation as "non-negative and
+    /// finite" and then permanently refuses every dispatch, because `spent >=
+    /// cap` holds even at zero spend on the very first turn — before the
+    /// teammate has ever run once. Setting `0.0` bricks the teammate; it does
+    /// not uncap it, and nothing here says so.
+    #[tokio::test]
+    async fn a_zero_daily_cap_refuses_the_teammates_very_first_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = zero_capped_record();
+
+        // No spend has ever been recorded for this teammate — a fresh day, a
+        // fresh company, or a cap just set to `0.0` from the console.
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let refused = pool
+            .run(
+                &rec.id,
+                "treasurer",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("treasurer", 0.0),
+            "the very first dispatch is refused, though this teammate has spent nothing yet"
+        );
+        assert!(!refused.contains("should-not-echo"));
+
+        // The cap is per-teammate: the uncapped engineer is untouched.
+        let ok = pool
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(ok.contains("hello-marker"), "{ok:?}");
+    }
+
     // --- Console tool grants, live (issue #1796) -----------------------------
 
     /// **The no-restart proof for the one-click grant.** A namespace granted
