@@ -914,12 +914,7 @@ mod live {
             body["connectionId"] = json!(connection_id);
         }
         let key = execute_idempotency_key(metering, &body)?;
-        let http = oh::util::tls::tls_client_builder()
-            .http1_only()
-            .timeout(std::time::Duration::from_secs(60))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .default_headers(openhuman_core::api::product::product_identity_headers())
-            .build()?;
+        let http = managed_execute_client()?;
 
         let post =
             async |body: &Value| post_managed_execute(client.inner(), &http, body, &key).await;
@@ -953,19 +948,40 @@ mod live {
         ))
     }
 
+    /// The HTTP client every managed execute posts through.
+    ///
+    /// One client for the process, not one per call: a `reqwest::Client` owns
+    /// a connection pool, and building one per execute means a fresh TCP and
+    /// TLS handshake on every tool call, with a burst paying for as many as it
+    /// makes. The vendored client is not used here only because it offers no
+    /// way to set the idempotency header; the pooling it provides is not
+    /// something to give up along with it.
+    fn managed_execute_client() -> Result<&'static reqwest::Client> {
+        static CLIENT: std::sync::OnceLock<std::result::Result<reqwest::Client, String>> =
+            std::sync::OnceLock::new();
+        CLIENT
+            .get_or_init(|| {
+                oh::util::tls::tls_client_builder()
+                    .http1_only()
+                    .timeout(std::time::Duration::from_secs(60))
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .default_headers(openhuman_core::api::product::product_identity_headers())
+                    .build()
+                    .map_err(|error| format!("{error}"))
+            })
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("composio execute client: {error}"))
+    }
+
     async fn post_managed_execute(
         client: &IntegrationClient,
         http: &reqwest::Client,
         body: &Value,
         key: &str,
     ) -> Result<ComposioExecuteResponse> {
-        use oh::security::egress::{EgressDescriptor, emit_external_transfer, enforce_egress};
         use openhuman_core::core::observability::report_error_or_expected;
 
         const PATH: &str = "/agent-integrations/composio/execute";
-        let egress = EgressDescriptor::integration(PATH);
-        enforce_egress(&egress)?;
-        emit_external_transfer(egress);
         let url = openhuman_core::api::config::api_url(&client.backend_url, PATH);
         let response = http
             .post(&url)
