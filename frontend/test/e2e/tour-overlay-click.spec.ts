@@ -61,8 +61,30 @@ function opener(page: Page) {
 async function goToRoster(page: Page): Promise<void> {
   // By address rather than by clicking the nav: during a tour the nav is under
   // the overlay, which is the very thing under test.
-  await page.goto("/#/company");
-  await expect(opener(page)).toBeVisible({ timeout: 30_000 });
+  //
+  // Re-asserted in a poll rather than set once, because the tour navigates too.
+  // `TourController`'s per-step hook drives the console to the stop's own view,
+  // and stop one is not this page, so a single hand-set address races it: land
+  // before the hook and the tour takes the view straight back. Asking again
+  // until the roster is actually here settles that race in one direction
+  // without waiting on the tour's internals.
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => {
+          window.location.hash = "#/company";
+        });
+        return opener(page)
+          .waitFor({ state: "visible", timeout: 2_000 })
+          .then(() => true)
+          .catch(() => false);
+      },
+      {
+        timeout: 30_000,
+        message: "the Company roster never settled under the tour",
+      },
+    )
+    .toBe(true);
 }
 
 /**
@@ -109,10 +131,13 @@ test("a click on the dimmed page neither moves the tour nor changes the address"
   // Give a navigation the chance to happen before concluding none did.
   await page.waitForTimeout(750);
 
-  await expect(page, "the overlay must not carry the click into the Room").not.toHaveURL(
-    /#\/chat\/main$/,
+  await expect(
+    page,
+    "the overlay must not carry the click into the Room",
+  ).not.toHaveURL(/#\/chat\/main$/);
+  await expect(page, "the address must not move at all").toHaveURL(
+    /#\/company$/,
   );
-  await expect(page, "the address must not move at all").toHaveURL(/#\/company$/);
   await expect(
     tooltip.getByText(`Step 1 of ${TOUR_STOPS}`),
     "and the tour must not have stepped",
@@ -134,7 +159,9 @@ test("the tooltip's own Next still advances the tour", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("with the tour dismissed the same card still opens the teammate", async ({ page }) => {
+test("with the tour dismissed the same card still opens the teammate", async ({
+  page,
+}) => {
   await page.goto("/#/company");
   await page.getByText(WELCOME).waitFor();
   await page.getByRole("button", { name: "Skip for now" }).click();
