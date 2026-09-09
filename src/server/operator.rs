@@ -4955,17 +4955,29 @@ async fn list_grants(scope: ScopedCompany) -> Json<Vec<StandingGrantDto>> {
 /// Takes effect on the **next** policy check; a call already admitted is not
 /// aborted. 404 when there is nothing to revoke — already revoked, or expired —
 /// rather than reporting success over a no-op.
+///
+/// Admin, matching `DELETE {scope}/tools/grants` on the neighbouring plane
+/// (issue #2169). Both objects are a permission an operator granted, and a
+/// grant one person made should not be undone by anyone who happens to be in
+/// the company: a standing permission is often the thing keeping an unattended
+/// desk working, so revoking it is a change to how the company runs rather than
+/// a tidy-up. Revoking fails in the safe direction, which is why this was easy
+/// to leave at member level and worth correcting anyway.
+///
+/// `GET {scope}/grants` stays readable by any member, deliberately, for the
+/// same consistency: `GET {scope}/tools/grants` is member-readable and
+/// discloses the same shape of fact.
 async fn revoke_grant(
-    scope: ScopedCompany,
+    scope: AdminScopedCompany,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<StatusCode, ApiError> {
     let gid = params
         .get("gid")
         .cloned()
         .ok_or_else(|| ApiError(OpenCompanyError::InvalidRequest("missing grant id".into())))?;
-    // The machine credential has no person behind it, the same distinction every
-    // other operator write draws.
-    let by = scope.actor.clone().unwrap_or_else(platform_actor);
+    // Always identified — `AdminScopedCompany::actor` covers the machine
+    // principal as well, so this write is never anonymous.
+    let by = scope.actor();
     let revoked = scope
         .runtime
         .revoke_standing_grant(&GrantId::new(gid.clone()), by)
