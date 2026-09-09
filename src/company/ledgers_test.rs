@@ -1378,25 +1378,24 @@ async fn a_limit_of_zero_or_past_every_bound_clamps_rather_than_emptying_the_pag
     assert_eq!(past.matched, 3);
 }
 
-/// A [`LedgerStore`] that pauses inside `list_specs` exactly once, after the
-/// read has already happened, so a test can hold a declaration mid-collision
-/// -check while another declaration of the same slug runs to completion
-/// underneath it.
-struct PausingSpecStore {
+/// A [`LedgerStore`] that yields inside `list_specs`, after the read and
+/// before the caller can act on it.
+///
+/// The window a declaration races in is between reading the registry and
+/// writing to it. Yielding there hands the runtime to whatever else is ready,
+/// so on the single-threaded test runtime two concurrent declarations
+/// deterministically interleave inside that window rather than doing so only
+/// when thread timing happens to arrange it. A declaration that is properly
+/// serialized never reaches the yield concurrently with another.
+struct YieldingSpecStore {
     inner: Arc<dyn LedgerStore>,
-    armed: Arc<AtomicBool>,
-    paused: Arc<Notify>,
-    resume: Arc<Notify>,
 }
 
 #[async_trait::async_trait]
-impl LedgerStore for PausingSpecStore {
+impl LedgerStore for YieldingSpecStore {
     async fn list_specs(&self, company: &CompanyId) -> Result<Vec<LedgerSpec>> {
         let read = self.inner.list_specs(company).await;
-        if self.armed.swap(false, Ordering::SeqCst) {
-            self.paused.notify_one();
-            self.resume.notified().await;
-        }
+        tokio::task::yield_now().await;
         read
     }
 
@@ -1427,29 +1426,22 @@ impl LedgerStore for PausingSpecStore {
 
 /// A ledger named twice at once must be declared once.
 ///
-/// `record`, `close` and `retire` all take [`ledger_lock`] before they read
-/// the store, so their check and their write are one section. `define` takes
-/// nothing: it lists the specs, asks the registry whether the slug collides,
-/// and only then writes. Two declarations of a slug that does not exist yet
+/// `record`, `close` and `retire` all take their lock before they read the
+/// store, so their check and their write are one section. A declaration that
+/// took none would list the specs, ask the registry whether the slug collides,
+/// and only then write: two declarations of a slug that does not exist yet
 /// both read a registry without it, both pass `admits`, and both write — so
 /// the second silently replaces the first, and the caller that lost is told
 /// its ledger was created.
 ///
-/// [`PausingSpecStore`] holds the first declaration inside exactly that gap so
-/// the window is deterministic rather than a matter of thread timing. Exactly
-/// one of the two must be refused.
+/// [`YieldingSpecStore`] puts both inside that window deterministically.
+/// Exactly one of the two must be refused.
 #[tokio::test]
 async fn two_declarations_of_one_new_slug_cannot_both_be_admitted() {
     let (runtime, _home) = runtime().await;
 
-    let armed = Arc::new(AtomicBool::new(false));
-    let paused = Arc::new(Notify::new());
-    let resume = Arc::new(Notify::new());
-    let store: Arc<dyn LedgerStore> = Arc::new(PausingSpecStore {
+    let store: Arc<dyn LedgerStore> = Arc::new(YieldingSpecStore {
         inner: runtime.ledgers().clone(),
-        armed: armed.clone(),
-        paused: paused.clone(),
-        resume: resume.clone(),
     });
     let ctx = Ledgers::new(runtime.id().clone(), store);
 
@@ -1458,22 +1450,7 @@ async fn two_declarations_of_one_new_slug_cannot_both_be_admitted() {
     let mut second = hazards();
     second["title"] = json!("Hazards, as the second caller named them");
 
-    armed.store(true, Ordering::SeqCst);
-
-    let first_ctx = ctx.clone();
-    let declarer = tokio::spawn(async move { define(&first_ctx, &first).await });
-
-    paused.notified().await;
-
-    // The second declaration runs to completion inside the first's collision
-    // window: its own `list_specs` is no longer armed.
-    let second_result = define(&ctx, &second).await;
-
-    resume.notify_one();
-    let first_result = tokio::time::timeout(std::time::Duration::from_secs(5), declarer)
-        .await
-        .expect("the first declaration did not finish")
-        .expect("the first declaration panicked");
+    let (first_result, second_result) = tokio::join!(define(&ctx, &first), define(&ctx, &second));
 
     assert!(
         first_result.is_err() ^ second_result.is_err(),
@@ -1494,6 +1471,69 @@ async fn two_declarations_of_one_new_slug_cannot_both_be_admitted() {
         survivor.title,
         winner.expect("the admitted declaration").title,
         "the stored ledger must be the one whose caller was told it was created"
+    );
+}
+
+/// How many ledgers this company has declared, built-ins aside.
+async fn declared_count(ctx: &Ledgers) -> usize {
+    registry(ctx)
+        .await
+        .expect("registry")
+        .specs()
+        .iter()
+        .filter(|spec| !spec.builtin)
+        .count()
+}
+
+/// Builds a declaration that collides with nothing but its own slug.
+fn ledger_named(slug: &str) -> serde_json::Value {
+    let mut doc = hazards();
+    doc["slug"] = json!(slug);
+    doc["title"] = json!(slug);
+    doc["derived"] = json!(format!("derived/{slug}.md"));
+    doc
+}
+
+/// The cap counts declarations, so two of *different* slugs contend too.
+///
+/// A lock taken per slug serializes only the callers naming one ledger. Both
+/// of `admits`' rules range over every declaration — how many the company has,
+/// and which derived file each writes — so two declarations of different slugs
+/// read the same registry, both find room under the cap, and both write. The
+/// company ends up past a cap it is the only thing enforcing.
+///
+/// With one slot left, exactly one must win.
+#[tokio::test]
+async fn two_declarations_of_different_slugs_cannot_both_take_the_last_slot() {
+    let (runtime, _home) = runtime().await;
+    let plain = Ledgers::new(runtime.id().clone(), runtime.ledgers().clone());
+
+    let declared = declared_count(&plain).await;
+    for n in declared..crate::ledger::registry::MAX_DECLARED - 1 {
+        define(&plain, &ledger_named(&format!("filler-{n}")))
+            .await
+            .expect("filler declaration");
+    }
+
+    let store: Arc<dyn LedgerStore> = Arc::new(YieldingSpecStore {
+        inner: runtime.ledgers().clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let (first_doc, second_doc) = (
+        ledger_named("first-past-the-post"),
+        ledger_named("second-past-the-post"),
+    );
+    let (first, second) = tokio::join!(define(&ctx, &first_doc), define(&ctx, &second_doc));
+
+    assert!(
+        first.is_ok() ^ second.is_ok(),
+        "exactly one declaration may take the last slot — first: {first:?}, second: {second:?}"
+    );
+    assert_eq!(
+        declared_count(&plain).await,
+        crate::ledger::registry::MAX_DECLARED,
+        "the cap is the only thing bounding declarations, so it must hold under a race"
     );
 }
 
