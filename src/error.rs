@@ -238,6 +238,15 @@ pub enum OpenCompanyError {
     #[error("company is {0}")]
     LifecycleConflict(String),
 
+    /// The caller is authenticated but does not hold the authority the
+    /// operation needs.
+    ///
+    /// Distinct from a missing grant, which is about a tool: this is about the
+    /// scope of the change itself — an operation that reaches past the company
+    /// in the path and so needs authority over more than that company.
+    #[error("{0}")]
+    Forbidden(String),
+
     /// A side-effecting effect was refused because the company's emergency stop
     /// is engaged (issue #86).
     ///
@@ -473,6 +482,7 @@ impl OpenCompanyError {
             // branch on differently.
             Self::WorkflowRunFailed { source, .. } => source.code(),
             Self::LifecycleConflict(_) => "lifecycle_conflict".to_string(),
+            Self::Forbidden(_) => "forbidden".to_string(),
             Self::EmergencyStop(_) => "emergency_stop".to_string(),
             Self::Conflict(_) => "conflict".to_string(),
             Self::NotInBuild(_) => "not_in_build".to_string(),

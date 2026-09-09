@@ -680,9 +680,32 @@ fn family_refusal(engine: &str, unreachable: Option<&[String]>) -> Option<String
 async fn apply(
     company: AdminScopedCompany,
     axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<ApplyQuery>,
     Json(request): Json<EngineRequest>,
 ) -> Result<Json<AppliedDto>, ApiError> {
+    // This route writes the host's `config.toml` and rebuilds every company on
+    // it, so the authority it needs is over the instance, not over one company.
+    // `AdminScopedCompany` proves the caller administers the company in the
+    // path and nothing more: on a shared host it would let one tenant's admin
+    // repoint the memory engine for every other tenant and force them all to
+    // rebuild.
+    //
+    // A single-company host is the case where the two authorities coincide —
+    // the admin there IS the operator, and a self-hosted deployment holds no
+    // platform credential at all, so demanding one would leave the engine
+    // unreachable from its own console.
+    let companies = state.registry().list().len();
+    let platform = matches!(
+        crate::server::graphql::auth::resolve_claims(&headers, &state),
+        Ok(crate::server::graphql::auth::GqlAuth::Platform(claims)) if claims.has_platform_scope()
+    );
+    if companies > 1 && !platform {
+        return Err(ApiError(OpenCompanyError::Forbidden(format!(
+            "the memory engine is configured for this whole host, not for one company, and \
+             this host runs {companies} of them. Changing it needs platform authority."
+        ))));
+    }
     let _ = company.id();
     let (stored, layer) = saved_selection(&state)?;
     if layer == "env" {
