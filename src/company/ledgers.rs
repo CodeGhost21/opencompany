@@ -568,6 +568,9 @@ pub async fn close(
 /// malformed, collides with an existing ledger, or is past the cap.
 pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<LedgerSpec> {
     let spec = crate::ledger::parse(document, false)?;
+    registry(ctx).await?.admits(&spec)?;
+    let lock = ledger_lock(&ctx.company, &spec.slug);
+    let _guard = lock.lock().await;
     let registry = registry(ctx).await?;
     registry.admits(&spec)?;
     ctx.ledgers.put_spec(&ctx.company, &spec).await?;

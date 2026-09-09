@@ -1439,7 +1439,6 @@ impl LedgerStore for PausingSpecStore {
 /// the window is deterministic rather than a matter of thread timing. Exactly
 /// one of the two must be refused.
 #[tokio::test]
-#[ignore = "define() takes no ledger lock: two declarations of one new slug both pass admits() and the second overwrites the first"]
 async fn two_declarations_of_one_new_slug_cannot_both_be_admitted() {
     let (runtime, _home) = runtime().await;
 
@@ -1496,6 +1495,27 @@ async fn two_declarations_of_one_new_slug_cannot_both_be_admitted() {
         winner.expect("the admitted declaration").title,
         "the stored ledger must be the one whose caller was told it was created"
     );
+}
+
+#[tokio::test]
+async fn independently_constructed_contexts_share_declaration_admission() {
+    let (runtime, _home) = runtime().await;
+    let first_ctx = Ledgers::new(runtime.id().clone(), runtime.ledgers().clone());
+    let second_ctx = Ledgers::new(runtime.id().clone(), runtime.ledgers().clone());
+    let mut first = hazards();
+    first["title"] = json!("First declaration");
+    let mut second = hazards();
+    second["title"] = json!("Second declaration");
+
+    let (first_result, second_result) =
+        tokio::join!(define(&first_ctx, &first), define(&second_ctx, &second));
+
+    assert!(first_result.is_ok() ^ second_result.is_ok());
+    let winner = first_result
+        .or(second_result)
+        .expect("one declaration wins");
+    let stored = registry(&first_ctx).await.expect("registry");
+    assert_eq!(stored.require("hazards").expect("stored ledger"), &winner);
 }
 
 /// A ledger with a `required` field, but no `Check::RequiredField` in its
