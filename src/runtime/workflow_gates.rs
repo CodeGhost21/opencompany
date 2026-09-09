@@ -112,9 +112,41 @@ struct Batch {
 #[derive(Clone, Default)]
 pub struct WorkflowGateQueue {
     inner: Arc<Mutex<HashMap<String, Batch>>>,
+    /// The company's emergency-stop flag, consulted by [`release`](Self::release)
+    /// under the same lock that takes the batch — the same treatment
+    /// `RunSupervisor::begin` gives its own admission check, and for the same
+    /// reason: every caller has already asked
+    /// `CompanyRuntime::ensure_not_emergency_stopped` earlier, but that ask sits
+    /// behind at least one `.await` before release is reached.
+    ///
+    /// `None` at the default construction every test uses, so nothing here
+    /// changes for a queue with no company to ask.
+    emergency: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
+}
+
+/// Why [`WorkflowGateQueue::release`] did not hand back a batch.
+#[derive(Debug)]
+pub enum ReleaseRefusal {
+    /// The company is stopped. The batch is untouched — still sitting in the
+    /// queue with every verdict it already banked, ready for
+    /// [`ready_for_release`](WorkflowGateQueue::ready_for_release) to find it
+    /// once an operator releases the stop.
+    EmergencyStop,
 }
 
 impl WorkflowGateQueue {
+    /// Installs the emergency-stop flag [`release`](Self::release) refuses a
+    /// decided batch against.
+    ///
+    /// Without this the queue releases regardless of the flag — the default
+    /// for every construction site that has no company to ask.
+    pub fn with_emergency_gate(
+        mut self,
+        gate: Arc<crate::policy::gate::ManifestApprovalGate>,
+    ) -> Self {
+        self.emergency = Some(gate);
+        self
+    }
     /// Records that `turn` just parked one more gate, `id` deciding it.
     ///
     /// Called from the one place gates are parked and on its **successful-park
@@ -182,16 +214,50 @@ impl WorkflowGateQueue {
     /// Called once, by whichever caller the continuation queue handed the
     /// release to — that queue's counting decides who, under one lock, so this
     /// cannot be entered twice for one run.
-    pub fn release(&self, turn: &str) -> Option<ReleasedGates> {
+    ///
+    /// Refuses — ahead of taking the batch — while the company's emergency
+    /// stop is engaged, when [`with_emergency_gate`](Self::with_emergency_gate)
+    /// installed one. **Codex review finding on PR #2140 (`3955615141`):**
+    /// before this, a mixed batch (at least one gate approved before the pause,
+    /// the last sibling expiring while paused) was removed here and then
+    /// refused two awaits later at `RunSupervisor::begin` — by which point
+    /// `resume_run`'s caller had nothing left to preserve and pruned the
+    /// checkpoint, discarding already-approved work an operator had to notice
+    /// and manually re-run. Checking here, under the same lock that takes the
+    /// batch, leaves it fully intact — every verdict still banked — for
+    /// [`ready_for_release`](Self::ready_for_release) to hand back once the
+    /// stop lifts, instead of destroying it on the way to a refusal two frames
+    /// downstream would have made anyway.
+    pub fn release(&self, turn: &str) -> Result<Option<ReleasedGates>, ReleaseRefusal> {
+        let mut guard = self.inner.lock().expect("workflow gate queue poisoned");
+        if self
+            .emergency
+            .as_deref()
+            .is_some_and(|gate| gate.is_emergency())
+        {
+            return Err(ReleaseRefusal::EmergencyStop);
+        }
+        Ok(guard.remove(turn).map(|batch| ReleasedGates {
+            effect: batch.effect,
+            approved: batch.approved,
+            denied: batch.denied,
+        }))
+    }
+
+    /// Every turn this queue is holding whose gates are all decided but which
+    /// has not yet been released — the batches an emergency stop's own
+    /// [`release`](Self::release) refusal left behind, ready for
+    /// `CompanyRuntime::emergency_resume` to hand to
+    /// [`resume_run`](crate::runtime::workflow_resume::resume_run) once the
+    /// stop lifts.
+    pub fn ready_for_release(&self) -> Vec<String> {
         self.inner
             .lock()
             .expect("workflow gate queue poisoned")
-            .remove(turn)
-            .map(|batch| ReleasedGates {
-                effect: batch.effect,
-                approved: batch.approved,
-                denied: batch.denied,
-            })
+            .iter()
+            .filter(|(_, batch)| batch.undecided.is_empty())
+            .map(|(turn, _)| turn.clone())
+            .collect()
     }
 
     /// Whether `turn` is a run-scoped batch this queue is holding.
@@ -262,6 +328,21 @@ mod test {
     use crate::runtime::workflow_resume::gate_effect;
     use serde_json::json;
 
+    fn emergency_gate_effect(node: &str) -> Effect {
+        Effect {
+            kind: crate::runtime::workflow_resume::WORKFLOW_APPROVE_KIND.to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({
+                crate::runtime::workflow_resume::PAYLOAD_NODE_ID: node,
+            }),
+            agent: None,
+            run_id: Some("wr-1".to_string()),
+        }
+    }
+
     fn gate(workflow: &str, node: &str) -> Effect {
         gate_effect(workflow, node, &json!({}), "run-1", &[], &[], None)
     }
@@ -277,6 +358,81 @@ mod test {
             agent: None,
             run_id: None,
         }
+    }
+
+    /// **Codex review finding on PR #2140 (`3955615141`).** Before this,
+    /// `release` removed a fully-decided batch unconditionally, and only the
+    /// caller two `.await`s downstream (`RunSupervisor::begin`) could refuse
+    /// it — by which point the batch was already gone and its checkpoint got
+    /// pruned as a terminal failure. This proves the batch survives a refusal
+    /// here instead: still queryable, every verdict still banked.
+    #[test]
+    fn release_refuses_and_preserves_a_decided_batch_while_stopped() {
+        let gate = Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            crate::company::Policy {
+                mode: "full".to_string(),
+                always_approve: Vec::new(),
+                auto_approve_under_usd: None,
+                approval_ttl_hours: None,
+            },
+        ));
+        let queue = WorkflowGateQueue::default().with_emergency_gate(gate.clone());
+
+        let a = ApprovalId::new("appr-a");
+        let b = ApprovalId::new("appr-b");
+        queue.arm("turn-1", &a, &emergency_gate_effect("node-a"));
+        queue.arm("turn-1", &b, &emergency_gate_effect("node-b"));
+        queue.decide("turn-1", &a, Verdict::Approve);
+        queue.decide("turn-1", &b, Verdict::Deny);
+        assert_eq!(
+            queue.undecided("turn-1"),
+            0,
+            "both gates on the turn are decided"
+        );
+
+        gate.set_emergency(true);
+        match queue.release("turn-1") {
+            Err(ReleaseRefusal::EmergencyStop) => {}
+            Ok(_) => panic!("a decided batch must be refused, not released, while stopped"),
+        }
+
+        assert!(
+            queue.is_armed("turn-1"),
+            "the refused release must leave the batch in the queue, not destroy it"
+        );
+        assert_eq!(
+            queue.ready_for_release(),
+            vec!["turn-1".to_string()],
+            "the preserved, fully-decided batch is discoverable for a later redrive"
+        );
+
+        gate.set_emergency(false);
+        let released = queue
+            .release("turn-1")
+            .expect("not stopped, so release succeeds")
+            .expect("the batch is still there");
+        assert_eq!(released.approved, vec!["node-a".to_string()]);
+        assert_eq!(released.denied, vec!["node-b".to_string()]);
+        assert!(
+            !queue.is_armed("turn-1"),
+            "a successful release still takes the batch out of the queue"
+        );
+    }
+
+    /// A queue built with no [`with_emergency_gate`](WorkflowGateQueue::with_emergency_gate)
+    /// call — every construction site with no company to ask — releases
+    /// regardless of any flag, exactly as before this refusal existed.
+    #[test]
+    fn release_ignores_emergency_state_with_no_gate_installed() {
+        let queue = WorkflowGateQueue::default();
+        let a = ApprovalId::new("appr-a");
+        queue.arm("turn-1", &a, &emergency_gate_effect("node-a"));
+        queue.decide("turn-1", &a, Verdict::Approve);
+
+        queue
+            .release("turn-1")
+            .expect("no gate installed, so nothing here can refuse on that basis")
+            .expect("the batch is there to release");
     }
 
     /// The core loop the module exists for: two gates park on one run, one
@@ -296,7 +452,10 @@ mod test {
         q.decide("turn-1", &id_b, Verdict::Deny);
         assert_eq!(q.undecided("turn-1"), 0);
 
-        let released = q.release("turn-1").expect("a batch was armed");
+        let released = q
+            .release("turn-1")
+            .expect("no emergency gate installed")
+            .expect("a batch was armed");
         assert_eq!(released.approved, vec!["node-a".to_string()]);
         assert_eq!(released.denied, vec!["node-b".to_string()]);
     }
@@ -348,7 +507,10 @@ mod test {
         q.arm("turn-1", &id, &gate("wf", "node-a"));
         q.decide("turn-1", &id, Verdict::Approve);
         q.decide("turn-1", &id, Verdict::Approve);
-        let released = q.release("turn-1").expect("armed");
+        let released = q
+            .release("turn-1")
+            .expect("no emergency gate installed")
+            .expect("armed");
         assert_eq!(released.approved, vec!["node-a".to_string()]);
     }
 
@@ -363,7 +525,10 @@ mod test {
         q.arm("turn-1", &id, &gate("wf", "node-a"));
         // The sweep calls decide() directly; nothing else touched this queue.
         q.decide("turn-1", &id, Verdict::Deny);
-        let released = q.release("turn-1").expect("armed");
+        let released = q
+            .release("turn-1")
+            .expect("no emergency gate installed")
+            .expect("armed");
         assert!(released.denied.contains(&"node-a".to_string()));
         assert!(released.approved.is_empty());
     }
@@ -375,8 +540,16 @@ mod test {
         let q = WorkflowGateQueue::default();
         let id = ApprovalId::new("a");
         q.arm("turn-1", &id, &gate("wf", "node-a"));
-        assert!(q.release("turn-1").is_some());
-        assert!(q.release("turn-1").is_none());
+        assert!(
+            q.release("turn-1")
+                .expect("no emergency gate installed")
+                .is_some()
+        );
+        assert!(
+            q.release("turn-1")
+                .expect("no emergency gate installed")
+                .is_none()
+        );
         assert!(!q.is_armed("turn-1"));
 
         // A decide arriving after the release must not panic or resurrect it.
@@ -414,7 +587,10 @@ mod test {
         q.arm("turn-1", &id_b, &second);
         q.decide("turn-1", &id_a, Verdict::Approve);
         q.decide("turn-1", &id_b, Verdict::Approve);
-        let released = q.release("turn-1").expect("armed");
+        let released = q
+            .release("turn-1")
+            .expect("no emergency gate installed")
+            .expect("armed");
         assert_eq!(
             released.effect.payload, first.payload,
             "the representative effect must stay the first gate's, not the last"

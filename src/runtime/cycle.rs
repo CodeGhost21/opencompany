@@ -635,6 +635,32 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
+        // Codex review finding on PR #2140 (`3951723394`): `ensure_accepting`
+        // (or `ensure_not_emergency_stopped` for a continuation) is checked by
+        // the caller before this lock is even requested, and that wait is
+        // unbounded — "behind a busy company, an unbounded time later" per this
+        // function's own doc above. A stop engaged while a cycle queues behind
+        // this lock must still catch it once the lock is actually held, or a
+        // queued request starts a turn after the switch was pulled. Checked
+        // before the journal is touched, so a refusal here leaves nothing
+        // claimed and nothing to unwind.
+        if let Err(err) = self.rt.ensure_not_emergency_stopped() {
+            if let Err(finish_err) = self
+                .rt
+                .journal
+                .record_cycle_finished(&cycle_id, Some(err.to_string()))
+                .await
+            {
+                tracing::warn!(
+                    company = %self.rt.id,
+                    cycle = %cycle_id,
+                    %finish_err,
+                    "could not journal a cycle finish for a stop-refused cycle"
+                );
+            }
+            drop(guard);
+            return Err(err);
+        }
         let mut claimed: Vec<ApprovalContinuation> = Vec::new();
         for continuation in continuation_claims {
             if let Err(error) = self
@@ -1635,6 +1661,15 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<ResolveReceipt> {
+        // Every caller of this already asked `ensure_accepting` before it, but
+        // that ask sits behind at least one `.await` (the blocker claim lock,
+        // arming a console blocker resolution) before this runs. Rechecked here
+        // — first, before anything below commits — so a stop that lands in that
+        // window still catches the settlement rather than letting it execute a
+        // native effect or mint a grant after the company reports itself
+        // stopped. Nothing has touched the gate or the journal yet, so a
+        // refusal here leaves the approval exactly as parked as it was.
+        self.rt.ensure_not_emergency_stopped()?;
         // Issue #374: a broader scope is validated BEFORE the gate is touched.
         //
         // The order is the whole safety story of a bad scope request. Validating
@@ -2326,6 +2361,10 @@ approval.]"
         amended_payload: serde_json::Value,
         by: Actor,
     ) -> Result<ResolveReceipt> {
+        // See the identical guard at the top of `settle_approval`: closes the
+        // same window, before anything below has touched the gate or the
+        // journal.
+        self.rt.ensure_not_emergency_stopped()?;
         let now = now_millis();
 
         if self
@@ -7457,6 +7496,84 @@ members = ["writer"]
         assert_eq!(brain.decisions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// `resolve_approval_spawned` checks `ensure_not_emergency_stopped` before
+    /// this runs, but that ask sits behind at least one `.await` before
+    /// `settle_approval` is actually reached. A stop engaged in that window
+    /// must still be caught here, before a native effect executes or a grant
+    /// is minted, and the approval must come back out exactly as parked as it
+    /// went in — not resolved with nothing to show for it.
+    #[tokio::test]
+    async fn settle_approval_refuses_a_native_effect_once_the_stop_is_engaged() {
+        let home_dir = tmp_home();
+        let sign_effect = Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: Some(42.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let gate = Arc::new(ManifestApprovalGate::new(
+            manifest("supervised").policy.clone(),
+        ));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .with_approvals(gate)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "file it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        let approval_id = report.parked[0].clone();
+        assert_eq!(rt.pending_approvals().len(), 1);
+
+        rt.emergency_pause(operator(), None).await.expect("pause");
+
+        let refused = CycleRunner::new(&rt)
+            .settle_approval(&approval_id, Verdict::Approve, operator(), GrantScope::Once)
+            .await;
+        assert!(
+            matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+            "settle_approval must refuse while the stop is engaged, got {refused:?}"
+        );
+        assert_eq!(
+            rt.pending_approvals().len(),
+            1,
+            "a refused settle must leave the approval exactly as parked as before"
+        );
+        assert!(
+            rt.grants.peek(&approval_id).is_none(),
+            "a refused settle must not have minted a grant"
+        );
+
+        let raw = tokio::fs::read_to_string(
+            Bundle::new(home_dir.path().to_path_buf(), rt.id()).journal_jsonl(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !raw.contains("ApprovalResolved"),
+            "a refused settle must not journal a resolution"
+        );
+    }
+
     // ── Issue #174: the generic cycle seam meters inference usage ────────────
 
     /// A brain that reports a fixed [`TokenUsage`] for every cycle — the shape
@@ -7843,6 +7960,75 @@ members = ["writer"]
         assert!(
             rt.journal.open_cycles().is_empty(),
             "the bracket closes when the cycle ends"
+        );
+    }
+
+    /// Codex review finding on PR #2140 (`3951723394`): `ensure_accepting` is
+    /// checked by the caller *before* this bracket even requests the lock, and
+    /// that wait is unbounded behind a busy company. A cycle that queued before
+    /// the emergency stop was engaged, but only reaches the front of the lock
+    /// after, must still be refused — otherwise the stop's own "halts
+    /// admission" promise has a hole exactly the size of that queue.
+    ///
+    /// Reuses `a_cycles_bracket_opens_before_the_serial_lock`'s setup: holding
+    /// `rt.serial` directly stands in for "another cycle is running", and
+    /// waiting on `journal.open_cycles()` proves the queued cycle is already
+    /// past `ensure_accepting` and stuck on the near side of the lock — the
+    /// exact window this fix closes.
+    #[tokio::test]
+    async fn a_cycle_queued_behind_the_lock_is_refused_once_the_stop_engages_while_it_waits() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let guard = rt.serial.lock().await;
+
+        let spawned = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.run_cycle(Vec::new()).await })
+        };
+
+        let mut open = Vec::new();
+        for _ in 0..200 {
+            open = rt.journal.open_cycles();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            open.len(),
+            1,
+            "the queued cycle must already be bracketed before the stop engages"
+        );
+
+        rt.emergency_pause(
+            Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            },
+            None,
+        )
+        .await
+        .expect("pause");
+
+        drop(guard);
+        let result = spawned.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::OpenCompanyError::EmergencyStop(_))
+            ),
+            "a cycle queued before the stop but reaching the lock after it must still be \
+             refused, got {result:?}"
+        );
+        assert!(
+            rt.journal.open_cycles().is_empty(),
+            "the bracket must still close on a stop-refused cycle"
         );
     }
 

@@ -852,6 +852,7 @@ pub(crate) fn agent_deps(
     model: Arc<dyn HarnessModel>,
 ) -> crate::harness::HarnessDeps {
     crate::harness::HarnessDeps {
+        emergency_gate: None,
         notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),

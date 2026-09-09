@@ -1123,11 +1123,20 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
 /// refused node. The approved work of a *mixed* verdict is not discarded — that
 /// case has a non-empty approved set and runs.
 pub async fn resume_run(runtime: &CompanyRuntime, turn: &str) -> Result<()> {
-    let Some(released) = runtime.workflow_gates().release(turn) else {
-        return Err(OpenCompanyError::InvalidRequest(format!(
-            "the decisions on `{turn}` are all in, but this host is no longer holding that run's \
-             parked gates, so there is nothing to continue — re-run the workflow"
-        )));
+    let released = match runtime.workflow_gates().release(turn) {
+        Err(crate::runtime::workflow_gates::ReleaseRefusal::EmergencyStop) => {
+            return Err(OpenCompanyError::EmergencyStop(format!(
+                "refusing to continue workflow turn `{turn}` while stopped; the decided batch \
+                 stays intact and resumes once an operator releases the stop"
+            )));
+        }
+        Ok(None) => {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "the decisions on `{turn}` are all in, but this host is no longer holding that \
+                 run's parked gates, so there is nothing to continue — re-run the workflow"
+            )));
+        }
+        Ok(Some(released)) => released,
     };
     if released.approved.is_empty() {
         tracing::info!(

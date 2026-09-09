@@ -4941,6 +4941,7 @@ description = "Runs Acme."
     /// (and its `[[harness]]` block) without restating the whole deps literal.
     fn brain_over_mock_with(dir: &std::path::Path, record: CompanyRecord) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -5453,6 +5454,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: if notify { Some(tasks.clone()) } else { None },
             ledgers: None,
             ledger_registry: Default::default(),
@@ -5550,6 +5552,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -5718,6 +5721,7 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -7984,6 +7988,7 @@ members = ["chief"]
     fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9313,6 +9318,7 @@ members = ["eng1", "eng2"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9467,6 +9473,7 @@ members = ["eng1", "eng2"]
         let log = Arc::new(FailFirstLog::default());
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9630,6 +9637,7 @@ members = ["engineer", "designer"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9873,6 +9881,7 @@ members = ["engineer", "designer"]
             .expect("journal message B");
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9996,6 +10005,7 @@ members = ["engineer", "designer"]
         requests: crate::harness::policy::ApprovalRequestQueue,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10337,6 +10347,7 @@ members = ["engineer", "designer"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10404,6 +10415,7 @@ members = ["engineer", "designer"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -11003,6 +11015,7 @@ members = ["engineer", "designer"]
         use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -11718,6 +11731,7 @@ members = ["engineer", "designer"]
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -12062,6 +12076,7 @@ members = ["engineer", "designer"]
             selector_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -12487,6 +12502,7 @@ members = ["engineer", "designer"]
             steer: steer.clone(),
         });
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),

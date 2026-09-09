@@ -2035,6 +2035,7 @@ mod tests {
         let mcp_home = Some(root.join("mcp"));
         let audit_root = root;
         HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),

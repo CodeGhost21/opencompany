@@ -777,10 +777,13 @@ fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
 /// authority check: it is a fixed, published string every member knows. Authority is
 /// [`AdminScopedCompany`] in the signature.
 ///
-/// Denies every new effect outside `EffectGroup::Other` until an operator
-/// deliberately releases it. Distinct from `/pause`, which stops the company
-/// *including chat* by moving `lifecycle`; this leaves the lifecycle untouched
-/// so the operator can keep asking the company what it was doing.
+/// Halts admission of new work — chat included — until an operator
+/// deliberately releases it; every new effect outside `EffectGroup::Other` is
+/// also denied at the gate, as defense-in-depth under that admission halt. A
+/// turn already running is not killed. Distinct from `/pause`, which moves
+/// `lifecycle` and is what a console reads to tell "paused" from "stopped" —
+/// this leaves `lifecycle` untouched, so `emergency-resume` always works even
+/// on a company an operator separately paused.
 ///
 /// Idempotent: pressing it twice returns `200` with `changed: false` rather than
 /// an error. A panic button that punishes a second press is a bad panic button.

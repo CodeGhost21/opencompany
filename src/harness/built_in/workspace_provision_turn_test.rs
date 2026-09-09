@@ -259,6 +259,7 @@ fn build_brain(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        emergency_gate: None,
         notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),

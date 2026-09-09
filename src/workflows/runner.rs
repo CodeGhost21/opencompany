@@ -3715,6 +3715,7 @@ description = "Runs Acme."
 
     fn deps(dir: &std::path::Path) -> HarnessDeps {
         HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
