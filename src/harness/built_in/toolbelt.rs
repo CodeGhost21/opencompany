@@ -1435,6 +1435,49 @@ mod tests {
         );
     }
 
+    /// `ShellTool`'s own schema tells the model that an
+    /// omitted or out-of-range `timeout_secs` "falls back to the configured
+    /// tool timeout" — `ToolTimeout::Inherit`, the run's global deadline. What
+    /// `timeout_policy` actually returns for `None`/`0` is
+    /// `ToolTimeout::Unbounded`: no deadline at all. A model that reads only
+    /// the schema has no way to learn that omitting the field removes the
+    /// backstop rather than falling onto one.
+    #[test]
+    fn shell_timeout_policy_contradicts_its_own_schema_fallback_claim() {
+        use oh::tools::traits::ToolTimeout;
+
+        let ws = std::env::temp_dir();
+        let security = test_security(&ws, PolicyMode::Full);
+        let tool = ShellTool::new(security, native_runtime(), AuditLogger::disabled());
+
+        let schema = tool.parameters_schema();
+        let description = schema["properties"]["timeout_secs"]["description"]
+            .as_str()
+            .expect("timeout_secs has a description");
+        assert!(
+            description.contains("falls back to the configured tool timeout"),
+            "pin the exact claim under test so a wording change re-opens this finding: {description}"
+        );
+
+        assert_eq!(
+            tool.timeout_policy(&json!({})),
+            ToolTimeout::Unbounded,
+            "an omitted timeout_secs must run unbounded per issue #4023 — the opposite of what \
+             the schema promises the model"
+        );
+        assert_eq!(
+            tool.timeout_policy(&json!({ "timeout_secs": 0 })),
+            ToolTimeout::Unbounded,
+            "an explicit 0 disables the deadline the same way omitting it does"
+        );
+        assert_ne!(
+            tool.timeout_policy(&json!({})),
+            ToolTimeout::Inherit,
+            "the schema's \"configured tool timeout\" is ToolTimeout::Inherit, which shell never \
+             returns"
+        );
+    }
+
     #[tokio::test]
     async fn web_tools_reject_ssrf_ip_literals() {
         let ws = std::env::temp_dir();
