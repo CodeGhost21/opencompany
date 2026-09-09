@@ -9125,6 +9125,33 @@ members = ["eng1", "eng2"]
         );
     }
 
+    /// A spawned card is grounded on the same terms an assigned one is: a name
+    /// that resolves to nobody opens the card unowned, rather than stamping an
+    /// owner the board renders and no dispatch can reach.
+    #[tokio::test]
+    async fn spawn_task_refuses_to_stamp_an_off_roster_owner_on_a_new_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, tasks) = brain_with_desk(dir.path());
+        brain
+            .run_delegation(
+                Delegation::SpawnTask {
+                    title: "Draft the plan".to_string(),
+                    note: None,
+                    assignee: Some("not-a-real-agent-xyz".to_string()),
+                },
+                None,
+            )
+            .await
+            .expect("delegation runs");
+
+        let cards = tasks.list(&CompanyId::new("acme")).await.unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].assignee, "",
+            "an unresolvable name leaves the card unowned"
+        );
+    }
+
     /// Issue #246: a chat turn that opened a card says so on the bubble it
     /// answered from. Before this the card appeared on the board and the reply
     /// carried nothing tying the two together, so an operator had no way to

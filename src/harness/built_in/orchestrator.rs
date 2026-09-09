@@ -12711,6 +12711,29 @@ name = "Morning"
         );
     }
 
+    /// `ReadTaskTool::description()` promises the model
+    /// "every attempt's status", and `read_task_bounds_rendered_attempts_...`
+    /// right above proves the render is truncated to `READ_TASK_ATTEMPTS_LIMIT`
+    /// rows. Both are real; they contradict each other. Pinning the exact
+    /// claim here means a future wording fix and a future cap change are each
+    /// forced to touch this test, instead of one silently drifting out of step
+    /// with the other the way they did to get here.
+    #[test]
+    fn read_task_description_claims_every_attempt_while_the_render_caps_at_the_limit() {
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), None, None, None);
+        assert!(
+            tool.description().contains("every attempt's status"),
+            "the schema text under test has changed; re-check whether the cap it once \
+             contradicted still exists: {}",
+            tool.description()
+        );
+        assert_eq!(
+            READ_TASK_ATTEMPTS_LIMIT, 10,
+            "the render is capped well under \"every attempt\" whenever a card has more retries \
+             than this"
+        );
+    }
+
     #[tokio::test]
     async fn read_task_bounds_the_rendered_title_so_attempts_and_output_stay_reachable() {
         let dir = tempfile::tempdir().unwrap();

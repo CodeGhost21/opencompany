@@ -3142,6 +3142,15 @@ impl<'a> DelegationRunner<'a> {
                 let Some(tasks) = self.tasks else {
                     return Ok(DelegationOutcome::default());
                 };
+                // Grounded against the roster on the same terms `AssignTask`
+                // grounds its own: a name that resolves to nobody opens the card
+                // unowned rather than stamping a phantom owner the board would
+                // then render and no dispatch could ever reach.
+                let owner = assignee
+                    .as_deref()
+                    .map(|name| assignee::resolve(self.record, name))
+                    .and_then(|resolved| resolved.canonical().map(str::to_string))
+                    .unwrap_or_default();
                 let card = TaskRecord {
                     id: generate_id(),
                     title: crate::ports::tasks::TaskTitle::system(&title),
@@ -3149,7 +3158,7 @@ impl<'a> DelegationRunner<'a> {
                     origin_message_seq: None,
                     column: COLUMN_TODO.to_string(),
                     priority: "medium".to_string(),
-                    assignee: assignee.unwrap_or_default(),
+                    assignee: owner,
                     updated_at_millis: now_millis(),
                     // Issue #151 §3.2: remember which conversation asked for this,
                     // so the completion can answer there instead of only landing in
