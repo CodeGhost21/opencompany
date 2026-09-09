@@ -10244,6 +10244,260 @@ mod tests {
         );
     }
 
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every `ApprovalExtended` line and passes everything else through to an
+    /// in-memory backend.
+    struct RefusingExtendStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingExtendStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if line.contains("ApprovalExtended") {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "RefusingExtendStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// `extend_approval` moves the gate's live deadline **before**
+    /// it journals the extension. When the journal append then fails, the
+    /// caller sees the error, but the live view already reflects the later
+    /// deadline — and nothing durable backs that, so a restart from the same
+    /// journal comes back believing the approval was never extended at all.
+    /// This pins that sequence exactly, as the real, current consequence: a
+    /// caller told the extend failed still sees the live queue disagree with
+    /// it until the next restart quietly settles the disagreement in the
+    /// caller's favor.
+    #[tokio::test]
+    async fn a_failed_extend_append_leaves_a_live_extension_that_reverts_on_restart() {
+        use crate::ports::types::{Actor, ActorKind};
+
+        let manifest: crate::company::types::CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"supervised\"\n")
+                .expect("manifest");
+        let store = std::sync::Arc::new(RefusingExtendStore {
+            inner: crate::ports::journal::MemoryJournalStore::default(),
+        });
+        let home_dir = tempfile::tempdir().expect("tempdir");
+
+        let rt1 =
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
+                .with_journal_store(store.clone())
+                .build()
+                .await
+                .expect("runtime");
+        let id = seed_parked(&rt1, "appr-extend-fail", 1_000).await;
+        let ttl = rt1.approval_gate.ttl_millis();
+        let original_deadline = 1_000 + ttl;
+
+        let extend = rt1
+            .extend_approval(
+                &id,
+                Actor {
+                    kind: ActorKind::User,
+                    id: "operator".into(),
+                },
+            )
+            .await;
+        assert!(extend.is_err(), "the forced append failure must surface");
+        assert!(
+            rt1.pending_approvals()[0].expires_at_millis.unwrap() > original_deadline,
+            "the live gate already moved the deadline even though nothing durable recorded it"
+        );
+        drop(rt1);
+
+        let rt2 = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_journal_store(store)
+            .build()
+            .await
+            .expect("runtime");
+        let replayed = rt2.pending_approvals();
+        assert_eq!(replayed.len(), 1, "the approval is still parked");
+        assert_eq!(
+            replayed[0].expires_at_millis,
+            Some(original_deadline),
+            "the extension a caller was told failed must not silently revert on restart"
+        );
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every `ApprovalExpired` line and passes everything else through.
+    struct RefusingExpiredStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingExpiredStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if line.contains("ApprovalExpired") {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "RefusingExpiredStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// `sweep_expired_capped` removes every id in the batch from the
+    /// live `parked` map up front, stashing each one's effect in
+    /// `expired_effects` for [`CompanyRuntime::retire_approval`] to collect.
+    /// `sweep_expired_approvals` then walks that batch and returns on the
+    /// **first** `retire_approval` failure (`?`), so a durable-write failure
+    /// partway through strands every id after it: already gone from `parked`,
+    /// still sitting in `expired_effects`, and never revisited because the
+    /// next sweep's scan is over `parked`, which no longer names them.
+    #[tokio::test]
+    async fn a_failed_retirement_mid_batch_strands_the_rest_of_the_batch() {
+        use crate::ports::types::{Actor, ActorKind, Verdict};
+
+        let manifest: crate::company::types::CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"supervised\"\n")
+                .expect("manifest");
+        let store = std::sync::Arc::new(RefusingExpiredStore {
+            inner: crate::ports::journal::MemoryJournalStore::default(),
+        });
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let rt = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+                .with_journal_store(store)
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let ttl = rt.approval_gate.ttl_millis();
+        let long_expired = crate::ports::now_millis().saturating_sub(ttl + 60_000);
+        // Alphabetical order matches park-time order here, so the cap sorts
+        // "appr-a" first — the one whose retirement is attempted (and fails)
+        // — and "appr-b" is the untouched survivor stranded behind it.
+        seed_parked(&rt, "appr-a", long_expired).await;
+        seed_parked(&rt, "appr-b", long_expired).await;
+        assert_eq!(
+            rt.pending_approvals().len(),
+            2,
+            "both are parked and expired"
+        );
+
+        let swept = rt.sweep_expired_approvals().await;
+        assert!(
+            swept.is_err(),
+            "the forced ApprovalExpired failure must surface"
+        );
+
+        // `record_expired` moves its in-memory `parked` entry out **before**
+        // journaling the expiry — the same optimistic-then-persist order
+        // The extend case pins the same shape — so "appr-a"'s failed attempt still drops
+        // it from the journal's own pending view in-memory, with nothing
+        // durable behind that removal. Only "appr-b", whose retirement was
+        // never even attempted, is left on the console's pending list.
+        let pending = rt.pending_approvals();
+        assert_eq!(
+            pending.len(),
+            1,
+            "only the untried survivor is left on the console's pending list: {pending:?}"
+        );
+        assert_eq!(
+            pending[0].id,
+            crate::ports::types::ApprovalId::new("appr-b")
+        );
+
+        // The gate's own live `parked` map already dropped both — that is
+        // what `sweep_expired_capped` did before the failing retirement ever
+        // ran — so a decision on the survivor is not a decision on anything:
+        // it comes back as a safe no-op, never as the operator's verdict.
+        let (receipt, _handle) = rt
+            .resolve_approval_spawned(
+                &crate::ports::types::ApprovalId::new("appr-b"),
+                Verdict::Approve,
+                Actor {
+                    kind: ActorKind::User,
+                    id: "operator".into(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("a losing resolve is a receipt, not an error");
+        assert!(
+            matches!(
+                receipt,
+                crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+            ),
+            "the survivor is gone from the gate's live map, so even the operator's own \
+             decision on it silently no-ops instead of settling it: {receipt:?}"
+        );
+
+        // A later sweep never even reaches the still-refusing store: its scan
+        // is over `parked`, which no longer names either id, so it succeeds
+        // trivially with nothing to report — the stranded survivor is retired
+        // by nothing and never seen again, while the console goes on listing it.
+        let second_sweep = rt
+            .sweep_expired_approvals()
+            .await
+            .expect("nothing left in `parked` to retire");
+        assert!(
+            second_sweep.is_empty(),
+            "the stranded survivor is never retried by a later sweep: {second_sweep:?}"
+        );
+    }
+
     #[tokio::test]
     async fn an_unresolvable_thread_root_degrades_to_the_channel() {
         use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq};

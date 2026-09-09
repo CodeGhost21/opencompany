@@ -1241,6 +1241,49 @@ mod tests {
         assert!(!full.require_approval_for_medium_risk);
     }
 
+    /// `workspace_only` is a field on the policy this module builds, but the
+    /// enforcement lives in the vendored `SecurityPolicy::validate_path`. This
+    /// drives the real vendored check, not a stub, so a traversal or symlink
+    /// escape is actually refused rather than merely configured.
+    #[tokio::test]
+    async fn exec_security_refuses_a_traversal_and_a_symlink_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::write(workspace.join("inside.txt"), b"ok").expect("seed file");
+
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("secret.txt"), b"nope").expect("seed secret");
+
+        let policy = exec_security(&workspace, PolicyMode::Full);
+
+        let traversal = policy.validate_path("../outside/secret.txt").await;
+        assert!(
+            traversal.is_err(),
+            "a `..` component must be refused before any resolve: {traversal:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            let link = workspace.join("escape-link");
+            std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+            let via_symlink = policy.validate_path("escape-link/secret.txt").await;
+            assert!(
+                via_symlink.is_err(),
+                "a symlink resolving outside the workspace must be refused: {via_symlink:?}"
+            );
+        }
+
+        // Sanity: a real file inside the workspace is still reachable, so the
+        // refusals above are workspace_only doing its job, not a broken policy.
+        let inside = policy.validate_path("inside.txt").await;
+        assert!(
+            inside.is_ok(),
+            "a file inside the workspace must resolve: {inside:?}"
+        );
+    }
+
     /// `auto` must not loosen shell execution (issue #560).
     ///
     /// This is the test for the decision argued on [`autonomy_for`], and it
@@ -1398,7 +1441,7 @@ mod tests {
     /// so under `Readonly`, where the autonomy tier alone already blocks
     /// everything — so none of them isolates this flag.
     ///
-    /// Finding CONF-002: it turns out this flag has **no effect at all** on
+    /// it turns out this flag has **no effect at all** on
     /// `ShellTool::execute`. The flag is only read by the vendored
     /// `SecurityPolicy::validate_command_execution` — but `ShellTool`'s real
     /// runtime path (`run_with_security_in_context`) calls
@@ -1418,7 +1461,7 @@ mod tests {
     /// first (a bug in that layer, a future direct call site) has no
     /// OpenHuman-level backstop at all.
     #[tokio::test]
-    #[ignore = "finding CONF-002: block_high_risk_commands has no effect on ShellTool::execute — the real path (check_gated_command) never calls validate_command_execution, so a destructive command runs under Full even with the flag set"]
+    #[ignore = "block_high_risk_commands has no effect on ShellTool::execute — the real path (check_gated_command) never calls validate_command_execution, so a destructive command runs under Full even with the flag set"]
     async fn block_high_risk_commands_refuses_a_destructive_command_even_under_full_autonomy() {
         let ws = std::env::temp_dir();
         let full = test_security(&ws, PolicyMode::Full);
