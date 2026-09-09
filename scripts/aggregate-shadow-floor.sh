@@ -19,11 +19,16 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
+# Match either half of the line the reader emits: the message prefix
+# `[policy:shadow-floor]`, or the tracing target `policy::shadow_floor` that
+# `DEFAULT_LOG_FILTER` names. A real line carries both, but which one a
+# formatter prints is the formatter's choice, and this measurement must not
+# silently find nothing because someone switched to a JSON subscriber.
 input=$(cat "$@")
-lines=$(grep -F '[policy:shadow-floor]' <<<"$input" || true)
+lines=$(grep -E 'policy:shadow-floor|policy::shadow_floor' <<<"$input" || true)
 
 if [[ -z "$lines" ]]; then
-    echo "No [policy:shadow-floor] lines found." >&2
+    echo "No shadow-floor lines found (looked for policy:shadow-floor and policy::shadow_floor)." >&2
     echo >&2
     echo "Before concluding the floor would fire rarely, check the build actually carries" >&2
     echo "the reader and that the log filter passes it: DEFAULT_LOG_FILTER must name" >&2
