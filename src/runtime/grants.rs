@@ -2498,6 +2498,28 @@ mod test {
         );
     }
 
+    /// `GET {scope}/grants` renders every entry `standing()`
+    /// returns with no pagination and no cap of its own — unlike, say, the
+    /// approval sweep's `MAX_RETIREMENTS_PER_TICK`. This pins that a large
+    /// standing-grant set comes back whole rather than a bounded page of it.
+    #[test]
+    fn standing_returns_every_live_grant_with_no_cap() {
+        let set = GrantSet::default();
+        for i in 0..500 {
+            set.grant_standing(standing(
+                &format!("g{i}"),
+                "ops",
+                &format!("tool-{i}"),
+                10_000,
+            ));
+        }
+        assert_eq!(
+            set.standing().len(),
+            500,
+            "every standing grant is returned; nothing pages or truncates the list"
+        );
+    }
+
     /// A single-use grant must burn even when a standing grant would also have
     /// admitted the call.
     ///
@@ -2977,9 +2999,9 @@ mod test {
     /// consumption. A fresh boot's `rehydrate`, seeing only the journal's
     /// `ApprovalGranted` line and no `GrantConsumed` to fold it back out,
     /// re-arms a grant that was already spent — the boot-time surfacing of
-    /// the window TOOL-005 names for the in-process case.
+    /// the window names for the in-process case.
     #[test]
-    #[ignore = "finding GRANT-004: a grant consumed but not yet journal-drained before a restart rehydrates as live again, because GrantConsumed is only written at the cycle drain"]
+    #[ignore = "a grant consumed but not yet journal-drained before a restart rehydrates as live again, because GrantConsumed is only written at the cycle drain"]
     fn a_grant_consumed_before_its_journal_drain_does_not_survive_a_restart() {
         let args = serde_json::json!({ "to": "a@b.test" });
         let before_crash = GrantSet::default();
@@ -3033,7 +3055,7 @@ mod test {
     /// a line whose `expires_at_millis` is far past that ceiling with no
     /// re-check.
     #[test]
-    #[ignore = "finding GRANT-006: rehydrate_standing accepts a journal line whose expiry exceeds the 7-day ceiling verbatim, with no re-check against MAX_STANDING_GRANT_MILLIS"]
+    #[ignore = "rehydrate_standing accepts a journal line whose expiry exceeds the 7-day ceiling verbatim, with no re-check against MAX_STANDING_GRANT_MILLIS"]
     fn rehydrate_standing_refuses_a_line_past_the_seven_day_ceiling() {
         let set = GrantSet::default();
         let far_future_expiry = 1_000 + MAX_STANDING_GRANT_MILLIS * 10;
