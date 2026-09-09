@@ -497,6 +497,56 @@ async fn applying_an_engine_persists_it_to_config_toml() {
     assert_eq!(body["layer"], "config.toml");
 }
 
+/// The engine is a property of the host, so changing it needs authority over
+/// the host.
+///
+/// A company admin holds authority over one company. On a host running more
+/// than one, this route would let that admin repoint the engine every other
+/// company on the box reads from, and rebuild all of them. The single-company
+/// case stays open, because there the two authorities are the same authority
+/// and a self-hosted deployment has no platform credential to present.
+#[tokio::test]
+async fn a_company_admin_may_not_repoint_the_engine_a_second_company_also_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = EnvVarGuard::capture(&MEMORY_ENV);
+    guard.remove("OPENCOMPANY_MEMORY");
+    guard.set("OPENCOMPANY_DATA_DIR", dir.path().to_str().unwrap());
+    let state = state_at(dir.path()).await;
+
+    let (status, body) = call(
+        &state,
+        "PUT",
+        "/api/v1/company/memory/engine",
+        Some(json!({ "engine": "store" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "one company on the host: {body}");
+
+    let second: CompanyManifest =
+        toml::from_str("[company]\nname = \"Beta\"\n[policy]\nmode = \"full\"\n").unwrap();
+    let beta = CompanyId::new("beta");
+    let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), second)
+        .with_id(beta.clone())
+        .build()
+        .await
+        .unwrap();
+    state.registry().insert(beta, Arc::new(runtime));
+
+    let (status, body) = call(
+        &state,
+        "PUT",
+        "/api/v1/companies/acme/memory/engine",
+        Some(json!({ "engine": "store" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "two companies on the host: {body}"
+    );
+    assert_eq!(body["code"], "forbidden", "{body}");
+}
+
 /// An engine id nothing in the catalog carries is a bad request, and the
 /// message lists what may be picked instead.
 #[tokio::test]
