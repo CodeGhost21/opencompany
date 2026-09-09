@@ -286,6 +286,10 @@ pub struct PeerConsult<'a> {
     pub turn: &'a dyn RunTurn,
     pub record: &'a CompanyRecord,
     pub exclude_agent: &'a str,
+    /// The workflow this recovery rung belongs to (issue #2150), so the
+    /// peer's turn can be scoped with the same `RunOrigin::Dispatched`
+    /// trust a workflow agent node's own turn carries.
+    pub workflow_id: &'a str,
 }
 
 /// How the one peer consultation ended, so `ask_around` can log each outcome
@@ -376,9 +380,24 @@ async fn consult_peer(
         return PeerOutcome::NoRoleMatched;
     };
     let ask = peer_prompt(question);
+    // Issue #2150: the peer's turn is dispatched by this recovery rung, not
+    // asked by an operator — the same trust a workflow agent node's own turn
+    // carries, named for the peer actually chosen rather than the node that
+    // raised the question.
+    let origin = crate::harness::built_in::run_origin::claim(
+        crate::harness::built_in::run_origin::RunOrigin::Dispatched {
+            agent: peer.id.clone(),
+            source: crate::harness::built_in::run_origin::DispatchSource::Workflow {
+                workflow_id: consult.workflow_id.to_string(),
+            },
+            scope: None,
+        },
+    );
     match tokio::time::timeout(
         PEER_TIMEOUT,
-        consult.turn.run_background(company, &peer.id, &ask, None),
+        origin.scoped(Box::pin(
+            consult.turn.run_background(company, &peer.id, &ask, None),
+        )),
     )
     .await
     {
@@ -1224,6 +1243,7 @@ role = "Renewal Team"
                 turn: stub,
                 record,
                 exclude_agent: "researcher",
+                workflow_id: "wf",
             }),
         )
         .await
@@ -1392,6 +1412,7 @@ role = "Renewal Team"
                 turn: &stub,
                 record: &record,
                 exclude_agent: "researcher",
+                workflow_id: "wf",
             }),
         )
         .await;
@@ -1439,6 +1460,7 @@ role = "Renewal Team"
                 turn: &stub,
                 record: &record,
                 exclude_agent: "researcher",
+                workflow_id: "wf",
             }),
         )
         .await;
