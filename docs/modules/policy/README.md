@@ -70,6 +70,15 @@ decide, in this order, and all of them sit **above** the
 | Paid media | `RequireApproval` — these tools stage their own card |
 | Explicit `request_approval` | `RequireApproval` — the agent asked |
 
+The emergency-stop row is enforced directly inside `ApprovalPolicy::check`
+itself, not delegated to the gate: a harness tool call never reaches
+`ManifestApprovalGate::evaluate`/`park`, so `check` re-reads the same
+`AtomicBool` (via `emergency_gate`) before it can return any of the `Allow`s
+below it. `evaluate`/`park` enforce the identical veto on their own path — an
+effect that does reach the durable approval queue — so the effect gate and the
+harness call policy agree independently rather than one delegating to the
+other; see [Emergency stop](#emergency-stop) below for that path.
+
 Below the bypass sit the tier dispatch, `always_approve`, the daily cap and
 `crate::policy::judge`. Those are the arms #1925 turned off: an arm added there
 today compiles, tests green, and never runs in production. Enforcement has to
