@@ -92,11 +92,246 @@ use oh::security::{
     AuditLogger, AutonomyLevel, SecurityPolicy, get_or_create_workspace_audit_logger,
 };
 use oh::tools::{
-    ApplyPatchTool, CsvExportTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool,
-    ShellTool, Tool, WebFetchTool, WorkspaceStateTool,
+    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, Tool,
+    WebFetchTool, WorkspaceStateTool,
 };
 
 use crate::harness::policy::PolicyMode;
+
+use oh::tools::traits::{
+    PermissionLevel, ToolCallOptions, ToolCategory, ToolResult, ToolRunContext, ToolScope,
+    ToolSpec, ToolTimeout,
+};
+
+trait ToolGuard: Send + Sync {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult>;
+}
+
+struct GuardedTool<T, G> {
+    inner: T,
+    guard: G,
+}
+
+#[async_trait::async_trait]
+impl<T: Tool, G: ToolGuard> Tool for GuardedTool<T, G> {
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner.execute(args).await
+    }
+
+    async fn execute_with_options(
+        &self,
+        args: serde_json::Value,
+        options: ToolCallOptions,
+    ) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner.execute_with_options(args, options).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        options: ToolCallOptions,
+        context: Option<&dyn ToolRunContext>,
+    ) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner
+            .execute_with_context(args, options, context)
+            .await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+    fn supports_markdown(&self) -> bool {
+        self.inner.supports_markdown()
+    }
+    fn permission_level(&self) -> PermissionLevel {
+        self.inner.permission_level()
+    }
+    fn permission_level_with_args(&self, args: &serde_json::Value) -> PermissionLevel {
+        self.inner.permission_level_with_args(args)
+    }
+    fn scope(&self) -> ToolScope {
+        self.inner.scope()
+    }
+    fn category(&self) -> ToolCategory {
+        self.inner.category()
+    }
+    fn is_concurrency_safe(&self, args: &serde_json::Value) -> bool {
+        self.inner.is_concurrency_safe(args)
+    }
+    fn external_effect(&self) -> bool {
+        self.inner.external_effect()
+    }
+    fn external_effect_with_args(&self, args: &serde_json::Value) -> bool {
+        self.inner.external_effect_with_args(args)
+    }
+    fn host_extension(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        self.inner.host_extension()
+    }
+    fn host_call_extension(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.inner.host_call_extension(args)
+    }
+    fn max_result_size_chars(&self) -> Option<usize> {
+        self.inner.max_result_size_chars()
+    }
+    fn timeout_policy(&self, args: &serde_json::Value) -> ToolTimeout {
+        self.inner.timeout_policy(args)
+    }
+    fn display_label(&self, args: &serde_json::Value) -> Option<String> {
+        self.inner.display_label(args)
+    }
+    fn display_detail(&self, args: &serde_json::Value) -> Option<String> {
+        self.inner.display_detail(args)
+    }
+}
+
+/// Each export admits at most 100,000 rows, 16 MiB of JSON and 8 MiB of CSV.
+struct CsvLimits;
+
+const MAX_CSV_ROWS: usize = 100_000;
+const MAX_CSV_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
+
+type CsvExportTool = GuardedTool<oh::tools::CsvExportTool, CsvLimits>;
+
+impl CsvExportTool {
+    fn new(security: Arc<SecurityPolicy>) -> Self {
+        Self {
+            inner: oh::tools::CsvExportTool::new(security),
+            guard: CsvLimits,
+        }
+    }
+}
+
+fn csv_cell_bytes(cell: &str) -> usize {
+    let quoted = cell.contains([',', '"', '\n', '\r']);
+    cell.len()
+        + if quoted {
+            2 + cell.bytes().filter(|&b| b == b'"').count()
+        } else {
+            0
+        }
+}
+
+impl ToolGuard for CsvLimits {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
+        let data = args.get("data")?.as_str()?;
+        if data.len() > MAX_CSV_INPUT_BYTES {
+            return Some(ToolResult::error(format!(
+                "CSV input exceeds {MAX_CSV_INPUT_BYTES} bytes"
+            )));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
+        let rows = parsed.as_array()?;
+        if rows.len() > MAX_CSV_ROWS {
+            return Some(ToolResult::error(format!(
+                "CSV export exceeds {MAX_CSV_ROWS} rows"
+            )));
+        }
+        let columns: Vec<&str> = match args.get("columns").and_then(serde_json::Value::as_array) {
+            Some(columns) => columns
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect(),
+            None => rows
+                .first()
+                .and_then(serde_json::Value::as_object)
+                .map(|object| object.keys().map(String::as_str).collect())
+                .unwrap_or_default(),
+        };
+        let mut bytes = columns.len().max(1);
+        for column in &columns {
+            bytes = bytes.saturating_add(csv_cell_bytes(column));
+        }
+        for row in rows {
+            bytes = bytes.saturating_add(columns.len().max(1));
+            for column in &columns {
+                let cell = match row.get(column) {
+                    None | Some(serde_json::Value::Null) => std::borrow::Cow::Borrowed(""),
+                    Some(serde_json::Value::String(value)) => {
+                        std::borrow::Cow::Borrowed(value.as_str())
+                    }
+                    Some(value) => std::borrow::Cow::Owned(value.to_string()),
+                };
+                bytes = bytes.saturating_add(csv_cell_bytes(&cell));
+                if bytes > MAX_CSV_BYTES {
+                    return Some(ToolResult::error(format!(
+                        "CSV export exceeds {MAX_CSV_BYTES} bytes"
+                    )));
+                }
+            }
+        }
+        if bytes > MAX_CSV_BYTES {
+            return Some(ToolResult::error(format!(
+                "CSV export exceeds {MAX_CSV_BYTES} bytes"
+            )));
+        }
+        None
+    }
+}
+
+/// The high-risk flag blocks execution independently of the autonomy tier.
+struct HighRiskCommands(Arc<SecurityPolicy>);
+
+type ShellTool = GuardedTool<oh::tools::ShellTool, HighRiskCommands>;
+
+impl ShellTool {
+    fn new(
+        security: Arc<SecurityPolicy>,
+        runtime: Arc<dyn RuntimeAdapter>,
+        audit: Arc<AuditLogger>,
+    ) -> Self {
+        Self {
+            inner: oh::tools::ShellTool::new(Arc::clone(&security), runtime, audit),
+            guard: HighRiskCommands(security),
+        }
+    }
+
+    fn with_audit(
+        self,
+        audit: ShellAudit,
+    ) -> GuardedTool<crate::harness::audit::AuditedShellTool, HighRiskCommands> {
+        GuardedTool {
+            inner: crate::harness::audit::AuditedShellTool::new(self.inner, audit),
+            guard: self.guard,
+        }
+    }
+}
+
+impl ToolGuard for HighRiskCommands {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
+        let command = args.get("command")?.as_str()?;
+        if !self.0.block_high_risk_commands
+            || self.0.command_risk_level(command) != oh::security::policy::CommandRiskLevel::High
+            || self.0.check_gated_command(command).is_err()
+        {
+            return None;
+        }
+        Some(ToolResult::error(
+            "[policy-blocked] Command blocked: high-risk commands are disallowed by policy",
+        ))
+    }
+}
 
 /// Subdirectory under the agent workspace that `curl` downloads land in.
 const CURL_DEST_SUBDIR: &str = "downloads";
@@ -408,10 +643,7 @@ pub fn shell_tools(
         return Vec::new();
     };
     vec![
-        Box::new(crate::harness::audit::AuditedShellTool::new(
-            ShellTool::new(security, runtime, Arc::clone(&audit.logger)),
-            audit,
-        )),
+        Box::new(ShellTool::new(security, runtime, Arc::clone(&audit.logger)).with_audit(audit)),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
     ]
 }
@@ -1436,32 +1668,8 @@ mod tests {
         );
     }
 
-    /// `block_high_risk_commands` is set unconditionally in `exec_security`,
-    /// but every existing test proving a destructive command is refused does
-    /// so under `Readonly`, where the autonomy tier alone already blocks
-    /// everything — so none of them isolates this flag.
-    ///
-    /// it turns out this flag has **no effect at all** on
-    /// `ShellTool::execute`. The flag is only read by the vendored
-    /// `SecurityPolicy::validate_command_execution` — but `ShellTool`'s real
-    /// runtime path (`run_with_security_in_context`) calls
-    /// `check_gated_command` instead, which never calls
-    /// `validate_command_execution`/`is_command_allowed` at all (this is
-    /// already documented at `src/policy/consequence.rs:1658`, for a
-    /// different boundary). `check_gated_command` only consults
-    /// `gate_decision`, and under `Full`, `Destructive` maps to `Prompt`, not
-    /// `Block` — so a raw `execute()` call runs the command.
-    ///
-    /// In production this is caught upstream by opencompany's own
-    /// `ApprovalPolicy`/consequence classifier, which is the actual gate on
-    /// this call — but that means `block_high_risk_commands` is not the
-    /// "last independent brake below our policy" its name and the module
-    /// docs claim it is; it is dead configuration. Anything that reaches a
-    /// wired `ShellTool` without going through opencompany's own policy layer
-    /// first (a bug in that layer, a future direct call site) has no
-    /// OpenHuman-level backstop at all.
+    /// High-risk commands are refused independently of the autonomy tier.
     #[tokio::test]
-    #[ignore = "block_high_risk_commands has no effect on ShellTool::execute — the real path (check_gated_command) never calls validate_command_execution, so a destructive command runs under Full even with the flag set"]
     async fn block_high_risk_commands_refuses_a_destructive_command_even_under_full_autonomy() {
         let ws = std::env::temp_dir();
         let full = test_security(&ws, PolicyMode::Full);
@@ -1476,6 +1684,84 @@ mod tests {
              autonomy, independent of the autonomy-tier gate: {}",
             result.output()
         );
+    }
+
+    #[tokio::test]
+    async fn shell_factory_blocks_high_risk_commands_on_every_execution_path() {
+        let ws = tempfile::Builder::new()
+            .prefix("oc-shell-guard-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let target = ws.path().join("protected");
+        std::fs::create_dir(&target).unwrap();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Full),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws.path(),
+        );
+        let tool = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        let args = json!({ "command": format!("rm -rf {}", target.display()) });
+        for result in [
+            tool.execute(args.clone()).await.unwrap(),
+            tool.execute_with_options(args.clone(), ToolCallOptions::default())
+                .await
+                .unwrap(),
+            tool.execute_with_context(args, ToolCallOptions::default(), None)
+                .await
+                .unwrap(),
+        ] {
+            assert!(result.is_error, "{}", result.output());
+            assert!(result.output().contains("high-risk"), "{}", result.output());
+        }
+        assert!(target.is_dir());
+        let result = tool
+            .execute(json!({ "command": "printf safe-command" }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output());
+        assert!(result.output().contains("safe-command"));
+        assert_eq!(tool.permission_level(), PermissionLevel::Execute);
+        assert_eq!(tool.max_result_size_chars(), Some(30_000));
+        assert_eq!(
+            tool.timeout_policy(&json!({ "timeout_secs": 17 })),
+            ToolTimeout::Secs(17)
+        );
+
+        let audit_dir = tempfile::tempdir().unwrap();
+        let audit = shell_audit(audit_dir.path()).unwrap();
+        let sink = audit.sink.clone();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Readonly),
+            native_runtime(),
+            Some(audit),
+            ws.path(),
+        );
+        let tool = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        let command = format!("rm -rf {}", target.display());
+        let result = tool.execute(json!({ "command": command })).await.unwrap();
+        assert!(result.is_error, "{}", result.output());
+        assert!(result.output().contains("read-only"), "{}", result.output());
+        assert!(std::fs::read_to_string(sink).unwrap().contains(&command));
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn high_risk_guard_respects_the_flag_without_blocking_ordinary_commands() {
+        let ws = tempfile::tempdir().unwrap();
+        let enabled = HighRiskCommands(test_security(ws.path(), PolicyMode::Full));
+        for command in [
+            "printf safe",
+            "touch note.txt",
+            "curl https://example.invalid",
+        ] {
+            assert!(enabled.refusal(&json!({ "command": command })).is_none());
+        }
+        assert!(enabled.refusal(&json!({ "command": "sudo id" })).is_some());
+        let mut security = exec_security(ws.path(), PolicyMode::Full);
+        security.block_high_risk_commands = false;
+        let disabled = HighRiskCommands(Arc::new(security));
+        assert!(disabled.refusal(&json!({ "command": "sudo id" })).is_none());
     }
 
     /// `ShellTool`'s own schema tells the model that an
@@ -1910,12 +2196,8 @@ mod tests {
         );
     }
 
-    /// `csv_export` writes into the agent's own workspace with no row or byte
-    /// ceiling of its own, so the size of the file is whatever the model put in
-    /// the `data` argument. A tenant workspace is shared disk; an export the
-    /// agent can make arbitrarily large is a fail-open path to filling it.
+    /// Exports above the row ceiling are refused before any workspace write.
     #[tokio::test]
-    #[ignore = "confirms fail-open: csv_export enforces no row or byte ceiling"]
     async fn csv_export_refuses_an_unbounded_row_count() {
         let ws_dir = tempfile::Builder::new()
             .prefix("oc-toolbelt-csvcap-")
@@ -1941,6 +2223,64 @@ mod tests {
             rows.len(),
             result.output()
         );
+    }
+
+    #[tokio::test]
+    async fn csv_factory_caps_rendered_bytes_on_every_execution_path() {
+        let ws = tempfile::tempdir().unwrap();
+        let tools = code_tools(test_security(ws.path(), PolicyMode::Full), ws.path());
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name() == "csv_export")
+            .unwrap();
+        let args = json!({
+            "data": serde_json::to_string(&json!([{ "value": "x".repeat(MAX_CSV_BYTES / 2) }])).unwrap(),
+            "columns": ["value", "value"],
+            "filename": "oversized.csv"
+        });
+        for result in [
+            tool.execute(args.clone()).await.unwrap(),
+            tool.execute_with_options(args.clone(), ToolCallOptions::default())
+                .await
+                .unwrap(),
+            tool.execute_with_context(args, ToolCallOptions::default(), None)
+                .await
+                .unwrap(),
+        ] {
+            assert!(result.is_error, "{}", result.output());
+            assert!(result.output().contains("bytes"), "{}", result.output());
+        }
+        assert!(!ws.path().join("exports").exists());
+
+        let result = tool
+            .execute(json!({
+                "data": r#"[{"value":"comma, quote\" and newline\n"}]"#,
+                "filename": "small.csv"
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output());
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("exports/small.csv")).unwrap(),
+            "value\n\"comma, quote\"\" and newline\n\"\n"
+        );
+    }
+
+    #[test]
+    fn csv_limits_admit_the_exact_row_and_byte_boundaries() {
+        let row_args =
+            |count| json!({ "data": serde_json::to_string(&vec![json!({}); count]).unwrap() });
+        assert!(CsvLimits.refusal(&row_args(MAX_CSV_ROWS)).is_none());
+        assert!(CsvLimits.refusal(&row_args(MAX_CSV_ROWS + 1)).is_some());
+        let byte_args = |count| json!({ "data": serde_json::to_string(&json!([{ "x": "y".repeat(count) }])).unwrap() });
+        assert!(CsvLimits.refusal(&byte_args(MAX_CSV_BYTES - 3)).is_none());
+        assert!(CsvLimits.refusal(&byte_args(MAX_CSV_BYTES - 2)).is_some());
+        assert!(
+            CsvLimits
+                .refusal(&json!({ "data": " ".repeat(MAX_CSV_INPUT_BYTES + 1) }))
+                .is_some()
+        );
+        assert_eq!(csv_cell_bytes("a,\"\n\r"), 8);
     }
 
     /// The SSRF allowlist is a per-company setting, and `http_request` — the
