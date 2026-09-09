@@ -352,11 +352,40 @@ loopback rather than in a second VM.
 Three things landed differently from how this section anticipated them.
 
 **Sizing no longer waits.** Measured per engine: 120 MB steady and 152 MB peak
-against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`, and 176-192 MB
-for a whole guest with its workload. That puts roughly 60 concurrently-awake
-tenants on a 64 GB box — but **disk binds first**: parking writes a full,
-non-sparse 1 GiB memory image per tenant, so a run-and-parked tenant costs ~2 GB
-of disk against ~190 MB of RAM.
+against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`.
+
+`RESIDENT_MAX` caps resident vectors, it does not allocate them. Filled it would
+hold `20_000 x 1536 x 4 bytes` = 123 MB — more than the whole engine measured,
+which is the tell that a 100 MB corpus does not fill it. Memory scales with
+*resident* vectors up to the cap and then stops: size a large corpus on the cap,
+a small one on the measurement.
+
+**A wake costs five times a boot.** Per-tenant cgroup peaks, one tenant, one
+afternoon: cold boot (`--config-file`) 201.7 MB and 205.6 MB; wake from snapshot
+(`PUT /snapshot/load`) 1.0 GB and 1.2 GB. A boot allocates only what the guest
+touches; a restore faults in the whole saved address space, because that is what
+a snapshot is. So ~200 MB is a floor seen once, on a first boot, and any fleet
+that parks and wakes costs the ceiling. Restored pages are file-backed by
+`vm.mem` and land in page cache, so the host reports them under `buff/cache`
+rather than `used` and can reclaim the clean ones — survivable, not free.
+
+**Two limits, governing different things.** RAM bounds how many tenants can be
+awake at once. Size that on the **measured peak, not the guest ceiling**: the
+1024 MiB ceiling caps what the guest can address, but the host-side cgroup peak
+during a snapshot wake reached 1.2 GB, because the restore also charges the
+VMM's own mapping of `vm.mem`. At that peak `(63.9 GB - ~1.8 GB host) / 1.2 GB`
+is roughly **50**, and dividing by 1 GiB instead would recommend ~60 — enough to
+overcommit the box precisely during a wave of wakes.
+
+Disk bounds how many can exist: a parked tenant costs **~1.13 GB** — `vm.mem` is 1.1 GB and
+genuinely not sparse, while `data.ext4` is 1.0 GB apparent but **30 MB
+allocated** — so 828 GB of free space holds roughly **730**. A box therefore
+carries ~730 companies of which ~50 can be awake simultaneously.
+
+**Corrects an earlier revision of this section**, which said disk binds before
+RAM and put a parked tenant at ~2 GB. That read apparent size and missed that
+`data.ext4` is sparse; the two limits bound different quantities rather than one
+preceding the other.
 
 **The manager holds no provider credential at all.** This section assumed the
 control plane would inject a fleet key. It does not: it asks the platform
