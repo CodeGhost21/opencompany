@@ -809,9 +809,12 @@ pub fn resolve(
         "api_url",
         "TINYHUMANS_API_URL",
         deployment,
-        env.get("TINYHUMANS_API_URL"),
-        config_toml.and_then(|c| c.api_url.clone()),
-        DEFAULT_API_URL.to_string(),
+        HostedDefault::Refuse,
+        BaseUrlSources {
+            env: env.get("TINYHUMANS_API_URL"),
+            toml: config_toml.and_then(|c| c.api_url.clone()),
+            default: DEFAULT_API_URL.to_string(),
+        },
     )?;
 
     let tinyplace_api_url = resolve_base_url(
@@ -819,9 +822,16 @@ pub fn resolve(
         "tinyplace_api_url",
         "TINYPLACE_API_URL",
         deployment,
-        env.get("TINYPLACE_API_URL"),
-        config_toml.and_then(|c| c.tinyplace_api_url.clone()),
-        DEFAULT_TINYPLACE_API_URL.to_string(),
+        // Opt-in: `maybe_build_economy` returns before reading this unless the
+        // manifest sets `place.discoverable` AND names a handle, and takes the
+        // same default this does when it gets `None`. Refusing here stopped
+        // every tenant over a value almost none of them reach.
+        HostedDefault::Allow,
+        BaseUrlSources {
+            env: env.get("TINYPLACE_API_URL"),
+            toml: config_toml.and_then(|c| c.tinyplace_api_url.clone()),
+            default: DEFAULT_TINYPLACE_API_URL.to_string(),
+        },
     )?;
 
     // brain_mode: env <- config.toml <- manifest (always present) <- default.
@@ -997,6 +1007,20 @@ fn resolve_str(
     }
 }
 
+/// Whether a [`Deployment::HostedTenant`] must state a base URL rather than
+/// inherit the built-in default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HostedDefault {
+    /// Refuse to boot when nothing states it. For a backend the tenant talks
+    /// to unconditionally, a silent production default is a destination
+    /// nobody chose.
+    Refuse,
+    /// Fall back to the default like any other deployment. For a backend
+    /// reached only when the company opts in, where the consumer carries its
+    /// own fallback anyway.
+    Allow,
+}
+
 /// Resolves a base-URL field that names which real backend this process talks
 /// to (`api_url`, `tinyplace_api_url`).
 ///
@@ -1005,24 +1029,44 @@ fn resolve_str(
 /// default — the operator running either owns the choice, and the default
 /// (production) *is* that choice when they name nothing.
 ///
-/// For [`Deployment::HostedTenant`] the default is refused instead: a tenant
-/// container is handed its entire environment by the platform that
-/// provisions it, so nobody ever chose the destination that a silent default
-/// would apply. The caller gets a config error naming `var_name` rather than
-/// a container that boots and quietly talks to production.
+/// For [`Deployment::HostedTenant`] the default is refused when `hosted` is
+/// [`HostedDefault::Refuse`]: a tenant container is handed its entire
+/// environment by the platform that provisions it, so nobody ever chose the
+/// destination that a silent default would apply. The caller gets a config
+/// error naming `var_name` rather than a container that boots and quietly
+/// talks to production.
+///
+/// That argument holds only for a backend every tenant reaches. It does not
+/// hold for one gated behind an opt-in the tenant has not taken: refusing
+/// there stops a container over a URL it would never have built a client for.
+/// Such a field passes [`HostedDefault::Allow`] and keeps defaulting.
 ///
 /// An env or `config.toml` value that is empty (after trimming) counts as
 /// unset in both branches — a launcher that exported the variable with
 /// nothing in it has said nothing.
+/// Where a base URL may come from, in precedence order.
+struct BaseUrlSources {
+    /// The process environment.
+    env: Option<String>,
+    /// `config.toml`.
+    toml: Option<String>,
+    /// The built-in default, which for every field here is production.
+    default: String,
+}
+
 fn resolve_base_url(
     prov: &mut ConfigProvenance,
     field: &'static str,
     var_name: &str,
     deployment: Deployment,
-    env_val: Option<String>,
-    toml_val: Option<String>,
-    default_val: String,
+    hosted: HostedDefault,
+    sources: BaseUrlSources,
 ) -> Result<String> {
+    let BaseUrlSources {
+        env: env_val,
+        toml: toml_val,
+        default: default_val,
+    } = sources;
     if let Some(value) = env_val.filter(|v| !v.trim().is_empty()) {
         prov.set(field, ConfigLayer::Env);
         return Ok(value);
@@ -1031,7 +1075,7 @@ fn resolve_base_url(
         prov.set(field, ConfigLayer::ConfigToml);
         return Ok(value);
     }
-    if deployment == Deployment::HostedTenant {
+    if deployment == Deployment::HostedTenant && hosted == HostedDefault::Refuse {
         return Err(OpenCompanyError::Config(format!(
             "{var_name} is not set. This is a hosted-tenant deployment, which is handed its \
              whole environment by the platform that provisions it — so this refuses to boot \
@@ -1629,15 +1673,42 @@ mod test {
         assert!(message.contains("TINYHUMANS_API_URL"), "{message}");
     }
 
+    /// **The tiny.place hub is opt-in, so an unset URL is not a
+    /// misconfiguration.**
+    ///
+    /// `maybe_build_economy` returns `None` before reading this unless the
+    /// manifest sets `place.discoverable` and names a handle — `discoverable`
+    /// defaults to false and no shipped company turns it on — and on the path
+    /// that does read it, it takes this same default when handed `None`.
+    ///
+    /// Refusing here stopped every hosted tenant from booting over a URL it
+    /// would never have built a client for. `api_url` keeps its refusal: that
+    /// backend is reached unconditionally, so a silent production default
+    /// there is a destination nobody chose.
     #[test]
-    fn hosted_tenant_refuses_to_boot_with_no_tinyplace_api_url() {
-        // api_url set so the failure under test is unambiguously about
-        // tinyplace_api_url, not the sibling field checked above.
+    fn hosted_tenant_defaults_tinyplace_api_url_rather_than_refusing() {
+        // api_url set so the resolve under test turns on tinyplace_api_url
+        // alone, not the sibling field checked above.
         let env = hosted_tenant_env([("TINYHUMANS_API_URL", "https://api.tinyhumans.ai")]);
+        let (cfg, prov) = resolve(&env, None, &default_manifest())
+            .expect("an unset tiny.place URL is not a boot failure");
+        assert_eq!(cfg.tinyplace_api_url, DEFAULT_TINYPLACE_API_URL);
+        assert_eq!(
+            prov.layer("tinyplace_api_url"),
+            Some(ConfigLayer::Default),
+            "and it is recorded as the default it is"
+        );
+    }
+
+    /// The sibling still refuses, so this change narrowed the rule rather
+    /// than removing it.
+    #[test]
+    fn hosted_tenant_still_refuses_a_missing_api_url_with_tinyplace_set() {
+        let env = hosted_tenant_env([("TINYPLACE_API_URL", "https://staging-api.tiny.place")]);
         let err = resolve(&env, None, &default_manifest()).unwrap_err();
         assert_eq!(err.code(), "config_error");
         let message = err.to_string();
-        assert!(message.contains("TINYPLACE_API_URL"), "{message}");
+        assert!(message.contains("TINYHUMANS_API_URL"), "{message}");
     }
 
     #[test]
