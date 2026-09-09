@@ -92,7 +92,7 @@ use oh::security::{
     AuditLogger, AutonomyLevel, SecurityPolicy, get_or_create_workspace_audit_logger,
 };
 use oh::tools::{
-    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, ShellTool, Tool,
+    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, Tool,
     WebFetchTool, WorkspaceStateTool,
 };
 
@@ -287,6 +287,49 @@ impl ToolGuard for CsvLimits {
             )));
         }
         None
+    }
+}
+
+/// The high-risk flag blocks execution independently of the autonomy tier.
+struct HighRiskCommands(Arc<SecurityPolicy>);
+
+type ShellTool = GuardedTool<oh::tools::ShellTool, HighRiskCommands>;
+
+impl ShellTool {
+    fn new(
+        security: Arc<SecurityPolicy>,
+        runtime: Arc<dyn RuntimeAdapter>,
+        audit: Arc<AuditLogger>,
+    ) -> Self {
+        Self {
+            inner: oh::tools::ShellTool::new(Arc::clone(&security), runtime, audit),
+            guard: HighRiskCommands(security),
+        }
+    }
+
+    fn with_audit(
+        self,
+        audit: ShellAudit,
+    ) -> GuardedTool<crate::harness::audit::AuditedShellTool, HighRiskCommands> {
+        GuardedTool {
+            inner: crate::harness::audit::AuditedShellTool::new(self.inner, audit),
+            guard: self.guard,
+        }
+    }
+}
+
+impl ToolGuard for HighRiskCommands {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
+        let command = args.get("command")?.as_str()?;
+        if !self.0.block_high_risk_commands
+            || self.0.command_risk_level(command) != oh::security::policy::CommandRiskLevel::High
+            || self.0.check_gated_command(command).is_err()
+        {
+            return None;
+        }
+        Some(ToolResult::error(
+            "[policy-blocked] Command blocked: high-risk commands are disallowed by policy",
+        ))
     }
 }
 
@@ -600,10 +643,7 @@ pub fn shell_tools(
         return Vec::new();
     };
     vec![
-        Box::new(crate::harness::audit::AuditedShellTool::new(
-            ShellTool::new(security, runtime, Arc::clone(&audit.logger)),
-            audit,
-        )),
+        Box::new(ShellTool::new(security, runtime, Arc::clone(&audit.logger)).with_audit(audit)),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
     ]
 }
@@ -1628,32 +1668,8 @@ mod tests {
         );
     }
 
-    /// `block_high_risk_commands` is set unconditionally in `exec_security`,
-    /// but every existing test proving a destructive command is refused does
-    /// so under `Readonly`, where the autonomy tier alone already blocks
-    /// everything — so none of them isolates this flag.
-    ///
-    /// it turns out this flag has **no effect at all** on
-    /// `ShellTool::execute`. The flag is only read by the vendored
-    /// `SecurityPolicy::validate_command_execution` — but `ShellTool`'s real
-    /// runtime path (`run_with_security_in_context`) calls
-    /// `check_gated_command` instead, which never calls
-    /// `validate_command_execution`/`is_command_allowed` at all (this is
-    /// already documented at `src/policy/consequence.rs:1658`, for a
-    /// different boundary). `check_gated_command` only consults
-    /// `gate_decision`, and under `Full`, `Destructive` maps to `Prompt`, not
-    /// `Block` — so a raw `execute()` call runs the command.
-    ///
-    /// In production this is caught upstream by opencompany's own
-    /// `ApprovalPolicy`/consequence classifier, which is the actual gate on
-    /// this call — but that means `block_high_risk_commands` is not the
-    /// "last independent brake below our policy" its name and the module
-    /// docs claim it is; it is dead configuration. Anything that reaches a
-    /// wired `ShellTool` without going through opencompany's own policy layer
-    /// first (a bug in that layer, a future direct call site) has no
-    /// OpenHuman-level backstop at all.
+    /// High-risk commands are refused independently of the autonomy tier.
     #[tokio::test]
-    #[ignore = "block_high_risk_commands has no effect on ShellTool::execute — the real path (check_gated_command) never calls validate_command_execution, so a destructive command runs under Full even with the flag set"]
     async fn block_high_risk_commands_refuses_a_destructive_command_even_under_full_autonomy() {
         let ws = std::env::temp_dir();
         let full = test_security(&ws, PolicyMode::Full);
@@ -1668,6 +1684,84 @@ mod tests {
              autonomy, independent of the autonomy-tier gate: {}",
             result.output()
         );
+    }
+
+    #[tokio::test]
+    async fn shell_factory_blocks_high_risk_commands_on_every_execution_path() {
+        let ws = tempfile::Builder::new()
+            .prefix("oc-shell-guard-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let target = ws.path().join("protected");
+        std::fs::create_dir(&target).unwrap();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Full),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws.path(),
+        );
+        let tool = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        let args = json!({ "command": format!("rm -rf {}", target.display()) });
+        for result in [
+            tool.execute(args.clone()).await.unwrap(),
+            tool.execute_with_options(args.clone(), ToolCallOptions::default())
+                .await
+                .unwrap(),
+            tool.execute_with_context(args, ToolCallOptions::default(), None)
+                .await
+                .unwrap(),
+        ] {
+            assert!(result.is_error, "{}", result.output());
+            assert!(result.output().contains("high-risk"), "{}", result.output());
+        }
+        assert!(target.is_dir());
+        let result = tool
+            .execute(json!({ "command": "printf safe-command" }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output());
+        assert!(result.output().contains("safe-command"));
+        assert_eq!(tool.permission_level(), PermissionLevel::Execute);
+        assert_eq!(tool.max_result_size_chars(), Some(30_000));
+        assert_eq!(
+            tool.timeout_policy(&json!({ "timeout_secs": 17 })),
+            ToolTimeout::Secs(17)
+        );
+
+        let audit_dir = tempfile::tempdir().unwrap();
+        let audit = shell_audit(audit_dir.path()).unwrap();
+        let sink = audit.sink.clone();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Readonly),
+            native_runtime(),
+            Some(audit),
+            ws.path(),
+        );
+        let tool = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        let command = format!("rm -rf {}", target.display());
+        let result = tool.execute(json!({ "command": command })).await.unwrap();
+        assert!(result.is_error, "{}", result.output());
+        assert!(result.output().contains("read-only"), "{}", result.output());
+        assert!(std::fs::read_to_string(sink).unwrap().contains(&command));
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn high_risk_guard_respects_the_flag_without_blocking_ordinary_commands() {
+        let ws = tempfile::tempdir().unwrap();
+        let enabled = HighRiskCommands(test_security(ws.path(), PolicyMode::Full));
+        for command in [
+            "printf safe",
+            "touch note.txt",
+            "curl https://example.invalid",
+        ] {
+            assert!(enabled.refusal(&json!({ "command": command })).is_none());
+        }
+        assert!(enabled.refusal(&json!({ "command": "sudo id" })).is_some());
+        let mut security = exec_security(ws.path(), PolicyMode::Full);
+        security.block_high_risk_commands = false;
+        let disabled = HighRiskCommands(Arc::new(security));
+        assert!(disabled.refusal(&json!({ "command": "sudo id" })).is_none());
     }
 
     /// `ShellTool`'s own schema tells the model that an
