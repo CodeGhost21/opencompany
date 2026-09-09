@@ -869,17 +869,12 @@ mod live {
             tool: &str,
             arguments: Option<Value>,
             connection_id: Option<&str>,
+            metering: &ComposioMetering,
         ) -> Result<ComposioExecuteResponse> {
             match self {
-                // No pin — the ordinary case — is the untouched path: the
-                // vendored client's own call, with no connection id, resolved
-                // by Composio for the entity.
-                Self::Managed(client) => match connection_id {
-                    None => client.execute_tool(tool, arguments).await,
-                    Some(connection_id) => {
-                        execute_pinned(client, tool, arguments, connection_id).await
-                    }
-                },
+                Self::Managed(client) => {
+                    execute_managed(client, tool, arguments, connection_id, metering).await
+                }
                 Self::Byok { direct, .. } => direct.execute(tool, arguments, connection_id).await,
             }
         }
@@ -894,42 +889,16 @@ mod live {
         }
     }
 
-    /// Run a Composio action **as a named connected account** (issue #820).
-    ///
-    /// The vendored [`ComposioClient::execute_tool`] builds its body as
-    /// `{tool, arguments}` and has no parameter for a connected account, so a
-    /// company that holds two Gmail accounts has no way to say which one an
-    /// agent sends from — the account is resolved by Composio for the entity,
-    /// outside this codebase entirely. The platform backend's
-    /// `POST /agent-integrations/composio/execute` *does* accept a
-    /// `connectionId` and forwards it to Composio as `connectedAccountId`
-    /// (`composioExecuteToolController`), so the only missing link was this
-    /// body field.
-    ///
-    /// This is deliberately a **thin shim, not a fork**: every step below is the
-    /// vendored client's own public helper, called in the vendored client's own
-    /// order, so the two paths cannot drift on argument normalization, egress
-    /// disclosure or provider-error rendering. It is reached **only** when the
-    /// company has pinned an account; an unpinned call still goes through
-    /// `execute_tool` verbatim, which is why the ordinary single-account
-    /// company's behaviour is untouched by this change.
-    ///
-    /// The one behaviour it does not reproduce is the client's private
-    /// single-shot post-OAuth retry, so it is re-stated here against the same
-    /// error string — see [`POST_OAUTH_AUTH_ERROR`]. Delete all of this the day
-    /// the vendored client's execute body takes a connection id.
-    async fn execute_pinned(
+    /// Identical normalized actions from one company agent share a backend key.
+    async fn execute_managed(
         client: &ComposioClient,
         tool: &str,
         arguments: Option<Value>,
-        connection_id: &str,
+        connection_id: Option<&str>,
+        metering: &ComposioMetering,
     ) -> Result<oh::integrations::composio::types::ComposioExecuteResponse> {
         use oh::security::egress::{EgressDescriptor, emit_external_transfer, enforce_egress};
 
-        // Egress spine: disclose (and, under LocalOnly, refuse) the transfer
-        // BEFORE the round-trip, exactly as `execute_tool` does. A pinned call
-        // ships the same arguments to the same third party; it must not be a way
-        // around the gate.
         let egress = EgressDescriptor::composio(tool);
         enforce_egress(&egress)?;
         emit_external_transfer(egress);
@@ -937,31 +906,29 @@ mod live {
         let arguments =
             oh::integrations::composio::execute_prepare::prepare_execute_arguments(tool, arguments)
                 .map_err(anyhow::Error::msg)?;
-        let body = json!({
+        let mut body = json!({
             "tool": tool,
             "arguments": arguments,
-            "connectionId": connection_id,
         });
-        // The connection id is not a credential (it is the same id the console
-        // renders and `delete_connection` takes), so it may be traced — the
-        // arguments still may not.
-        tracing::debug!(tool = %tool, connection_id = %connection_id, "[composio] execute (pinned account)");
+        if let Some(connection_id) = connection_id {
+            body["connectionId"] = json!(connection_id);
+        }
+        let key = execute_idempotency_key(metering, &body)?;
+        let http = oh::util::tls::tls_client_builder()
+            .http1_only()
+            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .default_headers(openhuman_core::api::product::product_identity_headers())
+            .build()?;
 
-        let post = async |body: &Value| {
-            client
-                .inner()
-                .post::<oh::integrations::composio::types::ComposioExecuteResponse>(
-                    "/agent-integrations/composio/execute",
-                    body,
-                )
-                .await
-        };
+        let post =
+            async |body: &Value| post_managed_execute(client.inner(), &http, body, &key).await;
 
         let mut resp = post(&body).await?;
         if is_post_oauth_auth_error(&resp) {
             tracing::debug!(
                 tool = %tool,
-                "[composio] pinned execute hit the post-OAuth readiness gap; retrying once"
+                "[composio] execute hit the post-OAuth readiness gap; retrying once"
             );
             tokio::time::sleep(POST_OAUTH_RETRY_DELAY).await;
             resp = post(&body).await?;
@@ -973,6 +940,102 @@ mod live {
                 Some(oh::integrations::composio::error_mapping::format_provider_error(tool, err));
         }
         Ok(resp)
+    }
+
+    fn execute_idempotency_key(metering: &ComposioMetering, body: &Value) -> Result<String> {
+        use sha2::{Digest, Sha256};
+
+        let mut identity = json!([&metering.company, &metering.agent, body]);
+        identity.sort_all_objects();
+        Ok(format!(
+            "oc-composio-v1-{:x}",
+            Sha256::digest(serde_json::to_vec(&identity)?)
+        ))
+    }
+
+    async fn post_managed_execute(
+        client: &IntegrationClient,
+        http: &reqwest::Client,
+        body: &Value,
+        key: &str,
+    ) -> Result<ComposioExecuteResponse> {
+        use oh::security::egress::{EgressDescriptor, emit_external_transfer, enforce_egress};
+        use openhuman_core::core::observability::report_error_or_expected;
+
+        const PATH: &str = "/agent-integrations/composio/execute";
+        let egress = EgressDescriptor::integration(PATH);
+        enforce_egress(&egress)?;
+        emit_external_transfer(egress);
+        let url = openhuman_core::api::config::api_url(&client.backend_url, PATH);
+        let response = http
+            .post(&url)
+            .bearer_auth(&client.auth_token)
+            .header("idempotency-key", key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| {
+                let error = anyhow::Error::new(error);
+                report_error_or_expected(
+                    &format!("{error:#}"),
+                    "integrations",
+                    "post",
+                    &[("path", PATH), ("failure", "transport")],
+                );
+                error
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await?;
+            let parsed = serde_json::from_str::<Value>(&text).ok();
+            let detail = parsed
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(Value::as_str)
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or(&text);
+            let detail = oh::util::truncate_at_byte_boundary(detail, 500);
+            let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+                let message = format!(
+                    "SESSION_EXPIRED: backend rejected session token on POST {PATH} \
+                     (401 for {url}: {detail}) — sign in again to resume"
+                );
+                openhuman_core::core::bus::BUS.publish(
+                    openhuman_core::core::events::DomainEvent::SessionExpired {
+                        source: format!("integrations.POST:{PATH}"),
+                        reason: oh::inference::provider::ops::sanitize_api_error(&message),
+                    },
+                );
+                message
+            } else {
+                format!("Backend returned {status} for POST {url}: {detail}")
+            };
+            report_error_or_expected(
+                &message,
+                "integrations",
+                "post",
+                &[("path", PATH), ("status", &status.as_u16().to_string())],
+            );
+            anyhow::bail!(message);
+        }
+        let envelope = response
+            .json::<oh::integrations::types::BackendResponse<ComposioExecuteResponse>>()
+            .await?;
+        if !envelope.success {
+            let message = envelope
+                .error
+                .unwrap_or_else(|| "unknown backend error".into());
+            report_error_or_expected(
+                &message,
+                "integrations",
+                "post",
+                &[("path", PATH), ("failure", "envelope_error")],
+            );
+            anyhow::bail!("Backend error for POST {url}: {message}");
+        }
+        envelope
+            .data
+            .ok_or_else(|| anyhow::anyhow!("Backend returned success but no data for POST {url}"))
     }
 
     /// Composio's gateway string for the window between a connection reporting
@@ -1799,9 +1862,9 @@ mod live {
                     return Ok(ToolResult::error(format!("composio_execute failed: {err}")));
                 }
             };
-            // A pin, when the company set one, is threaded through the route
-            // façade; an unpinned call is the untouched path it has always been.
-            let call = client.execute(&tool, arguments, pinned.as_deref()).await;
+            let call = client
+                .execute(&tool, arguments, pinned.as_deref(), &self.metering)
+                .await;
             match call {
                 Ok(resp) => {
                     // Metered only on success — i.e. a call that actually
@@ -1838,6 +1901,163 @@ mod live {
 
         use crate::ports::types::CompanyId;
         use crate::ports::usage::UsageSample;
+
+        #[test]
+        fn execute_keys_are_canonical_and_scoped_to_the_action_and_actor() {
+            let mut metering = ComposioMetering {
+                company: CompanyId::new("acme"),
+                agent: "ceo".into(),
+                meter: None,
+            };
+            let body = json!({
+                "tool": "GMAIL_SEND_EMAIL",
+                "arguments": { "to": "ops@acme.test", "content": { "subject": "hi", "body": "hello" } }
+            });
+            let reordered = json!({
+                "arguments": { "content": { "body": "hello", "subject": "hi" }, "to": "ops@acme.test" },
+                "tool": "GMAIL_SEND_EMAIL"
+            });
+            let key = execute_idempotency_key(&metering, &body).unwrap();
+            assert_eq!(key, execute_idempotency_key(&metering, &reordered).unwrap());
+            assert!(key.starts_with("oc-composio-v1-"));
+            assert!(!key.contains("ops@acme.test"));
+            for changed in [
+                json!({ "tool": "SLACK_POST_MESSAGE", "arguments": body["arguments"] }),
+                json!({ "tool": body["tool"], "arguments": { "to": "other@acme.test" } }),
+                json!({ "tool": body["tool"], "arguments": body["arguments"], "connectionId": "another-account" }),
+            ] {
+                assert_ne!(key, execute_idempotency_key(&metering, &changed).unwrap());
+            }
+            metering.company = CompanyId::new("another-company");
+            assert_ne!(key, execute_idempotency_key(&metering, &body).unwrap());
+            metering.company = CompanyId::new("acme");
+            metering.agent = "another-agent".into();
+            assert_ne!(key, execute_idempotency_key(&metering, &body).unwrap());
+        }
+
+        #[tokio::test]
+        async fn pinned_execute_preserves_the_key_across_the_post_oauth_retry() {
+            use axum::{Router, http::HeaderMap, routing::post};
+
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&seen);
+            let app = Router::new().route(
+                "/agent-integrations/composio/execute",
+                post(
+                    async move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+                        let mut requests = captured.lock().unwrap();
+                        requests.push((headers, body));
+                        let first = requests.len() == 1;
+                        axum::Json(json!({
+                            "success": true,
+                            "data": {
+                                "successful": !first,
+                                "data": {},
+                                "error": if first { Some(POST_OAUTH_AUTH_ERROR) } else { None }
+                            }
+                        }))
+                    },
+                ),
+            );
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (tool, meter) = tool_over(&url, &[("gmail", "ca-billing")]);
+            let result = tool
+                .execute(json!({
+                    "tool": "GMAIL_SEND_EMAIL", "arguments": { "to": "ops@acme.test" }
+                }))
+                .await
+                .unwrap();
+            server.abort();
+            assert!(!result.is_error, "{}", result.output());
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[0].0["idempotency-key"],
+                requests[1].0["idempotency-key"]
+            );
+            assert_eq!(requests[0].0["authorization"], "Bearer token");
+            assert_eq!(requests[0].1, requests[1].1);
+            assert_eq!(requests[0].1["connectionId"], "ca-billing");
+            assert_eq!(meter.samples.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn managed_execute_refuses_transport_and_envelope_failures_and_scrubs_tokens() {
+            use axum::{Router, http::StatusCode, routing::post};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            for (status, body) in [
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({ "error": "rejected Bearer token" }),
+                ),
+                (
+                    StatusCode::OK,
+                    json!({ "success": false, "error": "rejected Bearer token" }),
+                ),
+                (StatusCode::OK, json!({ "success": true, "data": null })),
+            ] {
+                let requests = Arc::new(AtomicUsize::new(0));
+                let captured = Arc::clone(&requests);
+                let app = Router::new().route(
+                    "/agent-integrations/composio/execute",
+                    post(async move || {
+                        captured.fetch_add(1, Ordering::SeqCst);
+                        (status, axum::Json(body.clone()))
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let (tool, meter) = tool_over(&url, &[]);
+                let result = tool
+                    .execute(json!({
+                        "tool": "GMAIL_SEND_EMAIL", "arguments": { "to": "ops@acme.test" }
+                    }))
+                    .await
+                    .unwrap();
+                server.abort();
+                assert_eq!(requests.load(Ordering::SeqCst), 1);
+                assert!(result.is_error, "{}", result.output());
+                assert!(
+                    !result.output().contains("Bearer token"),
+                    "{}",
+                    result.output()
+                );
+                assert!(meter.samples.lock().unwrap().is_empty());
+            }
+
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let connections = Arc::new(AtomicUsize::new(0));
+            let captured = Arc::clone(&connections);
+            let server = tokio::spawn(async move {
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    captured.fetch_add(1, Ordering::SeqCst);
+                    drop(socket);
+                }
+            });
+            let (tool, meter) = tool_over(&url, &[]);
+            let result = tool
+                .execute(json!({
+                    "tool": "GMAIL_SEND_EMAIL", "arguments": { "to": "ops@acme.test" }
+                }))
+                .await
+                .unwrap();
+            server.abort();
+            assert!(connections.load(Ordering::SeqCst) > 0);
+            assert!(result.is_error, "{}", result.output());
+            assert!(meter.samples.lock().unwrap().is_empty());
+        }
 
         #[derive(Default)]
         struct RecordingMeter {
@@ -3645,13 +3865,8 @@ mod isolation_tests {
         );
     }
 
-    /// `composio_execute` runs a real, side-effecting remote action and sends
-    /// no idempotency key: the body is `{tool, arguments}` (plus `connectionId`
-    /// when pinned) and nothing more. Two identical calls — a model retry, a
-    /// re-dispatched turn — are indistinguishable at the backend, so the action
-    /// runs twice. For `GMAIL_SEND_EMAIL` that is two emails.
+    /// Repeated managed executes carry the same backend idempotency key.
     #[tokio::test]
-    #[ignore = "confirms fail-open: composio_execute carries no idempotency key"]
     async fn a_repeated_execute_carries_an_idempotency_key_the_backend_can_dedupe_on() {
         type BodyLog = Arc<Mutex<Vec<(Value, Option<String>)>>>;
         async fn execute(
