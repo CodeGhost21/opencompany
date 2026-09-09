@@ -92,11 +92,203 @@ use oh::security::{
     AuditLogger, AutonomyLevel, SecurityPolicy, get_or_create_workspace_audit_logger,
 };
 use oh::tools::{
-    ApplyPatchTool, CsvExportTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool,
-    ShellTool, Tool, WebFetchTool, WorkspaceStateTool,
+    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, ShellTool, Tool,
+    WebFetchTool, WorkspaceStateTool,
 };
 
 use crate::harness::policy::PolicyMode;
+
+use oh::tools::traits::{
+    PermissionLevel, ToolCallOptions, ToolCategory, ToolResult, ToolRunContext, ToolScope,
+    ToolSpec, ToolTimeout,
+};
+
+trait ToolGuard: Send + Sync {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult>;
+}
+
+struct GuardedTool<T, G> {
+    inner: T,
+    guard: G,
+}
+
+#[async_trait::async_trait]
+impl<T: Tool, G: ToolGuard> Tool for GuardedTool<T, G> {
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner.execute(args).await
+    }
+
+    async fn execute_with_options(
+        &self,
+        args: serde_json::Value,
+        options: ToolCallOptions,
+    ) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner.execute_with_options(args, options).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        options: ToolCallOptions,
+        context: Option<&dyn ToolRunContext>,
+    ) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner
+            .execute_with_context(args, options, context)
+            .await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+    fn supports_markdown(&self) -> bool {
+        self.inner.supports_markdown()
+    }
+    fn permission_level(&self) -> PermissionLevel {
+        self.inner.permission_level()
+    }
+    fn permission_level_with_args(&self, args: &serde_json::Value) -> PermissionLevel {
+        self.inner.permission_level_with_args(args)
+    }
+    fn scope(&self) -> ToolScope {
+        self.inner.scope()
+    }
+    fn category(&self) -> ToolCategory {
+        self.inner.category()
+    }
+    fn is_concurrency_safe(&self, args: &serde_json::Value) -> bool {
+        self.inner.is_concurrency_safe(args)
+    }
+    fn external_effect(&self) -> bool {
+        self.inner.external_effect()
+    }
+    fn external_effect_with_args(&self, args: &serde_json::Value) -> bool {
+        self.inner.external_effect_with_args(args)
+    }
+    fn host_extension(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        self.inner.host_extension()
+    }
+    fn host_call_extension(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.inner.host_call_extension(args)
+    }
+    fn max_result_size_chars(&self) -> Option<usize> {
+        self.inner.max_result_size_chars()
+    }
+    fn timeout_policy(&self, args: &serde_json::Value) -> ToolTimeout {
+        self.inner.timeout_policy(args)
+    }
+    fn display_label(&self, args: &serde_json::Value) -> Option<String> {
+        self.inner.display_label(args)
+    }
+    fn display_detail(&self, args: &serde_json::Value) -> Option<String> {
+        self.inner.display_detail(args)
+    }
+}
+
+/// Each export admits at most 100,000 rows, 16 MiB of JSON and 8 MiB of CSV.
+struct CsvLimits;
+
+const MAX_CSV_ROWS: usize = 100_000;
+const MAX_CSV_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
+
+type CsvExportTool = GuardedTool<oh::tools::CsvExportTool, CsvLimits>;
+
+impl CsvExportTool {
+    fn new(security: Arc<SecurityPolicy>) -> Self {
+        Self {
+            inner: oh::tools::CsvExportTool::new(security),
+            guard: CsvLimits,
+        }
+    }
+}
+
+fn csv_cell_bytes(cell: &str) -> usize {
+    let quoted = cell.contains([',', '"', '\n', '\r']);
+    cell.len()
+        + if quoted {
+            2 + cell.bytes().filter(|&b| b == b'"').count()
+        } else {
+            0
+        }
+}
+
+impl ToolGuard for CsvLimits {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
+        let data = args.get("data")?.as_str()?;
+        if data.len() > MAX_CSV_INPUT_BYTES {
+            return Some(ToolResult::error(format!(
+                "CSV input exceeds {MAX_CSV_INPUT_BYTES} bytes"
+            )));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
+        let rows = parsed.as_array()?;
+        if rows.len() > MAX_CSV_ROWS {
+            return Some(ToolResult::error(format!(
+                "CSV export exceeds {MAX_CSV_ROWS} rows"
+            )));
+        }
+        let columns: Vec<&str> = match args.get("columns").and_then(serde_json::Value::as_array) {
+            Some(columns) => columns
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect(),
+            None => rows
+                .first()
+                .and_then(serde_json::Value::as_object)
+                .map(|object| object.keys().map(String::as_str).collect())
+                .unwrap_or_default(),
+        };
+        let mut bytes = columns.len().max(1);
+        for column in &columns {
+            bytes = bytes.saturating_add(csv_cell_bytes(column));
+        }
+        for row in rows {
+            bytes = bytes.saturating_add(columns.len().max(1));
+            for column in &columns {
+                let cell = match row.get(column) {
+                    None | Some(serde_json::Value::Null) => std::borrow::Cow::Borrowed(""),
+                    Some(serde_json::Value::String(value)) => {
+                        std::borrow::Cow::Borrowed(value.as_str())
+                    }
+                    Some(value) => std::borrow::Cow::Owned(value.to_string()),
+                };
+                bytes = bytes.saturating_add(csv_cell_bytes(&cell));
+                if bytes > MAX_CSV_BYTES {
+                    return Some(ToolResult::error(format!(
+                        "CSV export exceeds {MAX_CSV_BYTES} bytes"
+                    )));
+                }
+            }
+        }
+        if bytes > MAX_CSV_BYTES {
+            return Some(ToolResult::error(format!(
+                "CSV export exceeds {MAX_CSV_BYTES} bytes"
+            )));
+        }
+        None
+    }
+}
 
 /// Subdirectory under the agent workspace that `curl` downloads land in.
 const CURL_DEST_SUBDIR: &str = "downloads";
@@ -1910,12 +2102,8 @@ mod tests {
         );
     }
 
-    /// `csv_export` writes into the agent's own workspace with no row or byte
-    /// ceiling of its own, so the size of the file is whatever the model put in
-    /// the `data` argument. A tenant workspace is shared disk; an export the
-    /// agent can make arbitrarily large is a fail-open path to filling it.
+    /// Exports above the row ceiling are refused before any workspace write.
     #[tokio::test]
-    #[ignore = "confirms fail-open: csv_export enforces no row or byte ceiling"]
     async fn csv_export_refuses_an_unbounded_row_count() {
         let ws_dir = tempfile::Builder::new()
             .prefix("oc-toolbelt-csvcap-")
@@ -1941,6 +2129,64 @@ mod tests {
             rows.len(),
             result.output()
         );
+    }
+
+    #[tokio::test]
+    async fn csv_factory_caps_rendered_bytes_on_every_execution_path() {
+        let ws = tempfile::tempdir().unwrap();
+        let tools = code_tools(test_security(ws.path(), PolicyMode::Full), ws.path());
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name() == "csv_export")
+            .unwrap();
+        let args = json!({
+            "data": serde_json::to_string(&json!([{ "value": "x".repeat(MAX_CSV_BYTES / 2) }])).unwrap(),
+            "columns": ["value", "value"],
+            "filename": "oversized.csv"
+        });
+        for result in [
+            tool.execute(args.clone()).await.unwrap(),
+            tool.execute_with_options(args.clone(), ToolCallOptions::default())
+                .await
+                .unwrap(),
+            tool.execute_with_context(args, ToolCallOptions::default(), None)
+                .await
+                .unwrap(),
+        ] {
+            assert!(result.is_error, "{}", result.output());
+            assert!(result.output().contains("bytes"), "{}", result.output());
+        }
+        assert!(!ws.path().join("exports").exists());
+
+        let result = tool
+            .execute(json!({
+                "data": r#"[{"value":"comma, quote\" and newline\n"}]"#,
+                "filename": "small.csv"
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output());
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("exports/small.csv")).unwrap(),
+            "value\n\"comma, quote\"\" and newline\n\"\n"
+        );
+    }
+
+    #[test]
+    fn csv_limits_admit_the_exact_row_and_byte_boundaries() {
+        let row_args =
+            |count| json!({ "data": serde_json::to_string(&vec![json!({}); count]).unwrap() });
+        assert!(CsvLimits.refusal(&row_args(MAX_CSV_ROWS)).is_none());
+        assert!(CsvLimits.refusal(&row_args(MAX_CSV_ROWS + 1)).is_some());
+        let byte_args = |count| json!({ "data": serde_json::to_string(&json!([{ "x": "y".repeat(count) }])).unwrap() });
+        assert!(CsvLimits.refusal(&byte_args(MAX_CSV_BYTES - 3)).is_none());
+        assert!(CsvLimits.refusal(&byte_args(MAX_CSV_BYTES - 2)).is_some());
+        assert!(
+            CsvLimits
+                .refusal(&json!({ "data": " ".repeat(MAX_CSV_INPUT_BYTES + 1) }))
+                .is_some()
+        );
+        assert_eq!(csv_cell_bytes("a,\"\n\r"), 8);
     }
 
     /// The SSRF allowlist is a per-company setting, and `http_request` — the
