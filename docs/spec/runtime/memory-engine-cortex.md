@@ -352,31 +352,35 @@ loopback rather than in a second VM.
 Three things landed differently from how this section anticipated them.
 
 **Sizing no longer waits.** Measured per engine: 120 MB steady and 152 MB peak
-against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`, of which the
-resident vector cache is ~123 MB (`20_000 x 1536 dims x 4 bytes`) — the one term
-that scales with the corpus.
+against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`.
 
-**Plan against the 1024 MiB ceiling, not the working set, because a wake costs
-five times a boot.** Per-tenant cgroup peaks, same tenant, one afternoon:
+`RESIDENT_MAX` caps resident vectors, it does not allocate them. Filled it would
+hold `20_000 x 1536 x 4 bytes` = 123 MB — more than the whole engine measured,
+which is the tell that a 100 MB corpus does not fill it. Memory scales with
+*resident* vectors up to the cap and then stops: size a large corpus on the cap,
+a small one on the measurement.
 
-| Start path | Peak |
-|---|---|
-| cold boot (`--config-file`) | 201.7 MB, 205.6 MB |
-| wake from snapshot (`PUT /snapshot/load`) | 1.0 GB, 1.2 GB |
-
-A cold boot allocates only what the guest touches; a restore faults in the whole
-saved address space, because that is what a snapshot is. So ~200 MB is a floor
-seen once, on a tenant's first boot, and any fleet that parks and wakes costs
-the ceiling. Restored pages are file-backed by `vm.mem`, so they land in page
-cache — the host reports them under `buff/cache` rather than `used`, and the
-kernel can reclaim the clean ones. That makes overcommit survivable, not free.
+**A wake costs five times a boot.** Per-tenant cgroup peaks, one tenant, one
+afternoon: cold boot (`--config-file`) 201.7 MB and 205.6 MB; wake from snapshot
+(`PUT /snapshot/load`) 1.0 GB and 1.2 GB. A boot allocates only what the guest
+touches; a restore faults in the whole saved address space, because that is what
+a snapshot is. So ~200 MB is a floor seen once, on a first boot, and any fleet
+that parks and wakes costs the ceiling. Restored pages are file-backed by
+`vm.mem` and land in page cache, so the host reports them under `buff/cache`
+rather than `used` and can reclaim the clean ones — survivable, not free.
 
 **Two limits, governing different things.** RAM bounds how many tenants can be
-awake at once: `(63.9 GB - ~1.8 GB host) / 1 GiB` is roughly **60**. Disk bounds
-how many can exist: a parked tenant costs **~1.13 GB** — `vm.mem` is 1.1 GB and
+awake at once. Size that on the **measured peak, not the guest ceiling**: the
+1024 MiB ceiling caps what the guest can address, but the host-side cgroup peak
+during a snapshot wake reached 1.2 GB, because the restore also charges the
+VMM's own mapping of `vm.mem`. At that peak `(63.9 GB - ~1.8 GB host) / 1.2 GB`
+is roughly **50**, and dividing by 1 GiB instead would recommend ~60 — enough to
+overcommit the box precisely during a wave of wakes.
+
+Disk bounds how many can exist: a parked tenant costs **~1.13 GB** — `vm.mem` is 1.1 GB and
 genuinely not sparse, while `data.ext4` is 1.0 GB apparent but **30 MB
 allocated** — so 828 GB of free space holds roughly **730**. A box therefore
-carries ~730 companies of which ~60 are awake simultaneously.
+carries ~730 companies of which ~50 can be awake simultaneously.
 
 **Corrects an earlier revision of this section**, which said disk binds before
 RAM and put a parked tenant at ~2 GB. That read apparent size and missed that
