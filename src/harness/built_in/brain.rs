@@ -1512,6 +1512,13 @@ impl HarnessBrain {
                     scan_partial,
                     &control,
                     sink.clone(),
+                    Some(
+                        crate::harness::built_in::run_origin::RunOrigin::Dispatched {
+                            agent: responder.to_string(),
+                            source: crate::harness::built_in::run_origin::DispatchSource::Task,
+                            scope: None,
+                        },
+                    ),
                 )
                 .await;
         }
@@ -2029,31 +2036,33 @@ impl HarnessBrain {
         scan_partial: bool,
         control: &crate::company::steer::SteerControl,
         sink: Option<Arc<RunTraceSink>>,
+        dispatched: Option<crate::harness::built_in::run_origin::RunOrigin>,
     ) -> Option<String> {
         let instruction = publish::nudge_instruction(brief, reply, unpublished, scan_partial);
-        // Issue #2150: this is still the same dispatched card's run, so the
-        // nudge turn earns the same trust its primary turn did — a fresh claim
-        // naming the same responder and the same `Task` source, not a
-        // privilege re-derived from nothing.
-        let nudge_origin = crate::harness::built_in::run_origin::claim(
-            crate::harness::built_in::run_origin::RunOrigin::Dispatched {
-                agent: responder.to_string(),
-                source: crate::harness::built_in::run_origin::DispatchSource::Task,
-                scope: None,
-            },
-        );
-        let outcome = nudge_origin
-            .scoped(Box::pin(run_turn.run_steered_background(
-                &self.record().id,
-                responder,
-                &instruction,
-                control,
-                // A hand-off inside a dispatched card: the board is the
-                // conversation, not a thread (#1890 I).
-                ChatTarget::default(),
-                sink,
-            )))
-            .await;
+        let company = self.record().id.clone();
+        let turn = Box::pin(run_turn.run_steered_background(
+            &company,
+            responder,
+            &instruction,
+            control,
+            // A hand-off inside a dispatched card: the board is the
+            // conversation, not a thread (#1890 I).
+            ChatTarget::default(),
+            sink,
+        ));
+        // Only the caller knows whether this nudge belongs to a dispatched
+        // card. The cycle runs the operator's own turn, its delegated desk
+        // turns, a dispatched card and a re-dispatch after an approval through
+        // one path, so minting a `Dispatched` origin here would hand a turn
+        // that followed an operator's message the trust a card earned.
+        let outcome = match dispatched {
+            Some(origin) => {
+                crate::harness::built_in::run_origin::claim(origin)
+                    .scoped(turn)
+                    .await
+            }
+            None => turn.await,
+        };
         // A steer that landed during the nudge is consumed here so it cannot
         // leak into a later `control.take()` and be mistaken for a steer of the
         // primary run, which has already ended.
@@ -4075,6 +4084,7 @@ impl HarnessBrain {
                                     changed.partial,
                                     &nudge_control,
                                     None,
+                                    None,
                                 )
                                 .await;
                             let nudge_published = self.deps.pending_publishes.drain();
@@ -4430,6 +4440,7 @@ impl HarnessBrain {
                                     &unpublished,
                                     changed.partial,
                                     &nudge_control,
+                                    None,
                                     None,
                                 )
                                 .await;
