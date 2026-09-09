@@ -288,6 +288,15 @@ impl WorkflowScheduler {
             if runtime.ensure_running().await.is_err() {
                 continue;
             }
+            // Emergency stop is a separate switch from `lifecycle` — a stopped
+            // company still reports `running` — so `ensure_running` alone
+            // misses it. This tick is the fifth doorway
+            // `CompanyRuntime::ensure_not_emergency_stopped`'s own doc did not
+            // enumerate: a cron fire starts a new workflow run without ever
+            // reaching `run_cycle`, `spawn_follow_up`, or the boot reconciler.
+            if runtime.ensure_not_emergency_stopped().is_err() {
+                continue;
+            }
             // The cutoff sits a full week past the catch-up window
             // (PRUNE_CUTOFF_MINUTES > CATCHUP_WINDOW_MINUTES), so an anchor a
             // booting replica still needs is never eligible. Best-effort — a
@@ -2270,6 +2279,44 @@ to = "done"
             "paused",
         )
         .await;
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+
+        assert_eq!(scheduler.tick().await, 0);
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    /// Codex review finding on PR #2140 (`3952230576`): the emergency stop is a
+    /// separate switch from `lifecycle` — a stopped company still reports
+    /// `running` — so this tick must check it independently of the ordinary
+    /// pause skip proven above, or a cron fire starts a new, billed run while
+    /// the company reports itself stopped.
+    #[tokio::test]
+    async fn an_emergency_stopped_company_is_skipped() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let runtime = registry
+            .get(&CompanyId::new("acme"))
+            .expect("registered above");
+        runtime
+            .emergency_pause(
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: "owner".into(),
+                },
+                None,
+            )
+            .await
+            .expect("pause");
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
         let mut scheduler = WorkflowScheduler::new(registry, clock);
 

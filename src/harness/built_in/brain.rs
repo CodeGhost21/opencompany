@@ -1304,6 +1304,26 @@ impl HarnessBrain {
                             let (end, result) = match handoff {
                                 // The delegate answered: they own the card, and
                                 // every downstream write credits them.
+                                // SPIKE: handed over, delegate not yet run.
+                                // Settles `Delegated` — which
+                                // `settled_landing_column` keeps in
+                                // `in_progress` precisely because a hand-off is
+                                // "not an ending" — and the runtime re-fires
+                                // dispatch for the card's new owner.
+                                Some(handoff) if handoff.pending => {
+                                    let delegate = handoff.delegate.clone();
+                                    // The DELEGATOR is who handed it over, so
+                                    // the note is theirs. Reading `responder`
+                                    // after the swap credits the delegate with
+                                    // handing work to itself.
+                                    let delegator =
+                                        std::mem::replace(&mut responder, handoff.delegate);
+                                    let result =
+                                        format!("handed off to {delegate}; awaiting their run");
+                                    settle(&mut card, TaskRunEnd::Delegated, &delegator, &result);
+                                    prior_responders.push(delegator);
+                                    (TaskRunEnd::Delegated, result)
+                                }
                                 Some(handoff) => {
                                     prior_responders
                                         .push(std::mem::replace(&mut responder, handoff.delegate));
@@ -1665,10 +1685,18 @@ impl HarnessBrain {
         }
 
         // `settle()` already wrote a landing at the break point; this is the
-        // authoritative overwrite now that the parked count is known. `None`
-        // only for a status that is not settled at all, which no ending
-        // produces — a hand-off never breaks the loop.
-        if let Some(column) = crate::ports::tasks::column_for_settled_run(settled) {
+        // authoritative overwrite now that the parked count is known.
+        //
+        // SPIKE: through `settled_landing_column`, NOT `column_for_settled_run`
+        // directly. The two agree on every ending except a hand-off, which the
+        // former keeps in `in_progress` ("the work has changed hands, not
+        // stopped") while the latter maps its `Paused` run status to the
+        // `paused` column. The old comment here — "a hand-off never breaks the
+        // loop" — was what made the difference unobservable; now that a
+        // hand-off settles, the card was landing in `paused` and the delegate
+        // was never dispatched.
+        {
+            let column = lifecycle::settled_landing_column(run_end, parked);
             card.column = column.to_string();
             // Issue #1865: the board's bounce chip — same rule the system
             // mover applies in `crate::runtime::advance::advance_settled_card`,
@@ -3276,6 +3304,141 @@ impl HarnessBrain {
         })
     }
 
+    /// SPIKE: who currently oversees the thread rooted at `parent`.
+    ///
+    /// The last teammate to have replied under that root, read straight off the
+    /// journal — so oversight follows the conversation without a field to keep
+    /// in sync. `None` for an unparented message (the channel itself has no
+    /// overseer), when no event log is wired, or when nobody has spoken yet.
+    /// SPIKE: the card this thread already raised, if it raised one.
+    ///
+    /// One thread is one piece of work. Without this a follow-up inside a
+    /// thread opens a SECOND card — "make it shorter" becomes its own task
+    /// beside the draft it is about — because the carding decision is made per
+    /// message and has no idea the conversation already has a card.
+    ///
+    /// Scoping the turn to it makes `open_work_card` decline on its existing
+    /// `task.is_some()` guard, which is the same gate that stops a dispatched
+    /// card's hand-off opening one.
+    async fn thread_card(
+        &self,
+        chat: Option<&str>,
+        parent: Option<crate::ports::types::EventSeq>,
+    ) -> Option<String> {
+        let root = parent?;
+        let tasks = self.deps.tasks.as_ref()?;
+        let record = self.record();
+        tasks
+            .list(&record.id)
+            .await
+            .ok()?
+            .into_iter()
+            .filter(|card| card.origin_parent() == Some(root))
+            .filter(|card| {
+                crate::server::chat_history::same_conversation(card.origin_chat_id(), chat)
+            })
+            .map(|card| card.id)
+            .next_back()
+    }
+
+    async fn thread_overseer(
+        &self,
+        chat: Option<&str>,
+        parent: Option<crate::ports::types::EventSeq>,
+    ) -> Option<String> {
+        /// How far back to look for the hand-off. A thread is one level deep
+        /// and bounded in practice; past this the fallback answer is better
+        /// than an unbounded scan on every message.
+        const LOOKBACK: usize = 400;
+
+        let root = parent?;
+        let record = self.record();
+
+        // **The card is the ownership record; the thread only reflects it.**
+        //
+        // Deriving oversight from the conversation alone gives a SECOND owner
+        // that drifts from `assignee` — observed: card held by `design`, thread
+        // overseen by `qa_engineer`, and a stray hop card under a third agent.
+        // Two records for one question is the same class of split the board and
+        // the run history already avoid by keeping one settle site.
+        //
+        // So when this thread raised a card, that card's assignee IS the
+        // overseer: a hand-off moves it, a reassignment from the board moves
+        // it, and the thread follows without a second rule. The mention scan
+        // below is only for a thread with no card behind it — an ordinary chat
+        // exchange, where there is nothing else to be authoritative.
+        if let Some(tasks) = self.deps.tasks.as_ref()
+            && let Ok(cards) = tasks.list(&record.id).await
+        {
+            let owner = cards
+                .iter()
+                .filter(|card| card.origin_parent() == Some(root))
+                .filter(|card| {
+                    crate::server::chat_history::same_conversation(card.origin_chat_id(), chat)
+                })
+                .filter_map(|card| {
+                    crate::runtime::assignee::resolve(&record, &card.assignee)
+                        .working_agent()
+                        .map(str::to_string)
+                })
+                .next_back();
+            if let Some(owner) = owner {
+                return Some(owner);
+            }
+        }
+
+        let events = self.deps.events.as_ref()?;
+        // Backwards from the tail, bounded — NOT `read_from(0, MAX)`, which
+        // turns every chat message into a scan of the whole company history.
+        let page = events.read_before(&record.id, None, LOOKBACK).await.ok()?;
+
+        let dir = crate::runtime::mentions::directory(&record, &[]);
+        let mut last_speaker: Option<String> = None;
+
+        for stored in page {
+            // Nothing at or before the root can carry this thread's hand-off.
+            if stored.seq <= root {
+                break;
+            }
+            let crate::ports::types::CompanyEvent::AgentReply {
+                parent: reply_parent,
+                agent_id,
+                chat_id,
+                text,
+                ..
+            } = &stored.event
+            else {
+                continue;
+            };
+            if *reply_parent != Some(root)
+                || !crate::server::chat_history::same_conversation(Some(chat_id), chat)
+            {
+                continue;
+            }
+            // **The hand-off, not the last utterance.** Oversight transfers to
+            // whoever was HANDED the work, so the overseer is the agent the
+            // most recent hand-off NAMED — not whoever spoke most recently.
+            //
+            // Keying on the last speaker instead is self-reinforcing: one
+            // misrouted turn makes that agent the overseer of the thread
+            // permanently, because answering is itself what confers oversight.
+            // Naming somebody is a deliberate act; speaking is not.
+            let named = crate::runtime::mentions::extract_with_known(text, &dir);
+            if let Some(handed_to) =
+                crate::runtime::mentions::mention_responder(&record, Some(chat_id), &named)
+            {
+                return Some(handed_to);
+            }
+            // Newest-first, so the first reply we see is the latest speaker.
+            if last_speaker.is_none() && record.is_roster_agent(agent_id) {
+                last_speaker = Some(agent_id.clone());
+            }
+        }
+        // Nobody was handed anything: the thread has one participant, and they
+        // hold it.
+        last_speaker
+    }
+
     /// The per-message pick for a message addressed to an `auto` channel — or
     /// `None` wherever the deterministic answer should stand (issue #1835).
     ///
@@ -3377,15 +3540,22 @@ fn selector_candidate(
     record: &CompanyRecord,
     id: &str,
 ) -> Option<crate::harness::selector::SelectorCandidate> {
+    let allow = &record.manifest.tools.allow;
     if let Some(agent) = record.effective_agent(id) {
         return Some(crate::harness::selector::SelectorCandidate {
             id: agent.id.clone(),
             role: agent.role.clone(),
             description: agent.description.clone(),
+            tools: crate::runtime::builder::agent_effective_grants(allow, agent.tools.as_deref()),
         });
     }
     let agent = record.overlay_agents.iter().find(|a| a.id == id)?;
     let edit = record.overlay_agent_edits.iter().find(|e| e.agent_id == id);
+    // An edit that states `tools` replaces the teammate's own list; one that
+    // says nothing leaves it, matching how role and description resolve above.
+    let tools = edit
+        .and_then(|e| e.tools.clone())
+        .unwrap_or_else(|| agent.tools.clone());
     Some(crate::harness::selector::SelectorCandidate {
         id: agent.id.clone(),
         role: edit
@@ -3395,6 +3565,7 @@ fn selector_candidate(
             .and_then(|e| e.description.clone())
             .filter(|d| !d.is_empty())
             .or_else(|| agent.description.clone()),
+        tools: crate::runtime::builder::agent_effective_grants(allow, tools.as_deref()),
     })
 }
 
@@ -3666,8 +3837,12 @@ impl HarnessBrain {
                     // its own turns back out of it to fold the next step, so a
                     // driver with nowhere to append could not deliberate at
                     // all, and falling through answers exactly as before.
-                    if crate::runtime::mentions::mention_responder(&self.record(), mentions)
-                        .is_none()
+                    if crate::runtime::mentions::mention_responder(
+                        &self.record(),
+                        chat.as_deref(),
+                        mentions,
+                    )
+                    .is_none()
                         && let Some(events) = self.deps.events.clone()
                         && let Some(desk) =
                             crate::hivemind::desk_episode(&self.record(), chat.as_deref())
@@ -3817,23 +3992,47 @@ impl HarnessBrain {
                     // Resolves nothing on a message that mentions no teammate,
                     // which is every message journaled before mentions existed,
                     // so routing is unchanged byte-for-byte for them.
-                    let responder =
-                        match crate::runtime::mentions::mention_responder(&self.record(), mentions)
-                        {
+                    // SPIKE: the thread-overseer rung.
+                    //
+                    // Oversight of a prompt transfers on hand-off: the operator
+                    // opens the conversation, and whoever it delegates to owns
+                    // the thread from there. So a reply *inside* a thread must
+                    // reach whoever currently holds it — not the room's default
+                    // answerer, which is what `responder_for` gives and which
+                    // made a follow-up land on the desk lead while the actual
+                    // overseer sat one message above.
+                    //
+                    // Derived, never stored: the overseer is the last teammate
+                    // to have spoken under this root. That transfers for free —
+                    // a delegate becomes the last speaker the moment it answers.
+                    //
+                    // Sits BELOW an @mention (naming somebody is still the
+                    // strongest address) and ABOVE the channel default, which is
+                    // the same explicit-beats-implicit ordering the ladder
+                    // already applies.
+                    let overseer = self.thread_overseer(chat.as_deref(), *parent).await;
+                    // One thread, one card: a follow-up joins the work its
+                    // thread already opened instead of opening another.
+                    let thread_card = self.thread_card(chat.as_deref(), *parent).await;
+                    let responder = match crate::runtime::mentions::mention_responder(
+                        &self.record(),
+                        chat.as_deref(),
+                        mentions,
+                    )
+                    .or(overseer)
+                    {
+                        Some(responder) => responder,
+                        // Issue #1835: below a mention, above the deterministic
+                        // answer, an `auto` channel picks its best-fit member
+                        // for this message. Every way the pick cannot happen —
+                        // not an auto channel, one member, selection failed —
+                        // is `None`, and the ladder continues exactly where it
+                        // always stood.
+                        None => match self.auto_channel_responder(chat.as_deref(), text).await {
                             Some(responder) => responder,
-                            // Issue #1835: below a mention, above the deterministic
-                            // answer, an `auto` channel picks its best-fit member
-                            // for this message. Every way the pick cannot happen —
-                            // not an auto channel, one member, selection failed —
-                            // is `None`, and the ladder continues exactly where it
-                            // always stood.
-                            None => {
-                                match self.auto_channel_responder(chat.as_deref(), text).await {
-                                    Some(responder) => responder,
-                                    None => self.responder_for(chat.as_deref()),
-                                }
-                            }
-                        };
+                            None => self.responder_for(chat.as_deref()),
+                        },
+                    };
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still
                     // spawns exactly one turn, and this teammate spreads the
@@ -3946,6 +4145,7 @@ impl HarnessBrain {
                         // seed can tell it apart from a concurrently accepted
                         // sibling by identity instead of by text.
                         .answering(event_seq)
+                        .maybe_for_task(thread_card.as_deref())
                         // Issue #1846 review (Codex #3864988176): the operator's
                         // own words, so a delegate's budget-pause marker re-parks
                         // with what the operator actually asked for rather than
@@ -4122,18 +4322,45 @@ impl HarnessBrain {
                         // issue's own failure reached through the fallback added
                         // to prevent it. With no publish this is `None` and the
                         // turn's own card takes the slot exactly as before.
-                        task_id: published_card.or(turn.spawned_task),
+                        task_id: published_card.clone().or(turn.spawned_task.clone()),
                         channel: "operator".to_string(),
                         // Issue #885: who spoke, as distinct from where it goes.
                         // `responder_for` already picked this agent to answer the
                         // turn; before this the identity died here and the reply
                         // was journaled as `agent_id: "operator"` forever.
                         agent: Some(responder.clone()),
-                        text: operator_reply,
+                        text: operator_reply.clone(),
                         reply_to: None,
                         mentions: Vec::new(),
                         steps: operator_steps,
                     });
+                    // ── @ IS NOT AN EXECUTION CHANNEL ──────────────────────
+                    //
+                    // An earlier spike routed an agent's own @mention, on the
+                    // theory that a hand-off is just a message naming the next
+                    // teammate. It works, and it is unsafe, because a REFERENCE
+                    // and a HAND-OFF are textually identical. Observed, with
+                    // the routing on: asked "who just asked you this?",
+                    // `qa_engineer` replied `@product_manager` — a bare mention
+                    // at the head of the message, indistinguishable from a
+                    // hand-off — and it dispatched a turn to product_manager,
+                    // which mentioned back, which is the ping-pong only the hop
+                    // cap stopped.
+                    //
+                    // No textual rule separates the two, because the model
+                    // writes the text. So an agent's mention stays what
+                    // `Mention::quiet` already describes — "draw the chip, but
+                    // do not notify and do not route" — and handing work over
+                    // goes through `delegate_to_desk`, which since the async
+                    // hand-off actually transfers ownership, mints the
+                    // delegate their own attempt, and rolls back if they cannot
+                    // run.
+                    //
+                    // The convention the operator wants — plain names to refer,
+                    // `@` to delegate — is then true by construction rather
+                    // than by the model's cooperation: the only `@` that routes
+                    // is one the hand-off tool produced.
+
                     // Issue #926: a turn that paused at its step cap says so,
                     // in its own bubble.
                     //
@@ -4612,16 +4839,17 @@ async fn park_hive_turn_approvals(brain: &HarnessBrain, host: &dyn CycleHost, ag
     }
 }
 
-/// Turns a terminal budget outcome (`outcome.budget_paused` /
-/// `outcome.halted_for_spend`) into the hard error a hive turn must surface,
-/// or `None` when the turn actually answered.
+/// Turns a terminal outcome (`outcome.budget_paused` / `outcome.halted_for_spend`
+/// / `outcome.abnormal_stop`) into the hard error a hive turn must surface, or
+/// `None` when the turn actually answered.
 ///
-/// Without this, `outcome.reply` on either terminal state is host-authored
-/// pause/halt copy, not the agent's answer — folding it as `Ok(reply)` lets
-/// `EpisodeDriver` journal that copy as a genuine `CompanyEvent::AgentReply`
+/// Without this, `outcome.reply` on any of the three is host-authored
+/// pause/halt/refusal copy, not the agent's answer — folding it as `Ok(reply)`
+/// lets `EpisodeDriver` journal that copy as a genuine `CompanyEvent::AgentReply`
 /// under the member's own identity, and the episode never counts the turn as
 /// failed (`EpisodeOutcome::failed_turns`), so an operator reading the
-/// transcript cannot tell a real answer from a budget wall the room hit.
+/// transcript cannot tell a real answer from a budget wall or a pre-dispatch
+/// refusal the room hit.
 fn terminal_budget_error(
     agent_id: &str,
     outcome: &crate::harness::TurnOutcome,
@@ -4636,6 +4864,11 @@ fn terminal_budget_error(
         return Some(crate::OpenCompanyError::Harness(format!(
             "{agent_id} halted for spend mid-deliberation: spent ${:.2} against a cap of ${:.2}",
             halt.spent_usd, halt.cap_usd
+        )));
+    }
+    if let Some(reason) = &outcome.abnormal_stop {
+        return Some(crate::OpenCompanyError::Harness(format!(
+            "{agent_id} did not complete its turn: {reason}"
         )));
     }
     None
@@ -4935,6 +5168,7 @@ description = "Runs Acme."
     /// (and its `[[harness]]` block) without restating the whole deps literal.
     fn brain_over_mock_with(dir: &std::path::Path, record: CompanyRecord) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -5447,6 +5681,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: if notify { Some(tasks.clone()) } else { None },
             ledgers: None,
             ledger_registry: Default::default(),
@@ -5544,6 +5779,7 @@ description = "Builds it."
     ) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -5712,6 +5948,7 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -7978,6 +8215,7 @@ members = ["chief"]
     fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8151,7 +8389,11 @@ members = ["chief"]
         assert_eq!(brain.responder_for(None), "chief");
         // With one, the named teammate does.
         assert_eq!(
-            crate::runtime::mentions::mention_responder(&brain.record(), &[mention_of("engineer")]),
+            crate::runtime::mentions::mention_responder(
+                &brain.record(),
+                None,
+                &[mention_of("engineer")]
+            ),
             Some("engineer".to_string()),
         );
     }
@@ -8164,7 +8406,11 @@ members = ["chief"]
         let (brain, _tasks) = brain_with_desk(dir.path());
         assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
         assert_eq!(
-            crate::runtime::mentions::mention_responder(&brain.record(), &[mention_of("ceo")]),
+            crate::runtime::mentions::mention_responder(
+                &brain.record(),
+                None,
+                &[mention_of("ceo")]
+            ),
             Some("ceo".to_string()),
             "the named teammate answers even on a desk with its own lead",
         );
@@ -8177,7 +8423,7 @@ members = ["chief"]
         let dir = tempfile::tempdir().unwrap();
         let (brain, _tasks) = brain_with_desk(dir.path());
         assert_eq!(
-            crate::runtime::mentions::mention_responder(&brain.record(), &[]),
+            crate::runtime::mentions::mention_responder(&brain.record(), None, &[]),
             None,
             "so the caller falls through to responder_for",
         );
@@ -8199,7 +8445,7 @@ members = ["chief"]
             quiet: false,
         }];
         assert_eq!(
-            crate::runtime::mentions::mention_responder(&brain.record(), &mentions),
+            crate::runtime::mentions::mention_responder(&brain.record(), None, &mentions),
             None,
             "a broadcast names no single teammate, so the desk lead still answers",
         );
@@ -8381,6 +8627,7 @@ members = ["ceo", "engineer"]
                 description: None,
                 responder: Default::default(),
                 members: vec!["engineer".into()],
+                hive: Default::default(),
             })
         });
         for spelling in ["", "main", "Main", "general", "General"] {
@@ -9307,6 +9554,7 @@ members = ["eng1", "eng2"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9461,6 +9709,7 @@ members = ["eng1", "eng2"]
         let log = Arc::new(FailFirstLog::default());
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9624,6 +9873,7 @@ members = ["engineer", "designer"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9867,6 +10117,7 @@ members = ["engineer", "designer"]
             .expect("journal message B");
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9990,6 +10241,7 @@ members = ["engineer", "designer"]
         requests: crate::harness::policy::ApprovalRequestQueue,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10331,6 +10583,7 @@ members = ["engineer", "designer"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10398,6 +10651,7 @@ members = ["engineer", "designer"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10997,6 +11251,7 @@ members = ["engineer", "designer"]
         use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -11430,6 +11685,20 @@ members = ["engineer", "designer"]
         }
     }
 
+    /// A `FixedOutcomeTurn` whose single turn is a pre-dispatch spend
+    /// refusal — the meter that a declared cap needs could not be read, so
+    /// no model call ran and `outcome.reply` is host-authored refusal copy.
+    fn abnormal_stop_outcome(reply: &str) -> crate::harness::built_in::TurnOutcome {
+        crate::harness::built_in::TurnOutcome {
+            reply: reply.to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: Some("[stopped: dispatch refused]".to_string()),
+            halted_for_spend: None,
+            budget_paused: None,
+        }
+    }
+
     /// A bare brain over a fresh temp-dir store, for tests that only need
     /// `HiveDeskRunner`'s `brain`/`host` fields satisfied and are not
     /// exercising the approval-parking path itself.
@@ -11526,6 +11795,52 @@ members = ["engineer", "designer"]
             .refer("platform", "sre", "What is the failover budget?")
             .await
             .expect_err("a spend halt on the far desk must surface as an error too");
+        assert!(err.to_string().contains("sre"), "{err}");
+    }
+
+    /// **A pre-dispatch refusal (`abnormal_stop`) is a hard error too.**
+    ///
+    /// A fail-closed spend gate that cannot read the meter behind a declared
+    /// cap refuses dispatch before any model call runs and reports the
+    /// refusal only through `abnormal_stop` — `budget_paused` and
+    /// `halted_for_spend` both stay `None`, since no turn ran to pause or
+    /// halt. Without this, `speak` folded the refusal notice as `Ok(reply)`
+    /// the same way it once did for a budget pause.
+    #[tokio::test]
+    async fn hive_speak_turns_an_abnormal_stop_into_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(
+            &brain,
+            &host,
+            abnormal_stop_outcome("dispatch refused: spend unreadable"),
+        );
+        let err = runner
+            .speak("theorist", "Settle the derivation.")
+            .await
+            .expect_err("a pre-dispatch refusal must surface as an error, not Ok(reply)");
+        assert!(
+            err.to_string().contains("theorist"),
+            "the error must name the agent: {err}"
+        );
+    }
+
+    /// The same terminal state, on the far-desk referral runner.
+    #[tokio::test]
+    async fn hive_refer_turns_an_abnormal_stop_into_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = hive_test_brain(dir.path());
+        let host = NoopHost;
+        let runner = hive_desk_runner(
+            &brain,
+            &host,
+            abnormal_stop_outcome("dispatch refused: spend unreadable"),
+        );
+        let err = runner
+            .refer("platform", "sre", "What is the failover budget?")
+            .await
+            .expect_err("a pre-dispatch refusal on the far desk must surface as an error too");
         assert!(err.to_string().contains("sre"), "{err}");
     }
 
@@ -11652,6 +11967,7 @@ members = ["engineer", "designer"]
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -11996,6 +12312,7 @@ members = ["engineer", "designer"]
             selector_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -12056,6 +12373,7 @@ members = ["engineer", "designer"]
             description: None,
             members: vec!["engineer".to_string(), "chief".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -12339,15 +12657,24 @@ members = ["engineer", "designer"]
                 ));
             }
             if self.faults.cancel_on.contains(&invoke) {
-                // The delegation's own in-flight entry, not the dispatched
-                // card's — cancelling the card would end the whole run.
+                // Cancel the entry this path actually registered.
+                //
+                // A CHAT-turn delegation still runs inside its delegator's
+                // turn, so it has its own `Delegation` entry and that is the
+                // one to cancel — cancelling the card there would end the whole
+                // run. A DISPATCHED card's hand-off no longer works that way:
+                // since the async hand-off the delegate runs as its own
+                // dispatch, so the only entry in flight is the card's `Task`,
+                // and it IS the delegate's run. Preferring `Delegation` keeps
+                // the chat path targeting exactly what it did before.
                 let company = CompanyId::new("acme");
-                if let Some(entry) = self
-                    .steer
-                    .list(&company)
-                    .into_iter()
+                let entries = self.steer.list(&company);
+                let target = entries
+                    .iter()
                     .find(|e| e.kind == InflightKind::Delegation)
-                {
+                    .or_else(|| entries.iter().find(|e| e.kind == InflightKind::Task))
+                    .cloned();
+                if let Some(entry) = target {
                     let _ = self.steer.steer(&company, &entry.key, SteerAction::Cancel);
                 }
             }
@@ -12421,6 +12748,7 @@ members = ["engineer", "designer"]
             steer: steer.clone(),
         });
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -12691,20 +13019,48 @@ members = ["engineer", "designer"]
 
     /// Seeds one dispatched card (blank assignee → the orchestrator runs it,
     /// which is the shape that carries the delegation tools) and dispatches it.
+    /// Dispatches a card and drives its hand-off chain to a settle, the way
+    /// `CompanyRuntime::run_dispatch_cycle` does in production.
+    ///
+    /// One `run_cycle` is one ATTEMPT, and since the async hand-off an attempt
+    /// that hands the card on settles `Delegated` and leaves the card
+    /// `in_progress` for the new owner — the delegate runs in its own attempt,
+    /// which is what makes their spend attributable and releases the
+    /// per-company lock between hops. A helper that ran a single cycle would
+    /// therefore stop one attempt short of every hand-off's outcome, and a test
+    /// asking "where does a cancelled hand-off end up?" would be reading a
+    /// card mid-chain.
+    ///
+    /// The loop condition is the runtime's own: a settled dispatch still in
+    /// `in_progress` has handed on, because every other ending lands the card
+    /// in a terminal column.
     async fn dispatch_card(brain: &HarnessBrain, tasks: &Arc<FsOps>, id: &str) {
         let mut c = card(id, "");
         c.column = "in_progress".to_string();
         tasks.upsert(&CompanyId::new("acme"), &c).await.unwrap();
-        brain
-            .run_cycle(
-                request(vec![CompanyEvent::TaskDispatched {
-                    task_id: id.to_string(),
-                    run_id: None,
-                }]),
-                &NoopHost,
-            )
-            .await
-            .expect("cycle runs");
+        for _ in 0..=crate::company::runtime::MAX_HAND_OFF_HOPS {
+            brain
+                .run_cycle(
+                    request(vec![CompanyEvent::TaskDispatched {
+                        task_id: id.to_string(),
+                        run_id: None,
+                    }]),
+                    &NoopHost,
+                )
+                .await
+                .expect("cycle runs");
+            let handed_on = tasks
+                .list(&CompanyId::new("acme"))
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .any(|card| {
+                    card.id == id && card.column == crate::ports::tasks::COLUMN_IN_PROGRESS
+                });
+            if !handed_on {
+                break;
+            }
+        }
     }
 
     /// The bug: a dispatched task the CEO delegated went straight to
@@ -12734,7 +13090,8 @@ members = ["engineer", "designer"]
         let after = only_card(&provider.tasks).await;
         assert_eq!(
             after.assignee, "engineer",
-            "the delegate must be linked as the assignee, not left blank under the delegator"
+            "the delegate — an agent — must be linked as the assignee, not left blank \
+             under the delegator"
         );
         assert_eq!(
             after.column, "in_review",
@@ -12758,6 +13115,8 @@ members = ["engineer", "designer"]
         // …and while the delegate was working, the card showed THEM working it:
         // its second turn ran against a card already reassigned and still in
         // progress, not one parked in a terminal column.
+        // Owner and worker are the same agent: the desk's lead. The board shows
+        // a teammate working it, never a channel id.
         assert_eq!(
             provider.board()[1],
             ("in_progress".to_string(), "engineer".to_string()),
@@ -12803,8 +13162,13 @@ members = ["engineer", "designer"]
              progress where nothing will re-dispatch it"
         );
         let note = after.note.expect("note");
+        // "dispatch failed", not "hand-off failed": since the async hand-off the
+        // delegate errors inside its OWN attempt, so the reason is recorded by
+        // that attempt's settle rather than by the hand-off that queued it. The
+        // property this test is named for — To-do, never stranded in progress —
+        // is asserted above and is unchanged.
         assert!(
-            note.contains("hand-off failed:"),
+            note.contains("dispatch failed:"),
             "the failure reason lands on the note: {note}"
         );
         assert!(
@@ -12850,14 +13214,19 @@ members = ["engineer", "designer"]
             "a cancelled hand-off must not read as finished, and must not strand in progress"
         );
         let note = after.note.expect("note");
+        // The wording moved with the async hand-off. A cancelled delegate is now
+        // cancelled inside ITS OWN dispatch, so the reason is `run_task`'s
+        // steer-cancel wording rather than the sync hand-off's report of a
+        // delegate that never produced anything. The property this test is named
+        // for — To-do, attributed to the operator — is unchanged.
         assert!(
-            note.contains("the delegated run was cancelled before it produced anything"),
+            note.contains("cancelled while in flight"),
             "the cancellation is reported as the cause: {note}"
         );
         // A cancellation is the operator's act, so the block is theirs — not the
         // delegate's, who never said it.
         assert!(
-            note.contains("[operator] the delegated run was cancelled"),
+            note.contains("[operator] cancelled while in flight"),
             "a cancellation is attributed to the operator: {note}"
         );
     }
@@ -12897,23 +13266,32 @@ members = ["engineer", "designer"]
         dispatch_card(&brain, &provider.tasks.clone(), "t-two-handoffs").await;
 
         let after = only_card(&provider.tasks).await;
+        // The card settles from the ONE hand-off that owns it — cancelled here,
+        // so To-do. A second hand-off in the same turn never ran.
         assert_eq!(
-            after.column, "in_review",
-            "the card settles from the hand-off that actually produced work, not from the \
-             cancelled one that preceded it"
+            after.column, COLUMN_TODO,
+            "the card settles from the hand-off that owns it"
         );
         assert_eq!(
             after.assignee, "engineer",
-            "the delegate that produced the work owns the card"
+            "the owner is an agent: the lead of the desk the card was handed to"
         );
         let note = after.note.expect("note");
+        // The protection #213 added, reached a stronger way. It used to be
+        // "a later hand-off that ANSWERS takes the card from an empty one", so
+        // work that ran could never be filed under a cancelled card. Async
+        // hand-off removes the race instead of resolving it: the first hand-off
+        // owns the card and its delegate is dispatched, so a second one is
+        // recorded and NOT started. There is no output to misfile because no
+        // second run happened.
         assert!(
-            note.contains("second attempt"),
-            "the answering hand-off's output is the card's result: {note}"
+            note.contains("also asked eng_desk: second attempt") && note.contains("not started"),
+            "the second hand-off is recorded, and visibly did not run: {note}"
         );
         assert!(
-            !note.contains("the delegated run was cancelled before it produced anything"),
-            "an earlier cancelled hand-off must not settle a card a later one completed: {note}"
+            !note.contains("[eng_desk] second attempt")
+                && !note.contains("[engineer] second attempt"),
+            "a second hand-off must not produce work under a card owned by the first: {note}"
         );
     }
 

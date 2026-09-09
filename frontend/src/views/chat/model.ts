@@ -1273,7 +1273,6 @@ function inlineFirstReplies(
     );
     if (runtimeReplies.length > 1) continue;
     const root = position.get(rootId);
-    const first = bucket[0];
     // **Only the runtime's own answer is ever promoted** (codex on #1972).
     //
     // `bucket[0]` is merely the earliest reply, and that is the *operator's*
@@ -1300,10 +1299,41 @@ function inlineFirstReplies(
     // say, and it is what *every* locally built company line carries — this
     // console's own POST, an `AgentReplyEvent` — so reading it as "might be a
     // person" would fold the live answer this promotion exists for.
-    if (first === undefined || first.from !== "company" || first.byPerson) continue;
-    const answer = position.get(first.id);
-    if (root === undefined || answer === undefined) continue;
+    if (root === undefined) continue;
     const own = new Set(bucket.map((r) => r.id));
+
+    // Promotion is for the ORDINARY EXCHANGE ONLY: one question, one answer,
+    // nothing in between. That is the whole case #1890 D part 2 argued for —
+    // without it the channel becomes "a column of your own questions each
+    // wearing a 1 reply chip".
+    //
+    // A root with SEVERAL runtime answers is not that case. It is a multi-party
+    // exchange (agent A hands to B, B answers), and it belongs in the thread as
+    // a unit. Promoting just the first one — what this did before — put that
+    // reply in the channel AND in the thread panel at once, and left the chip
+    // counting the remainder while the panel counted everything, so the two
+    // disagreed. Promoting ALL of them is worse still: the thread empties into
+    // the channel and two concurrent exchanges interleave, which is the exact
+    // nonsense the fold exists to prevent.
+    //
+    // So: promote only when there is exactly one promotable answer AND it is
+    // the earliest reply in the thread. Both terms carry weight, and dropping
+    // either reintroduces a defect this comment already describes:
+    //
+    //   - Without the count, a multi-party exchange promotes its first answer
+    //     into the channel while the panel still shows it — the disagreement
+    //     described just above.
+    //   - Without "earliest", the operator's own follow-up (or a colleague's)
+    //     no longer blocks promotion: it is a reply, so it lives in `bucket`
+    //     and the interleave scan below counts it as `own` rather than as an
+    //     interruption. The runtime's answer is then flattened out from behind
+    //     the very words the person wrote while waiting for it — the case the
+    //     `bucket[0]` paragraph above exists to prevent.
+    const promotable = bucket.filter((r) => r.from === "company" && !r.byPerson);
+    if (promotable.length !== 1 || promotable[0] !== bucket[0]) continue;
+    const first = promotable[0];
+    const answer = position.get(first.id);
+    if (answer === undefined) continue;
     let interleaved = false;
     for (let i = root + 1; i < answer; i += 1) {
       if (!own.has(messages[i].id)) {

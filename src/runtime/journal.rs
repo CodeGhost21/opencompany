@@ -3949,6 +3949,39 @@ mod test {
         );
     }
 
+    /// `GrantConsumed` is buffered in memory and journaled only at
+    /// the cycle drain (see `GrantState::consumed`'s doc), so a restart that
+    /// lands between "the tool ran" and "the drain wrote the record" replays
+    /// the grant as still live. This pins that this is what actually happens
+    /// on replay today — the documented duplication window, not a guess about
+    /// it — so a fix that closes the window is a deliberate, visible change to
+    /// this test rather than a silent behavior shift.
+    #[tokio::test]
+    async fn a_grant_consumed_but_not_yet_drained_replays_as_live_after_a_restart() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal
+            .record_granted(&grant("appr-crash", 1_000))
+            .await
+            .unwrap();
+        // The tool ran and `GrantSet::consume` removed it from the in-memory
+        // live set here, in the real path — but that consumption is buffered,
+        // not journaled, until the cycle runner's drain. No `record_grant_consumed`
+        // call happens before the crash this test models.
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        let replayed = reloaded.replayed_grants();
+        assert_eq!(
+            replayed.len(),
+            1,
+            "an undrained consumption re-arms the grant on replay: {replayed:?}"
+        );
+        assert_eq!(replayed[0].approval_id, ApprovalId::new("appr-crash"));
+    }
+
     #[tokio::test]
     async fn a_denied_explicit_request_replays_only_as_a_verdict_continuation() {
         let dir = tmp_dir();

@@ -129,6 +129,87 @@ pub fn correction(attempted: &str, allowed: &[&str]) -> String {
 
 /// The same line, stripped of the marker that made it a move.
 ///
+/// One deliberation line, rendered for a person instead of for the fold.
+///
+/// The grammar is addressed to the mechanism: `!` says which move this is,
+/// `#topic` names the option, `^N` and `>N` are sequence citations. All four
+/// are load-bearing in the transcript and meaningless in a chat window — an
+/// operator reading a desk was being shown `!support #lazy-load ^3 agreed`,
+/// which is machine syntax rendered verbatim in a human channel.
+///
+/// So the head tokens are stripped and the member's own sentence is all that
+/// remains — a teammate's line should read as a teammate talking. `None` for any line carrying no move, which is
+/// every ordinary reply on every non-deliberating desk — those must pass
+/// through byte-for-byte.
+///
+/// **A rendering only.** The stored line keeps its grammar: the fold reads
+/// markers off the journal, and a projection that rewrote them would leave the
+/// room unable to count its own transcript.
+#[must_use]
+pub fn readable(line: &str) -> Option<String> {
+    let kind = line_kind(line)?;
+    let rest = line.trim_start().strip_prefix('!')?;
+    let rest = rest
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, tail)| tail);
+
+    // Only the citation tokens at the HEAD are grammar. The same characters
+    // inside a sentence are the member's own words — "#2 in the list", "a > b"
+    // — and rewriting those would edit what a teammate said.
+    let mut topic = None;
+    let mut rest = rest.trim_start();
+    loop {
+        let token = rest.split_whitespace().next().unwrap_or_default();
+        let is_grammar = token.starts_with('#')
+            || token.starts_with('^')
+            || token.starts_with('>')
+            || token.starts_with("!");
+        if token.is_empty() || !is_grammar {
+            break;
+        }
+        if let Some(name) = token.strip_prefix('#')
+            && topic.is_none()
+        {
+            topic = Some(name.to_string());
+        }
+        rest = rest[token.len()..].trim_start();
+    }
+
+    // **No label, only the sentence.** The lead this once carried — "[supports
+    // lazy-load]" — was the grammar in another costume: still the mechanism's
+    // vocabulary, still addressed to the fold, still something an operator has
+    // to learn before the channel reads as a conversation. A teammate's line
+    // should look like a teammate talking.
+    //
+    // What is lost is that the channel no longer distinguishes a support from
+    // an objection at a glance. That is recoverable from the prose, which says
+    // so in words, and the fold keeps the marker on the stored row either way.
+    //
+    // A move with no sentence after it — `!question` and `!defer` are the two
+    // honest things a member with nothing to add can say — would otherwise
+    // render as an empty bubble, so those keep a plain phrase.
+    if !rest.is_empty() {
+        return Some(rest.to_string());
+    }
+    // `line_kind` folds `!unpin` onto `pin` — they write the same board, so the
+    // fold treats them alike. A RENDERING must not: "Pinned for the room." is
+    // the opposite of what an unpin did, and a bare one carries no sentence to
+    // correct the impression.
+    let bare = line.trim_start().strip_prefix('!').unwrap_or_default();
+    let unpinning = bare.split_whitespace().next() == Some("unpin");
+    Some(
+        match kind {
+            "pin" if unpinning => "Unpinned from the room's board.",
+            "question" => "I have nothing further to ask.",
+            "defer" => "This is not mine to answer.",
+            "commit" => "Recorded.",
+            "pin" => "Pinned for the room.",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 /// The leading `!` and nothing else: the member's own words are kept verbatim,
 /// so the transcript records what it wanted to say and a reader can see the
 /// attempt. What it loses is the only thing at stake — `resolve` reads a
@@ -157,4 +238,69 @@ pub struct MoveViolation {
     pub agent_id: String,
     /// The kind it reached for, without the `!`.
     pub attempted: String,
+}
+
+#[cfg(test)]
+mod readable_test {
+    use super::readable;
+
+    #[test]
+    fn a_move_line_reads_as_english() {
+        assert_eq!(
+            readable("!propose #lazy-load defer each section until it is opened").as_deref(),
+            Some("defer each section until it is opened")
+        );
+        assert_eq!(
+            readable("!support #lazy-load ^3 agreed, and it is reversible").as_deref(),
+            Some("agreed, and it is reversible")
+        );
+        assert_eq!(
+            readable("!object >3 ^1 users bounce between sections").as_deref(),
+            Some("users bounce between sections")
+        );
+    }
+
+    /// The same characters inside a sentence are the member's own words —
+    /// rewriting those would edit what a teammate said.
+    #[test]
+    fn only_the_head_tokens_are_grammar() {
+        assert_eq!(
+            readable("!evidence #perf ^2 the p95 is > 400ms and #2 in the list is worse")
+                .as_deref(),
+            Some("the p95 is > 400ms and #2 in the list is worse")
+        );
+    }
+
+    /// Every reply on every desk that does not deliberate must survive
+    /// byte-for-byte.
+    #[test]
+    fn an_ordinary_reply_is_untouched() {
+        assert_eq!(readable("here is the summary you asked for"), None);
+        assert_eq!(readable("!notamove still ordinary prose"), None);
+    }
+
+    /// A bare marker still says which move it was.
+    #[test]
+    fn a_move_with_nothing_after_it_still_renders() {
+        assert_eq!(
+            readable("!question").as_deref(),
+            Some("I have nothing further to ask."),
+            "a bare move would otherwise render as an empty bubble"
+        );
+    }
+    /// `line_kind` folds `!unpin` onto `pin` because both write one board — a
+    /// RENDERING must not, or an unpin reads as its own opposite.
+    #[test]
+    fn an_unpin_does_not_read_as_a_pin() {
+        assert_eq!(
+            readable("!unpin").as_deref(),
+            Some("Unpinned from the room's board.")
+        );
+        assert_eq!(readable("!pin").as_deref(), Some("Pinned for the room."));
+        // With a sentence, the member's own words stand either way.
+        assert_eq!(
+            readable("!unpin ^4 the window has moved past it").as_deref(),
+            Some("the window has moved past it")
+        );
+    }
 }

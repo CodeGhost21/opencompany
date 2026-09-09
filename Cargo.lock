@@ -3569,6 +3569,8 @@ dependencies = [
  "thiserror 2.0.20",
  "tinyagents-harness",
  "tinyflows",
+ "tinyhivemind",
+ "tinyhivemind-core",
  "tinyhivemind-hive",
  "tinyinference",
  "tinymcp",
@@ -3593,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman"
-version = "0.63.21"
+version = "0.63.22"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -5920,7 +5922,7 @@ dependencies = [
 
 [[package]]
 name = "tinyconnectors-bus"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6056,7 +6058,7 @@ dependencies = [
 
 [[package]]
 name = "tinymemory"
-version = "1.13.8"
+version = "1.15.2"
 dependencies = [
  "anyhow",
  "async-trait",

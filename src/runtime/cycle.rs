@@ -635,6 +635,32 @@ impl<'a> CycleRunner<'a> {
             }
             None => self.rt.serial.clone().lock_owned().await,
         };
+        // Codex review finding on PR #2140 (`3951723394`): `ensure_accepting`
+        // (or `ensure_not_emergency_stopped` for a continuation) is checked by
+        // the caller before this lock is even requested, and that wait is
+        // unbounded — "behind a busy company, an unbounded time later" per this
+        // function's own doc above. A stop engaged while a cycle queues behind
+        // this lock must still catch it once the lock is actually held, or a
+        // queued request starts a turn after the switch was pulled. Checked
+        // before the journal is touched, so a refusal here leaves nothing
+        // claimed and nothing to unwind.
+        if let Err(err) = self.rt.ensure_not_emergency_stopped() {
+            if let Err(finish_err) = self
+                .rt
+                .journal
+                .record_cycle_finished(&cycle_id, Some(err.to_string()))
+                .await
+            {
+                tracing::warn!(
+                    company = %self.rt.id,
+                    cycle = %cycle_id,
+                    %finish_err,
+                    "could not journal a cycle finish for a stop-refused cycle"
+                );
+            }
+            drop(guard);
+            return Err(err);
+        }
         let mut claimed: Vec<ApprovalContinuation> = Vec::new();
         for continuation in continuation_claims {
             if let Err(error) = self
@@ -1635,6 +1661,15 @@ approval.]"
         by: Actor,
         scope: GrantScope,
     ) -> Result<ResolveReceipt> {
+        // Every caller of this already asked `ensure_accepting` before it, but
+        // that ask sits behind at least one `.await` (the blocker claim lock,
+        // arming a console blocker resolution) before this runs. Rechecked here
+        // — first, before anything below commits — so a stop that lands in that
+        // window still catches the settlement rather than letting it execute a
+        // native effect or mint a grant after the company reports itself
+        // stopped. Nothing has touched the gate or the journal yet, so a
+        // refusal here leaves the approval exactly as parked as it was.
+        self.rt.ensure_not_emergency_stopped()?;
         // Issue #374: a broader scope is validated BEFORE the gate is touched.
         //
         // The order is the whole safety story of a bad scope request. Validating
@@ -1993,7 +2028,13 @@ approval.]"
         //
         // Computed here rather than inline in the literal below, which would
         // borrow `tool` after the field above has moved it.
-        let scope = crate::policy::consequence::standing_scope_of(&tool, &args);
+        let scope = match crate::policy::consequence::standing_mint_scope(&tool, &args, verdict) {
+            crate::policy::consequence::StandingMintScope::Scoped(scope) => Some(scope),
+            crate::policy::consequence::StandingMintScope::Unscoped => None,
+            crate::policy::consequence::StandingMintScope::Refused(why) => {
+                return Err(OpenCompanyError::InvalidRequest(why));
+            }
+        };
         let (agent, workflow) = match &subject {
             GrantSubject::Agent(agent) => (agent.clone(), None),
             GrantSubject::Workflow(workflow) => (String::new(), Some(workflow.clone())),
@@ -2320,6 +2361,10 @@ approval.]"
         amended_payload: serde_json::Value,
         by: Actor,
     ) -> Result<ResolveReceipt> {
+        // See the identical guard at the top of `settle_approval`: closes the
+        // same window, before anything below has touched the gate or the
+        // journal.
+        self.rt.ensure_not_emergency_stopped()?;
         let now = now_millis();
 
         if self
@@ -2549,6 +2594,19 @@ pub(crate) async fn execute_effect_once(
     if rt.journal.is_executed(key) {
         return Ok(());
     }
+    // The commit boundary, and so the last place the stop can still hold.
+    //
+    // Every caller checks the flag before reaching here, and every one of those
+    // checks sits behind at least one `.await` — resolving an approval journals
+    // the verdict before this runs, and a tool-call settlement yields on the
+    // grant lookup. A stop landing in that window would otherwise send the
+    // email or move the money after the company had reported itself stopped.
+    //
+    // Refused before `record_executed`, never after: the at-most-once mark is
+    // what makes the runtime never re-attempt an effect, so recording it and
+    // then refusing would lose the effect permanently rather than defer it.
+    // Unmarked, the key is still executable once an operator releases the stop.
+    rt.ensure_not_emergency_stopped()?;
     // The commit now describes what it is committing (issue #351). Classified
     // here, against the gate in force at execution time, because this is the one
     // place that has both the effect and the policy — and because "was this
@@ -2839,6 +2897,9 @@ fn cycle_task_id(
     let mut found: Option<String> = None;
     for event in events {
         let candidate = match event {
+            // Never a trigger: the marker records that a child turn was created,
+            // it does not ask for one.
+            CompanyEvent::ReferralEnqueued { .. } => None,
             CompanyEvent::TaskDispatched { task_id, .. } => Some(task_id.clone()),
             CompanyEvent::ApprovalResolved { approval_id, .. } => {
                 match approval_task(approval_id) {
@@ -3042,6 +3103,9 @@ fn cycle_conversation(
     let mut found: Option<(String, Option<EventSeq>)> = None;
     for (index, event) in events.iter().enumerate() {
         let candidate = match event {
+            // Names no conversation to answer in: it records that a child
+            // turn was created elsewhere, and that turn carries its own.
+            CompanyEvent::ReferralEnqueued { .. } => None,
             // The one event that names a thread outright. An unaddressed message
             // (`chat: None`) went to the orchestrator with no conversation of its
             // own — a rival, not a neutral pass-through, for the same reason a
@@ -5958,6 +6022,56 @@ members = ["writer"]
         assert_eq!(record.ledger.len(), 1);
     }
 
+    /// The commit boundary holds the stop, and defers rather than destroys.
+    ///
+    /// Callers check the flag before reaching the executor, and every one of
+    /// those checks sits behind an await — resolving an approval journals the
+    /// verdict first, so a stop landing in that window used to send the money
+    /// anyway. Refusing must also leave the key unexecuted, or the effect is
+    /// lost instead of postponed.
+    #[tokio::test]
+    async fn a_stop_refuses_the_effect_commit_and_leaves_it_executable_after_release() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
+            .await
+            .unwrap();
+
+        let effect = Effect {
+            kind: "x402.spend".into(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(3.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+
+        rt.approval_gate.set_emergency(true);
+        execute_effect_once(&rt, "k1", &effect, None)
+            .await
+            .expect_err("a stopped company must not commit an effect");
+
+        assert!(
+            !rt.journal.is_executed("k1"),
+            "a refused commit must not carry the at-most-once mark, or the effect is lost \
+             rather than deferred"
+        );
+        let record = rt.store().load(rt.id()).await.unwrap().unwrap();
+        assert!(
+            record.ledger.is_empty(),
+            "and the money must not have moved"
+        );
+
+        rt.approval_gate.set_emergency(false);
+        execute_effect_once(&rt, "k1", &effect, None)
+            .await
+            .expect("released, so the deferred effect runs");
+        let record = rt.store().load(rt.id()).await.unwrap().unwrap();
+        assert_eq!(record.ledger.len(), 1);
+    }
+
     #[tokio::test]
     async fn supervised_effect_runs_without_policy_hitl() {
         let home_dir = tmp_home();
@@ -7451,6 +7565,84 @@ members = ["writer"]
         assert_eq!(brain.decisions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// `resolve_approval_spawned` checks `ensure_not_emergency_stopped` before
+    /// this runs, but that ask sits behind at least one `.await` before
+    /// `settle_approval` is actually reached. A stop engaged in that window
+    /// must still be caught here, before a native effect executes or a grant
+    /// is minted, and the approval must come back out exactly as parked as it
+    /// went in — not resolved with nothing to show for it.
+    #[tokio::test]
+    async fn settle_approval_refuses_a_native_effect_once_the_stop_is_engaged() {
+        let home_dir = tmp_home();
+        let sign_effect = Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: Some(42.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let gate = Arc::new(ManifestApprovalGate::new(
+            manifest("supervised").policy.clone(),
+        ));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(EffectBrain {
+                    effect: sign_effect,
+                }))
+                .with_approvals(gate)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "file it".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        let approval_id = report.parked[0].clone();
+        assert_eq!(rt.pending_approvals().len(), 1);
+
+        rt.emergency_pause(operator(), None).await.expect("pause");
+
+        let refused = CycleRunner::new(&rt)
+            .settle_approval(&approval_id, Verdict::Approve, operator(), GrantScope::Once)
+            .await;
+        assert!(
+            matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+            "settle_approval must refuse while the stop is engaged, got {refused:?}"
+        );
+        assert_eq!(
+            rt.pending_approvals().len(),
+            1,
+            "a refused settle must leave the approval exactly as parked as before"
+        );
+        assert!(
+            rt.grants.peek(&approval_id).is_none(),
+            "a refused settle must not have minted a grant"
+        );
+
+        let raw = tokio::fs::read_to_string(
+            Bundle::new(home_dir.path().to_path_buf(), rt.id()).journal_jsonl(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !raw.contains("ApprovalResolved"),
+            "a refused settle must not journal a resolution"
+        );
+    }
+
     // ── Issue #174: the generic cycle seam meters inference usage ────────────
 
     /// A brain that reports a fixed [`TokenUsage`] for every cycle — the shape
@@ -7553,6 +7745,98 @@ members = ["writer"]
         assert_eq!(spend.len(), 1);
         // Negative: an outflow, per the ledger convention (issue #1047).
         assert_eq!(spend[0].amount_usd, -0.031);
+    }
+
+    /// a `PerCycle`-metered brain's spend charges
+    /// `UNATTRIBUTED_AGENT` unconditionally, even on a single-agent company
+    /// where the cycle can only have been that one teammate's work. That
+    /// makes the spend invisible to `usd_spent_by_agent` for the real
+    /// teammate — and therefore invisible to that teammate's
+    /// `budget_usd_daily` cap, which sums exactly that function's output.
+    #[tokio::test]
+    async fn per_cycle_spend_is_invisible_to_the_real_agents_daily_cap() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(9.99))))
+            .build()
+            .await
+            .unwrap();
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "how are we doing".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+        let samples = rt.usage().query(rt.id(), 0).await.unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(
+            crate::metering::daily_budget::usd_spent_by_agent(&samples, "ceo"),
+            0.0,
+            "the $9.99 this cycle spent is invisible to the only real teammate's daily spend \
+             sum — a budget_usd_daily cap on `ceo` would never see it and could never trip"
+        );
+        assert_eq!(
+            crate::metering::daily_budget::usd_spent_by_agent(
+                &samples,
+                crate::metering::UNATTRIBUTED_AGENT
+            ),
+            9.99,
+            "the spend is real; it is just parked under the company-wide bucket instead of \
+             the teammate whose turn it was"
+        );
+    }
+
+    /// A stopped company does not take the turn at all — not "takes it and
+    /// performs no effect".
+    ///
+    /// The switch used to be read only inside the native-effect path, so the
+    /// model call itself still ran and still billed; the turn was refused only
+    /// at whatever it tried to *do*. The refusal belongs at admission, where
+    /// nothing has been spent yet.
+    #[tokio::test]
+    async fn emergency_pause_stops_a_turn_from_running_and_spending() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+            .with_brain(Arc::new(MeteredBrain::per_cycle(reported_usage(9.99))))
+            .build()
+            .await
+            .unwrap();
+
+        rt.emergency_pause(operator(), Some("incident".to_string()))
+            .await
+            .unwrap();
+        assert!(rt.is_emergency_paused());
+
+        let refused = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                mentions: Vec::new(),
+                parent: None,
+                text: "how are we doing".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+                attachments: Vec::new(),
+            }])
+            .await;
+        assert!(
+            matches!(refused, Err(OpenCompanyError::EmergencyStop(_))),
+            "{refused:?}"
+        );
+
+        let samples = rt.usage().query(rt.id(), 0).await.unwrap();
+        assert!(
+            samples.is_empty(),
+            "and nothing was billed, because the model was never called: {samples:?}"
+        );
     }
 
     /// Tokens without USD (the managed passthrough bills backend-side) still
@@ -7790,6 +8074,75 @@ members = ["writer"]
         assert!(
             rt.journal.open_cycles().is_empty(),
             "the bracket closes when the cycle ends"
+        );
+    }
+
+    /// Codex review finding on PR #2140 (`3951723394`): `ensure_accepting` is
+    /// checked by the caller *before* this bracket even requests the lock, and
+    /// that wait is unbounded behind a busy company. A cycle that queued before
+    /// the emergency stop was engaged, but only reaches the front of the lock
+    /// after, must still be refused — otherwise the stop's own "halts
+    /// admission" promise has a hole exactly the size of that queue.
+    ///
+    /// Reuses `a_cycles_bracket_opens_before_the_serial_lock`'s setup: holding
+    /// `rt.serial` directly stands in for "another cycle is running", and
+    /// waiting on `journal.open_cycles()` proves the queued cycle is already
+    /// past `ensure_accepting` and stuck on the near side of the lock — the
+    /// exact window this fix closes.
+    #[tokio::test]
+    async fn a_cycle_queued_behind_the_lock_is_refused_once_the_stop_engages_while_it_waits() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let guard = rt.serial.lock().await;
+
+        let spawned = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.run_cycle(Vec::new()).await })
+        };
+
+        let mut open = Vec::new();
+        for _ in 0..200 {
+            open = rt.journal.open_cycles();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            open.len(),
+            1,
+            "the queued cycle must already be bracketed before the stop engages"
+        );
+
+        rt.emergency_pause(
+            Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            },
+            None,
+        )
+        .await
+        .expect("pause");
+
+        drop(guard);
+        let result = spawned.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::OpenCompanyError::EmergencyStop(_))
+            ),
+            "a cycle queued before the stop but reaching the lock after it must still be \
+             refused, got {result:?}"
+        );
+        assert!(
+            rt.journal.open_cycles().is_empty(),
+            "the bracket must still close on a stop-refused cycle"
         );
     }
 
@@ -9838,6 +10191,7 @@ members = ["writer"]
             description: None,
             members: vec!["eng1".to_string()],
             responder: crate::ports::types::ResponderMode::Auto,
+            hive: Default::default(),
         });
         rt.store().save(&record).await.unwrap();
 
@@ -10414,6 +10768,128 @@ members = ["writer"]
         let listed = rt.standing_grants();
         assert_eq!(listed.len(), 1, "the grant is revoked by the newer refusal");
         assert_eq!(listed[0].verdict, Verdict::Deny);
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that fails the
+    /// Nth `StandingGrantMinted` append it sees and passes every other line
+    /// straight through to an in-memory backend.
+    struct FailNthStandingMintStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+        seen: std::sync::atomic::AtomicUsize,
+        fail_at: usize,
+    }
+
+    impl FailNthStandingMintStore {
+        fn new(fail_at: usize) -> Self {
+            Self {
+                inner: crate::ports::journal::MemoryJournalStore::default(),
+                seen: std::sync::atomic::AtomicUsize::new(0),
+                fail_at,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for FailNthStandingMintStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> Result<()> {
+            if line.contains("StandingGrantMinted") {
+                let n = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n == self.fail_at {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "FailNthStandingMintStore: forced failure on the mint".to_string(),
+                    ));
+                }
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// the reconcile's own steps are not atomic. Revoking the
+    /// shadowed opposite-polarity policy is journaled and applied in memory
+    /// *before* the new policy's own mint is journaled, so a failure on that
+    /// second append — the durable store erroring, a disk momentarily full —
+    /// leaves the company with the old policy gone and no new one in its
+    /// place. Nothing rolls the revoke back.
+    #[tokio::test]
+    async fn a_failed_mint_after_a_successful_revoke_leaves_neither_policy_live() {
+        let home_dir = tmp_home();
+        let store = std::sync::Arc::new(FailNthStandingMintStore::new(2));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+                .with_brain(Arc::new(ParkingBrain {
+                    effect: grantable_effect(
+                        "ops",
+                        crate::policy::consequence::WEB_FETCH,
+                        serde_json::json!({ "url": "https://docs.rs/x" }),
+                    ),
+                }))
+                .with_journal_store(store)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let mut ids = Vec::new();
+        for text in ["do it", "again"] {
+            let report = rt
+                .run_cycle(vec![CompanyEvent::OperatorMessage {
+                    mentions: Vec::new(),
+                    parent: None,
+                    text: text.into(),
+                    by: None,
+                    chat: None,
+                    deliverable: None,
+                    attachments: Vec::new(),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(report.parked.len(), 1);
+            ids.push(report.parked[0].clone());
+        }
+
+        // First resolution: a standing denial. Its own mint is the first
+        // `StandingGrantMinted` line, which the store lets through.
+        rt.resolve_approval_spawned(&ids[0], Verdict::Deny, operator(), tool_scope())
+            .await
+            .expect("the first mint succeeds");
+        assert_eq!(rt.standing_grants().len(), 1);
+        assert_eq!(rt.standing_grants()[0].verdict, Verdict::Deny);
+
+        // Second resolution: a standing approval of the same scope. The
+        // reconcile revokes the denial (succeeds — a different record), then
+        // mints the approval — the second `StandingGrantMinted` line, which
+        // the store refuses.
+        let second = rt
+            .resolve_approval_spawned(&ids[1], Verdict::Approve, operator(), tool_scope())
+            .await;
+        assert!(
+            second.is_err(),
+            "the forced failure on the mint must surface, not be swallowed"
+        );
+
+        assert!(
+            rt.standing_grants().is_empty(),
+            "the revoke already landed and nothing rolled it back, so neither the old \
+             denial nor the new approval governs this scope: {:?}",
+            rt.standing_grants()
+        );
     }
 
     /// Issue #1458 under concurrency: two opposite-polarity resolutions of the

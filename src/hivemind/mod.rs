@@ -88,7 +88,7 @@ pub use memory::{
     HIVE_MEMORY_LABEL_PREFIX, HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory,
     desk_prefix, note_label,
 };
-pub use moves::{MOVE_KINDS, MoveViolation, UNGATED_KINDS};
+pub use moves::{MOVE_KINDS, MoveViolation, UNGATED_KINDS, line_kind, readable};
 pub use prompt::{EpisodePrompt, canonical_topic, marker_line};
 pub use referral::{
     AskedQuestion, EpisodeReferrals, FederationDesk, HiveFederation, HiveReferralRunner,
@@ -97,7 +97,7 @@ pub use referral::{
 pub use scope::EpisodeScope;
 pub use types::{
     EpisodeEnding, EpisodeOutcome, HiveConfig, HiveDesk, HiveMember, HivePolicy, desk_episode,
-    desk_federation,
+    desk_federation, effective_hive_config,
 };
 
 /// The `agent_id` an episode's closing outcome row is journaled under.
@@ -111,6 +111,21 @@ pub use types::{
 /// summary misattributed to it, and the read path can tell an unauthored
 /// outcome row from a teammate's line without consulting a roster.
 pub const HIVE_REPORT_AUTHOR: &str = "hive-report";
+
+/// The `agent_id` a failed turn's notice is journaled under.
+///
+/// Hyphenated for the same reason [`HIVE_REPORT_AUTHOR`] is, and read back as
+/// a system row on the same terms — but a DIFFERENT id, because the two rows
+/// answer to different readers.
+///
+/// The closing report restates a tally whose inputs are already on screen as
+/// the turns that produced them, so a console may reasonably decline to draw
+/// it. A failure notice is the opposite: the turn it describes does not exist,
+/// so there is no gap for a reader to notice and nothing else records that a
+/// seat was asked and could not answer. Sharing one id forced the two to be
+/// shown or hidden together, and hiding this one leaves "a transcript with a
+/// hole in it that nothing accounts for".
+pub const HIVE_FAILURE_AUTHOR: &str = "hive-failure";
 
 /// The `agent_id` an answer carried back from another desk is journaled under.
 ///

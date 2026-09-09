@@ -248,6 +248,12 @@ impl ManifestApprovalGate {
     }
 
     /// Whether the emergency stop is currently engaged.
+    ///
+    /// This flag is the switch's single source of truth, but this gate is not
+    /// its only enforcer: denying effects leaves the turns that ask for them
+    /// running. The halt on work itself is
+    /// [`CompanyRuntime::ensure_not_emergency_stopped`](crate::runtime::CompanyRuntime::ensure_not_emergency_stopped),
+    /// which reads this same flag.
     pub fn is_emergency(&self) -> bool {
         self.emergency.load(Ordering::SeqCst)
     }
@@ -268,6 +274,19 @@ impl ManifestApprovalGate {
     /// the gate does not enforce.
     pub fn ttl_millis(&self) -> u64 {
         self.ttl_millis.load(Ordering::Relaxed)
+    }
+
+    /// Whether this gate currently turns policy (the tier, `always_approve`,
+    /// the spend cap) into approval requests, as opposed to allowing
+    /// everything the hard denials do not already refuse.
+    ///
+    /// Read by [`PolicyDto`](crate::server::ops::policy::PolicyDto) so the
+    /// console states this fact rather than assuming it: every gate built by
+    /// [`with_policy_hitl_disabled`](Self::with_policy_hitl_disabled) reports
+    /// `false` here, and a copy of that assumption in TypeScript would drift
+    /// the moment a gate is built without it.
+    pub fn policy_hitl_enabled(&self) -> bool {
+        self.policy_hitl_enabled.load(Ordering::Relaxed)
     }
 
     /// The policy snapshot the gate currently evaluates against.
@@ -749,10 +768,12 @@ impl ApprovalGate for ManifestApprovalGate {
         //    releasing it. Denial returns to the brain as a refusal it replans
         //    around, which is what "park all new work" has to mean.
         //
-        //    `EffectGroup::Other` is exempt so chat survives — the operator has
-        //    to be able to ask the company what it was doing. The gate does not
-        //    police which tools `Other` covers, so "chat survives" is an
-        //    observation, not a promise about every non-conversational effect.
+        //    `EffectGroup::Other` is exempt at this layer only. It used to be
+        //    the carve-out that kept chat alive under a stop; since the runtime
+        //    admits no cycle at all while stopped
+        //    ([`CompanyRuntime::ensure_not_emergency_stopped`]), nothing reaches
+        //    this gate to take the exemption during one. It remains so that
+        //    releasing restores evaluation to exactly its pre-stop shape.
         if self.is_emergency() && effect.group != EffectGroup::Other {
             return Ok(PolicyDecision::Deny);
         }
@@ -880,6 +901,16 @@ mod test {
 
     async fn decide(gate: &ManifestApprovalGate, effect: &Effect) -> PolicyDecision {
         gate.evaluate(&company(), effect).await.unwrap()
+    }
+
+    #[test]
+    fn policy_hitl_enabled_reflects_the_gate_that_reports_it() {
+        let live = ManifestApprovalGate::new(policy("supervised", None));
+        assert!(live.policy_hitl_enabled());
+
+        let disabled =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+        assert!(!disabled.policy_hitl_enabled());
     }
 
     #[tokio::test]

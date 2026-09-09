@@ -11,6 +11,21 @@
 //! they are known authority defects. Runtime `TRACE` probes pin every method
 //! set, and the anonymous column pins route existence.
 //!
+//! `operator.rs` is a third source, closed the same way the ops inventory is:
+//! `source_path_set_equals_the_ops_matrix_path_set` scans its `scoped(...)`
+//! calls on their own and asserts that set equals `OPERATOR_AUTHORITY_ROUTES`,
+//! separately from the ops directory scan asserted against
+//! `OPS_SCOPED_ROUTES` — a route whose registration moves between the two
+//! sources without changing its suffix still fails, because each side is
+//! checked against its own table rather than a combined one. Its direct
+//! `.route(...)` calls (dual-address writes not registered through `scoped`,
+//! e.g. chat and approvals) are asserted against `OPERATOR_DIRECT_ROUTES` plus
+//! the operator-sourced subset of `EXTERNAL_AUTHORITY_ROUTES` and
+//! `OVERLAPPING_EXTERNAL_ROUTES`. A route added to `operator.rs` without a
+//! matrix row fails one of those set-equality assertions — the same
+//! closed-set guarantee the ops scan gives, not a hand-maintained list a new
+//! route could silently miss.
+//!
 //! Red-proof log (all temporary edits were restored from `/tmp` copies before
 //! continuing, and `git diff` was byte-identical to the pre-proof tree):
 //! - Removed `clear_policy`'s `require_admin`: the member `DELETE /policy`
@@ -19,6 +34,15 @@
 //!   unexpected canonical suffix `/matrix-canary`.
 //! - Added `.delete(get_activation)` to `/activation`: the method gate failed
 //!   on both forms with runtime `{DELETE, GET}` versus declared `{GET}`.
+//! - Duplicated `scoped("/activation", ...)` (an ops-owned suffix) into an
+//!   unreferenced `operator.rs` function, leaving `OPS_SCOPED_ROUTES` and
+//!   `OPERATOR_AUTHORITY_ROUTES` untouched — the same suffix now surfaces
+//!   from both scans, simulating a route whose registration crossed sources
+//!   without the matrix following it. The pre-fix union-of-both-scans
+//!   comparison stayed green, because the suffix was already present in the
+//!   combined actual set from the ops side. The per-source comparison this
+//!   file now runs failed as intended: `operator scoped suffix set drifted;
+//!   missing=[]; unexpected=["/activation"]`.
 
 #![cfg(feature = "openhuman")]
 
@@ -108,6 +132,7 @@ enum Access {
     Capability,
     Hmac,
     PublicGone,
+    Visible,
 }
 
 impl Access {
@@ -155,6 +180,20 @@ impl Access {
             Self::Capability => Verdict::Exact(StatusCode::NOT_FOUND, Some("not_found")),
             Self::Hmac => Verdict::Refused(StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::PublicGone => Verdict::Exact(StatusCode::GONE, None),
+            // `list_companies`: no address to check ownership against, so it
+            // filters the registry down to what each principal may see rather
+            // than refusing anyone who is merely authenticated (matches
+            // `GqlAuth::visible_companies`'s own doc: a tenant sees only what
+            // it owns, never a 403 revealing more exists). `Permitted` here
+            // covers a 200 with an empty list exactly as much as a populated
+            // one — `check_verdict` only reads status/code, never the body.
+            Self::Visible => match principal {
+                Anonymous => Verdict::Refused(StatusCode::UNAUTHORIZED, "unauthorized"),
+                MustChangePasswordAdmin => {
+                    Verdict::Refused(StatusCode::FORBIDDEN, "password_change_required")
+                }
+                Member | Admin | TenantOwner | TenantNonOwner | Platform => Verdict::Permitted,
+            },
         }
     }
 
@@ -167,6 +206,7 @@ impl Access {
             Self::Capability => "capability",
             Self::Hmac => "hmac",
             Self::PublicGone => "public-gone",
+            Self::Visible => "visible",
         }
     }
 }
@@ -225,6 +265,7 @@ enum Address {
 enum Source {
     Ops,
     ExternalAuthority,
+    Operator,
 }
 
 impl Source {
@@ -232,6 +273,7 @@ impl Source {
         match self {
             Self::Ops => "ops",
             Self::ExternalAuthority => "external",
+            Self::Operator => "operator",
         }
     }
 }
@@ -241,13 +283,15 @@ enum Probe {
     Empty,
     Json(&'static str),
     Capability,
+    /// A Server-Sent Events endpoint: the body never ends on its own (a live
+    /// subscription plus a periodic keep-alive), so a permitted response's
+    /// body is never drained — see [`Harness::request`].
+    Sse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Wait {
     None,
-    AuthRoleBranch,
-    SkillsBranch,
     BodyAdminFix,
     LedgerFix,
     TeamFix,
@@ -259,8 +303,6 @@ impl Wait {
     const fn label(self) -> &'static str {
         match self {
             Self::None => "-",
-            Self::AuthRoleBranch => "fix/auth-role-dimension-on-authorize-address",
-            Self::SkillsBranch => "fix/skills-admin-and-bounded-write",
             Self::BodyAdminFix => "none-assigned:body-admin-signature",
             Self::LedgerFix => "none-assigned:ledger-authority",
             Self::TeamFix => "none-assigned:team-delete-authority",
@@ -274,7 +316,6 @@ impl Wait {
 enum RedCells {
     None,
     Member,
-    MemberAndTempPassword,
     TenantOwnerAndPlatform,
     TempPassword,
 }
@@ -284,10 +325,6 @@ impl RedCells {
         match self {
             Self::None => false,
             Self::Member => matches!(principal, Principal::Member),
-            Self::MemberAndTempPassword => matches!(
-                principal,
-                Principal::Member | Principal::MustChangePasswordAdmin
-            ),
             Self::TenantOwnerAndPlatform => {
                 matches!(principal, Principal::TenantOwner | Principal::Platform)
             }
@@ -653,7 +690,7 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Post, "/skills/{slug}/uninstall", Admin, Destructive, ""),
     r!(Get, "/skills/registry", Scoped, Ordinary, ""),
     r!(Put, "/skills/{slug}", Admin, Authority, ""),
-    red!(Post, "/skills", Authority, SkillsBranch),
+    r!(Post, "/skills", Admin, Authority, ""),
     r!(Get, "/skills", Scoped, Ordinary, ""),
     r!(Get, "/smtp", Scoped, Ordinary, ""),
     r!(Put, "/smtp", Admin, Credential, ""),
@@ -870,49 +907,25 @@ const EXTERNAL_AUTHORITY_ROUTES: &[Route] = &[
         Verb::Post,
         "/api/v1/companies/{id}/pause",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/resume",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/emergency-pause",
         Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
     external_admin(
         Verb::Post,
         "/api/v1/companies/{id}/emergency-resume",
         Probe::Empty,
-        RedCells::Member,
-    ),
-    external_admin(
-        Verb::Post,
-        "/api/v1/companies/{id}/approvals/{aid}",
-        Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
-        RedCells::MemberAndTempPassword,
-    ),
-    external_admin(
-        Verb::Post,
-        "/api/v1/company/approvals/{aid}",
-        Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
-        RedCells::Member,
-    ),
-    external_admin(
-        Verb::Post,
-        "/api/v1/companies/{id}/approvals/{aid}/extend",
-        Probe::Empty,
-        RedCells::MemberAndTempPassword,
-    ),
-    external_admin(
-        Verb::Post,
-        "/api/v1/company/approvals/{aid}/extend",
-        Probe::Empty,
-        RedCells::Member,
+        RedCells::None,
     ),
 ];
 
@@ -948,10 +961,356 @@ const fn external_admin(
         blast: Blast::Authority,
         probe,
         note: "",
-        wait: Wait::AuthRoleBranch,
+        wait: Wait::None,
         red_cells,
     }
 }
+
+// Every `scoped(...)` route `operator.rs` registers: `ScopedCompany` governs
+// all of them exactly as it governs the ops inventory, so a member may list
+// or revoke a grant, staff a desk, or settle an in-review card — not just an
+// admin. Checked against the `operator.rs` scan on its own in
+// `source_path_set_equals_the_ops_matrix_path_set`, so a `scoped(...)` call
+// added there without a row here fails that assertion.
+const OPERATOR_AUTHORITY_ROUTES: &[Route] = &[
+    Route {
+        method: Verb::Post,
+        path: "/approvals/{aid}",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Admin,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Json(r#"{"verdict":"deny","amended_payload":{}}"#),
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/approvals/{aid}/extend",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Admin,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/desks",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/desks",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Json(r#"{"name":"__matrix_absent__"}"#),
+        note: "Members may create desks (group chats) for the company.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Delete,
+        path: "/desks/{desk_id}",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Destructive,
+        probe: Probe::Empty,
+        note: "Members may delete operator-created desks.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/desks/{desk_id}/members",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Json(r#"{"agent_id":"__matrix_absent__"}"#),
+        note: "Members may add a teammate to a desk.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Delete,
+        path: "/desks/{desk_id}/members/{agent_id}",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Members may remove an operator-added desk member.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Put,
+        path: "/desks/{desk_id}/order",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Json(r#"{"ordered_member_ids":[]}"#),
+        note: "Members may reorder a desk's members.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/operator-channel",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/events",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Sse,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/grants",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Lists every standing permission open on the company, including who granted it and what it admits.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Delete,
+        path: "/grants/{gid}",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Revokes one standing permission; 404 when there is nothing to revoke rather than reporting success over a no-op.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/chat/review",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Json(
+            r#"{"chatId":"__matrix_absent__","taskId":"__matrix_absent__","decision":"approve"}"#,
+        ),
+        note: "Members may approve or revise a task's in-review dispatch card.",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+];
+
+// Direct (non-`scoped`) `operator.rs` routes: dual-address writes/reads
+// registered as two separate `.route(...)` calls (one per addressing form)
+// rather than through the `scoped(...)` helper, because the two forms resolve
+// the company differently enough that they are two handler functions, not
+// one — the same reason `EXTERNAL_AUTHORITY_ROUTES` and
+// `OVERLAPPING_EXTERNAL_ROUTES` model their own operator.rs routes
+// (`resolve_approval`, `company_status`, …) the same way instead of through
+// `scoped`. Closed the same way as the scoped set: asserted in
+// `source_path_set_equals_the_ops_matrix_path_set` against operator.rs's
+// scanned direct-call set, combined with the operator-sourced subset of
+// `EXTERNAL_AUTHORITY_ROUTES`/`OVERLAPPING_EXTERNAL_ROUTES`.
+const OPERATOR_DIRECT_ROUTES: &[Route] = &[
+    // No address to check ownership against — `list_companies` filters the
+    // registry to what each principal may see rather than refusing anyone
+    // merely authenticated. See `Access::Visible`.
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/companies",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Visible,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::TempPasswordBoundaryFix,
+        red_cells: RedCells::TempPassword,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/api/v1/companies/{id}/chat",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Json(r#"{"text":"__matrix_absent__","detach":true}"#),
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/api/v1/company/chat",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Json(r#"{"text":"__matrix_absent__","detach":true}"#),
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/companies/{id}/chat/history",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/company/chat/history",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/companies/{id}/chat/attribution-audit",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/company/chat/attribution-audit",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/api/v1/companies/{id}/chat/messages/{seq}/reactions",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Json(r#"{"emoji":"👍","on":true}"#),
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Post,
+        path: "/api/v1/company/chat/messages/{seq}/reactions",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Json(r#"{"emoji":"👍","on":true}"#),
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    // `list_approvals`/`list_approvals_single` check `authorize_address` but,
+    // like `company_status`, never call `refuse_until_password_changed` — the
+    // same known temp-password gap `OVERLAPPING_EXTERNAL_ROUTES` already
+    // tracks, found here on two more routes rather than a new one; pinned
+    // through the same wait branch rather than opening a second issue for an
+    // identical defect.
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/companies/{id}/approvals",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Members may read pending approvals, filtered to what their role may see.",
+        wait: Wait::TempPasswordBoundaryFix,
+        red_cells: RedCells::TempPassword,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/company/approvals",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Authority,
+        probe: Probe::Empty,
+        note: "Members may read pending approvals, filtered to what their role may see.",
+        wait: Wait::TempPasswordBoundaryFix,
+        red_cells: RedCells::TempPassword,
+    },
+];
 
 fn all_routes() -> impl Iterator<Item = &'static Route> {
     OPS_SCOPED_ROUTES
@@ -959,6 +1318,8 @@ fn all_routes() -> impl Iterator<Item = &'static Route> {
         .chain(OPS_EXACT_ROUTES)
         .chain(EXTERNAL_AUTHORITY_ROUTES)
         .chain(OVERLAPPING_EXTERNAL_ROUTES)
+        .chain(OPERATOR_DIRECT_ROUTES)
+        .chain(OPERATOR_AUTHORITY_ROUTES)
 }
 
 fn routes() -> impl Iterator<Item = &'static Route> {
@@ -1045,7 +1406,7 @@ impl Harness {
             ),
         };
         let body = match probe {
-            Probe::Empty | Probe::Capability => Body::empty(),
+            Probe::Empty | Probe::Capability | Probe::Sse => Body::empty(),
             Probe::Json(json) => {
                 request = request.header(header::CONTENT_TYPE, "application/json");
                 Body::from(json)
@@ -1059,10 +1420,19 @@ impl Harness {
             .expect("infallible router response");
         let status = response.status();
         let headers = response.headers().clone();
-        let body = to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("bounded matrix body");
-        let json = serde_json::from_slice::<Value>(&body).ok();
+        // A permitted SSE response never ends its body on its own (a live
+        // subscription plus a periodic keep-alive), so draining it would hang
+        // the harness rather than time out cleanly. A refused SSE request
+        // still gets a normal, finite JSON error body from the extractor
+        // rejection, so only the success path skips the drain.
+        let json = if probe == Probe::Sse && status.is_success() {
+            None
+        } else {
+            let body = to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("bounded matrix body");
+            serde_json::from_slice::<Value>(&body).ok()
+        };
         Observed {
             status,
             headers,
@@ -1198,18 +1568,6 @@ async fn declared_non_defect_cells_hold_the_seven_principal_boundary() {
 }
 
 #[tokio::test]
-#[ignore = "waits on fix/auth-role-dimension-on-authorize-address"]
-async fn lifecycle_and_approval_authority_waits_on_auth_role_branch() {
-    check_cells(Some(Wait::AuthRoleBranch)).await;
-}
-
-#[tokio::test]
-#[ignore = "waits on fix/skills-admin-and-bounded-write"]
-async fn custom_skill_authority_waits_on_skills_branch() {
-    check_cells(Some(Wait::SkillsBranch)).await;
-}
-
-#[tokio::test]
 #[ignore = "waits on a body-admin signature branch; none assigned in handoff section 7"]
 async fn body_admin_machine_principals_wait_for_an_assigned_branch() {
     check_cells(Some(Wait::BodyAdminFix)).await;
@@ -1261,13 +1619,15 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         373,
         "complete ops route-method rows",
     );
-    assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 8);
+    assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
     assert_eq!(OVERLAPPING_EXTERNAL_ROUTES.len(), 1);
+    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 13);
+    assert_eq!(OPERATOR_DIRECT_ROUTES.len(), 11);
     assert_eq!(
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        382,
+        415,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1275,10 +1635,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        297,
+        328,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 2_674);
+    assert_eq!(render_snapshot().lines().count(), 2_905);
     assert_eq!(
         all_routes()
             .map(|route| {
@@ -1289,7 +1649,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
                         .count()
             })
             .sum::<usize>(),
-        55,
+        46,
         "ignored red principal cells",
     );
     assert_eq!(
@@ -1387,14 +1747,41 @@ fn render_snapshot() -> String {
 
 #[test]
 fn source_path_set_equals_the_ops_matrix_path_set() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/ops");
-    let scanned = scan_ops_routes(&root).unwrap_or_else(|error| panic!("{error}"));
+    let server_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let ops_root = server_root.join("ops");
+    let scanned = scan_ops_routes(&ops_root).unwrap_or_else(|error| panic!("{error}"));
 
-    let expected_suffixes: BTreeSet<_> = OPS_SCOPED_ROUTES
+    // `operator.rs` registers `scoped(...)` routes too (issue #2148 part 2),
+    // through the identical helper the ops directory uses — but the ops scan
+    // only walks `src/server/ops`, so its `scoped(...)` calls need their own
+    // pass rather than silently joining the ops directory's tree walk.
+    let operator_file = server_root.join("operator.rs");
+    let operator_scan =
+        scan_file_route_literals(&operator_file).unwrap_or_else(|error| panic!("{error}"));
+
+    // Each scan is checked against its own matrix constant, not a union of
+    // both. A route whose registration moves from the ops directory to
+    // `operator.rs` (or back) keeps the same suffix, so a unioned check
+    // stays green on that move alone while the matrix still labels the
+    // route under its old source and the wrong table declares it. Comparing
+    // per-source is what turns that provenance drift into a failure instead
+    // of a set membership that never notices which side lost a suffix and
+    // which side gained one.
+    let ops_expected_suffixes: BTreeSet<_> = OPS_SCOPED_ROUTES
         .iter()
         .map(|route| route.path.to_string())
         .collect();
-    assert_set_eq("scoped suffix", &expected_suffixes, &scanned.scoped);
+    assert_set_eq("ops scoped suffix", &ops_expected_suffixes, &scanned.scoped);
+
+    let operator_expected_suffixes: BTreeSet<_> = OPERATOR_AUTHORITY_ROUTES
+        .iter()
+        .map(|route| route.path.to_string())
+        .collect();
+    assert_set_eq(
+        "operator scoped suffix",
+        &operator_expected_suffixes,
+        &operator_scan.scoped,
+    );
 
     let expected_direct: BTreeSet<_> = OPS_EXACT_ROUTES
         .iter()
@@ -1409,6 +1796,36 @@ fn source_path_set_equals_the_ops_matrix_path_set() {
             ("scope.rs:single-company-format", 1),
         ]),
         "non-Axum/dynamic route allowlist drifted"
+    );
+
+    // `operator.rs`'s direct (non-`scoped`) routes are declared two ways: the
+    // ones this file also owns the authority story for
+    // (`OPERATOR_DIRECT_ROUTES`), and the ones `EXTERNAL_AUTHORITY_ROUTES` /
+    // `OVERLAPPING_EXTERNAL_ROUTES` already declare — those two constants also
+    // hold `provision.rs`'s pause/resume/emergency-* routes, so the
+    // operator-sourced subset is whatever is left after subtracting
+    // `provision.rs`'s own scanned direct set, rather than a second literal
+    // path list that could drift from the first.
+    let provision_scan = scan_file_route_literals(&server_root.join("provision.rs"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let external_and_overlapping_direct: BTreeSet<String> = EXTERNAL_AUTHORITY_ROUTES
+        .iter()
+        .chain(OVERLAPPING_EXTERNAL_ROUTES.iter())
+        .map(|route| route.path.to_string())
+        .collect();
+    let operator_sourced_external: BTreeSet<String> = external_and_overlapping_direct
+        .difference(&provision_scan.direct)
+        .cloned()
+        .collect();
+    let expected_operator_direct: BTreeSet<String> = OPERATOR_DIRECT_ROUTES
+        .iter()
+        .map(|route| route.path.to_string())
+        .chain(operator_sourced_external)
+        .collect();
+    assert_set_eq(
+        "operator direct path",
+        &expected_operator_direct,
+        &operator_scan.direct,
     );
 }
 
@@ -1431,48 +1848,40 @@ fn external_authority_router_files_have_no_unclassified_paths() {
         ]),
         &provision.direct,
     );
+
+    // Knowing a path exists is not the same as exercising it. These four are
+    // `PlatformScope` and the matrix has no platform access class to express
+    // them, so they carry no row and no principal ever probes them. Naming
+    // them here is what stops that being silent: a ninth provisioning route,
+    // or a fix that gives these rows, fails this assertion rather than
+    // quietly joining a set nobody checks.
+    let unexercised: BTreeSet<String> = provision
+        .direct_methods
+        .iter()
+        .filter(|entry| {
+            !EXTERNAL_AUTHORITY_ROUTES
+                .iter()
+                .any(|route| *entry == &format!("{} {}", route.method.label(), route.path))
+        })
+        .cloned()
+        .collect();
+    assert_set_eq(
+        "provisioning routes no principal probes",
+        &string_set(&[
+            "POST /api/v1/companies",
+            "GET /api/v1/companies/provisioning",
+            "POST /api/v1/companies/{id}/suspend",
+            "POST /api/v1/companies/{id}/archive",
+        ]),
+        &unexercised,
+    );
+
     assert!(provision.scoped.is_empty());
 
-    let operator = scan_file_route_literals(&root.join("operator.rs"))
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_set_eq(
-        "operator direct path",
-        &string_set(&[
-            "/api/v1/companies",
-            "/api/v1/companies/{id}",
-            "/api/v1/companies/{id}/chat",
-            "/api/v1/companies/{id}/chat/history",
-            "/api/v1/companies/{id}/chat/attribution-audit",
-            "/api/v1/companies/{id}/chat/messages/{seq}/reactions",
-            "/api/v1/companies/{id}/approvals",
-            "/api/v1/companies/{id}/approvals/{aid}",
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
-            "/api/v1/company/chat",
-            "/api/v1/company/chat/history",
-            "/api/v1/company/chat/attribution-audit",
-            "/api/v1/company/chat/messages/{seq}/reactions",
-            "/api/v1/company/approvals",
-            "/api/v1/company/approvals/{aid}",
-            "/api/v1/company/approvals/{aid}/extend",
-        ]),
-        &operator.direct,
-    );
-    assert_set_eq(
-        "operator scoped suffix",
-        &string_set(&[
-            "/desks",
-            "/desks/{desk_id}",
-            "/desks/{desk_id}/members",
-            "/desks/{desk_id}/members/{agent_id}",
-            "/desks/{desk_id}/order",
-            "/operator-channel",
-            "/events",
-            "/grants",
-            "/grants/{gid}",
-            "/chat/review",
-        ]),
-        &operator.scoped,
-    );
+    // `operator.rs`'s own direct and scoped path sets are closed against the
+    // matrix in `source_path_set_equals_the_ops_matrix_path_set`, not here —
+    // this test stays about `provision.rs`, the one file left with no
+    // matrix-derived closure.
 }
 
 fn string_set(values: &[&str]) -> BTreeSet<String> {
@@ -1542,6 +1951,17 @@ fn declared_method_sets() -> BTreeMap<String, BTreeSet<String>> {
                 .insert(route.method.label().to_string());
         }
     }
+    // `provision.rs` registers `POST /api/v1/companies` (provisioning) on the
+    // exact path `list_companies` answers `GET` on. That `POST` carries no row
+    // of its own — it is one of the four provisioning routes the matrix has no
+    // `PlatformScope`-shaped access class to express (see
+    // `external_authority_router_files_have_no_unclassified_paths`'s
+    // "provisioning routes no principal probes" set) — so without this the
+    // runtime's real `{GET, POST}` Allow header would fail this gate on a
+    // route this change was never asked to widen.
+    if let Some(methods) = sets.get_mut("/api/v1/companies") {
+        methods.insert("POST".to_string());
+    }
     sets
 }
 
@@ -1549,7 +1969,44 @@ fn declared_method_sets() -> BTreeMap<String, BTreeSet<String>> {
 struct Scan {
     scoped: BTreeSet<String>,
     direct: BTreeSet<String>,
+    /// `"POST /api/v1/companies"` — the method matters as much as the path.
+    /// A path already in the inventory can gain a second method, and a
+    /// path-only set stays green while that new method goes unprobed.
+    direct_methods: BTreeSet<String>,
     allowed_nonliteral: BTreeMap<&'static str, usize>,
+}
+
+/// Every HTTP verb a `.route("/p", …)` call wires, including Axum's chained
+/// form `post(handler).delete(other)`. Reading only the first identifier
+/// records `POST` and silently drops the `DELETE`, which is the same
+/// path-shaped blindness this check exists to remove.
+fn route_verbs(tokens: &[Token], open_paren: usize) -> BTreeSet<String> {
+    const VERBS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+    let mut verbs = BTreeSet::new();
+    let mut depth = 0usize;
+    for index in open_paren..tokens.len() {
+        match punct_at(tokens, index) {
+            Some('(') => depth += 1,
+            Some(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        if depth == 1
+            && punct_at(tokens, index + 1) == Some('(')
+            && let Some(name) = ident_at(tokens, index)
+            && VERBS.contains(&name)
+        {
+            verbs.insert(name.to_ascii_uppercase());
+        }
+    }
+    if verbs.is_empty() {
+        verbs.insert("?".to_string());
+    }
+    verbs
 }
 
 fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
@@ -1558,6 +2015,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     let skipped = test_only_token_indexes(&tokens);
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     for index in 0..tokens.len() {
         if skipped.contains(&index) {
             continue;
@@ -1583,6 +2041,12 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
             match tokens.get(index + 3).map(|token| &token.kind) {
                 Some(TokenKind::String(path)) => {
                     direct.insert(path.clone());
+                    // `.route("/p", post(h))` — the verb is the identifier
+                    // after the comma. An unreadable one is recorded as
+                    // `?` rather than skipped, so it cannot vanish quietly.
+                    for verb in route_verbs(&tokens, index + 2) {
+                        direct_methods.insert(format!("{verb} {path}"));
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -1597,6 +2061,7 @@ fn scan_file_route_literals(file: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral: BTreeMap::new(),
     })
 }
@@ -1620,6 +2085,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     files.sort();
     let mut scoped = BTreeSet::new();
     let mut direct = BTreeSet::new();
+    let mut direct_methods = BTreeSet::new();
     let mut allowed_nonliteral = BTreeMap::new();
     for file in files {
         let relative = file.strip_prefix(root).expect("collected under root");
@@ -1657,6 +2123,9 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
                 match tokens.get(index + 3).map(|token| &token.kind) {
                     Some(TokenKind::String(path)) => {
                         direct.insert(path.clone());
+                        for verb in route_verbs(&tokens, index + 2) {
+                            direct_methods.insert(format!("{verb} {path}"));
+                        }
                     }
                     _ => {
                         let Some(fingerprint) =
@@ -1677,6 +2146,7 @@ fn scan_ops_routes(root: &Path) -> Result<Scan, String> {
     Ok(Scan {
         scoped,
         direct,
+        direct_methods,
         allowed_nonliteral,
     })
 }
@@ -2114,4 +2584,16 @@ mod scanner_tests {
         assert!(visible);
         assert!(!hidden);
     }
+}
+
+#[test]
+fn chained_route_verbs_are_all_recorded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let setup = scan_file_route_literals(&root.join("setup.rs")).expect("scan");
+    assert!(
+        setup.direct_methods.contains("GET /api/v1/setup")
+            && setup.direct_methods.contains("POST /api/v1/setup"),
+        "chained get(read).post(apply) must yield both verbs, got {:?}",
+        setup.direct_methods
+    );
 }

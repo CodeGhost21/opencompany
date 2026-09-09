@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { FinancesView } from "@/views/FinancesView";
 import { HostingView } from "@/views/HostingView";
 import { InvoicingView } from "@/views/finance/InvoicingView";
@@ -143,7 +144,12 @@ type Page =
 
 async function nameOf(view: Page, answer: unknown): Promise<string | null> {
   await act(async () => {
-    root.render(createElement(view, { client: clientWith(answer), company: "acme" }));
+    root.render(
+      createElement(ConnectionScopeProvider, {
+        scope: { connection: "local", company: "acme" },
+        children: createElement(view, { client: clientWith(answer), company: "acme" }),
+      }),
+    );
   });
   const headings = container.querySelectorAll("h1");
   expect(headings.length, "a page has exactly one h1").toBeLessThan(2);
@@ -227,7 +233,10 @@ describe("People offers no Invite before it knows the reader is an admin", () =>
   it("has no actions in the loading state", async () => {
     await act(async () => {
       root.render(
-        createElement(PeopleView, { client: clientWith("pending"), company: "acme" }),
+        createElement(ConnectionScopeProvider, {
+          scope: { connection: "local", company: "acme" },
+          children: createElement(PeopleView, { client: clientWith("pending"), company: "acme" }),
+        }),
       );
     });
     expect(container.querySelector("h1")?.textContent).toBe("People");

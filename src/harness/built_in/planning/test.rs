@@ -1822,6 +1822,55 @@ async fn a_clean_plan_lands_and_hands_the_card_on() {
     assert_eq!(model.calls(), 1, "one card, one model call");
 }
 
+fn operator() -> crate::ports::types::Actor {
+    crate::ports::types::Actor {
+        kind: crate::ports::types::ActorKind::Operator,
+        id: "operator".to_string(),
+    }
+}
+
+/// **Codex review finding on PR #2140 (`3960203729`).** A card can reach
+/// `Planning` through a plain board write while the company is
+/// emergency-stopped — that write never goes through `run_cycle`, so none of
+/// `ensure_not_emergency_stopped`'s other doorways see it — and this pass is
+/// its own paid-model call, so without its own check it would bill inference
+/// while the company reports itself stopped. Proves the model is never
+/// called, and the card bounces back to To-do with the stop named, exactly
+/// like every other pass failure that spent nothing.
+#[tokio::test]
+async fn a_stopped_company_refuses_the_pass_before_the_model_is_called() {
+    let model = ScriptedModel::replying(CLEAN_PLAN);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-stopped", "maya"))
+        .await
+        .unwrap();
+
+    runtime
+        .emergency_pause(operator(), None)
+        .await
+        .expect("pause");
+
+    run_planning_pass(Arc::clone(&runtime), "t-stopped".to_string()).await;
+
+    let after = read(&runtime, "t-stopped").await;
+    assert_eq!(
+        after.column, COLUMN_TODO,
+        "a pass refused by the stop must not leave the card sitting in Planning"
+    );
+    let note = after.note.expect("the refusal is on the note");
+    assert!(
+        note.contains("stopped"),
+        "the note should name the emergency stop as the reason: {note}"
+    );
+    assert_eq!(
+        model.calls(),
+        0,
+        "the model must never be called while the company is stopped"
+    );
+}
+
 /// A blocked plan is still written. It is the most useful thing on the card:
 /// the operator's next move is to close the gap, and the brief is what says
 /// which gap and why.
@@ -2516,6 +2565,7 @@ async fn the_prompt_carries_runtime_teammates_and_desks_not_just_manifest_ones()
         description: None,
         members: vec!["social_manager".to_string()],
         responder: crate::ports::types::ResponderMode::default(),
+        hive: Default::default(),
     });
     runtime.store().save(&record).await.unwrap();
 

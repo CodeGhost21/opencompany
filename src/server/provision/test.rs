@@ -854,7 +854,8 @@ async fn emergency_pause_shows_in_status_and_resume_clears_it() {
     let body = json_body(paused).await;
     assert_eq!(body["emergency_paused"], true);
     assert_eq!(body["changed"], true);
-    // Orthogonal to lifecycle: the company is still running, so chat still works.
+    // Not orthogonal to lifecycle any more: the stop halts admission, so an
+    // ingress that would run a turn is refused while it is engaged.
     assert_eq!(body["lifecycle"], "running");
 
     let ok = app
@@ -866,7 +867,10 @@ async fn emergency_pause_shows_in_status_and_resume_clears_it() {
         ))
         .await
         .unwrap();
-    assert_eq!(ok.status(), StatusCode::OK);
+    // A chat turn calls the model and bills for it, so a stopped company cannot
+    // serve one and still be stopped. 409: the operator chose this state and it
+    // clears when they release it, so it is neither a fault nor a retry.
+    assert_eq!(ok.status(), StatusCode::CONFLICT);
 
     // Release requires the company id, not the fixed phrase.
     let resumed = app
@@ -2589,7 +2593,7 @@ async fn a_member_may_not_engage_the_emergency_stop() {
         .oneshot(json_post_req_as(
             "/api/v1/companies/acme/emergency-pause",
             &cookie,
-            serde_json::json!({ "confirm": "EMERGENCY-PAUSE" }),
+            serde_json::json!({ "confirm": super::PAUSE_CONFIRMATION }),
         ))
         .await
         .unwrap();
@@ -2611,7 +2615,7 @@ async fn a_member_may_not_release_the_emergency_stop() {
         .oneshot(json_post_req(
             "/api/v1/companies/acme/emergency-pause",
             Some(PLATFORM_SECRET),
-            serde_json::json!({ "confirm": "EMERGENCY-PAUSE" }),
+            serde_json::json!({ "confirm": super::PAUSE_CONFIRMATION }),
         ))
         .await
         .unwrap();
@@ -2668,7 +2672,7 @@ async fn an_admin_may_still_work_the_emergency_stop() {
         .oneshot(json_post_req_as(
             "/api/v1/companies/acme/emergency-pause",
             &cookie,
-            serde_json::json!({ "confirm": "EMERGENCY-PAUSE" }),
+            serde_json::json!({ "confirm": super::PAUSE_CONFIRMATION }),
         ))
         .await
         .unwrap();
@@ -2685,6 +2689,29 @@ async fn an_admin_may_still_work_the_emergency_stop() {
         .unwrap();
     assert_eq!(released.status(), StatusCode::OK);
     assert_eq!(json_body(released).await["emergency_paused"], false);
+}
+
+/// No credential at all is `401`, not `403` — the guard must not turn an
+/// anonymous request into a role decision.
+#[tokio::test]
+async fn an_unauthenticated_caller_cannot_reach_any_lifecycle_route() {
+    let home_dir = home();
+    let (app, _cookie) = company_with_session(home_dir.path(), crate::ports::UserRole::Admin).await;
+
+    for uri in [
+        "/api/v1/companies/acme/pause",
+        "/api/v1/companies/acme/resume",
+        "/api/v1/companies/acme/emergency-pause",
+        "/api/v1/companies/acme/emergency-resume",
+    ] {
+        let denied = app.clone().oneshot(post_req(uri, None)).await.unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} answered an anonymous caller with {}",
+            denied.status()
+        );
+    }
 }
 
 /// The narrower platform rule the admin guard must not swallow: a company's own

@@ -143,6 +143,13 @@ pub struct HiveConfig {
 }
 
 impl HiveConfig {
+    /// Whether this block says nothing at all, so a record that predates the
+    /// field keeps omitting it exactly as it did before.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
     /// Whether a desk of `members` effective members deliberates under this
     /// config.
     ///
@@ -296,6 +303,20 @@ impl HivePolicy {
 pub enum EpisodeEnding {
     /// One topic carried and the room recorded it.
     Converged {
+        /// What the carried proposal actually SAID, when its `!propose` line is
+        /// still in the window.
+        ///
+        /// A topic id is a label, and the report had only the label: a room
+        /// that argued well and named its option `#need-decide` reported
+        /// "the desk settled on #need-decide", which tells an operator nothing
+        /// about the decision. The reasoning was in the transcript, where the
+        /// report could not reach it — `EpisodeOutcome` carries no transcript,
+        /// so the text has to travel on the ending itself.
+        ///
+        /// `None` when no `!propose` for the topic survives the fold window,
+        /// which is possible for a long room: the sentence then reads exactly
+        /// as it did before this field existed.
+        proposal: Option<String>,
         /// The topic that carried.
         topic: String,
         /// The members whose grounded support carried it.
@@ -506,18 +527,53 @@ impl EpisodeOutcome {
         let turns = self.turns;
         let plural = if turns == 1 { "turn" } else { "turns" };
         match &self.ending {
-            EpisodeEnding::Converged { topic, supporters } => {
+            EpisodeEnding::Converged {
+                topic,
+                supporters,
+                proposal,
+            } => {
                 let backing = if supporters.is_empty() {
                     "the room".to_owned()
                 } else {
                     supporters.join(", ")
                 };
-                format!(
-                    "The desk settled on #{topic} after {turns} {plural} (backed by {backing})."
-                )
+                match proposal.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                    // The decision first, the bookkeeping after it: an operator
+                    // reading this wants to know what was decided, not which
+                    // label the room happened to file it under.
+                    // Kept to ONE line, like every other row the room writes.
+                    // This report is journaled onto the desk, so it lands in the
+                    // NEXT episode's transcript window — a paragraph here would
+                    // take that space from every future room. A proposal is
+                    // extracted from a single `!propose` line, so it fits.
+                    Some(text) => format!(
+                        "The desk settled after {turns} {plural} (#{topic}, backed by \
+                         {backing}): {text}"
+                    ),
+                    None => format!(
+                        "The desk settled on #{topic} after {turns} {plural} (backed by \
+                         {backing})."
+                    ),
+                }
             }
+            // **A deadlock is escalated, not merely reported.**
+            //
+            // `Deadlocked` is returned only when `has_free_dissenter` is false
+            // — every member has taken a side by construction. So the room
+            // cannot break this itself, and nobody in it can even choose who to
+            // ask: any member picking an outside desk would be one side of a
+            // split choosing its own referee. Every member also had the chance
+            // to name an outsider on any of its own turns, since referral is
+            // considered on every committed marked line; none did.
+            //
+            // That leaves exactly one party who can decide, and the sentence
+            // now says so. Reported flatly, this read as an outcome rather than
+            // as a question, and an operator watching a desk had to know the
+            // mechanism to realise a decision was owed.
             EpisodeEnding::Deadlocked { topics } => format!(
-                "The desk deadlocked after {turns} {plural}: {} carried together and nobody broke the tie.",
+                "The desk deadlocked after {turns} {plural}: {} carried together and everyone had \
+                 taken a side, so nobody was left to break the tie. It needs your call — say which \
+                 to take, or what would settle it.",
                 topics
                     .iter()
                     .map(|topic| format!("#{topic}"))
@@ -532,6 +588,39 @@ impl EpisodeOutcome {
             }
         }
     }
+}
+
+/// The hive block in force for `desk_id`, overlay first and manifest behind it.
+///
+/// Both surfaces can declare one and they are merged the same way
+/// `effective_desk_members` merges membership: an operator-created desk keeps
+/// its own settings, a manifest desk keeps the blueprint's, and a desk that
+/// declares nothing takes the defaults.
+///
+/// Reading only the manifest — which is what this did — meant a console-created
+/// desk could not answer either question the block decides. It deliberated
+/// because the default says so and had no way to opt out, and it could never
+/// opt IN to referral, because there was no `[[group_chat]]` entry to hang the
+/// block on. A company that builds its desks in the console therefore had
+/// cross-desk referral permanently unavailable, with nothing to change to get
+/// it.
+#[must_use]
+pub fn effective_hive_config(record: &CompanyRecord, desk_id: &str) -> HiveConfig {
+    record
+        .overlay_desks
+        .iter()
+        .find(|desk| desk.id == desk_id)
+        .filter(|desk| !desk.hive.is_default())
+        .map(|desk| desk.hive.clone())
+        .or_else(|| {
+            record
+                .manifest
+                .group_chats
+                .iter()
+                .find(|group| group.id == desk_id)
+                .map(|group| group.hive.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// The desk a hive episode should answer `chat` on, or `None` to keep today's
@@ -563,12 +652,7 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
         return None;
     }
     let desk_id = record.resolve_desk_id(chat)?;
-    let declared = record
-        .manifest
-        .group_chats
-        .iter()
-        .find(|group| group.id == desk_id);
-    let config = declared.map(|group| group.hive.clone()).unwrap_or_default();
+    let config = effective_hive_config(record, &desk_id);
     let members: Vec<HiveMember> = record
         .effective_desk_members(&desk_id)
         .into_iter()
@@ -613,9 +697,24 @@ pub fn desk_episode(record: &CompanyRecord, chat: Option<&str>) -> Option<HiveDe
         );
         return None;
     }
+    // Name and description come from whichever surface declared the desk, the
+    // same order the config does. Reading the manifest alone left an operator
+    // -created desk carrying its raw id as its name in every episode prompt and
+    // closing report, because the manifest has no entry for it.
+    let overlay = record.overlay_desks.iter().find(|desk| desk.id == desk_id);
+    let declared = record
+        .manifest
+        .group_chats
+        .iter()
+        .find(|group| group.id == desk_id);
     Some(HiveDesk {
-        name: declared.map_or_else(|| desk_id.clone(), |group| group.name.clone()),
-        description: declared.and_then(|group| group.description.clone()),
+        name: overlay
+            .map(|desk| desk.name.clone())
+            .or_else(|| declared.map(|group| group.name.clone()))
+            .unwrap_or_else(|| desk_id.clone()),
+        description: overlay
+            .and_then(|desk| desk.description.clone())
+            .or_else(|| declared.and_then(|group| group.description.clone())),
         id: desk_id,
         members,
         config,

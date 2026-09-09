@@ -351,7 +351,7 @@ impl<'a> EpisodePrompt<'a> {
             self.missing(),
             self.peers(),
             self.last_line(visible),
-            render_transcript(visible, self.trigger),
+            render_transcript(visible, self.trigger, Some(&self.member.id)),
         )
     }
 
@@ -756,7 +756,11 @@ const EPISODE_DIVIDER: &str = "--- Above: earlier conversation on this desk, fro
 /// parameter existed) renders exactly as it always has, and a caller that
 /// never learned a trigger passes `None` and gets the same guarantee.
 #[must_use]
-pub fn render_transcript(visible: &[SessionMessage], trigger: Option<Sequence>) -> String {
+pub fn render_transcript(
+    visible: &[SessionMessage],
+    trigger: Option<Sequence>,
+    viewer: Option<&str>,
+) -> String {
     let split = trigger
         .map(|trigger| visible.partition_point(|message| message.sequence <= trigger))
         .filter(|&split| split > 0 && split < visible.len());
@@ -765,13 +769,41 @@ pub fn render_transcript(visible: &[SessionMessage], trigger: Option<Sequence>) 
         if split == Some(index) {
             lines.push(EPISODE_DIVIDER.to_owned());
         }
-        lines.push(render_transcript_line(message));
+        lines.push(render_transcript_line(message, viewer));
     }
     lines.join("\n")
 }
 
 /// One transcript row: `[sequence] author: content`.
-fn render_transcript_line(message: &SessionMessage) -> String {
+///
+/// The reading member's own rows carry a `(you)` marker after their author id,
+/// and everyone else's render by name alone. Without that distinction a member
+/// read its own turns in exactly the third person it read its colleagues' —
+/// and wrote back in the same voice.
+/// Observed live: `software_engineer` closed a room with "carried with support
+/// from software_engineer and junior_engineer", crediting itself by name as
+/// though it were someone else, because the transcript it had just read gave it
+/// no other convention to copy.
+///
+/// This is the same fix `Speaker::Viewer` is for the chat seed (issue #1956),
+/// which the episode's own renderer never had: "there were no colleagues in the
+/// room" is one failure, and "there is no *self* in the room" is its twin.
+///
+/// The id stays in front of the marker rather than being replaced by a bare
+/// `You`, because the transcript is the citation surface: a member is named by
+/// its id when a colleague objects to `>N` or backs `^N`, so a row it cannot
+/// tie back to that id is one it cannot recognise as the thing being argued
+/// with. Attribution is upstream's contract here — `tests/hivemind_e2e.rs`
+/// parses these rows by author id — and this adds to it rather than
+/// substituting for it.
+///
+/// `None` renders every row by name, for a caller with no reader to speak of.
+fn render_transcript_line(message: &SessionMessage, viewer: Option<&str>) -> String {
+    if let (Some(viewer), SessionAuthor::Agent { id, .. }) = (viewer, &message.author)
+        && id == viewer
+    {
+        return format!("[{}] {id} (you): {}", message.sequence, message.content);
+    }
     let author = match &message.author {
         SessionAuthor::Agent { label, .. }
         | SessionAuthor::Person { label, .. }

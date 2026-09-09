@@ -568,7 +568,9 @@ export function ApprovalsView({
                       ? "1 thing needs your approval"
                       : `${rows.length} things need your approval`}
                   </h2>
-                  {bulkRows.length > 1 && (
+                  {/* Withheld on the same basis as a single card's footer: a
+                      bulk resolve is the same admin-scoped route, once per row. */}
+                  {bulkRows.length > 1 && bulkRows.every((a) => !a.contents_hidden) && (
                     <div className="flex shrink-0 items-center gap-2 self-center">
                       <Button
                         variant="outline"
@@ -987,7 +989,14 @@ export function ApprovalCard({
 
         <ApprovalPayload approval={a} />
 
-        {!blocker && (
+        {/* `contents_hidden` and the decide route's own admin check are the
+            same `may_administer` predicate on the host, so a card whose
+            contents this viewer cannot read is exactly a card this viewer
+            cannot resolve. Gating the scope controls and the footer below on
+            it, rather than on a separate role read, keeps a member's card at
+            one refusal — the one `ApprovalPayload` already stated — instead of
+            a second one repeating it in different words. */}
+        {!blocker && !a.contents_hidden && (
           <>
             <ApprovalScopeControl
               approval={a}
@@ -1032,7 +1041,13 @@ export function ApprovalCard({
         {/* The decide footer (#1406) — deliberately the LAST thing in the card,
             after the scope control it depends on. Disabled on THIS card's own
             state only; a decision in flight on another card leaves these live,
-            which is the whole of #373's first cause. */}
+            which is the whole of #373's first cause.
+
+            Omitted entirely, not disabled, when this viewer may not resolve
+            it: `ApprovalPayload` above already told them why, and a greyed-out
+            Approve/Decline/Extend row underneath would only invite the click
+            that ends in a 403 toast. */}
+        {!a.contents_hidden && (
         <div
           data-testid="approval-decide"
           className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"
@@ -1123,6 +1138,7 @@ export function ApprovalCard({
             </>
           )}
         </div>
+        )}
       </CardContent>
     </Card>
   );

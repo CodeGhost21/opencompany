@@ -110,6 +110,10 @@ pub mod native_salvage;
 #[cfg(test)]
 mod native_salvage_turn_test;
 pub mod orchestrator;
+/// Issue #6014: task-aware extraction of an oversized tool result — one
+/// bounded model call that keeps what answers the turn, in place of a byte cut
+/// that keeps whatever happened to come first. See [`payload_extract`].
+pub mod payload_extract;
 /// Chargebee billing tools (issue #788), wired per company from its own
 /// SecretStore. Always compiled so the credential resolution and the fail-closed
 /// decision are testable at default features; only the tools are gated.
@@ -230,6 +234,14 @@ use crate::runtime::builder::agent_scoped_grants;
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
 pub struct HarnessDeps {
+    /// The company's emergency-stop flag, consulted by every agent's
+    /// [`ApprovalPolicy`](crate::harness::built_in::policy::ApprovalPolicy) so a
+    /// harness tool dispatched under `full` autonomy — which reaches no other
+    /// gate — still refuses a consequential call once the switch is pulled.
+    ///
+    /// `None` at every non-harness construction site and every test that has no
+    /// company gate to ask, which keeps them admitting exactly as before.
+    pub emergency_gate: Option<Arc<crate::policy::gate::ManifestApprovalGate>>,
     /// The inference model shared across a company's agents. A [`HarnessModel`]
     /// is a tinyinference [`ChatModel<()>`](tinyinference::model::ChatModel)
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
@@ -692,6 +704,130 @@ fn agent_budget_exhausted_notice(agent_id: &str, cap_usd: f64) -> String {
         "{agent_id} has reached its daily spend cap of ${cap_usd:.2} — dispatch to this teammate \
          is paused until the cap resets at 00:00 UTC. Other teammates are unaffected."
     )
+}
+
+/// Why a spend gate could not read the spend it exists to bound.
+///
+/// The two cases are not the same fault and must not be reported as one. A
+/// meter that errors is transient — the next read may succeed, and nothing
+/// about the deployment is wrong. A host with no meter at all can never
+/// enforce a declared cap: the cap and the deployment contradict each other
+/// until an operator changes one of them, and no amount of retrying resolves
+/// it. Both refuse the priced operation; they differ in what the operator is
+/// told to do about it.
+enum SpendReadFault {
+    NoMeter,
+    QueryFailed(OpenCompanyError),
+}
+
+/// Reads the usage samples a spend gate needs, resolving the two ways that
+/// read comes back empty-handed into [`SpendReadFault`].
+///
+/// Every spend gate goes through this one seam, so "can this cap be enforced
+/// right now" cannot answer differently for the total ceiling, a teammate's
+/// daily cap, and the predicate the optional model calls consult.
+async fn read_spend_for_gate(
+    meter: Option<&dyn UsageMeter>,
+    company: &CompanyId,
+    since_millis: u64,
+) -> std::result::Result<Vec<crate::ports::UsageSample>, SpendReadFault> {
+    let Some(meter) = meter else {
+        return Err(SpendReadFault::NoMeter);
+    };
+    meter
+        .query(company, since_millis)
+        .await
+        .map_err(SpendReadFault::QueryFailed)
+}
+
+/// The shape every pre-dispatch spend refusal returns: the reply IS the
+/// notice, and none of the in-turn signals apply because no turn ran — no
+/// iteration cap was reached, no in-turn spend brake armed, and no provider
+/// reported the account out of credits.
+///
+/// `abnormal_stop` IS set: this is a terminal, non-resumable stop with no
+/// checkpoint to continue from, same as an ACP refusal/cancellation. Workflow
+/// and card dispatch already fail the attempt on `abnormal_stop`; leaving it
+/// `None` here let a pre-dispatch refusal settle those attempts `Succeeded`
+/// and bind the refusal notice downstream as if it were the node's answer.
+fn spend_gate_refusal(reply: String, cause: SpendGateCause) -> TurnOutcome {
+    TurnOutcome {
+        reply,
+        steps: Vec::new(),
+        hit_iteration_cap: false,
+        abnormal_stop: Some(cause.abnormal_stop().to_string()),
+        halted_for_spend: None,
+        budget_paused: None,
+    }
+}
+
+/// Why a pre-dispatch spend gate refused.
+///
+/// The two read differently to whoever is looking: an unreadable meter is a
+/// host fault to go and fix, an exhausted cap is a healthy meter reporting a
+/// real ceiling, and waiting for the reset or raising the cap is the move.
+/// Reporting both as the former sends operators to troubleshoot a meter that
+/// is working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpendGateCause {
+    Unmeasurable,
+    Exhausted,
+}
+
+impl SpendGateCause {
+    fn abnormal_stop(self) -> &'static str {
+        match self {
+            Self::Unmeasurable => {
+                "[stopped: dispatch refused, spend could not be measured against a declared cap]"
+            }
+            Self::Exhausted => "[stopped: dispatch refused, a declared spend cap is exhausted]",
+        }
+    }
+}
+
+/// The operator-facing refusal when the company's declared token ceiling
+/// cannot be measured.
+///
+/// Names the fault and the operator's move, because the alternative — running
+/// the turn and warning into a log — leaves the console rendering a ceiling
+/// that has quietly stopped applying, which is a worse state than a refusal
+/// somebody can see and act on.
+fn unmeasurable_ceiling_notice(fault: &SpendReadFault) -> String {
+    match fault {
+        SpendReadFault::NoMeter => "This company declares a token budget for the period, but \
+             this host has no usage meter to measure spend against it — dispatch is paused \
+             rather than run against a ceiling that cannot be enforced. Configure a usage \
+             meter, or remove the budget."
+            .to_string(),
+        SpendReadFault::QueryFailed(_) => "Spend against this company's token budget could not \
+             be read, so dispatch is paused rather than run against a ceiling that cannot be \
+             checked. It resumes as soon as the usage meter reads again."
+            .to_string(),
+    }
+}
+
+/// The per-teammate twin of [`unmeasurable_ceiling_notice`]. Names the cap it
+/// could not check and says the rest of the company is unaffected — this gate
+/// is scoped to the desk that declared a bound.
+fn unmeasurable_agent_budget_notice(
+    agent_id: &str,
+    cap_usd: f64,
+    fault: &SpendReadFault,
+) -> String {
+    match fault {
+        SpendReadFault::NoMeter => format!(
+            "{agent_id} declares a daily spend cap of ${cap_usd:.2}, but this host has no usage \
+             meter to measure spend against it — dispatch to this teammate is paused rather than \
+             run against a cap that cannot be enforced. Configure a usage meter, or remove the \
+             cap. Other teammates are unaffected."
+        ),
+        SpendReadFault::QueryFailed(_) => format!(
+            "{agent_id}'s spend against its ${cap_usd:.2} daily cap could not be read, so \
+             dispatch to this teammate is paused rather than run against a cap that cannot be \
+             checked. It resumes as soon as the usage meter reads again. Other teammates are \
+             unaffected."
+        ),
+    }
 }
 
 /// The coarse pre-task proximity warning threshold (issue #1846): 90% of the
@@ -3753,12 +3889,17 @@ impl HarnessPool {
     /// One predicate, so "is the ceiling spent" cannot answer differently for
     /// the gate and for the turn it gates.
     ///
-    /// **Answers `false` wherever the ceiling cannot be evaluated** — no plan,
-    /// no total budget, no meter, or a failed spend query — which is exactly
-    /// what `total_ceiling_refusal` does with the same cases: it declines to
-    /// hard-refuse and defers to the per-namespace fail-closed roster. A gate
-    /// that instead blocked on an unreadable meter would take routing down on
-    /// a metering hiccup.
+    /// **Answers `false` only when no ceiling is declared** — no plan, or a
+    /// plan with no `total_budget`. A company that declared no bound has
+    /// nothing to enforce, so these optional model calls run freely.
+    ///
+    /// When a ceiling IS declared but the spend behind it cannot be read, this
+    /// answers `true`, matching what `total_ceiling_refusal` does with the
+    /// same cases: a declared cap is binding, and a priced call made against a
+    /// bound nobody can measure is spending real money outside it. The callers
+    /// this gates are all optional extras — a card title, a sufficiency judge,
+    /// a responder-selection pass — each of which already has a deterministic
+    /// answer to fall back on, so declining them costs a nicety, not the work.
     pub(crate) async fn total_ceiling_spent(company: &CompanyId, deps: &HarnessDeps) -> bool {
         let Some(plan) = deps.plan.as_ref() else {
             return false;
@@ -3766,13 +3907,10 @@ impl HarnessPool {
         if plan.total_budget.is_none() {
             return false;
         }
-        let Some(meter) = deps.meter.as_deref() else {
-            return false;
-        };
         let since = plan.period.period_start_millis(crate::ports::now_millis());
-        match meter.query(company, since).await {
+        match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
             Ok(samples) => plan.total_exhausted(capability_budget::tokens_in(&samples)),
-            Err(_) => false,
+            Err(_) => true,
         }
     }
 
@@ -3790,90 +3928,67 @@ impl HarnessPool {
     ) -> Option<TurnOutcome> {
         let plan = deps.plan.as_ref()?;
         plan.total_budget?;
-        match deps.meter.as_deref() {
-            Some(meter) => {
-                let since = plan.period.period_start_millis(crate::ports::now_millis());
-                match meter.query(company, since).await {
-                    Ok(samples) => {
-                        let spent = capability_budget::tokens_in(&samples);
-                        // Issue #1846: the coarse pre-task proximity warning,
-                        // read BESIDE the exhaustion check above — same query,
-                        // same samples, no second meter read. Fail-open by
-                        // construction: this whole arm only runs when the read
-                        // already succeeded, and it makes no per-task cost
-                        // claim, only "you are near the period ceiling".
-                        // Published, never returned — a warning is
-                        // non-blocking, so the turn keeps dispatching normally
-                        // whether or not a console happens to be listening.
-                        if let Some(cap) = plan.total_budget
-                            && !plan.total_exhausted(spent)
-                            && is_approaching_budget_ceiling(spent, cap)
-                        {
-                            tracing::info!(
-                                company = %company,
-                                spent,
-                                cap,
-                                "[capability-budget] approaching the total token ceiling; publishing a non-blocking proximity warning"
-                            );
-                            crate::turn_stream::publish(
-                                company,
-                                crate::turn_stream::BudgetProximityFrame {
-                                    kind: "budget_proximity",
-                                    agent_id: None,
-                                    message: budget_proximity_message(),
-                                    at_millis: crate::ports::now_millis(),
-                                },
-                            );
-                        }
-                        if plan.total_exhausted(spent) {
-                            tracing::info!(
-                                company = %company,
-                                agent = agent_id,
-                                spent,
-                                "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
-                            );
-                            return Some(TurnOutcome {
-                                reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
-                                steps: Vec::new(),
-                                // No model call ran, so no cap was reached
-                                // (issue #926). A refusal is not a pause.
-                                hit_iteration_cap: false,
-                                // This pre-turn refusal is its own, older
-                                // signal (the reply text itself names the
-                                // cap) — not the PR #1880 `abnormal_stop`,
-                                // which is scoped to the ACP fold's
-                                // refusal/cancelled/unrecognized stops.
-                                abnormal_stop: None,
-                                // And no in-turn hook fired, because no turn
-                                // ran (issue #1032). The reply already IS the
-                                // budget notice; labelling this as a halt too
-                                // would tell the operator the same thing twice.
-                                halted_for_spend: None,
-                                // Issue #1846: this is OpenCompany's own
-                                // plan-level token ceiling refusing dispatch —
-                                // a company policy, not the provider account
-                                // being out of money. No model call ran, so
-                                // `classify_turn` never saw a wire error to
-                                // classify.
-                                budget_paused: None,
-                            });
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            company = %company,
-                            %error,
-                            "[capability-budget] total-ceiling spend query failed; not hard-refusing — deferring to the per-namespace fail-closed roster"
-                        );
-                    }
+        let since = plan.period.period_start_millis(crate::ports::now_millis());
+        let samples = match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
+            Ok(samples) => samples,
+            Err(fault) => {
+                match &fault {
+                    SpendReadFault::NoMeter => tracing::error!(
+                        company = %company,
+                        agent = agent_id,
+                        "[capability-budget] a total token ceiling is declared but this host has no usage meter; refusing dispatch (no model call) until a meter is configured or the ceiling is removed"
+                    ),
+                    SpendReadFault::QueryFailed(error) => tracing::error!(
+                        company = %company,
+                        agent = agent_id,
+                        %error,
+                        "[capability-budget] total-ceiling spend query failed; refusing dispatch (no model call) rather than spending against a ceiling that cannot be checked"
+                    ),
                 }
+                return Some(spend_gate_refusal(
+                    unmeasurable_ceiling_notice(&fault),
+                    SpendGateCause::Unmeasurable,
+                ));
             }
-            None => {
-                tracing::warn!(
-                    company = %company,
-                    "[capability-budget] no usage meter; cannot enforce the total token ceiling — deferring to the per-namespace fail-closed roster"
-                );
-            }
+        };
+
+        let spent = capability_budget::tokens_in(&samples);
+        // Issue #1846: the coarse pre-task proximity warning, read BESIDE the
+        // exhaustion check below — same query, same samples, no second meter
+        // read. Published, never returned: a warning is non-blocking, so the
+        // turn keeps dispatching normally whether or not a console is
+        // listening.
+        if let Some(cap) = plan.total_budget
+            && !plan.total_exhausted(spent)
+            && is_approaching_budget_ceiling(spent, cap)
+        {
+            tracing::info!(
+                company = %company,
+                spent,
+                cap,
+                "[capability-budget] approaching the total token ceiling; publishing a non-blocking proximity warning"
+            );
+            crate::turn_stream::publish(
+                company,
+                crate::turn_stream::BudgetProximityFrame {
+                    kind: "budget_proximity",
+                    agent_id: None,
+                    message: budget_proximity_message(),
+                    at_millis: crate::ports::now_millis(),
+                },
+            );
+        }
+        if plan.total_exhausted(spent) {
+            tracing::info!(
+                company = %company,
+                agent = agent_id,
+                spent,
+                "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
+            );
+            return Some(spend_gate_refusal(
+                TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
+                SpendGateCause::Exhausted,
+            ));
         }
         None
     }
@@ -4056,14 +4171,14 @@ impl HarnessPool {
         // inject and the memory writeback — so a refused turn costs nothing and
         // leaves no fabricated outcome in the memory store.
         //
-        // Fail-closed tradeoff (issue #188): the hard refusal fires ONLY when
-        // spend is actually readable. With no meter, or a meter whose query
-        // errors, we do NOT brick the tenant on a transient read failure — we
-        // fall through to run the turn, which the per-namespace fail-closed path
-        // in `resolve_filter`/`ensure` has already stripped of every exec tool.
-        // A `warn!` records the deferral. Refusing every turn on a flaky meter
-        // read would be a strictly worse failure mode than letting an
-        // intrinsic-tools-only turn through.
+        // One rule, applied at every spend gate: a declared cap is BINDING, and
+        // a gate that cannot read the spend it bounds refuses the priced
+        // operation rather than admitting it. Dispatch is unconditionally
+        // priced — it is about to call a model — so admitting one against an
+        // unreadable ceiling spends real money outside a bound nobody can
+        // observe, and the console goes on rendering that ceiling as if it
+        // still applied. A refusal an operator can see and act on is a better
+        // state than a cap that silently stopped existing.
         if let Some(refusal) = Self::total_ceiling_refusal(company, agent_id, deps).await {
             return Ok(refusal);
         }
@@ -4085,91 +4200,71 @@ impl HarnessPool {
         // fabricated outcome in the store. The reply names the teammate, the cap
         // and the reset — never a bare failure.
         //
-        // FAIL-OPEN, mirroring #188's documented tradeoff: with no meter, or a
-        // meter whose query errors, we warn and run the turn. Bricking a
-        // company's cognition on a flaky read would be a strictly worse failure
-        // mode than one day of overspend, and there is no operator recourse at
-        // turn level (unlike the policy arm, whose park a human can approve —
-        // which is why THAT layer fails closed and this one does not).
+        // Scoped to the desk that declared a bound: an uncapped colleague is
+        // never gated by a meter fault, so an unreadable meter costs the company
+        // its capped teammates, not its cognition.
         if let Some(cap) = agent.budget_usd_daily {
-            match deps.meter.as_deref() {
-                Some(meter) => {
-                    let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
-                    match meter.query(company, since).await {
-                        Ok(samples) => {
-                            let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
-                            // Issue #1846: same coarse proximity warning as the
-                            // total-ceiling read above, beside this per-agent
-                            // read, reusing the SAME `samples` — no second
-                            // query. Non-blocking; only fires when this
-                            // teammate is not already refused below.
-                            if spent < cap && is_approaching_budget_ceiling_f64(spent, cap) {
-                                tracing::info!(
-                                    company = %company,
-                                    agent = agent_id,
-                                    spent,
-                                    cap,
-                                    "[agent-budget] approaching the daily spend cap; publishing a non-blocking proximity warning"
-                                );
-                                crate::turn_stream::publish(
-                                    company,
-                                    crate::turn_stream::BudgetProximityFrame {
-                                        kind: "budget_proximity",
-                                        agent_id: Some(agent_id.to_string()),
-                                        message: budget_proximity_message_usd(agent_id),
-                                        at_millis: crate::ports::now_millis(),
-                                    },
-                                );
-                            }
-                            if spent >= cap {
-                                tracing::info!(
-                                    company = %company,
-                                    agent = agent_id,
-                                    spent,
-                                    cap,
-                                    "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
-                                );
-                                return Ok(TurnOutcome {
-                                    reply: agent_budget_exhausted_notice(agent_id, cap),
-                                    steps: Vec::new(),
-                                    // No model call ran, so no cap was reached
-                                    // (issue #926). A refusal is not a pause.
-                                    hit_iteration_cap: false,
-                                    // Same reasoning as the total-ceiling
-                                    // refusal above: this is its own signal,
-                                    // not the PR #1880 ACP-only field.
-                                    abnormal_stop: None,
-                                    // Same teammate cap, refused BEFORE the
-                                    // turn (issue #1032). The in-turn brake
-                                    // never armed, and the reply above already
-                                    // names the cap it refused against.
-                                    halted_for_spend: None,
-                                    // Issue #1846: same reasoning as the total
-                                    // ceiling refusal above — this is the
-                                    // teammate's manifest cap, not the provider
-                                    // account being out of credits, and no
-                                    // model call ran to classify.
-                                    budget_paused: None,
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                company = %company,
-                                agent = agent_id,
-                                %error,
-                                "[agent-budget] daily-spend query failed; running the turn rather than bricking this teammate"
-                            );
-                        }
+            let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
+            let samples = match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
+                Ok(samples) => samples,
+                Err(fault) => {
+                    match &fault {
+                        SpendReadFault::NoMeter => tracing::error!(
+                            company = %company,
+                            agent = agent_id,
+                            cap,
+                            "[agent-budget] a daily spend cap is declared but this host has no usage meter; refusing dispatch to this teammate (no model call) until a meter is configured or the cap is removed"
+                        ),
+                        SpendReadFault::QueryFailed(error) => tracing::error!(
+                            company = %company,
+                            agent = agent_id,
+                            cap,
+                            %error,
+                            "[agent-budget] daily-spend query failed; refusing dispatch to this teammate (no model call) rather than spending against a cap that cannot be checked"
+                        ),
                     }
+                    return Ok(spend_gate_refusal(
+                        unmeasurable_agent_budget_notice(agent_id, cap, &fault),
+                        SpendGateCause::Unmeasurable,
+                    ));
                 }
-                None => {
-                    tracing::warn!(
-                        company = %company,
-                        agent = agent_id,
-                        "[agent-budget] no usage meter; the per-agent daily spend cap cannot be enforced on this host"
-                    );
-                }
+            };
+
+            let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
+            // Issue #1846: same coarse proximity warning as the total-ceiling
+            // read above, reusing the SAME `samples` — no second query.
+            // Non-blocking; only fires when this teammate is not already
+            // refused below.
+            if spent < cap && is_approaching_budget_ceiling_f64(spent, cap) {
+                tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    spent,
+                    cap,
+                    "[agent-budget] approaching the daily spend cap; publishing a non-blocking proximity warning"
+                );
+                crate::turn_stream::publish(
+                    company,
+                    crate::turn_stream::BudgetProximityFrame {
+                        kind: "budget_proximity",
+                        agent_id: Some(agent_id.to_string()),
+                        message: budget_proximity_message_usd(agent_id),
+                        at_millis: crate::ports::now_millis(),
+                    },
+                );
+            }
+            if spent >= cap {
+                tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    spent,
+                    cap,
+                    "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
+                );
+                return Ok(spend_gate_refusal(
+                    agent_budget_exhausted_notice(agent_id, cap),
+                    SpendGateCause::Exhausted,
+                ));
             }
         }
 
@@ -4295,6 +4390,7 @@ impl HarnessPool {
                 raw_message: message.to_string(),
                 events: events.clone(),
                 store: deps.store.clone(),
+                reader: agent_id.to_string(),
                 thread_root: chat.thread_root,
                 current_message_seq: chat.message_seq,
             }),
@@ -4323,18 +4419,26 @@ impl HarnessPool {
                 crate::turn_stream::LiveRoute::Workflow { .. } => None,
             })
             .or_else(|| chat.chat_id.map(str::to_string));
-        let (outcome, turn_costs) = crate::runtime::delegation::with_turn_conversation(
-            turn_chat,
-            deps.approval_requests.turn_scoped(agent.run_with_steer(
-                &augmented,
-                steer,
-                stream_ctx,
-                run_sink.clone(),
-                chat_seed_request,
-                // The caller's own, not read off `live` (#1890 I). A turn can
-                // have a conversation and stream nothing.
-                chat,
-            )),
+        // Issue #6014: what this turn is for, in scope for its whole duration, so
+        // an oversized tool result can be extracted against the task instead of
+        // cut on a byte boundary. `operator_words` for the reason its own docs
+        // give — `message` here is the composed text and carries the cycle's
+        // briefings, which are not what anybody asked for.
+        let (outcome, turn_costs) = crate::runtime::delegation::with_task_hint(
+            crate::runtime::delegation::operator_words(message).to_string(),
+            crate::runtime::delegation::with_turn_conversation(
+                turn_chat,
+                deps.approval_requests.turn_scoped(agent.run_with_steer(
+                    &augmented,
+                    steer,
+                    stream_ctx,
+                    run_sink.clone(),
+                    chat_seed_request,
+                    // The caller's own, not read off `live` (#1890 I). A turn can
+                    // have a conversation and stream nothing.
+                    chat,
+                )),
+            ),
         )
         .await;
         // Issue B-120: bank what the turn spent BEFORE its result is unwrapped.
@@ -5252,6 +5356,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the per-server read-only MCP declaration, so a
             // server-declared read-only bridge call does not park under `auto`.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5353,6 +5460,9 @@ pub(crate) fn build_roster(
             // Issue #1124: the same per-server read-only MCP declaration the
             // manifest agents get — an overlay teammate calls the same servers.
             .with_mcp_reads(mcp_reads.clone());
+        if let Some(gate) = deps.emergency_gate.as_ref() {
+            agent_policy = agent_policy.with_emergency_gate(gate.clone());
+        }
         if let Some(workspace) = deps.workspace.as_ref() {
             agent_policy = agent_policy.with_workspace(workspace.clone(), company.id.clone());
         }
@@ -5484,6 +5594,7 @@ pub(crate) fn workflow_wiring_deps(
     plan: Option<capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        emergency_gate: None,
         provider: Arc::new(provider::MockProvider::default()),
         provider_slug: "mock".to_string(),
         serves: None,
@@ -6325,6 +6436,7 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                emergency_gate: None,
                 notifications: None,
                 ledgers: None,
                 ledger_registry: Default::default(),
@@ -6542,6 +6654,7 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -7673,6 +7786,7 @@ description = "Builds the product."
     fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8032,6 +8146,34 @@ description = "Builds the product."
             usages.len(),
             1,
             "a steered empty turn does NOT retry — exactly one attempt"
+        );
+    }
+
+    /// The empty-retry guard above proves steer does not silently *restart*
+    /// work. This proves the other half: a steer requested before a turn whose
+    /// first attempt already produced a real reply must not discard it. Only
+    /// the *next* iteration is where `SteerStopHook` is meant to intervene —
+    /// nothing here may drop output the model already returned.
+    #[tokio::test]
+    async fn a_steer_pending_before_a_successful_attempt_does_not_drop_its_reply() {
+        let (agent, _deps) = scripted_agent(vec![Ok("here is the answer".into())]);
+        let control = SteerControl::new();
+        control.request(SteerAction::Cancel);
+        let (outcome, usages) = agent
+            .run_with_steer(
+                "hi",
+                Some(&control),
+                None,
+                None,
+                None,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await;
+        let outcome = outcome.expect("runs");
+        assert_eq!(usages.len(), 1, "one attempt, and it already succeeded");
+        assert_eq!(
+            outcome.reply, "here is the answer",
+            "a pending steer must not discard a reply the model already produced"
         );
     }
 
@@ -8477,6 +8619,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8612,6 +8755,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8758,6 +8902,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -8891,6 +9036,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9034,6 +9180,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9154,6 +9301,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9265,6 +9413,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9406,6 +9555,7 @@ description = "Builds the product."
         let mut rec = record();
         rec.id = company.clone();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -9537,6 +9687,7 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10034,6 +10185,7 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10488,6 +10640,7 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10651,6 +10804,7 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -10887,22 +11041,96 @@ description = "Sets direction."
         );
     }
 
-    /// Fail-closed tradeoff (issue #188): with a total ceiling configured but no
-    /// meter to read spend from, the hard refusal does NOT fire — a transient
-    /// unreadable-spend condition must not brick every turn. The turn runs (the
-    /// per-namespace fail-closed roster already handles exec-tool stripping).
+    /// A declared total ceiling that cannot be read refuses dispatch (both
+    /// arms), rather than admitting a priced turn against a bound nobody can
+    /// measure. The two unreadable cases are distinct faults and say so: an
+    /// absent meter can never enforce the cap on this host, an erroring meter
+    /// is a transient read that clears on the next one.
     #[tokio::test]
-    async fn run_does_not_refuse_when_spend_is_unreadable() {
+    async fn run_refuses_when_a_declared_total_ceiling_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let context = Arc::new(MockContext::default());
-        // A zero ceiling would refuse from the first token IF spend were readable;
-        // with no meter wired the gate must defer, not brick.
-        let plan = crate::harness::capability_budget::CapabilityPlan {
+        // A generous ceiling: a readable meter would admit this turn, so the
+        // refusal below can only come from the spend read failing.
+        let plan = || crate::harness::capability_budget::CapabilityPlan {
             period: crate::harness::capability_budget::BudgetPeriod::Daily,
             budgets: std::collections::BTreeMap::new(),
-            total_budget: Some(0),
+            total_budget: Some(1_000_000),
         };
-        let deps = deps_with_plan(dir.path(), context.clone(), None, Some(plan));
+        let rec = record();
+
+        // No meter wired: the cap is declared on a host that can never measure
+        // it — a deployment fault, not a transient one.
+        let no_meter = deps_with_plan(dir.path(), context.clone(), None, Some(plan()));
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &no_meter).await.expect("ensure");
+        let reply = pool
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &no_meter,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert!(
+            !reply.contains("hello-marker"),
+            "no model call may run against an unmeasurable ceiling: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_ceiling_notice(&SpendReadFault::NoMeter),
+            "an absent meter is reported as the deployment fault it is, and the reply says what \
+             the operator has to change"
+        );
+        let no_meter_reply = reply;
+
+        // A meter that errors: the same refusal, a different fault.
+        let failing = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(Arc::new(FailingMeter) as Arc<dyn UsageMeter>),
+            Some(plan()),
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &failing).await.expect("ensure");
+        let reply = pool
+            .run(
+                &rec.id,
+                "ceo",
+                "hello-marker",
+                &failing,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert!(
+            !reply.contains("hello-marker"),
+            "no model call may run against an unreadable ceiling: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_ceiling_notice(&SpendReadFault::QueryFailed(OpenCompanyError::Store(
+                "meter unavailable".into()
+            ))),
+            "a failed read is reported as transient, not as a misconfigured host"
+        );
+        assert_ne!(
+            reply, no_meter_reply,
+            "the two faults are not the same fault and must not read as one"
+        );
+    }
+
+    /// A company that declares NO total ceiling is untouched by the rule above:
+    /// nothing to enforce means nothing to fail closed on, meter or no meter.
+    #[tokio::test]
+    async fn a_company_with_no_declared_ceiling_runs_without_a_meter() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let deps = deps_with_plan(dir.path(), context.clone(), None, None);
         let pool = HarnessPool::new();
         let rec = record();
         pool.ensure(&rec, &deps).await.expect("ensure");
@@ -10916,16 +11144,29 @@ description = "Sets direction."
                 crate::runtime::delegation::ChatTarget::default(),
             )
             .await
-            .expect("no meter must not brick the turn")
+            .expect("an unbounded company keeps running")
             .reply;
         assert!(
             reply.contains("hello-marker"),
-            "an unreadable ceiling defers to running the turn: {reply:?}"
+            "no declared cap means no gate: {reply:?}"
         );
-        assert_ne!(
-            reply, TOTAL_BUDGET_EXHAUSTED_NOTICE,
-            "the hard refusal must not fire without a spend read"
+    }
+
+    /// `spend_gate_refusal` must set `abnormal_stop`: `HarnessAgentRunner`
+    /// (`workflows::caps`) and hive's `terminal_budget_error` both key off it
+    /// to keep a pre-dispatch refusal from settling a workflow/card attempt or
+    /// a hive turn `Succeeded` and binding the refusal notice downstream as if
+    /// it were the node's or the teammate's real answer.
+    #[test]
+    fn spend_gate_refusal_carries_an_abnormal_stop() {
+        let outcome = spend_gate_refusal("refused".to_string(), SpendGateCause::Unmeasurable);
+        assert!(
+            outcome.abnormal_stop.is_some(),
+            "a pre-dispatch refusal must not read like a clean finish downstream"
         );
+        assert!(!outcome.hit_iteration_cap);
+        assert!(outcome.halted_for_spend.is_none());
+        assert!(outcome.budget_paused.is_none());
     }
 
     // --- The per-agent daily spend cap at dispatch (issue #304) --------------
@@ -10984,6 +11225,23 @@ description = "Builds the product."
     /// inference and inference never reaches a `ToolPolicy`. Gating only priced
     /// tool calls would leave a capped teammate free to burn its budget many
     /// times over on model turns alone.
+    #[test]
+    fn an_exhausted_cap_and_an_unreadable_meter_do_not_read_alike() {
+        let exhausted = spend_gate_refusal("refused".to_string(), SpendGateCause::Exhausted);
+        let unmeasurable = spend_gate_refusal("refused".to_string(), SpendGateCause::Unmeasurable);
+        assert_ne!(
+            exhausted.abnormal_stop, unmeasurable.abnormal_stop,
+            "an exhausted cap sent to the meter-fault reason points the operator at a meter that works"
+        );
+        assert!(
+            exhausted
+                .abnormal_stop
+                .as_deref()
+                .is_some_and(|stop| stop.contains("exhausted")),
+            "the exhausted reason must name the cap, not the measurement"
+        );
+    }
+
     #[tokio::test]
     async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
         let dir = tempfile::tempdir().unwrap();
@@ -11068,6 +11326,93 @@ description = "Builds the product."
             ok.contains("hello-marker"),
             "one teammate's exhausted budget must not stop the company: {ok:?}"
         );
+    }
+
+    /// A company whose `treasurer` carries a `budget_usd_daily` of exactly
+    /// `0.0` — the value `validate_cap` in `server::ops::team` accepts as a
+    /// non-negative, finite number with no special-case.
+    fn zero_capped_record() -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "treasurer"
+role = "Treasurer"
+description = "Handles spend."
+budget_usd_daily = 0.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// a cap of exactly `0.0` passes validation as "non-negative and
+    /// finite" and then permanently refuses every dispatch, because `spent >=
+    /// cap` holds even at zero spend on the very first turn — before the
+    /// teammate has ever run once. Setting `0.0` bricks the teammate; it does
+    /// not uncap it, and nothing here says so.
+    #[tokio::test]
+    async fn a_zero_daily_cap_refuses_the_teammates_very_first_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = zero_capped_record();
+
+        // No spend has ever been recorded for this teammate — a fresh day, a
+        // fresh company, or a cap just set to `0.0` from the console.
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let refused = pool
+            .run(
+                &rec.id,
+                "treasurer",
+                "should-not-echo",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("treasurer", 0.0),
+            "the very first dispatch is refused, though this teammate has spent nothing yet"
+        );
+        assert!(!refused.contains("should-not-echo"));
+
+        // The cap is per-teammate: the uncapped engineer is untouched.
+        let ok = pool
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &deps,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(ok.contains("hello-marker"), "{ok:?}");
     }
 
     // --- Console tool grants, live (issue #1796) -----------------------------
@@ -11793,16 +12138,16 @@ description = "Builds the product."
         );
     }
 
-    /// Fail-open pin, mirroring #188's documented tradeoff exactly: with a cap
-    /// set but spend unreadable, the turn RUNS.
+    /// A declared `budget_usd_daily` that cannot be read refuses dispatch to
+    /// that teammate — the same rule as the total ceiling, at the layer that
+    /// carries the money.
     ///
-    /// A `$0` cap would refuse from the first cent if spend were readable, so a
-    /// meter that errors is the only reason this turn can proceed. Bricking a
-    /// teammate's cognition on a flaky read is a strictly worse failure mode
-    /// than one day of overspend — and unlike the policy arm's park, a turn-level
-    /// refusal offers the operator nothing to approve.
+    /// The cap here is a generous `$50`, so a readable meter would admit both
+    /// turns below; the refusals can only come from the spend read failing.
+    /// The uncapped colleague keeps working either way: the rule bites the
+    /// scope that declared a bound, not the company.
     #[tokio::test]
-    async fn run_does_not_refuse_a_capped_teammate_when_spend_is_unreadable() {
+    async fn run_refuses_a_capped_teammate_when_spend_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let context = Arc::new(MockContext::default());
         let manifest: CompanyManifest = toml::from_str(
@@ -11817,7 +12162,12 @@ mode = "full"
 id = "ceo"
 role = "Chief Executive"
 description = "Sets direction."
-budget_usd_daily = 0.0
+budget_usd_daily = 50.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
 "#,
         )
         .expect("valid manifest");
@@ -11826,32 +12176,61 @@ budget_usd_daily = 0.0
             ..record()
         };
 
-        let deps = deps_with_plan(
+        // A meter that errors: a transient read fault.
+        let failing = deps_with_plan(
             dir.path(),
             context.clone(),
             Some(Arc::new(FailingMeter) as Arc<dyn UsageMeter>),
             None,
         );
         let pool = HarnessPool::new();
-        pool.ensure(&rec, &deps).await.expect("ensure");
-
+        pool.ensure(&rec, &failing).await.expect("ensure");
         let reply = pool
             .run(
                 &rec.id,
                 "ceo",
                 "hello-marker",
-                &deps,
+                &failing,
                 crate::runtime::delegation::ChatTarget::default(),
             )
             .await
-            .expect("an unreadable budget must not brick the teammate")
+            .expect("a refusal is a benign outcome, not a hard error")
             .reply;
         assert!(
-            reply.contains("hello-marker"),
-            "an unreadable cap defers to running the turn: {reply:?}"
+            !reply.contains("hello-marker"),
+            "no model call may run against an unreadable cap: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_agent_budget_notice(
+                "ceo",
+                50.0,
+                &SpendReadFault::QueryFailed(OpenCompanyError::Store("meter unavailable".into()))
+            ),
+            "the refusal names the teammate, its cap, and that the read may clear"
+        );
+        let failed_read_reply = reply;
+
+        // The uncapped colleague declared no bound, so there is nothing to fail
+        // closed on and it keeps working through the same broken meter.
+        let ok = pool
+            .run(
+                &rec.id,
+                "engineer",
+                "hello-marker",
+                &failing,
+                crate::runtime::delegation::ChatTarget::default(),
+            )
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "an uncapped teammate is not gated by a broken meter: {ok:?}"
         );
 
-        // ...and with no meter at all, the same deferral.
+        // No meter at all: the cap is permanently unenforceable on this host —
+        // a deployment fault rather than a transient read.
         let no_meter = deps_with_plan(dir.path(), context.clone(), None, None);
         let pool = HarnessPool::new();
         pool.ensure(&rec, &no_meter).await.expect("ensure");
@@ -11864,9 +12243,22 @@ budget_usd_daily = 0.0
                 crate::runtime::delegation::ChatTarget::default(),
             )
             .await
-            .expect("no meter must not brick the teammate")
+            .expect("a refusal is a benign outcome, not a hard error")
             .reply;
-        assert!(reply.contains("hello-marker"), "no meter defers: {reply:?}");
+        assert!(
+            !reply.contains("hello-marker"),
+            "no model call may run against an unmeasurable cap: {reply:?}"
+        );
+        assert_eq!(
+            reply,
+            unmeasurable_agent_budget_notice("ceo", 50.0, &SpendReadFault::NoMeter),
+            "an absent meter is reported as the deployment fault it is, and the reply says what \
+             the operator has to change"
+        );
+        assert_ne!(
+            reply, failed_read_reply,
+            "the two faults are not the same fault and must not read as one"
+        );
     }
 
     /// The cap is the UTC calendar day: yesterday's $9 does not refuse today's
@@ -12990,6 +13382,112 @@ budget_usd_daily = 0.0
                 log.reads(),
                 reads_after_first,
                 "a second turn in the same thread is not a switch"
+            );
+        }
+
+        /// A journal that can be made to fail, so a test can break the seed's
+        /// one dependency after a binding has already been established.
+        struct BreakingLog {
+            inner: Arc<InMemoryLog>,
+            failing: std::sync::atomic::AtomicBool,
+        }
+
+        impl BreakingLog {
+            fn break_now(&self) {
+                self.failing
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait]
+        impl EventLog for BreakingLog {
+            async fn append(&self, id: &CompanyId, event: CompanyEvent) -> crate::Result<EventSeq> {
+                self.inner.append(id, event).await
+            }
+            async fn read_from(
+                &self,
+                id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "the journal is unreadable".into(),
+                    ));
+                }
+                self.inner.read_from(id, seq, limit).await
+            }
+            fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
+                self.inner.subscribe(id)
+            }
+        }
+
+        /// The clear-and-reseed runs under the agent and binding locks, so it
+        /// cannot interleave — but it still depends on the journal, and the
+        /// journal can fail. When it does, the switch has already cleared the
+        /// outgoing desk's history and has nothing to put in its place.
+        ///
+        /// The invariant that must survive that is the one the switch exists
+        /// for: a turn on `beta` never sees `alpha`. Starting blind is the
+        /// correct answer to an unreadable journal; falling back to the
+        /// transcript autoload — which on a switch points at the OUTGOING
+        /// thread — would answer beta's question out of alpha's conversation.
+        #[tokio::test]
+        async fn a_seed_that_cannot_be_built_starts_blind_rather_than_leaking_the_bound_desk() {
+            let (mut fx, log, seen) = recording_fixture();
+            let breaking = Arc::new(BreakingLog {
+                inner: log.clone(),
+                failing: std::sync::atomic::AtomicBool::new(false),
+            });
+            fx.deps.events = Some(breaking.clone());
+            let rec = record();
+            log.operator("alpha", "ALPHA_USER_MARKER");
+            log.reply("alpha", "ALPHA_AGENT_MARKER");
+            log.operator("beta", "BETA_USER_MARKER");
+            log.reply("beta", "BETA_AGENT_MARKER");
+
+            let pool = HarnessPool::new();
+            pool.ensure(&rec, &fx.deps).await.expect("ensure");
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello alpha",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("alpha")),
+            )
+            .await
+            .expect("alpha chat turn");
+
+            let bound_to_alpha = seen.lock().unwrap().join("\n===\n");
+            assert!(
+                bound_to_alpha.contains("ALPHA_USER_MARKER"),
+                "the fixture must actually bind to alpha first, or this proves nothing: \
+                 {bound_to_alpha:?}"
+            );
+
+            breaking.break_now();
+            let before = seen.lock().unwrap().len();
+
+            pool.run(
+                &rec.id,
+                "ceo",
+                "hello beta",
+                &fx.deps,
+                crate::runtime::delegation::ChatTarget::channel(Some("beta")),
+            )
+            .await
+            .expect("a switch whose seed cannot be built must still answer");
+
+            let after: Vec<String> = seen.lock().unwrap()[before..].to_vec();
+            let last = after.last().expect("the beta turn made a model call");
+            assert!(
+                !last.contains("ALPHA_USER_MARKER") && !last.contains("ALPHA_AGENT_MARKER"),
+                "an unreadable journal let the previously-bound desk's history into an \
+                 unrelated turn: {last:?}"
+            );
+            assert!(
+                last.contains("hello beta"),
+                "the turn still has to answer the message it was given: {last:?}"
             );
         }
     }

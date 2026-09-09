@@ -112,7 +112,7 @@ that does and does not imply.
 | --- | --- | --- |
 | `TINYHUMANS_TOKEN_FILE` | — | Platform-projected, audience-bound token file; rotates in place and outranks `TINYHUMANS_API_KEY` |
 | `TINYHUMANS_API_KEY` | — (required for cycles when no token file) | Static TinyHumans credential (JWT or API key) |
-| `TINYHUMANS_API_URL` | `https://api.tinyhumans.ai` | Backend base URL |
+| `TINYHUMANS_API_URL` | `https://api.tinyhumans.ai` | Backend base URL. A **hosted tenant refuses to boot** when neither this nor `config.toml` states it: the platform hands a tenant its whole environment, so a silent production default is a destination nobody chose |
 | `OPENCOMPANY_BIND` | `127.0.0.1:8080` | HTTP bind address. Outranked by `serve --bind`, outranks `config.toml`'s `bind` — see [the bind address](#the-bind-address) |
 | `OPENCOMPANY_DATA_DIR` | `~/.opencompany` (workspace and bundle home alike; bundles at `companies/<slug>`) | The instance data root: both the workspace layout and the company-bundle home. `--home` outranks it for the bundle home **only** — the workspace (`memory/`, `store/`, `files/`, `logs/`, `tmp/`) still resolves under this variable, so `--home` alone does not move a whole instance. The only knob that isolates two hosts from each other — see [the workspace layout](workspace-layout.md#choosing-the-root-srcstorepathsrs) |
 | `OPENCOMPANY_BRAIN_MODE` | `hosted` | `hosted` \| `sidecar` (overrides `[brain].mode`) |
@@ -122,7 +122,7 @@ that does and does not imply.
 | `OPENCOMPANY_INFERENCE_URL` | `https://api.tinyhumans.ai/openai/v1` | Harness-brain OpenAI-compatible endpoint (`openhuman` feature) |
 | `OPENCOMPANY_INFERENCE_MODEL` | `chat-v1` | Roster-wide default model/tier for the harness brain (`openhuman` feature) |
 | `OPENCOMPANY_CONTEXT_WINDOW` | `240000` | Context window the managed inference profile advertises, in tokens (`openhuman` feature). Compression and deterministic trimming engage at 90% of it; set it to a smaller model's advertised window (with an estimation margin) or `off`/`0` to restore unbounded intra-turn history — see [harness history protection](providers.md#history-protection) |
-| `TINYPLACE_API_URL` | `https://api.tiny.place` | tiny.place base (staging/local override) |
+| `TINYPLACE_API_URL` | `https://api.tiny.place` | tiny.place base (staging/local override). Defaults on every deployment kind, hosted tenants included: the economy is read only when a company sets `place.discoverable` and names a handle, and takes this same default when unset |
 | `GITHUB_TOKEN` | — | Only for the feedback→issue flow; without it, feedback is stored locally and a prefilled "file it yourself" link is shown |
 | `OPENCOMPANY_MAIL_PROVIDER` | `smtp` when any `OPENCOMPANY_MAIL_*` is set | Host-level outbound mail transport. Supported: `smtp` |
 | `OPENCOMPANY_MAIL_HOST` | — | SMTP submission host. Setting it opts the host into platform mail |

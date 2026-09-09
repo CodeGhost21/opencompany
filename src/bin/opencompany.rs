@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use opencompany::app::config::HostedDefault;
 use opencompany::company::Schedule;
 use opencompany::runtime::lifecycle_scheduler::load_or_create_cutoff_millis;
 use opencompany::runtime::{
@@ -1811,8 +1812,8 @@ const MAX_BLOCKING_THREADS: usize = 512;
 /// The log filter used when `RUST_LOG` says nothing.
 ///
 /// The bare `error` is exactly what `EnvFilter::from_default_env()` fell back to,
-/// so no target in this binary becomes chattier than it was. The one added
-/// directive is the exception the default cannot express, and it is not cosmetic.
+/// so no target in this binary becomes chattier than it was. Each added
+/// directive is an exception the default cannot express, and neither is cosmetic.
 ///
 /// `tinyagents::observability` is the target the vendored durable-append writer
 /// (`AppendWorker`, in
@@ -1834,9 +1835,17 @@ const MAX_BLOCKING_THREADS: usize = 512;
 /// is `pub(crate)` in tinyagents and cannot be read from here, so the subscriber
 /// is the only channel we have (see `docs/spec/runtime/workspace-layout.md`).
 ///
+/// `policy::shadow_floor` is the target the consequence-floor shadow reader
+/// (`ApprovalPolicy::record_shadow_floor`, `src/harness/built_in/policy.rs`,
+/// issue #2147) reports on. It emits `info!`, one line per call the floor would
+/// have stopped, and that line is the entire measurement: no container image,
+/// compose file or deploy workflow sets `RUST_LOG` either, so a bare `error`
+/// filter would run the whole staging measurement and record nothing — the same
+/// shape as the durable-append gap above, one level quieter.
+///
 /// Setting `RUST_LOG` replaces this string wholesale — the operator keeps full
 /// control, and behaviour with `RUST_LOG` set is unchanged.
-const DEFAULT_LOG_FILTER: &str = "error,tinyagents::observability=warn";
+const DEFAULT_LOG_FILTER: &str = "error,tinyagents::observability=warn,policy::shadow_floor=info";
 
 fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -1885,9 +1894,14 @@ fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
 /// both callers is a production base URL. Every other deployment kind keeps
 /// the default: the operator running it owns the choice, and no-override *is*
 /// that choice.
+///
+/// `hosted` carries the same distinction its twin makes: that argument holds
+/// for a backend every tenant reaches, and not for one behind an opt-in the
+/// tenant has not taken. See [`HostedDefault`].
 fn resolve_serve_base_url(
     var_name: &str,
     deployment: opencompany::app::deployment::Deployment,
+    hosted: HostedDefault,
     toml_val: Option<String>,
     default_val: String,
 ) -> Result<String> {
@@ -1900,7 +1914,9 @@ fn resolve_serve_base_url(
     if let Some(value) = toml_val.filter(|value| !value.trim().is_empty()) {
         return Ok(value);
     }
-    if deployment == opencompany::app::deployment::Deployment::HostedTenant {
+    if deployment == opencompany::app::deployment::Deployment::HostedTenant
+        && hosted == HostedDefault::Refuse
+    {
         return Err(opencompany::error::OpenCompanyError::Config(format!(
             "{var_name} is not set. This is a hosted-tenant deployment, which is handed its \
              whole environment by the platform that provisions it — so this refuses to boot \
@@ -2082,6 +2098,10 @@ async fn async_main() -> Result<()> {
             let tinyplace_api_url = resolve_serve_base_url(
                 "TINYPLACE_API_URL",
                 deployment,
+                // Opt-in: `maybe_build_economy` returns before reading this
+                // unless the manifest sets `place.discoverable` AND names a
+                // handle, and takes this same default when given `None`.
+                HostedDefault::Allow,
                 config_file
                     .as_ref()
                     .and_then(|c| c.tinyplace_api_url.clone()),
@@ -2138,6 +2158,7 @@ async fn async_main() -> Result<()> {
             let api_url = resolve_serve_base_url(
                 "TINYHUMANS_API_URL",
                 deployment,
+                HostedDefault::Refuse,
                 config_file.as_ref().and_then(|c| c.api_url.clone()),
                 AppConfig::default().api_url,
             )?;
@@ -3152,6 +3173,48 @@ mod test {
         );
     }
 
+    /// Issue #2147: the consequence-floor shadow reader's whole output is one
+    /// `info!` per call it would have stopped. Without a named exception a
+    /// bare `error` filter drops every line of it, so a week of staging
+    /// traffic measures nothing and nobody notices — the same failure mode
+    /// `the_default_filter_passes_durable_append_warnings_and_still_drops_other_ones`
+    /// pins for the durable-append worker, one level quieter. Revert the
+    /// `policy::shadow_floor=info` directive and this fails.
+    #[test]
+    fn the_default_filter_passes_the_shadow_floor_measurement() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(None));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "policy::shadow_floor",
+                "[policy:shadow-floor] agent=- tool='gmail_send_email' would_stop=irreversible_send \
+                 mode=Auto hitl=false issue=2147"
+            );
+            // An unrelated `info!` stays dropped: this is one named target,
+            // not a global level bump.
+            tracing::info!(target: "opencompany::unrelated", "ordinary chatter");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        let seen = |target: &str, level: tracing::Level| {
+            events.iter().any(|(t, l)| t == target && *l == level)
+        };
+
+        assert!(
+            seen("policy::shadow_floor", tracing::Level::INFO),
+            "the shadow-floor measurement must survive the default filter; captured {events:?}"
+        );
+        assert!(
+            !seen("opencompany::unrelated", tracing::Level::INFO),
+            "the exception is one target, not a global level bump; captured {events:?}"
+        );
+    }
+
     /// A `RUST_LOG` the operator set is theirs, even when part of it is junk.
     ///
     /// `try_from_default_env` rejects the whole variable over one malformed
@@ -3255,6 +3318,7 @@ mod test {
         let resolved = resolve_serve_base_url(
             UNSET_VAR,
             opencompany::app::deployment::Deployment::HostedTenant,
+            HostedDefault::Refuse,
             Some("https://toml.example".to_string()),
             "https://default.example".to_string(),
         )
@@ -3268,6 +3332,7 @@ mod test {
         let err = resolve_serve_base_url(
             UNSET_VAR,
             opencompany::app::deployment::Deployment::HostedTenant,
+            HostedDefault::Refuse,
             None,
             "https://default.example".to_string(),
         )
@@ -3284,6 +3349,7 @@ mod test {
         let err = resolve_serve_base_url(
             UNSET_VAR,
             opencompany::app::deployment::Deployment::HostedTenant,
+            HostedDefault::Refuse,
             Some("   ".to_string()),
             "https://default.example".to_string(),
         )
@@ -3295,11 +3361,34 @@ mod test {
         ));
     }
 
+    /// **The boot path the tenant container actually takes.**
+    ///
+    /// `serve` builds `AppConfig` field-by-field through this twin, so a rule
+    /// relaxed only in `app::config::resolve_base_url` would leave every
+    /// hosted tenant still refusing to start. Observed on staging: a tenant
+    /// rolled onto an image carrying PR #2141 crash-looped with
+    /// `TINYPLACE_API_URL is not set`, for a company whose manifest has no
+    /// `[place]` block at all.
+    #[test]
+    fn serve_base_url_lets_a_hosted_tenant_default_an_opt_in_backend() {
+        let resolved = resolve_serve_base_url(
+            UNSET_VAR,
+            opencompany::app::deployment::Deployment::HostedTenant,
+            HostedDefault::Allow,
+            None,
+            "https://default.example".to_string(),
+        )
+        .expect("an opt-in backend must not stop a tenant from booting");
+
+        assert_eq!(resolved, "https://default.example");
+    }
+
     #[test]
     fn serve_base_url_self_hosted_still_defaults_when_neither_env_nor_toml() {
         let resolved = resolve_serve_base_url(
             UNSET_VAR,
             opencompany::app::deployment::Deployment::SelfHosted,
+            HostedDefault::Refuse,
             None,
             "https://default.example".to_string(),
         )

@@ -740,6 +740,15 @@ pub(crate) struct TaskHandoff {
     /// it, the same way `direct_card` and this hand-off's own card already
     /// do.
     pub(crate) budget_paused: Option<crate::harness::BudgetPause>,
+    /// SPIKE (async hand-off): the delegate owns the card but has NOT run yet.
+    ///
+    /// The synchronous model awaits the delegate inside the delegator's
+    /// attempt, which is why `TaskRunEnd::Delegated` was documented as
+    /// "unreachable as a run settle today". Handing over without running makes
+    /// it reachable: the delegator settles `Delegated`, and the delegate is
+    /// dispatched as its own attempt with its own cost and its own lock
+    /// acquisition.
+    pub(crate) pending: bool,
 }
 
 /// Drives the brain-agnostic delegation orchestration over a [`RunTurn`]: run the
@@ -1132,6 +1141,16 @@ impl<'a> DelegationRunner<'a> {
     pub(crate) fn for_task(mut self, task_id: &str) -> Self {
         self.task = Some(task_id.to_string());
         self
+    }
+
+    /// [`for_task`](Self::for_task) for a caller that may or may not have one —
+    /// a chat turn scopes itself to the card its THREAD already opened, and to
+    /// nothing when the thread has none.
+    pub(crate) fn maybe_for_task(self, task_id: Option<&str>) -> Self {
+        match task_id {
+            Some(id) => self.for_task(id),
+            None => self,
+        }
     }
 
     /// Scopes this runner to the card's **attempt** (issue #242), so a delegated
@@ -2207,10 +2226,62 @@ impl<'a> DelegationRunner<'a> {
             // card marked cancelled. So an empty hand-off is *provisional* and a
             // later one that answers takes the card over from it (issue #213
             // review finding 3).
-            let owns_card = handoff.as_ref().is_none_or(|prior| prior.reply.is_none());
+            // Once a hand-off owns the card, no LATER one in this turn runs.
+            //
+            // The synchronous model could let a second hand-off run and take the
+            // card from an empty first (issue #213 finding 3). Asynchronously it
+            // cannot: the first hand-off's delegate is already dispatched, so a
+            // second that ran here would produce work under a card whose owner
+            // is somebody else — and if that owner is then cancelled, the card
+            // settles `todo` carrying output that really did run. That is the
+            // exact "work filed under a card marked cancelled" #213 fixed,
+            // reached the other way round.
+            //
+            // So it is recorded and not started. One card, one owner, one
+            // dispatch — and the operator can see what else was asked for.
+            if handoff.as_ref().is_some_and(|prior| prior.pending) {
+                if let Some(target) = hand_off_target_of(&delegation) {
+                    card.note = Some(append_note(
+                        card.note.as_deref(),
+                        delegator,
+                        &format!(
+                            "also asked {target}: {} — not started, this card is already with \
+                             its new owner",
+                            instruction_of(&delegation)
+                        ),
+                    ));
+                }
+                continue;
+            }
+            // A hand-off that produced nothing is PROVISIONAL and a later one
+            // that answers takes the card from it (issue #213 finding 3) — but
+            // a PENDING hand-off is not "produced nothing", it is "has not run
+            // yet". It already owns the card and the delegate is about to be
+            // dispatched for it, so a second hand-off in the same turn must not
+            // move the card again; its instruction is recorded on the note
+            // instead, exactly as a non-owning hand-off's answer is.
+            let owns_card = handoff
+                .as_ref()
+                .is_none_or(|prior| prior.reply.is_none() && !prior.pending);
             if owns_card {
                 self.hand_card_over(card, delegator, &member, instruction_of(&delegation))
                     .await?;
+                // SPIKE: hand over and STOP. The delegate is not run inside this
+                // attempt — the card now names them, the delegator settles
+                // `Delegated`, and the dispatch edge re-fires for the new owner.
+                //
+                // What that buys, and why the synchronous version could not:
+                // one attempt row per agent (so cost is attributable), the
+                // per-company cycle lock released between hops, and a card
+                // whose `assignee` is a real reassignment rather than a
+                // mid-turn display concession.
+                handoff = Some(TaskHandoff {
+                    delegate: member,
+                    reply: None,
+                    budget_paused: None,
+                    pending: true,
+                });
+                continue;
             }
             let outcome = self
                 .run_delegation(delegation, None, MessageContext::default())
@@ -2223,6 +2294,7 @@ impl<'a> DelegationRunner<'a> {
                         delegate: member,
                         reply: Some(desk.reply),
                         budget_paused: desk.budget_paused,
+                        pending: false,
                     });
                 }
                 // An operator cancelled their run mid-flight, so it produced
@@ -2233,6 +2305,7 @@ impl<'a> DelegationRunner<'a> {
                         delegate: member,
                         reply: None,
                         budget_paused: None,
+                        pending: false,
                     });
                 }
                 // Nothing produced and NOT a cancellation. `run_delegation`'s
@@ -2988,6 +3061,20 @@ impl<'a> DelegationRunner<'a> {
         member: &str,
         instruction: &str,
     ) -> Result<()> {
+        // **An owner is an agent. A desk is a channel, not an owner.**
+        //
+        // `member` is the agent that will run the card, and that is exactly who
+        // now owns it — for a teammate hand-off the teammate, for a desk
+        // hand-off that desk's lead.
+        //
+        // This briefly wrote the hand-off target reduced by
+        // `AssigneeResolution::canonical` instead, on the reading that a desk
+        // hand-off should leave the DESK on the card. That put a channel id in
+        // an ownership field: `assignee` is also what the thread's overseer is
+        // read from, so a card handed to a desk named nobody who could answer
+        // for it. `canonical` maps a desk to its own id because it is the
+        // stored-key helper for whatever a card happens to say — not a claim
+        // that a desk is a thing which owns work.
         card.assignee = member.to_string();
         card.note = Some(append_note(
             card.note.as_deref(),
@@ -3782,6 +3869,41 @@ tokio::task_local! {
     /// scope: no tools to loop on, no pre-turn memory retrieval, and no prior
     /// task's thread goal re-injected (issue #1725). Absent = a normal turn.
     pub(crate) static CHAT_ONLY_TURN: bool;
+}
+
+tokio::task_local! {
+    /// What the current turn is trying to do, in the requester's own words
+    /// (issue #6014).
+    ///
+    /// Read by [`PayloadExtractor`](crate::harness::payload_extract) when a tool
+    /// returns more than the per-result budget: knowing the task is what lets it
+    /// keep the records that answer the question and shorten the ones that do
+    /// not. Without it the extractor declines outright rather than guessing,
+    /// because a task-blind extraction is a byte cut with a model call attached
+    /// — it would drop the one issue that mattered exactly as readily as the
+    /// twenty-nine that did not.
+    ///
+    /// Set to [`operator_words`], not the composed turn text: by the time a turn
+    /// runs, `message` carries the cycle's machine briefings (open work, the
+    /// settled digest, the thread index, attachment markers), and an extractor
+    /// told the task is "here is a list of finished cards" would keep the wrong
+    /// half of the payload. The same cut the triage and the budget-pause re-park
+    /// already take, for the same reason.
+    ///
+    /// Absent on any path that has not been taught to set it, which the
+    /// extractor treats as "no hint" and declines — no worse than before it
+    /// existed.
+    pub(crate) static TURN_TASK_HINT: String;
+}
+
+/// The current turn's task, when one is in scope.
+pub(crate) fn current_task_hint() -> Option<String> {
+    TURN_TASK_HINT.try_with(|hint| hint.clone()).ok()
+}
+
+/// Runs `fut` with `task` readable as the turn's task hint.
+pub(crate) async fn with_task_hint<F: std::future::Future>(task: String, fut: F) -> F::Output {
+    TURN_TASK_HINT.scope(task, fut).await
 }
 
 tokio::task_local! {
@@ -9017,6 +9139,24 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
     /// On the DISPATCHED-card path the card stays owned by the level-1 member
     /// the orchestrator handed it to — nested delegation is visible in the note
     /// and the steps, not by the card changing hands again.
+    ///
+    /// # This test changed with the async hand-off, and the change is the point
+    ///
+    /// It used to additionally assert that `handed.reply` carried the level-1
+    /// member's answer, with the nested researcher's reply folded into it. That
+    /// was a true statement about a SYNCHRONOUS hand-off: the delegate ran
+    /// inside the delegator's attempt, so its answer came back up the stack.
+    ///
+    /// It cannot be true of an asynchronous one. The delegator now hands over
+    /// and settles `Delegated`; the delegate is dispatched as its OWN attempt,
+    /// which is what buys one attempt row per agent (so spend is attributable)
+    /// and releases the per-company serial lock between hops. The answer still
+    /// reaches the operator — through the delegate's own settle and relay —
+    /// just not on the delegator's reply.
+    ///
+    /// What the test was *named* for is unchanged and still asserted: the card
+    /// belongs to the member the orchestrator handed it to, and nested
+    /// delegation does not move it a second time.
     #[tokio::test]
     async fn a_dispatched_card_stays_with_the_level_one_member() {
         let fx = Fixture::nested();
@@ -9070,14 +9210,199 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             handed.delegate, "engineer",
             "the card belongs to the member the ORCHESTRATOR handed it to"
         );
-        let reply = handed.reply.expect("the level-1 member answered");
         assert!(
-            reply.contains("researcher (delegated by engineer) replied"),
-            "the nested answer rides on the level-1 member's reply: {reply}"
+            handed.pending,
+            "the hand-off is pending: the delegate has NOT run inside this attempt"
         );
+        assert!(
+            handed.reply.is_none(),
+            "a pending hand-off carries no reply — the delegate answers from its own \
+             attempt, which is what makes the spend attributable to them: {:?}",
+            handed.reply
+        );
+        // **An owner is an agent; a desk is a channel.** Handing to a desk hands
+        // the work to that desk's lead, and it is the lead the card names.
+        //
+        // This assertion previously demanded `eng_desk`, on the reading that a
+        // desk hand-off leaves the DESK owning the card. That put a channel id
+        // in an ownership field — and `assignee` is what the thread's overseer
+        // is read from, so a card handed to a desk named nobody who could
+        // answer for it. `AssigneeResolution::canonical` maps a desk to its own
+        // id because it is the stored-key helper for whatever a card happens to
+        // say, not a claim that a desk owns work.
         assert_eq!(
             card.assignee, "engineer",
-            "nested delegation must not move the card a second time"
+            "the desk's lead owns the card; nested delegation must not move it \
+             a second time"
+        );
+    }
+
+    // ── Issue #453 residual: an id that names no card ───────────────────────
+
+    /// `assign_task`'s receipt tells the model the assignment "takes effect as
+    /// this turn completes". The drain is what completes it, and an id naming
+    /// no card reaches a `tracing::warn!` and `DelegationOutcome::default()` —
+    /// the board is untouched, which is right, and nobody who could act on it
+    /// is told, which is not. A mistyped id and a deleted card are the same
+    /// silence, and the turn has already been told it worked.
+    #[tokio::test]
+    #[ignore = "assign_task on an unknown task_id is a silent drain-time no-op after a success receipt"]
+    async fn assigning_a_card_that_is_not_on_the_board_does_not_report_success() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "assigning it",
+                vec![Delegation::AssignTask {
+                    task_id: "card-that-never-existed".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: Some("please pick this up".to_string()),
+                }],
+            )],
+        );
+
+        let outcome = fx
+            .runner(&turns)
+            .handle_operator_message(
+                "chief",
+                "put the launch plan on engineering",
+                Some("general"),
+            )
+            .await;
+
+        assert!(
+            fx.cards().await.iter().all(|card| card.assignee.is_empty()),
+            "nothing may be assigned on the strength of an id that names no card"
+        );
+        let error = outcome.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error.contains("card-that-never-existed"),
+            "the drain must name the card it could not assign rather than warn into the log and \
+             let the receipt stand: {error:?}"
+        );
+    }
+
+    /// The same residual on the arm the code's own comment calls the more
+    /// consequential one: `review_task`'s receipt says the card "moves to done
+    /// as this turn completes". An unknown id moves nothing, records the
+    /// verdict nowhere, and returns the same empty outcome a real approval
+    /// returns.
+    #[tokio::test]
+    #[ignore = "review_task on an unknown task_id records the verdict nowhere after a 'moves to done' receipt"]
+    async fn approving_a_card_that_is_not_on_the_board_does_not_report_success() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "approved",
+                vec![Delegation::ReviewTask {
+                    task_id: "card-that-never-existed".to_string(),
+                    decision: lifecycle::ReviewDecision::Approve,
+                    note: Some("looks good".to_string()),
+                }],
+            )],
+        );
+
+        let outcome = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "approve the launch plan card", Some("general"))
+            .await;
+
+        assert!(
+            fx.cards().await.is_empty(),
+            "a verdict on an id that names no card may not mint one"
+        );
+        let error = outcome.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error.contains("card-that-never-existed"),
+            "the drain must name the card whose approval landed nowhere rather than warn into the \
+             log while the turn is told it moved: {error:?}"
+        );
+    }
+
+    /// The bound on both refusals above: an id that DOES name a card must not
+    /// be caught by them. Without this the two tests are satisfied by a drain
+    /// that refuses every lifecycle write.
+    #[tokio::test]
+    async fn a_known_card_id_still_assigns_and_reports_no_failure() {
+        let fx = Fixture::new();
+        let card = TaskRecord {
+            id: "card-real".to_string(),
+            title: TaskTitle::authored("Draft the launch plan"),
+            note: None,
+            column: COLUMN_TODO.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: now_millis(),
+            origin: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            planning_attempts: Vec::new(),
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            origin_message_seq: None,
+            bounced: None,
+        };
+        fx.tasks
+            .upsert(&fx.record.id, &card)
+            .await
+            .expect("seed the card");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "assigning it",
+                vec![Delegation::AssignTask {
+                    task_id: "card-real".to_string(),
+                    assignee: "engineer".to_string(),
+                    note: None,
+                }],
+            )],
+        );
+
+        fx.runner(&turns)
+            .handle_operator_message(
+                "chief",
+                "put the launch plan on engineering",
+                Some("general"),
+            )
+            .await
+            .expect("a real card assigns without complaint");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].assignee, "engineer");
+    }
+}
+
+#[cfg(test)]
+mod task_hint_tests {
+    use super::*;
+
+    /// The hint is readable inside its scope and gone outside it — the same
+    /// contract `CHAT_ONLY_TURN` holds, and for the same reason: a hint that
+    /// leaked past its turn would describe the previous request to the next
+    /// turn's extractor, which is worse than having none.
+    #[tokio::test]
+    async fn the_task_hint_is_scoped_to_its_turn() {
+        assert!(
+            current_task_hint().is_none(),
+            "no hint before any turn is in scope"
+        );
+        with_task_hint("find the open issues".to_string(), async {
+            assert_eq!(
+                current_task_hint().as_deref(),
+                Some("find the open issues"),
+                "inside the scope the turn's task is readable"
+            );
+        })
+        .await;
+        assert!(
+            current_task_hint().is_none(),
+            "the hint does not leak past its scope"
         );
     }
 }

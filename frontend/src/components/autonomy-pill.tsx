@@ -57,7 +57,7 @@ import {
   AUTONOMY_CONFIRM_ACTION,
   AUTONOMY_CONFIRM_CANCEL,
   AUTONOMY_CONFIRM_TITLE,
-  AUTONOMY_PROMPTS_NOTE,
+  autonomyPromptsNote,
   tierWideningExplanation,
   widensAutonomy,
 } from "@/components/policy-settings";
@@ -542,7 +542,7 @@ export function AutonomyPill({
                 : null}
             </AlertDialogDescription>
             <p className="text-sm text-muted-foreground">
-              {AUTONOMY_PROMPTS_NOTE}
+              {autonomyPromptsNote(status.policyHitlEnabled ?? false)}
             </p>
           </AlertDialogHeader>
           <AlertDialogFooter>
