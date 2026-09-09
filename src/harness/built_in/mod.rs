@@ -139,6 +139,7 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
+pub mod run_origin;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
