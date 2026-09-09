@@ -13,8 +13,9 @@ proposal and the measurements behind it.**
 [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128) is
 registered, and both live suites pass against a real CortexDB. Selectable is not
 selected: `OPENCOMPANY_MEMORY` defaults exactly as it did, and choosing Cortex is
-the decision this record informs. It argues against it — with **one leg of that
-argument retracted**; see [Correction](#correction-2026-09-04) below.
+the decision this record informs. It argues against it — with one leg of that argument
+[retracted](#correction-2026-09-04) and one
+[hardened](memory-engine-cortex-evidence.md#the-scope-bypass-re-measured-2026-09-09).
 
 ## Correction (2026-09-04)
 
@@ -60,9 +61,10 @@ Understanding stays empty, and the concepts lane still reports no LLM router wit
 both routers verifiably started — the one defect here that has survived
 checking.
 
-Finding 2 is untouched, and it *forces* instance-per-tenant rather than blocking
-it: it removes the shared-instance-with-per-tenant-credentials row from the
-topology table, while instance-per-tenant needs no token scoping at all. The
+Finding 2's conclusion is untouched and its reasoning is now stronger — see
+[the re-measurement](memory-engine-cortex-evidence.md#the-scope-bypass-re-measured-2026-09-09).
+It *forces* instance-per-tenant rather than blocking it, removing the
+shared-instance-with-per-tenant-credentials row from the topology table. The
 decision taken on [#2072](https://github.com/tinyhumansai/opencompany/issues/2072)
 is to adopt at that topology.
 
@@ -77,21 +79,21 @@ question, and the recommendation follows from them.
    **closed-source**, distributed only as prebuilt artifacts (`cortexdbai/cortexdb-releases`,
    Docker Hub `cortexdb/cortexdb`). Whatever we build treats it as an opaque
    upstream binary we cannot patch.
-2. **The isolating configuration is not reachable self-hosted — and what we
-   measured is policy, not a broken boundary.** `CORTEX_V1_MINTER_ENABLE=1`
-   turns on `POST /v1/auth/tokens`, which mints correctly. A token minted *for*
-   scope A, pointed at scope B: `/v1/recall` is refused `403 POLICY_DENIED`,
-   but `GET /v1/events?scope=B` returns B's records and `POST /v1/experience`
-   into B is accepted. **That is the deployment tier behaving as configured**:
-   `GET /v1/policy/effective` lists `scope.read.holistic`, `scope.read.descend`
-   and `scope.write.about_other` among the actor's *allowed* capabilities. The
-   documented way to narrow it, `PUT /v1/policy/{tier}`, is experimental and
-   `404`s here, though the read endpoints are present. The minter is itself
-   documented as "a dev convenience, not a production issuer"; production
-   presets expect OIDC or `cortex-auth-ref`, which is in no release asset and no
-   doc page. So we cannot configure the isolation, nor test whether the
-   production path enforces it — weaker than calling it a defect, and the same
-   conclusion: nothing here may rest on Cortex's scopes.
+2. **The isolating configuration is not reachable self-hosted, and two routes
+   bypass the boundary outright.** `CORTEX_V1_MINTER_ENABLE=1` turns on
+   `POST /v1/auth/tokens`, which mints correctly. A token minted *for* scope A,
+   pointed at scope B: `/v1/recall` and `/v1/forget` are refused
+   `403 POLICY_DENIED`, but `GET /v1/events?scope=B` returns B's records and
+   `POST /v1/experience` into B is accepted and stored. The documented way to
+   narrow an actor, `PUT /v1/policy/{tier}`, is experimental and `404`s here.
+   ~~This is the deployment tier behaving as configured.~~ **It is not** —
+   re-run on v0.9.9 with narrowed tokens holding none of the capabilities that
+   would explain it, the same two routes still leak while their neighbours
+   refuse the identical request. `aud` cannot separate tenants within an
+   instance either: it is one value per *deployment*. Both are set out in
+   [the re-measurement](memory-engine-cortex-evidence.md#the-scope-bypass-re-measured-2026-09-09).
+   The conclusion is the one this record already drew, for a stronger reason:
+   nothing here may rest on Cortex's scopes.
 3. ~~**The derived fact and belief tier does not work.**~~ **Overturned — see
    [Correction](#correction-2026-09-04).** The run below had enrichment off and
    no way to report it; configured, and on a funded provider account, Facts and
@@ -118,7 +120,7 @@ removes the middle option:
 |---|---|---|
 | One shared instance, one bootstrap credential | Namespace-only — the **weak** tier | Yes |
 | **One instance per tenant**, own key and own data dir | Credential *and* storage isolation | **Yes** |
-| Shared instance, real per-tenant credentials | Strong | **No** — the production issuer and the policy-narrowing API are both unavailable in this build (finding 2) |
+| Shared instance, real per-tenant credentials | Strong | **No** — `aud` is one value per deployment, so a shared instance is a *single* Cortex tenant, and the scope boundary it falls back on is bypassed on `/v1/events` and `/v1/experience` (finding 2) |
 
 `memory-engine.md` is unambiguous about why the weak tier is not acceptable as a
 default: with a hosted engine "the namespace string is the only thing separating

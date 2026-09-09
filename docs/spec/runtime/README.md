@@ -39,7 +39,8 @@ Supporting docs:
     why an ephemeral data root refuses to boot
   - [memory-engine-cortex.md](memory-engine-cortex.md) — the hosted-Cortex
     design record for #1936, with its measurements split into
-    [memory-engine-cortex-evidence.md](memory-engine-cortex-evidence.md)
+    [memory-engine-cortex-evidence.md](memory-engine-cortex-evidence.md),
+    which also carries the cross-scope bypass that settled the topology
   - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
     and two processes wanting the same directory
   - [offline.md](offline.md) — running with no network at all: the documented
