@@ -366,7 +366,7 @@ Named so they are countable rather than implied.
   inside the shell is blocked by `crates/opencompany-app/tauri.conf.json`'s
   `connect-src 'self' ipc:`, and widening that CSP is a security decision of its
   own. The embedded *host* would report if the feature were compiled in, but
-  `DESKTOP_RELEASE_FEATURES` in `.github/workflows/release-desktop-macos.yml`
+  `DESKTOP_RELEASE_FEATURES` in `.github/workflows/build-desktop.yml`
   does not include `crash-reporting`, so the released binary has no client
   either. Adding it there is a distribution decision — it changes what ships to
   end users rather than to operators — and is deliberately left open.

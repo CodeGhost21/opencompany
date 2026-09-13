@@ -60,7 +60,7 @@ path = "src/main.rs"
 #
 # `composio` and `acp` are **not** in the feature list below and they ARE in the
 # shipped application: `DESKTOP_RELEASE_FEATURES` in
-# `.github/workflows/release-desktop-macos.yml` passes
+# `.github/workflows/build-desktop.yml` passes
 # `opencompany-core/acp,opencompany-core/composio` on the `tauri build` command line, and
 # `ci.yml`'s `Desktop` lane compiles and tests that same string. Both are
 # `= ["openhuman"]` in the root manifest — pure `cfg` switches that pull no
