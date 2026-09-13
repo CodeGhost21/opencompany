@@ -118,7 +118,6 @@ jobs:
 
       - name: Configure git and pick the commit to cut
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
