@@ -147,6 +147,7 @@ jobs:
       - name: Ensure tag does not already exist
         if: inputs.create_release
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.bump.outputs.tag }}
         run: |
           if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
