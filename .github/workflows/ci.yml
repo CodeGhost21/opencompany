@@ -210,9 +210,16 @@ jobs:
       # complete synthetic merge. The extra work is intentional — a batch may
       # combine unrelated Rust, console, and desktop changes, and only running
       # all three makes the required checks evidence for that combined state.
-      rust: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.rust }}
-      frontend: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.frontend }}
-      desktop: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.desktop }}
+      #
+      # `workflow_dispatch` is forced the same way, for the same reason from
+      # the other side: `promote-main-to-release.yml` dispatches this run on a
+      # fresh snapshot of main, and the filter's fallback for an event with no
+      # PR is a diff against the default branch — which for a just-promoted
+      # `release` is empty, so every lane would skip and the promotion would
+      # be green on nothing.
+      rust: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.rust }}
+      frontend: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.frontend }}
+      desktop: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -222,7 +229,7 @@ jobs:
       # selective runs. A merge group intentionally has no such PR context, and
       # the outputs above already select every lane for it.
       - id: filter
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
