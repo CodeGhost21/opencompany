@@ -394,6 +394,18 @@ jobs:
       - name: Assert desktop feature sets agree
         run: scripts/ci/assert-desktop-features.sh
 
+      # Every file that carries the application version says the same thing.
+      # v0.1.5 shipped with `crates/opencompany-app/Cargo.toml` still at 0.1.4
+      # because a hand bump touched five files and missed the sixth; the
+      # release workflows now bump through `scripts/release/bump-version.mjs`,
+      # which refuses a drifted tree — so a drift has to be caught at the PR
+      # that introduces it, or it blocks the next release instead. Here, in
+      # the ungated job, for the reason the two checks above are: the seven
+      # files span the `rust`, `frontend` and `desktop` filters, and a PR that
+      # edits only one of them runs only one lane. Plain Node, no install.
+      - name: Assert every version file agrees
+        run: node scripts/release/verify-version-sync.mjs
+
   # The 500-line Markdown cap, asserted rather than trusted (issue #695), in a
   # job that always runs (issue #1974).
   #
@@ -1717,11 +1729,9 @@ jobs:
 
       # The version bump the release workflows run, exercised on a copy of the
       # real version files — so a file growing a shape the script no longer
-      # matches fails here, not inside a release dispatch. And the tree itself:
-      # every version file must agree, which v0.1.5 did not
-      # (`crates/opencompany-app/Cargo.toml` stayed at 0.1.4).
+      # matches fails here, not inside a release dispatch. (That the tree
+      # itself agrees is asserted in `actions-pinned`, the ungated job.)
       - run: node --test scripts/release/bump-version.test.mjs
-      - run: node scripts/release/verify-version-sync.mjs
 
       # Exactly one Tauri app, and no script that picks it by working directory
       # rather than by name.
