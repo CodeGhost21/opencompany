@@ -323,6 +323,8 @@ open, and confirm no banner and no error ever appear.
 
 ## See also
 
+- [releases.md](releases.md) — the three workflows that cut a release, and the
+  one decision each of them takes
 - [desktop.md](desktop.md) — the desktop client: connections, transport seam,
   embedded host
 - [desktop-instances.md](desktop-instances.md) — several local hosts on one
