@@ -84,9 +84,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-          # The `cache` input takes a package-manager NAME and "false" is truthy, so `cache: false` is not "off":
-          # `package-manager-cache` is the input that means it. Nothing here
-          # runs `npm install`, so there is nothing to cache.
+          # `package-manager-cache`, NOT `cache`: the `cache` input takes a
+          # package-manager NAME and the string "false" is truthy, so `cache:
+          # false` asks for a package manager called "false" and the step dies.
+          # Nothing here runs `npm install`, so there is nothing to cache.
           package-manager-cache: false
 
       - name: Configure git and pick the commit to cut
