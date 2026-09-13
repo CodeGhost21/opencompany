@@ -222,6 +222,19 @@ jobs:
           submodules: true
       - name: Init vendored openhuman crate submodules
         run: scripts/ci/init-vendored-submodules.sh
+      # The feature set the tenant image ships with lives on `deploy-staging.yml`
+      # (`TENANT_FEATURES`), which is the one that reaches a tenant. Read it
+      # rather than copy it, so this build cannot drift into compiling a
+      # different product; an empty read is fatal for the same reason.
+      - name: Read the tenant feature set
+        id: features
+        run: |
+          value="$(sed -n 's/^[[:space:]]*TENANT_FEATURES:[[:space:]]*//p' .github/workflows/deploy-staging.yml | head -1)"
+          if [ -z "$value" ]; then
+            echo "::error::could not read TENANT_FEATURES from deploy-staging.yml" >&2
+            exit 1
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Build image (no push)
@@ -232,6 +245,7 @@ jobs:
           platforms: linux/amd64
           tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
           build-args: |
+            FEATURES=${{ steps.features.outputs.value }}
             OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
             VITE_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
           cache-from: type=gha,scope=release-docker
