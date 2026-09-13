@@ -48,7 +48,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          persist-credentials: false
+          # This job PUSHES. `actions/checkout` stores GITHUB_TOKEN as an
+          # `http.extraheader` for this checkout only, which is what `git push`
+          # below authenticates with — no token in a remote URL, nothing that
+          # `set -x` could ever print. Every other checkout in this repo says
+          # `false`; those jobs do not push.
+          persist-credentials: true
 
       - name: Merge main into release and push
         env:
@@ -58,7 +63,6 @@ jobs:
           log() { echo "[promote] $*"; }
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           git fetch origin main
           log "main is at $(git rev-parse origin/main)"

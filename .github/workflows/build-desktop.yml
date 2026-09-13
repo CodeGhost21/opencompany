@@ -81,6 +81,28 @@ on:
         description: Attach outputs to the DRAFT GitHub Release named by `tag` instead of uploading Actions artifacts. Requires `sign`.
         type: boolean
         default: false
+    # Named rather than `secrets: inherit`, so a caller hands over exactly the
+    # signing material and nothing else the repository holds (AWS, SSH, OpenAI).
+    # All optional: `guard` names the missing one when an input needs it.
+    secrets:
+      APPLE_CERTIFICATE_BASE64:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
 
 permissions:
   contents: write
