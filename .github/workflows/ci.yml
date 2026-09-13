@@ -22,12 +22,20 @@ name: CI
 # becomes `main`. Enabling the queue and choosing its batch size are repository
 # ruleset settings, deliberately left to maintainers; this trigger is the
 # workflow half GitHub requires once they enable it.
+#
+# `release` is the long-lived branch production is cut from
+# (docs/spec/runtime/releases.md). A fix PR against it runs here as a
+# `pull_request` like any other; a direct push to it runs like a push to
+# `main`. `workflow_dispatch` exists for `promote-main-to-release.yml`: the
+# merge commit it pushes is made with GITHUB_TOKEN, which never fires `push`
+# workflows (GitHub's recursion guard), so it dispatches this one explicitly.
 on:
   push:
-    branches: [main]
+    branches: [main, release]
   pull_request:
   merge_group:
     types: [checks_requested]
+  workflow_dispatch: {}
 
 # Issue #770. Cancellation is scoped to NON-DEFAULT refs, and the asymmetry is
 # the whole point: on a PR branch a new push makes the previous run's answer
@@ -287,7 +295,13 @@ jobs:
           # Match the `uses:` value only, ignoring prose that mentions "uses:"
           # inside a comment. Anchored to the step form: optional list dash,
           # the key, then the reference.
+          # A LOCAL reusable workflow — `uses: ./.github/workflows/x.yml` —
+          # takes no ref at all: it always runs at the calling workflow's
+          # own commit, so there is nothing an owner could move. Exempt by
+          # the leading `./`, and only that; `owner/repo/.github/workflows/
+          # x.yml@ref` is a remote workflow and still needs its SHA.
           unpinned=$(grep -rnE '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/ \
+            | grep -vE 'uses:[[:space:]]*\./\.github/workflows/[^[:space:]]+\.ya?ml([[:space:]]|$|#)' \
             | grep -vE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}([[:space:]]|$|#)' || true)
           if [ -n "$unpinned" ]; then
             echo "::error title=Unpinned action::A \`uses:\` reference names a tag or branch rather than a 40-hex commit SHA. A tag is a pointer its owner can move, so the job would run whatever it names at run time. Resolve it with: gh api repos/<owner>/<action>/commits/<tag> --jq .sha — then record the precise version in a trailing comment." >&2
@@ -305,9 +319,9 @@ jobs:
 
       # Issue #592, and the same argument as the pin check above. The vendored
       # openhuman submodule init was copied into four jobs in this file and a
-      # fifth in `release.yml`, ~340 lines apart here — far enough that a reader
-      # edits one copy and never learns the others exist. The copies then
-      # drifted: `release.yml` was missing `vendor/tinyhumans-sdk` and the
+      # fifth in the then release workflow, ~340 lines apart here — far enough
+      # that a reader edits one copy and never learns the others exist. The
+      # copies then drifted: the release copy was missing `vendor/tinyhumans-sdk` and the
       # nested `tinycortex` init, which fails `cargo build --locked` outright at
       # manifest resolution. It stayed invisible only because that workflow is
       # `workflow_dispatch`-only and had never run. This job's header records
@@ -363,7 +377,7 @@ jobs:
 
       # Issue #1738. The desktop's shipped feature set lives on three command
       # lines and in no manifest — `DESKTOP_RELEASE_FEATURES` in
-      # `release-desktop-macos.yml`, the `Desktop` lane's clippy and test steps
+      # `build-desktop.yml`, the `Desktop` lane's clippy and test steps
       # below, and `scripts/desktop-dev.sh`. Until #1738 the dev script had no
       # copy at all, so a developer ran the DEFAULT build and every user
       # installed the release one. Here rather than in the `Desktop` job because
@@ -1694,6 +1708,14 @@ jobs:
       # and the test is the one thing its own diff cannot run.
       - run: node --test scripts/release/generate-release-notes.test.mjs
 
+      # The version bump the release workflows run, exercised on a copy of the
+      # real version files — so a file growing a shape the script no longer
+      # matches fails here, not inside a release dispatch. And the tree itself:
+      # every version file must agree, which v0.1.5 did not
+      # (`crates/opencompany-app/Cargo.toml` stayed at 0.1.4).
+      - run: node --test scripts/release/bump-version.test.mjs
+      - run: node scripts/release/verify-version-sync.mjs
+
       # Exactly one Tauri app, and no script that picks it by working directory
       # rather than by name.
       #
@@ -2191,7 +2213,7 @@ jobs:
       # was an inconsistency inside one job rather than a deliberate choice.
       #
       # `--features` matches `DESKTOP_RELEASE_FEATURES` in
-      # `release-desktop-macos.yml` — see that file for why `acp` and
+      # `build-desktop.yml` — see that file for why `acp` and
       # `composio` are passed on the command line instead of being written into
       # `crates/opencompany-app/Cargo.toml`. The short version: they are pure `cfg` switches
       # that add no package, so the release build can turn them on and still
