@@ -213,6 +213,49 @@ impl Provider {
             ProviderOrigin::Indexed => None,
         }
     }
+
+    /// This row's one model, read without guessing (keys rework, issue
+    /// #2306, slice 2b). See [`model_on_row`].
+    pub fn model(&self) -> ModelOnRow {
+        model_on_row(&self.models)
+    }
+}
+
+/// A provider row's single model, as read from its `models` map (keys
+/// rework, issue #2306, slice 2b).
+///
+/// The map is a storage encoding (the same id under every tier key), not a
+/// selection — `models` predates this rework and stays that shape so a
+/// rollback binary still reads a model per tier. Two different ids under it
+/// is a row nobody chose one model for, and it is reported, never resolved
+/// by picking one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelOnRow {
+    /// No non-blank value at all.
+    None,
+    /// Exactly one distinct non-blank id (trimmed).
+    One(String),
+    /// Two or more distinct ids, trimmed, sorted ascending, de-duplicated.
+    Ambiguous(Vec<String>),
+}
+
+/// Collapses a tier-keyed `models` map to [`ModelOnRow`]. Entry zero uses the
+/// same function, because its record carries `inference/config.models`
+/// (`provider_from_runtime`, below).
+pub fn model_on_row(models: &BTreeMap<String, String>) -> ModelOnRow {
+    let mut distinct: Vec<String> = models
+        .values()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .collect::<std::collections::BTreeSet<&str>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    match distinct.len() {
+        0 => ModelOnRow::None,
+        1 => ModelOnRow::One(distinct.remove(0)),
+        _ => ModelOnRow::Ambiguous(distinct),
+    }
 }
 
 /// The persisted shape of a non-entry-zero provider.
@@ -813,6 +856,137 @@ pub async fn set_managed_enabled(
 /// The [`SecretStore`] key naming the company's default provider.
 pub const DEFAULT_PROVIDER_KEY: &str = "inference/default";
 
+/// A provider slug and the one model to send it (keys rework, issue #2306,
+/// slice 2b): the only shape the new resolution path sends. Serialized field
+/// order is `provider`, then `model`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// A slug from [`list_providers`], which includes entry zero.
+    pub provider: String,
+    /// The id that provider's API accepts. Non-empty after trim.
+    pub model: String,
+}
+
+/// `inference/default`, parsed (keys rework, issue #2306, slice 2b).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultChoice {
+    /// Missing, `""`, or only whitespace.
+    Unset,
+    /// A bare slug (every value stored before this rework), or JSON with a
+    /// blank or absent `model`. Resolves exactly as a bare slug always has.
+    ProviderOnly(String),
+    /// JSON with a non-blank provider and a non-blank model.
+    Full(ModelChoice),
+}
+
+impl DefaultChoice {
+    /// The provider this default names, if any.
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Unset => None,
+            Self::ProviderOnly(slug) => Some(slug.as_str()),
+            Self::Full(choice) => Some(choice.provider.as_str()),
+        }
+    }
+
+    /// The full pair, only when both halves are present.
+    pub fn full(&self) -> Option<&ModelChoice> {
+        match self {
+            Self::Full(choice) => Some(choice),
+            _ => None,
+        }
+    }
+}
+
+/// The JSON read shape for [`parse_default`]. `model` is optional so a
+/// provider-only JSON value is representable; unknown fields are ignored (no
+/// `deny_unknown_fields`), so a future field added here never breaks an
+/// older binary reading a value a newer one wrote.
+#[derive(Deserialize)]
+struct StoredDefault {
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The parse rules for `inference/default` (Q1), in order:
+///
+/// 1. Trim. Empty ⇒ [`DefaultChoice::Unset`].
+/// 2. Does not start with `{` ⇒ the whole trimmed value is a slug ⇒
+///    [`DefaultChoice::ProviderOnly`].
+/// 3. Starts with `{` ⇒ deserialize as [`StoredDefault`]. Invalid JSON, a
+///    missing `provider`, or a non-string `provider` ⇒ `OpenCompanyError::Store`.
+/// 4. `provider` blank after trim ⇒ `OpenCompanyError::Store`.
+/// 5. `model` absent, `null`, or blank after trim ⇒ `ProviderOnly(provider)`.
+/// 6. Otherwise ⇒ `Full { provider: trimmed, model: trimmed }`.
+pub fn parse_default(raw: &str) -> Result<DefaultChoice> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DefaultChoice::Unset);
+    }
+    if !trimmed.starts_with('{') {
+        return Ok(DefaultChoice::ProviderOnly(trimmed.to_string()));
+    }
+    let stored: StoredDefault = serde_json::from_str(trimmed).map_err(|e| {
+        OpenCompanyError::Store(format!("inference default is not valid JSON: {e}"))
+    })?;
+    let provider = stored.provider.trim();
+    if provider.is_empty() {
+        return Err(OpenCompanyError::Store(
+            "inference default names no provider".to_string(),
+        ));
+    }
+    match stored
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        Some(model) => Ok(DefaultChoice::Full(ModelChoice {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        })),
+        None => Ok(DefaultChoice::ProviderOnly(provider.to_string())),
+    }
+}
+
+/// Reads and parses `inference/default` (keys rework, issue #2306, slice 2b).
+/// Never writes: a bare slug stays a bare slug on disk (Q1) until an explicit
+/// [`set_default_choice`] rewrites it.
+pub async fn load_default(company: &CompanyId, secrets: &dyn SecretStore) -> Result<DefaultChoice> {
+    let Some(SecretValue(raw)) = secrets.get(company, DEFAULT_PROVIDER_KEY).await? else {
+        return Ok(DefaultChoice::Unset);
+    };
+    parse_default(&raw)
+}
+
+/// Writes a full default as **one** JSON value, e.g.
+/// `{"provider":"tinyhumans","model":"acme/test-model"}` (keys rework, issue
+/// #2306, slice 2b). One write, so a provider can never be paired with
+/// another provider's model even under a failed second write — there is no
+/// second write.
+pub async fn set_default_choice(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    choice: &ModelChoice,
+) -> Result<()> {
+    let provider = choice.provider.trim();
+    let model = choice.model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return Err(OpenCompanyError::InvalidRequest(
+            "a default needs both a provider and a model".to_string(),
+        ));
+    }
+    let raw = serde_json::to_string(&ModelChoice {
+        provider: provider.to_string(),
+        model: model.to_string(),
+    })
+    .map_err(|e| OpenCompanyError::Store(format!("serializing the inference default: {e}")))?;
+    secrets
+        .set(company, DEFAULT_PROVIDER_KEY, SecretValue(raw))
+        .await
+}
+
 /// Which provider this company has **said** is its default, if any.
 ///
 /// A slug in a slot of its own rather than a flag on each record, and that shape
@@ -823,15 +997,18 @@ pub const DEFAULT_PROVIDER_KEY: &str = "inference/default";
 /// `None` is every company that has not said, which is every company that
 /// existed before this. There is no backfill: [`resolve::primary`] falls back to
 /// the first enabled provider, which is exactly what it did before.
+///
+/// Keys rework (issue #2306), slice 2b: a JSON default answers its
+/// `provider` too, so this stays a thin wrapper over [`load_default`] rather
+/// than a second read path every caller would have to keep in sync with it.
 pub async fn load_default_slug(
     company: &CompanyId,
     secrets: &dyn SecretStore,
 ) -> Result<Option<String>> {
-    let Some(SecretValue(raw)) = secrets.get(company, DEFAULT_PROVIDER_KEY).await? else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+    Ok(load_default(company, secrets)
+        .await?
+        .provider()
+        .map(str::to_string))
 }
 
 /// Marks `slug` as this company's default, replacing whatever was marked.
@@ -1738,5 +1915,276 @@ mod tests {
         // which is the property the route now answers from.
         let stored = load_routes(&company, &secrets).await.unwrap();
         assert!(stored.is_empty());
+    }
+
+    // ---- the default's new shape (keys rework, issue #2306, slice 2b) ------
+
+    #[tokio::test]
+    async fn a_json_default_reads_provider_and_model() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(
+                    "  {\"provider\":\" acme \",\"model\":\" acme/other-model \"}\n".into(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Full(ModelChoice {
+                provider: "acme".to_string(),
+                model: "acme/other-model".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_slug_default_reads_as_provider_without_model() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(" acme\n".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::ProviderOnly("acme".to_string())
+        );
+        assert_eq!(
+            load_default_slug(&company(), &secrets)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acme")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_model_in_json_reads_as_provider_only() {
+        let secrets = MemSecrets::default();
+        for raw in [
+            r#"{"provider":"acme"}"#,
+            r#"{"provider":"acme","model":null}"#,
+            r#"{"provider":"acme","model":"  "}"#,
+        ] {
+            secrets
+                .set(
+                    &company(),
+                    DEFAULT_PROVIDER_KEY,
+                    SecretValue(raw.to_string()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                load_default(&company(), &secrets).await.unwrap(),
+                DefaultChoice::ProviderOnly("acme".to_string()),
+                "raw: {raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_json_default_is_an_error() {
+        let secrets = MemSecrets::default();
+        for raw in [
+            r#"{"provider":"#,
+            r#"{"model":"x"}"#,
+            r#"{"provider":"  ","model":"x"}"#,
+            r#"{"provider":5}"#,
+        ] {
+            secrets
+                .set(
+                    &company(),
+                    DEFAULT_PROVIDER_KEY,
+                    SecretValue(raw.to_string()),
+                )
+                .await
+                .unwrap();
+            let err = load_default(&company(), &secrets).await.unwrap_err();
+            assert!(
+                matches!(err, OpenCompanyError::Store(_)),
+                "raw: {raw}: {err}"
+            );
+            assert!(
+                err.to_string().contains("inference default"),
+                "raw: {raw}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cleared_default_reads_unset() {
+        let secrets = MemSecrets::default();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Unset
+        );
+        assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+
+        clear_default_slug(&company(), &secrets).await.unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Unset
+        );
+
+        secrets
+            .set(&company(), DEFAULT_PROVIDER_KEY, SecretValue("   ".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Unset
+        );
+        assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn setting_a_default_choice_is_one_json_write() {
+        let secrets = MemSecrets::default();
+        set_default_choice(
+            &company(),
+            &secrets,
+            &ModelChoice {
+                provider: " tinyhumans ".to_string(),
+                model: " acme/test-model ".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let map = secrets.map.lock().unwrap();
+        assert_eq!(map.len(), 1, "one write: {map:?}");
+        assert_eq!(
+            map.get(DEFAULT_PROVIDER_KEY).map(String::as_str),
+            Some(r#"{"provider":"tinyhumans","model":"acme/test-model"}"#)
+        );
+        drop(map);
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Full(ModelChoice {
+                provider: "tinyhumans".to_string(),
+                model: "acme/test-model".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_choice_without_a_model_is_refused_before_writing() {
+        let secrets = MemSecrets::default();
+        let err = set_default_choice(
+            &company(),
+            &secrets,
+            &ModelChoice {
+                provider: "acme".to_string(),
+                model: "  ".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, OpenCompanyError::InvalidRequest(_)), "{err}");
+        assert!(secrets.map.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_default_slug_reads_the_provider_out_of_a_json_default() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(r#"{"provider":"acme","model":"acme/other-model"}"#.to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default_slug(&company(), &secrets)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acme")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_with_one_distinct_model_collapses_to_it() {
+        let secrets = MemSecrets::default();
+        let mut d = draft("acme");
+        d.models = crate::company::INFERENCE_TIERS
+            .iter()
+            .map(|t| ((*t).to_string(), "acme/other-model".to_string()))
+            .collect();
+        d.models
+            .insert("chat-v1".to_string(), " acme/other-model ".to_string());
+        d.models.insert("extra".to_string(), "".to_string());
+        put_provider(&company(), &secrets, d).await.unwrap();
+        let row = get_provider(&company(), &secrets, "acme")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.model(), ModelOnRow::One("acme/other-model".to_string()));
+    }
+
+    #[test]
+    fn a_row_with_no_model_reads_none() {
+        assert_eq!(model_on_row(&BTreeMap::new()), ModelOnRow::None);
+        let mut blank = BTreeMap::new();
+        blank.insert("chat-v1".to_string(), "  ".to_string());
+        assert_eq!(model_on_row(&blank), ModelOnRow::None);
+    }
+
+    #[test]
+    fn a_row_with_two_distinct_models_is_ambiguous_never_picked() {
+        let mut models = BTreeMap::new();
+        models.insert("chat-v1".to_string(), "b-model".to_string());
+        models.insert("agentic-v1".to_string(), "a-model".to_string());
+        models.insert("reasoning-v1".to_string(), "a-model".to_string());
+        assert_eq!(
+            model_on_row(&models),
+            ModelOnRow::Ambiguous(vec!["a-model".to_string(), "b-model".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_zero_models_collapse_the_same_way() {
+        let secrets = MemSecrets::default();
+        let uniform = crate::company::INFERENCE_TIERS
+            .iter()
+            .map(|t| ((*t).to_string(), "acme/test-model".to_string()))
+            .collect();
+        super::super::save_runtime_config(
+            &company(),
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".to_string(),
+                base_url: None,
+                models: uniform,
+            },
+        )
+        .await
+        .unwrap();
+        let zero = entry_zero(&company(), &secrets).await.unwrap().unwrap();
+        assert_eq!(zero.model(), ModelOnRow::One("acme/test-model".to_string()));
+
+        let mut ambiguous = BTreeMap::new();
+        ambiguous.insert("chat-v1".to_string(), "x/a".to_string());
+        ambiguous.insert("agentic-v1".to_string(), "x/b".to_string());
+        super::super::save_runtime_config(
+            &company(),
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".to_string(),
+                base_url: None,
+                models: ambiguous,
+            },
+        )
+        .await
+        .unwrap();
+        let zero = entry_zero(&company(), &secrets).await.unwrap().unwrap();
+        assert!(matches!(zero.model(), ModelOnRow::Ambiguous(_)));
     }
 }

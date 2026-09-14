@@ -65,11 +65,17 @@ pub fn nothing_resolved(agent_name: &str) -> String {
 ///
 /// "No model is chosen for this company. Choose a default provider and model
 /// in Connections → API Keys → LLM."
+///
+/// A `const` because `inference::NO_MODEL_CHOSEN` (2b's originally-named
+/// symbol, kept for callers outside this module that still match error text
+/// against it) needs a `&'static str` it can re-export, not a function call.
+pub const COMPANY_NO_MODEL_CHOSEN: &str = "No model is chosen for this company. Choose a default \
+     provider and model in Connections → API Keys → LLM.";
+
+/// Same text as [`COMPANY_NO_MODEL_CHOSEN`], as an owned `String` for callers
+/// building an [`crate::error::OpenCompanyError`] (which takes `String`).
 pub fn nothing_resolved_for_company() -> String {
-    format!(
-        "No model is chosen for this company. Choose a default provider and \
-         model in {SETTINGS_PATH}."
-    )
+    COMPANY_NO_MODEL_CHOSEN.to_string()
 }
 
 /// A provider that would otherwise resolve has no credential.
