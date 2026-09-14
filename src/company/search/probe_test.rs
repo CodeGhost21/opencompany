@@ -256,11 +256,17 @@ async fn a_hostile_body_is_abandoned_rather_than_buffered() {
     //
     // Sixteen megabytes against a 4 KiB cap: four thousand times the limit, and
     // an ordinary rejection is under a kilobyte.
+    const CHUNK: usize = 64 * 1024;
+    const CHUNKS: usize = 256;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    // The task reports how much it managed to write before the client hung up.
+    // That is what makes the assertion below mean "abandoned the stream" rather
+    // than "buffered it all and then kept 4 KiB" — the retained string is the
+    // same size either way.
     let server = tokio::spawn(async move {
         let Ok((mut stream, _)) = listener.accept().await else {
-            return;
+            return 0usize;
         };
         use tokio::io::AsyncWriteExt;
         let _ = stream
@@ -268,12 +274,15 @@ async fn a_hostile_body_is_abandoned_rather_than_buffered() {
             .await;
         // Written until the client hangs up, which is the point: the reader
         // must stop, not the writer.
-        let chunk = vec![b'x'; 64 * 1024];
-        for _ in 0..256 {
+        let chunk = vec![b'x'; CHUNK];
+        let mut written = 0usize;
+        for _ in 0..CHUNKS {
             if stream.write_all(&chunk).await.is_err() {
-                return;
+                break;
             }
+            written += CHUNK;
         }
+        written
     });
 
     let info = crate::company::search::catalogue::entry("searxng").expect("searxng is catalogued");
@@ -290,7 +299,40 @@ async fn a_hostile_body_is_abandoned_rather_than_buffered() {
         "read {} bytes against a {BODY_CAP}-byte cap",
         body.len()
     );
-    server.abort();
+
+    // And the cap was applied to the STREAM. `body.len() <= BODY_CAP` is also
+    // true of buffering the whole 16 MiB and then keeping 4 KiB of it — which
+    // is exactly the version this replaced — so what tells them apart is that
+    // the writer never got to finish.
+    let written = server.await.expect("server task");
+    assert!(
+        written < CHUNK * CHUNKS,
+        "the client read all {} bytes instead of abandoning the stream",
+        CHUNK * CHUNKS
+    );
+}
+
+#[tokio::test]
+async fn an_account_provider_takes_no_address_override() {
+    // Otherwise `POST …/search/test` could check Brave against an address of
+    // the caller's choosing, and the probe would put the company's stored Brave
+    // key in a header to it. The credential is write-only on this surface —
+    // never returned, never rendered back — and that would have handed it
+    // straight out through the one route whose whole point is that it is safe
+    // to press. The route refuses it as well; refused twice, because the cost
+    // of the miss is the credential.
+    let info = crate::company::search::catalogue::entry("brave").expect("brave is catalogued");
+    let failure = probe(
+        info,
+        Some("brave-not-a-real-key"),
+        Some("http://127.0.0.1:1"),
+    )
+    .await
+    .expect_err("an override must be refused, not fetched");
+    let ProbeFailure::Transport(message) = failure else {
+        panic!("expected a transport refusal");
+    };
+    assert!(message.contains("its own address"), "{message}");
 }
 
 #[test]

@@ -538,7 +538,19 @@ async fn connect_provider(
     }
 
     if let Some(key) = api_key.as_deref() {
-        store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), &slug, key).await?;
+        // `if_connected`, because the claim above released the index lock and a
+        // removal can land in the gap. Writing the credential anyway would put
+        // it at an address the index does not hold — invisible in status,
+        // skipped by Disconnect all — and this route would still answer
+        // `saved: true` for a provider that is no longer connected.
+        if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug, key)
+            .await?
+        {
+            return Err(invalid(format!(
+                "{} was disconnected while it was being connected — try again",
+                info.label
+            )));
+        }
     }
 
     let failure = check(info, api_key.as_deref(), endpoint.as_deref()).await;
@@ -777,7 +789,27 @@ async fn test_provider(
         Some(key) => Some(key),
         None => store::load_provider_key(runtime.id(), runtime.secrets().as_ref(), &slug).await?,
     };
+    // **An address is only ever accepted for a provider that HAS one.**
+    //
+    // Without this an admin could check Brave against an address of their
+    // choosing, and the probe would put the company's **stored Brave key** in a
+    // header to it. The credential is write-only everywhere on this surface —
+    // it is never returned by any route and never rendered back — and this
+    // would have handed it straight back, to any destination, through a route
+    // whose whole purpose is that it is safe to press. Neither the URL shape
+    // check nor the DNS pin helps: both ask whether an address may be fetched,
+    // and the question here is whether this provider has an address at all.
+    //
+    // The three account providers answer at constants in the catalogue.
+    // `validate_draft` already drops an endpoint for them on every write path;
+    // this is the read-only path that had no equivalent.
     let endpoint = match supplied(body.endpoint.as_deref()) {
+        Some(endpoint) if !info.needs_endpoint() => {
+            return Err(invalid(format!(
+                "{} answers at its own address — `{endpoint}` cannot be checked against it",
+                info.label
+            )));
+        }
         Some(endpoint) => Some(endpoint),
         None => store::list_providers(runtime.id(), runtime.secrets().as_ref())
             .await?
@@ -842,15 +874,36 @@ async fn put_search(
         // where the selection resolves to nothing yet and the effective provider
         // is still managed. Reading the effective one here would refuse the
         // request that completes the configuration.
-        let selected =
-            match store::load_default_slug(runtime.id(), runtime.secrets().as_ref()).await? {
-                Some(slug) => Some(slug),
-                None => store::list_providers(runtime.id(), runtime.secrets().as_ref())
-                    .await?
-                    .into_iter()
-                    .next()
-                    .map(|provider| provider.slug),
-            };
+        //
+        // Unmarked, it is the row the STATUS ROUTE NAMES — not simply the first
+        // stored one. A client of this compatibility API reads `provider` from
+        // the status and patches it, and the two disagreed: with a disabled Exa
+        // stored before an enabled Brave, the status said `brave` and a bare
+        // `{"apiKey": …}` silently updated exa. The same resolver answers both
+        // now, so what was read is what is written.
+        //
+        // First-in-list survives as the last fallback, which is the case the
+        // comment above is about: nothing resolves yet, so there is no active
+        // row to name and the one the operator just picked is the answer.
+        let selected = match store::load_default_slug(runtime.id(), runtime.secrets().as_ref())
+            .await?
+        {
+            Some(slug) => Some(slug),
+            None => {
+                // The same call the status route makes, so the two cannot
+                // drift: one derivation of "which row answers", not two.
+                let candidates =
+                    crate::company::search::candidates(runtime.id(), runtime.secrets().as_ref())
+                        .await?;
+                match resolve::active(&candidates, None) {
+                    Some(active) => Some(active.provider.slug.clone()),
+                    None => candidates
+                        .into_iter()
+                        .next()
+                        .map(|candidate| candidate.provider.slug),
+                }
+            }
+        };
         let Some(selected) = selected else {
             return Err(invalid("no provider is connected to apply that to"));
         };
@@ -1611,6 +1664,54 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{after}");
+    }
+
+    #[tokio::test]
+    async fn a_check_cannot_send_an_account_providers_key_to_an_address_of_your_choosing() {
+        // The credential is write-only on this surface: no route returns it and
+        // no page renders it back. `POST …/search/test` with an `endpoint` for
+        // Brave would have put the stored Brave key in a header to whatever
+        // address was named — handing it straight out, through the one route
+        // whose whole point is that it is safe to press.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "brave", "apiKey": "brave-not-a-real-key"})),
+        )
+        .await;
+
+        let (status, body) = call(
+            &state,
+            "POST",
+            "/api/v1/companies/acme/search/test",
+            &admin,
+            Some(json!({"slug": "brave", "endpoint": "http://127.0.0.1:1/collect"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // SearXNG is the provider that genuinely has an address, so it must
+        // still accept one — the refusal is about which providers have one, not
+        // about overrides in general.
+        let (status, _) = call(
+            &state,
+            "POST",
+            "/api/v1/companies/acme/search/test",
+            &admin,
+            Some(json!({"slug": "searxng", "endpoint": "http://127.0.0.1:1/"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a self-hosted instance still takes an address"
+        );
     }
 
     #[tokio::test]

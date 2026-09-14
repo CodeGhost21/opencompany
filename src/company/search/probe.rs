@@ -462,6 +462,17 @@ pub async fn probe(
     credential: Option<&str>,
     endpoint: Option<&str>,
 ) -> Result<(), ProbeFailure> {
+    // An override is only for a provider that HAS an address of its own. For
+    // the three account providers the credential travels in a header to a
+    // constant in the catalogue, and honouring an override here would send it
+    // wherever the caller named. The route above refuses this too; it is
+    // refused twice because the cost of the miss is the company's credential.
+    if endpoint.is_some() && !info.needs_endpoint() {
+        return Err(ProbeFailure::Transport(format!(
+            "{} answers at its own address and takes no override",
+            info.label
+        )));
+    }
     let base = endpoint.unwrap_or(info.endpoint).trim_end_matches('/');
     if base.is_empty() {
         return Err(ProbeFailure::Transport("no endpoint to check".to_string()));

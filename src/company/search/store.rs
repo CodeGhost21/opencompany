@@ -213,19 +213,43 @@ pub async fn list_providers(
     };
 
     let mut providers = Vec::with_capacity(index.len() + 1);
+    let entry_zero = entry_zero_slug(company, secrets).await?;
 
-    if let Some(slug) = entry_zero_slug(company, secrets).await?
+    if let Some(slug) = entry_zero.as_deref()
         && !index.iter().any(|entry| entry.slug == slug)
     {
         providers.push(SearchProvider {
             endpoint: read(company, secrets, ENDPOINT_SECRET).await?,
-            slug,
+            slug: slug.to_string(),
             enabled: true,
         });
     }
 
     for entry in index {
-        let endpoint = read(company, secrets, &provider_endpoint_key(&entry.slug)).await?;
+        let mut endpoint = read(company, secrets, &provider_endpoint_key(&entry.slug)).await?;
+        // **The flat address survives the slug entering the index.**
+        //
+        // An upgraded company keeps its SearXNG URL in `search/endpoint` alone,
+        // and the synthesized row above is where it is read from. But the row is
+        // synthesized only while the slug is NOT indexed — and any index
+        // mutation at all puts it there: toggling this row, or connecting a
+        // second provider. From the next read on, the branch changes to this one
+        // and looks at `search/provider/searxng/endpoint`, which nothing ever
+        // wrote.
+        //
+        // The address was then gone. SearXNG went incomplete, every agent
+        // silently fell back to managed search, and nothing on the page said
+        // why — the exact class of failure convergence exists to avoid, from an
+        // operator action as ordinary as flipping a switch.
+        //
+        // Read-side fallback rather than a copy at write time: the store has no
+        // delete, so a copy would leave the same value at two addresses with
+        // nothing to say which is current, and convergence is deliberately a
+        // thing that happens on a real save rather than behind the operator's
+        // back.
+        if endpoint.is_none() && entry_zero.as_deref() == Some(entry.slug.as_str()) {
+            endpoint = read(company, secrets, ENDPOINT_SECRET).await?;
+        }
         providers.push(SearchProvider {
             slug: entry.slug,
             enabled: entry.enabled,

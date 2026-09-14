@@ -658,3 +658,91 @@ async fn a_key_is_not_stored_for_a_provider_the_index_does_not_hold() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn a_legacy_searxng_address_survives_the_slug_entering_the_index() {
+    // An upgraded company keeps its URL in `search/endpoint` alone. The
+    // synthesized entry-zero row reads it from there — but only while the slug
+    // is NOT in the index, and any index mutation at all puts it there.
+    // Toggling the row, or connecting a second provider, used to move the read
+    // to `search/provider/searxng/endpoint`, which nothing had written: the
+    // address vanished, SearXNG went incomplete, and every agent silently fell
+    // back to managed search.
+    let secrets = MemSecrets::default();
+    seed(
+        &secrets,
+        &[
+            (PROVIDER_SECRET, "searxng"),
+            (ENDPOINT_SECRET, "http://search.acme.internal"),
+        ],
+    )
+    .await;
+
+    let before = list_providers(&company(), &secrets).await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before[0].endpoint.as_deref(),
+        Some("http://search.acme.internal")
+    );
+
+    // The ordinary operator action that used to lose it: flip the switch.
+    set_enabled(&company(), &secrets, "searxng", false)
+        .await
+        .unwrap();
+
+    let after = list_providers(&company(), &secrets).await.unwrap();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(
+        after[0].endpoint.as_deref(),
+        Some("http://search.acme.internal"),
+        "the address has to survive the slug being indexed: {after:?}"
+    );
+
+    // And connecting a second provider, which indexes the first as a side
+    // effect.
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "brave".to_string(),
+            enabled: true,
+            endpoint: None,
+        },
+    )
+    .await
+    .unwrap();
+    let with_two = list_providers(&company(), &secrets).await.unwrap();
+    let searxng = with_two
+        .iter()
+        .find(|provider| provider.slug == "searxng")
+        .expect("searxng row");
+    assert_eq!(
+        searxng.endpoint.as_deref(),
+        Some("http://search.acme.internal"),
+        "{with_two:?}"
+    );
+
+    // A per-provider address, once written, wins over the flat one — which is
+    // what convergence means.
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "searxng".to_string(),
+            enabled: true,
+            endpoint: Some("http://moved.acme.internal".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let moved = list_providers(&company(), &secrets).await.unwrap();
+    let searxng = moved
+        .iter()
+        .find(|provider| provider.slug == "searxng")
+        .expect("searxng row");
+    assert_eq!(
+        searxng.endpoint.as_deref(),
+        Some("http://moved.acme.internal"),
+        "{moved:?}"
+    );
+}
