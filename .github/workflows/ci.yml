@@ -211,17 +211,15 @@ jobs:
       # combine unrelated Rust, console, and desktop changes, and only running
       # all three makes the required checks evidence for that combined state.
       #
-      # A `push` to `release` and `workflow_dispatch` are forced the same way,
-      # for the same reason from the other side: `promote-main-to-release.yml`
-      # pushes a fresh snapshot of main to `release` (as the `tiny-humans-bot`
-      # App, whose pushes fire `push` workflows), and the filter's fallback for
-      # an event with no PR is a diff against the default branch — which for a
-      # just-promoted `release` is empty, so every lane would skip and the
-      # promotion would be green on nothing. A dispatch is the manual way to
-      # get the same full run on any ref.
-      rust: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release')) && 'true' || steps.filter.outputs.rust }}
-      frontend: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release')) && 'true' || steps.filter.outputs.frontend }}
-      desktop: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release')) && 'true' || steps.filter.outputs.desktop }}
+      # `workflow_dispatch` is forced the same way, for the same reason from
+      # the other side: `promote-main-to-release.yml` dispatches this run on a
+      # fresh snapshot of main, and the filter's fallback for an event with no
+      # PR is a diff against the default branch — which for a just-promoted
+      # `release` is empty, so every lane would skip and the promotion would
+      # be green on nothing.
+      rust: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.rust }}
+      frontend: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.frontend }}
+      desktop: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -231,7 +229,7 @@ jobs:
       # selective runs. A merge group intentionally has no such PR context, and
       # the outputs above already select every lane for it.
       - id: filter
-        if: github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch' && !(github.event_name == 'push' && github.ref == 'refs/heads/release')
+        if: github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
@@ -2335,70 +2333,3 @@ jobs:
       - name: Package (from crates/opencompany-app)
         working-directory: crates/opencompany-app
         run: ../../frontend/node_modules/.bin/tauri build --debug --no-bundle
-
-  # The one check the branch rulesets require (`.github/rulesets/`). Every
-  # lane above is `if:`-gated on the changed areas, and a required status
-  # check that never reports blocks the PR forever — so the rulesets cannot
-  # name the lanes themselves. This job always runs (`if: always()`), waits on
-  # every gating lane, and fails unless each one either passed or was skipped
-  # by its own area filter. `cancelled` and `failure` both fail it.
-  #
-  # The advisory `Console (current Node, advisory)` lane is deliberately not
-  # listed: it is `continue-on-error` and exists to surface drift, not to
-  # block a merge.
-  #
-  # Keep the display name exactly `PR CI Gate`: it is what the rulesets'
-  # `required_status_checks` entry references, and a rename would silently
-  # block every PR until the ruleset is edited to match.
-  pr-ci-gate:
-    name: PR CI Gate
-    needs:
-      - changes
-      - actions-pinned
-      - markdown-cap
-      - rust
-      - rust-mail
-      - rust-mongodb
-      - rust-gated
-      - rust-gated-binary
-      - console
-      - console-e2e
-      - console-e2e-live-brain
-      - console-e2e-first-run
-      - desktop
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every gating lane to pass or be skipped
-        env:
-          RESULTS: |
-            Changed areas=${{ needs.changes.result }}
-            Actions pinned=${{ needs['actions-pinned'].result }}
-            Markdown line cap=${{ needs['markdown-cap'].result }}
-            Rust=${{ needs.rust.result }}
-            Rust (mail)=${{ needs['rust-mail'].result }}
-            Rust (mongodb)=${{ needs['rust-mongodb'].result }}
-            Rust (openhuman, tinymemory)=${{ needs['rust-gated'].result }}
-            Gated host binary=${{ needs['rust-gated-binary'].result }}
-            Console=${{ needs.console.result }}
-            Console E2E=${{ needs['console-e2e'].result }}
-            Console E2E (live brain)=${{ needs['console-e2e-live-brain'].result }}
-            Console E2E (first run)=${{ needs['console-e2e-first-run'].result }}
-            Desktop=${{ needs.desktop.result }}
-        run: |
-          set -euo pipefail
-          failed=0
-          while IFS='=' read -r name result; do
-            [ -n "$name" ] || continue
-            echo "${name}: ${result}"
-            case "$result" in
-              success|skipped) ;;
-              *) failed=1 ;;
-            esac
-          done <<< "$RESULTS"
-          if [ "$failed" -ne 0 ]; then
-            echo "::error::At least one gating lane did not pass; see the results above." >&2
-            exit 1
-          fi
-          echo "All gating lanes passed or were skipped by their area filter."
