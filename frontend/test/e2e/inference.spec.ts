@@ -29,6 +29,12 @@ import { expect, test } from "@playwright/test";
 
 type Page = import("@playwright/test").Page;
 
+/** Pick a provider from the inference configuration select. */
+async function pickProvider(page: Page, label: string) {
+  await page.locator("#inference-provider").click();
+  await page.getByRole("option", { name: label, exact: true }).click();
+}
+
 /**
  * Switching provider asks before overwriting a draft's Base URL and model
  * fields. Whether it asks depends on what the previous save left in the form,
@@ -64,6 +70,12 @@ async function openInference(page: Page) {
   await expect(
     page.getByTestId("inference-providers").or(page.getByTestId("inference-providers-empty")),
   ).toBeVisible({ timeout: 30_000 });
+}
+
+// Kept as an alias for the legacy managed-selection regression below: inference
+// lives on its own settings page after the Connections split.
+async function openConnections(page: Page) {
+  await openInference(page);
 }
 
 /**
