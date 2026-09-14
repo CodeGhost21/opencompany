@@ -250,7 +250,6 @@ export function ApiKeyView({ client, company }: Props) {
   );
 
   const shape = accountShape(load, status);
-  const subline = accountSubline(load, status);
   const removable = canRemoveKey(status);
   const actions = headerActions(status, canManage);
   const openKeyDialog = () => {
@@ -265,26 +264,57 @@ export function ApiKeyView({ client, company }: Props) {
       {/* The console's one page header (#1763) rather than a hand-rolled `h1`:
           a routed view that titles itself is how twelve heading styles happened
           the first time, and `page-header-adoption` is the test that says so. */}
-      <PageHeader title="Account" width="full" />
+      <PageHeader
+        title="Account"
+        width="full"
+        description="The TinyHumans account this company acts and spends through."
+      />
 
       <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
-        {/* The page's one action (operator request, 2026-09-14): no explainer
-            and no sign-in option beside it. Not shown once this company has a
-            key of its own — the row below carries Replace and Remove. Decided
-            in `headerActions`. */}
-        {actions.key && (
-          <div>
-            <Button type="button" onClick={openKeyDialog} data-testid="account-add-key">
-              <KeyRound className="size-4" />
-              Connect to TinyHumans
-            </Button>
-          </div>
-        )}
+        {/* The action, and the one sentence the action does not itself say: that
+            a single key covers both halves. Everything else the old page opened
+            with — what write-only means, what Clear does, what happens at zero —
+            described a control that was visible while it was being read. */}
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3">
+            <div className="grid gap-0.5">
+              <h2 className="text-sm font-medium">{ACCOUNT_LABEL}</h2>
+              {/* The billing consequence, on the card carrying the button it is
+                  true of, and visible before anything is saved. Connecting
+                  stores the identity and declares the `managed` provider, and
+                  managed turns resolve through this same key (#2266) — so it
+                  moves the thinking bill as well.
 
-        {/* The state. One row for the account, one for what is left on it.
-            Not drawn when nothing resolves and the Connect button is there:
-            the button alone is the not-connected state. */}
-        {!(shape === "empty" && actions.key) && (
+                  Qualified, because the managed chain has two rungs above this
+                  one: a key pasted for TinyHumans on the LLM page
+                  (`provider/tinyhumans/key`), and the legacy `inference/key`.
+                  Where either is set it keeps answering, and connecting moves
+                  the apps without moving the bill. Saying so is cheaper than
+                  being wrong on a company that has one. */}
+              <p className="text-xs text-muted-foreground">
+                One key for the apps your agents act through and the models they think with.
+                Connecting points both at this company&apos;s account — unless the LLM page
+                already holds a TinyHumans key of its own, which keeps precedence.
+              </p>
+            </div>
+            {/* One way to connect: the API-key dialog. The "Sign in with
+                TinyHumans" option was removed at the operator's request
+                (2026-09-14). Not shown once this company has a key of its own —
+                the row below carries Replace and Remove. Decided in
+                `headerActions`. A returning grant is still redeemed by the
+                unconditional `useRedeemKeyGrant` call above. */}
+            <div className="flex flex-wrap items-center gap-2">
+              {actions.key && (
+                <Button type="button" onClick={openKeyDialog} data-testid="account-add-key">
+                  <KeyRound className="size-4" />
+                  Connect to TinyHumans
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* The state. One row for the account, one for what is left on it. */}
         <Card>
           <CardContent className="px-0">
             {/* Named for what the card holds, not for one of the three states
@@ -300,25 +330,48 @@ export function ApiKeyView({ client, company }: Props) {
                 <Skeleton className="h-10 rounded-md" />
               </div>
             ) : shape === "empty" ? (
-              // Reached only by someone who cannot connect (a member): an
-              // admin sees the Connect button instead of this card.
-              <p className="px-4 py-3 text-sm" data-testid="account-empty">
-                Not connected.
-              </p>
+              // Nothing resolves anywhere. Not a row: there is no account to
+              // describe, and a row saying so would be a heading over blank space.
+              <div
+                className="flex flex-col items-start gap-3 px-4 py-6"
+                data-testid="account-empty"
+              >
+                {/* Scoped to what this credential actually governs. The old page
+                    said "agents cannot think and no provider can be connected"
+                    here, which is false on a company whose LLM page holds a
+                    provider key of its own — `inference/key` resolves without
+                    this one, so such a company thinks perfectly well and would
+                    be sent to fix something that is not broken. The exception is
+                    named rather than denied. */}
+                <p className="text-sm">
+                  <span className="font-medium">No account connected yet.</span>{" "}
+                  <span className="text-muted-foreground">
+                    Apps cannot be connected, and there is no TinyHumans balance to think
+                    against — though a provider key set on the LLM page still works.
+                  </span>
+                </p>
+                {/* No button here, deliberately, though the list this borrows its
+                    shape from has one. The page it replaces carried the warning
+                    in its own source: two identical primary buttons on one screen
+                    leave a reader working out whether they do the same thing. On
+                    a list of providers the header action and the empty-state
+                    action are inches apart in a long card; on a page with one
+                    credential they are adjacent and identical, and the header
+                    card's action is already in view directly above this. The
+                    sentence stays — it is what the empty state is for. */}
+              </div>
             ) : (
               <ul className="divide-y divide-border" data-testid="account-rows">
                 <li className="flex items-center gap-3 px-4 py-3" data-testid="account-row">
                   <Mark label={ACCOUNT_LABEL} />
                   <span className="grid min-w-0 flex-1 leading-tight">
                     <span className="truncate text-sm font-medium">{ACCOUNT_LABEL}</span>
-                    {subline && (
-                      <span
-                        className="truncate text-xs text-muted-foreground"
-                        data-testid="account-row-subline"
-                      >
-                        {subline}
-                      </span>
-                    )}
+                    <span
+                      className="truncate text-xs text-muted-foreground"
+                      data-testid="account-row-subline"
+                    >
+                      {accountSubline(load, status)}
+                    </span>
                   </span>
 
                   {/* Revoking a key is not something this console can do — it
@@ -434,7 +487,6 @@ export function ApiKeyView({ client, company }: Props) {
             )}
           </CardContent>
         </Card>
-        )}
 
         <AccountKeyDialog
           open={editing}

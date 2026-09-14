@@ -51,10 +51,10 @@ describe("accountShape keeps an unreadable store apart from an empty one", () =>
 });
 
 describe("accountSubline says which tier actually answers", () => {
-  // The card's "Connected" heading already says it; the operator asked for no
-  // extra line (2026-09-14).
-  it("draws no line for the company's own key", () => {
-    expect(accountSubline("ready", status({ source: "company" }))).toBe("");
+  it("names the company's own account", () => {
+    expect(accountSubline("ready", status({ source: "company" }))).toContain(
+      "this company's own TinyHumans account",
+    );
   });
 
   // The hosted case. `configured` is false here and a row built on it would
@@ -84,10 +84,14 @@ describe("accountSubline says which tier actually answers", () => {
     expect(accountSubline("error", null).toLowerCase()).not.toContain("billed");
   });
 
-  // No row is drawn for "none" — the Connect button alone is that state.
-  it("draws no line when nothing resolves", () => {
+  // Narrow on purpose. "Agents cannot think" is what this line said first, and
+  // it is **false** on a company whose LLM page holds a provider key of its
+  // own — `inference/key` resolves without this credential. The sub-line states
+  // the absence; the empty state carries the consequence with its exception
+  // named.
+  it("states the absence without claiming the company has stopped", () => {
     const line = accountSubline("ready", status({ configured: false, source: "none" }));
-    expect(line).toBe("");
+    expect(line).toBe("No TinyHumans account for this company");
   });
 
   it("never claims agents cannot think, in any state", () => {
@@ -105,9 +109,11 @@ describe("accountSubline says which tier actually answers", () => {
     expect(line).not.toContain("No TinyHumans account");
   });
 
-  it("claims no state for a tier this build does not know", () => {
+  it("falls back to what the row is when a host names an unknown tier", () => {
     const unknown = status({ source: "something-new" as CompanyCredentialStatus["source"] });
-    expect(accountSubline("ready", unknown)).toBe("");
+    expect(accountSubline("ready", unknown)).toBe(
+      "The account this company acts and spends through",
+    );
   });
 });
 

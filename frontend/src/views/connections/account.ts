@@ -75,17 +75,23 @@ export function accountSubline(load: AccountLoad, status: CompanyCredentialStatu
     return "The host could not say — this is not the same as having no key";
   }
   switch (status.source) {
+    case "company":
+      return "Acting as this company's own TinyHumans account";
     case "attested":
     case "static":
-      // The one tier worth a line: the row is connected, but not with a key of
-      // this company's own, which is why Remove is not offered on it.
       return "Acting as the account of whoever runs this server";
+    case "none":
+      // Deliberately narrow. "Agents cannot think" is what this page used to
+      // say here, and it is **false** on a company whose LLM page holds a key
+      // of its own: that one outranks this credential in the managed chain, and
+      // a provider of its own never consults it — so such a company thinks
+      // perfectly well with no TinyHumans account at all. What is always true
+      // is the absence itself.
+      return "No TinyHumans account for this company";
     default:
-      // The company's own key needs no line — the card's "Connected" heading
-      // already says it — and "none" never reaches a row: the page shows the
-      // Connect button alone (operator request, 2026-09-14). Empty renders no
-      // sub-line at all.
-      return "";
+      // An older or newer host naming a tier this build does not know. Saying
+      // what the row *is* beats claiming a state nobody established.
+      return "The account this company acts and spends through";
   }
 }
 
@@ -101,18 +107,17 @@ export function canRemoveKey(status: CompanyCredentialStatus | null): boolean {
   return status?.source === "company";
 }
 
-/** What the page's header offers. */
+/** What the header card offers. */
 export interface HeaderActions {
   /** "Connect to TinyHumans" — the dialog that takes an API key. */
   key: boolean;
 }
 
 /**
- * Whether the page offers its one action, "Connect to TinyHumans".
+ * Whether the header card shows its one option, "Connect to TinyHumans".
  *
- * One, not two: the "Sign in with TinyHumans" grant option was removed from
- * this page at the operator's request (2026-09-14). The key dialog works on
- * every host.
+ * The API-key dialog works on every host. The "Sign in with TinyHumans" grant
+ * option was removed from this page at the operator's request (2026-09-14).
  *
  * Not offered once this company has a key of its own. The connected row
  * carries Replace and Remove, and a Connect button above a row that already
