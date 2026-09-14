@@ -222,9 +222,11 @@ pub struct InferenceReadyDto {
     /// The provider slug behind it, for the picker's initial value. Always
     /// `managed` today: the injected path is the platform's own endpoint.
     pub provider: Option<&'static str>,
-    /// The endpoint it resolves to. Shown, not secret — it is a URL, and seeing
-    /// which one a test is about to hit is the difference between a green tick
-    /// and a green tick you can trust.
+    /// The endpoint it resolves to, with any embedded credential redacted.
+    /// Seeing which endpoint a test is about to hit is the difference between a
+    /// green tick and a green tick you can trust — but a URL is not
+    /// automatically safe to show, because it can carry userinfo. See
+    /// [`redact_endpoint`](crate::company::inference::catalogue::redact_endpoint).
     pub base_url: Option<String>,
 }
 
@@ -239,7 +241,12 @@ pub struct InferenceReadyDto {
 /// The credential itself never leaves this function.
 #[cfg(feature = "openhuman")]
 fn house_credential(env: &dyn EnvSource) -> Option<String> {
-    crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| config.base_url)
+    crate::harness::provider::harness_inference_from_env(env)
+        // Redacted, because "it is a URL" is not the same as "it is not a
+        // secret": `OPENCOMPANY_INFERENCE_URL` can carry userinfo, and this
+        // one is the deployer's own endpoint rather than a tenant's, so no
+        // input rule this workload holds can have kept it out.
+        .map(|(config, _)| crate::company::inference::catalogue::redact_endpoint(&config.base_url))
 }
 
 /// Without the harness there is no inference path at all, so the host holds
@@ -1247,6 +1254,23 @@ async fn probe_inference<E: EnvSource + Sync>(
         });
     let normalized_base_url =
         crate::company::inference::normalize_setup_base_url(&req.provider, req.base_url.as_deref());
+    // **Refused before anything is sent.** The catalogue read below and the
+    // probe after it would both put a URL's userinfo on the wire as basic auth,
+    // this response echoes the endpoint to the browser, and a failure is
+    // logged — so a credential typed into the URL would reach all three before
+    // the setup apply's own validation could refuse it (Codex review on #2281).
+    if let Some(typed) = normalized_base_url.as_deref()
+        && crate::company::inference::catalogue::endpoint_has_credentials(typed)
+    {
+        return InferenceTestDto {
+            ok: false,
+            base_url: crate::company::inference::catalogue::redact_endpoint(typed),
+            model: None,
+            error: Some(
+                crate::company::inference::catalogue::ENDPOINT_CREDENTIAL_REFUSAL.to_string(),
+            ),
+        };
+    }
     let mut decl = crate::company::inference::decl_for_probe(
         &req.provider,
         normalized_base_url.as_deref(),
@@ -1282,7 +1306,11 @@ async fn probe_inference<E: EnvSource + Sync>(
             decl.models.insert((*tier).to_string(), model.clone());
         }
     }
-    let base_url = decl.base_url.clone();
+    // What is *said* about the endpoint — in this response and in the log below.
+    // Redacted, because an endpoint that reached here without being typed (an
+    // `OPENCOMPANY_INFERENCE_URL` this host does not own) can still carry
+    // userinfo. The probe itself goes to `decl.base_url`, untouched.
+    let base_url = crate::company::inference::catalogue::redact_endpoint(&decl.base_url);
 
     // `openai_compatible` has no default endpoint, so a blank URL resolves to
     // an empty string. Reported here rather than left to produce a confusing
@@ -1333,9 +1361,8 @@ async fn probe_inference<E: EnvSource + Sync>(
 ) -> InferenceTestDto {
     InferenceTestDto {
         ok: false,
-        base_url: crate::company::inference::effective_base_url(
-            &req.provider,
-            req.base_url.as_deref(),
+        base_url: crate::company::inference::catalogue::redact_endpoint(
+            &crate::company::inference::effective_base_url(&req.provider, req.base_url.as_deref()),
         ),
         model: None,
         error: Some(

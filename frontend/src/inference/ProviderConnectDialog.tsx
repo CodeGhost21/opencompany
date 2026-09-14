@@ -13,9 +13,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   MANAGED_OPTION_SLUG,
+  checkProviderName,
   checkSlug,
+  clampToProviderNameLimit,
   credentialAsk,
   customProviderReady,
+  endpointHasCredentials,
   normalizeEndpoint,
   slugErrorCopy,
   slugify,
@@ -168,7 +171,9 @@ export function ProviderConnectDialog({
   const rivals = editing ? providers.filter((p) => p.slug !== editing.slug) : providers;
 
   const slug = slugify(label);
-  const slugError = custom ? checkSlug(rivals, slug) : null;
+  // The name's own bound is reported before the slug's, because a name past the
+  // limit is what the operator can actually see and fix — the slug is derived.
+  const slugError = custom ? (checkProviderName(label) ?? checkSlug(rivals, slug)) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
   // Once the endpoint has said it needs a model, it needs one: adding without it
   // is the reported dead end, and the host refuses it anyway.
@@ -182,7 +187,15 @@ export function ProviderConnectDialog({
     onSubmit({
       kind: optionSlug ?? "custom",
       label: custom ? label.trim() : undefined,
-      baseUrl: ask.needsEndpoint ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim()) : undefined,
+      // **An unchanged endpoint in edit mode is not sent.** The row's
+      // `baseUrl` is the host's *redacted* form, which can mask a path segment
+      // that only looks like a credential; posting it back would store that
+      // mask over a working endpoint on a rename (Codex review on #2281). The
+      // host keeps the stored endpoint when none is sent.
+      baseUrl:
+        !ask.needsEndpoint || (editing != null && baseUrl.trim() === editing.baseUrl.trim())
+          ? undefined
+          : (normalizeEndpoint(baseUrl) ?? baseUrl.trim()),
       // **An untouched field in edit mode is not an instruction.** The host
       // reads `Some("")` as "clear the credential", which is right for the
       // Remove key action and catastrophic here: renaming a provider would
@@ -217,7 +230,11 @@ export function ProviderConnectDialog({
                 value={label}
                 placeholder="My Provider"
                 autoComplete="off"
-                onChange={(e) => setLabel(e.target.value)}
+                // The host holds this rule; clamping here only stops a paste
+                // becoming a 400 the operator has to read to understand. Counted
+                // in code points, as the host counts — never `maxLength`, which
+                // counts UTF-16 units and refuses names the host accepts.
+                onChange={(e) => setLabel(clampToProviderNameLimit(e.target.value))}
               />
               {/* The slug is what a routing entry will say, so the operator
                   sees it before they commit to it rather than meeting it later
@@ -253,7 +270,9 @@ export function ProviderConnectDialog({
               />
               {baseUrl.trim() && !endpointOk && (
                 <p className="text-xs text-status-blocked-text">
-                  That must be an http or https address.
+                  {endpointHasCredentials(baseUrl)
+                    ? "Remove the username and password from the URL and put the credential in the API key field — an endpoint is stored as written and is readable by everyone who can see this company's settings."
+                    : "That must be an http or https address."}
                 </p>
               )}
             </div>

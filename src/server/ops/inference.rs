@@ -202,7 +202,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
                 models.iter().map(|model| model.id.as_str()),
             );
             Ok(Json(ModelCatalogDto {
-                base_url,
+                base_url: catalogue::redact_endpoint(&base_url),
                 models,
                 tier_vocabulary: Some(vocabulary.as_str()),
                 tier_defaults: vocabulary.tier_defaults(),
@@ -210,10 +210,15 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
             }))
         }
         Err(error) => Ok(Json(ModelCatalogDto {
+            // Redacted, not raw. `reqwest` masks userinfo in its own `Display`,
+            // but this `format!` re-adds it from the endpoint we hold — which
+            // is how a stored `http://user:password@host/v1` came to be printed
+            // in full in a banner an operator screenshots into a ticket.
             error: Some(format!(
-                "Could not list models from {base_url}: {error}. Enter model ids directly."
+                "Could not list models from {endpoint}: {error}. Enter model ids directly.",
+                endpoint = catalogue::redact_endpoint(&base_url)
             )),
-            base_url,
+            base_url: catalogue::redact_endpoint(&base_url),
             models: Vec::new(),
             tier_vocabulary: None,
             tier_defaults: BTreeMap::new(),
@@ -517,7 +522,7 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
             slug: provider.slug,
             label: provider.label,
             kind: provider.kind,
-            base_url: provider.base_url,
+            base_url: catalogue::redact_endpoint(&provider.base_url),
             models: provider.models,
             enabled: provider.enabled,
             key_configured,
@@ -858,6 +863,13 @@ async fn effective_status_with(
             |d| d.base_url.clone(),
         ),
     };
+    // This route is `ScopedCompany`, not admin — every console reader gets this
+    // field on every page load. A credential embedded in the endpoint is
+    // refused at every point one can be set, but an endpoint stored before that
+    // rule existed, or one arriving from a `company.toml` or
+    // `OPENCOMPANY_INFERENCE_URL` this host does not own, still has to be safe
+    // to *say*.
+    let base_url = catalogue::redact_endpoint(&base_url);
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
@@ -965,9 +977,11 @@ async fn managed_state(
     Ok(ManagedDto {
         source: source.as_str().to_string(),
         configured: source.resolves(),
-        base_url: platform
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        base_url: catalogue::redact_endpoint(
+            &platform
+                .map(|p| p.base_url.clone())
+                .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        ),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
             .map_err(ApiError)?,
@@ -1207,7 +1221,7 @@ async fn unauthenticated_reason(
          fall back on — a request to {base} would carry no Authorization header and be rejected, \
          so none was sent. Save a key that {base} accepts above, or point this company at an \
          endpoint that needs none.",
-        base = decl.base_url
+        base = catalogue::redact_endpoint(&decl.base_url)
     )))
 }
 
@@ -1231,7 +1245,8 @@ fn probe_failure(decl: &inference::InferenceDecl, raw: &str) -> (String, &'stati
                  stored against the provider selected when it was saved, so a key for another \
                  vendor fails here even while this card reports one is set. Re-save the key under \
                  {}, or Remove key to fall back. The provider said: {raw}",
-                decl.base_url, decl.provider
+                catalogue::redact_endpoint(&decl.base_url),
+                decl.provider
             ),
             "credential_rejected",
         );
@@ -1475,6 +1490,32 @@ base_url = "https://byo.example/v1"
         let id = CompanyId::new(name);
         save_record(home, &id, &manifest()).await;
         let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, name).await;
+        state
+    }
+
+    /// [`state_with_company`] over a caller-supplied manifest.
+    ///
+    /// The strict `validate()` only runs on a first boot with no persisted
+    /// record (`src/runtime/builder.rs`), and `save_record` writes one first —
+    /// so this can plant a manifest a fresh company would now be refused. That
+    /// is the point: an endpoint stored before the refusal existed is exactly
+    /// the case the redaction half of the rule is for.
+    async fn state_with_manifest(
+        home: &std::path::Path,
+        name: &str,
+        manifest_toml: &str,
+    ) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new(name);
+        save_record(home, &id, &manifest).await;
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
             .with_id(id.clone())
             .build()
             .await
@@ -2166,6 +2207,253 @@ base_url = "https://byo.example/v1"
     }
 
     // ---------------------------------------------------------------------
+    // A credential embedded in an endpoint: refused on the way in, redacted on
+    // the way out. Three paths, because the leak had three.
+    // ---------------------------------------------------------------------
+
+    /// The credential a test endpoint carries. Obviously fake, and asserted on
+    /// by substring everywhere below — a leak anywhere is a leak.
+    const EMBEDDED_PASSWORD: &str = "hunter2";
+    /// Loopback discard: refuses immediately, offline and deterministically.
+    const CREDENTIALED_ENDPOINT: &str = "http://alice:hunter2@127.0.0.1:9/unreachable/v1";
+    const CREDENTIALED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [inference]\nprovider = \"openai_compatible\"\n\
+         base_url = \"http://alice:hunter2@127.0.0.1:9/unreachable/v1\"\n";
+
+    /// Path 1 — it is never stored.
+    #[tokio::test]
+    async fn an_endpoint_carrying_a_credential_is_refused_before_anything_is_written() {
+        let home_dir = home();
+        let state = state_with_company_named(home_dir.path(), "credurl-add").await;
+
+        for body in [
+            json!({
+                "kind": "custom",
+                "label": "Acme gateway",
+                "baseUrl": CREDENTIALED_ENDPOINT,
+            }),
+            // The local-runtime category types its own endpoint too.
+            json!({ "kind": "ollama", "baseUrl": CREDENTIALED_ENDPOINT }),
+        ] {
+            let (status, _, raw) = send_as(
+                &state,
+                "credurl-add",
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {raw}");
+            assert!(
+                !raw.contains(EMBEDDED_PASSWORD),
+                "the refusal echoed the credential it was refusing: {raw}"
+            );
+        }
+
+        // The draft probe refuses it too, rather than putting a basic-auth
+        // credential on the wire to an address the operator named.
+        let (status, _, raw) = send_as(
+            &state,
+            "credurl-add",
+            "POST",
+            "/api/v1/company/inference/probe",
+            Some(json!({ "baseUrl": CREDENTIALED_ENDPOINT })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+        assert!(!raw.contains(EMBEDDED_PASSWORD), "{raw}");
+
+        // And nothing landed: no stored endpoint anywhere in the status read.
+        let (_, _, raw) = send_as(
+            &state,
+            "credurl-add",
+            "GET",
+            "/api/v1/company/inference",
+            None,
+        )
+        .await;
+        assert!(
+            !raw.contains(EMBEDDED_PASSWORD),
+            "a refused endpoint reached the store: {raw}"
+        );
+    }
+
+    /// Path 2 — the catalog-read failure note does not re-add it.
+    ///
+    /// `reqwest` redacts userinfo in its own error `Display`; the handler's own
+    /// `format!` used to put it back from the endpoint we hold.
+    #[tokio::test]
+    async fn a_catalog_read_failure_names_the_endpoint_without_its_credential() {
+        let home_dir = home();
+        let state =
+            state_with_manifest(home_dir.path(), "credurl-models", CREDENTIALED_MANIFEST).await;
+
+        let (status, body, raw) = send_as(
+            &state,
+            "credurl-models",
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            !raw.contains(EMBEDDED_PASSWORD),
+            "the catalog route leaked an embedded credential: {raw}"
+        );
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("Could not list models from"),
+            "the failure still names the endpoint it could not reach: {raw}"
+        );
+        assert!(
+            error.contains("http://***@127.0.0.1:9/unreachable/v1"),
+            "the endpoint is redacted, not dropped — the operator still needs to \
+             recognise which one it was: {raw}"
+        );
+    }
+
+    /// Path 3 — the read DTO, on the non-admin route every console reader calls.
+    #[tokio::test]
+    async fn the_company_status_read_redacts_an_endpoint_credential() {
+        let home_dir = home();
+        let state =
+            state_with_manifest(home_dir.path(), "credurl-status", CREDENTIALED_MANIFEST).await;
+
+        let (status, body, raw) = send_as(
+            &state,
+            "credurl-status",
+            "GET",
+            "/api/v1/company/inference",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            !raw.contains(EMBEDDED_PASSWORD),
+            "`GET …/inference` is `ScopedCompany`, so this is the password on the \
+             wire for every console reader: {raw}"
+        );
+        assert_eq!(
+            body["baseUrl"].as_str(),
+            Some("http://***@127.0.0.1:9/unreachable/v1"),
+            "{raw}"
+        );
+    }
+
+    /// The same rule over a provider **row**, which is a different DTO built
+    /// from a different store.
+    #[tokio::test]
+    async fn a_provider_row_redacts_an_endpoint_credential() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+        // Written straight to the store, as a record predating the refusal
+        // would be — the handler now refuses this endpoint.
+        store::put_provider(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            store::ProviderDraft {
+                slug: "acme-gateway".into(),
+                label: "Acme gateway".into(),
+                kind: "custom".into(),
+                base_url: CREDENTIALED_ENDPOINT.into(),
+                models: BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        let row = dto
+            .providers
+            .iter()
+            .find(|p| p.slug == "acme-gateway")
+            .expect("the planted provider is listed");
+        assert_eq!(row.base_url, "http://***@127.0.0.1:9/unreachable/v1");
+        assert!(
+            !serde_json::to_string(&dto)
+                .unwrap()
+                .contains(EMBEDDED_PASSWORD),
+            "the whole status DTO must be free of it, not just the field we looked at"
+        );
+    }
+
+    /// Defect B, end to end: a name past the bound is a 400 before any write,
+    /// not a 500 with a truncated credential behind it.
+    #[tokio::test]
+    async fn a_provider_name_past_the_bound_is_refused_rather_than_breaking_the_store() {
+        use crate::company::inference::store::MAX_PROVIDER_NAME_CHARS;
+
+        let home_dir = home();
+        let state = state_with_company_named(home_dir.path(), "longname").await;
+
+        // At the bound: accepted, and its credential round-trips through the
+        // store — including the clear the delete issues.
+        let at_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS);
+        let (status, _, raw) = send_as(
+            &state,
+            "longname",
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": at_limit,
+                "baseUrl": UNREACHABLE,
+                "key": "sk-not-a-real-key",
+                "addAnyway": true,
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a name at the bound is legal: {raw}"
+        );
+        let (status, _, raw) = send_as(
+            &state,
+            "longname",
+            "DELETE",
+            &format!("/api/v1/company/inference/providers/{at_limit}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "removing it clears the credential, which is the write that used to \
+             fail after truncating it: {raw}"
+        );
+
+        // Past the bound: refused, and refused *before* the key is written.
+        let past_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS + 1);
+        let (status, _, raw) = send_as(
+            &state,
+            "longname",
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": past_limit,
+                "baseUrl": UNREACHABLE,
+                "key": "sk-not-a-real-key",
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a 500 here is the incident: {raw}"
+        );
+        assert!(
+            raw.contains(&MAX_PROVIDER_NAME_CHARS.to_string()),
+            "the refusal says what the limit is: {raw}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // Issue #597 — the card must report the endpoint requests actually reach,
     // not the built-in production constant.
     // ---------------------------------------------------------------------
@@ -2847,6 +3135,71 @@ base_url = "https://byo.example/v1"
         assert_eq!(groq["baseUrl"], "https://api.groq.com/openai/v1");
         assert_eq!(groq["label"], "Groq");
         assert_eq!(groq["enabled"], true, "a new provider arrives on");
+    }
+
+    #[tokio::test]
+    async fn a_rename_that_posts_back_the_served_endpoint_keeps_the_stored_one() {
+        // Codex review on #2281. The row is served through `redact_endpoint`,
+        // which masks a path segment that only looks like userinfo. A console
+        // that posts that value back on a rename must not overwrite a working
+        // endpoint with the mask.
+        const GATEWAY: &str = "http://127.0.0.1:9/proxy/http:user@example.com/v1";
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Acme gateway",
+                "baseUrl": GATEWAY,
+                "key": "sk-not-a-real-key",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a path is not a credential: {raw}");
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let served = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme-gateway")
+            .expect("the row was created")["baseUrl"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(served, GATEWAY, "the row is served redacted: {served}");
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/acme-gateway",
+            Some(json!({ "label": "Acme renamed", "baseUrl": served })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        use crate::company::inference::store;
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("registered");
+        let stored = store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+        let acme = stored
+            .iter()
+            .find(|p| p.slug == "acme-gateway")
+            .expect("still listed");
+        assert_eq!(
+            acme.base_url, GATEWAY,
+            "the stored endpoint survived the rename"
+        );
+        assert_eq!(acme.label, "Acme renamed");
     }
 
     #[tokio::test]

@@ -787,10 +787,25 @@ pub fn normalize_setup_base_url(provider: &str, raw: Option<&str>) -> Option<Str
         return Some(raw.trim_end_matches('/').to_string());
     }
 
-    let mut url = if raw.starts_with("http://") || raw.starts_with("https://") {
-        raw.to_string()
-    } else {
-        format!("http://{raw}")
+    // An `http:` or `https:` the operator typed is the scheme, in any case (RFC
+    // 3986 §3.1) and with however many slashes they typed after it — URL parsing
+    // reads `http:/host` and `http:///host` as `http://host`. Only a value with no
+    // scheme at all gets one. Prefixing a second scheme onto `HTTP://host` or
+    // `http:/alice:pw@host` produced `http://HTTP://…` and `http://http:/…`,
+    // whose credential no longer sat in the first authority (Codex review on
+    // #2281).
+    let lower = raw.to_ascii_lowercase();
+    let typed_scheme = ["https:", "http:"]
+        .into_iter()
+        .find(|scheme| lower.starts_with(scheme))
+        .map(str::len);
+    let mut url = match typed_scheme {
+        Some(len) => format!(
+            "{}//{}",
+            &raw[..len],
+            raw[len..].trim_start_matches(['/', '\\'])
+        ),
+        None => format!("http://{raw}"),
     };
     url = url.trim_end_matches('/').to_string();
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
@@ -1808,13 +1823,18 @@ fn validate_parts(
     }
 
     let base_url = base_url.map(str::trim).filter(|s| !s.is_empty());
+    // Every echo of the typed URL below is redacted. A `base_url` is quoted back
+    // in a rejection the console renders, and a rejection is the one moment a
+    // malformed URL — the kind most likely to have been typed by hand with a
+    // password in it — is guaranteed to be shown to somebody.
     match provider {
         "ollama" | "openai_compatible" => match base_url {
             None => problems.push(format!(
                 "`[inference].base_url` is required for provider `{provider}` — give the OpenAI-compatible endpoint URL."
             )),
             Some(url) if !is_http_url(url) => problems.push(format!(
-                "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{url}`."
+                "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{}`.",
+                catalogue::redact_endpoint(url)
             )),
             _ => {}
         },
@@ -1823,10 +1843,28 @@ fn validate_parts(
                 && !is_http_url(url)
             {
                 problems.push(format!(
-                    "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{url}`."
+                    "`[inference].base_url` must be an `http://` or `https://` URL — you wrote `{}`.",
+                    catalogue::redact_endpoint(url)
                 ));
             }
         }
+    }
+
+    // A credential in the endpoint, refused for the same reason
+    // `api_key_secret` refuses a pasted token just below: a `base_url` is stored
+    // as written, returned to every console reader on the company status read,
+    // and interpolated into operator-facing failure text. The console's own
+    // endpoint fields refuse this before anything is written
+    // (`catalogue::normalize_local_endpoint`); this is the manifest and
+    // console-`PUT` half of the same rule, so the two ways to set an endpoint
+    // cannot disagree about it.
+    if let Some(url) = base_url
+        && catalogue::endpoint_has_credentials(url)
+    {
+        problems.push(format!(
+            "`[inference].base_url` carries a username or password in the URL — you wrote `{}`. Remove them and store the credential in the key slot instead; an endpoint is readable by everyone who can see this company's settings.",
+            catalogue::redact_endpoint(url)
+        ));
     }
 
     // The credential must be a *key name*, not the token itself. Reject values
@@ -2371,6 +2409,39 @@ mod tests {
     }
 
     #[test]
+    fn a_base_url_carrying_a_credential_is_rejected_and_never_echoed() {
+        // Same rule as `api_key_secret` below, one field over: a credential
+        // belongs in the write-only key slot, and a `base_url` is stored as
+        // written and read back by every console reader.
+        let mut m = inference("openai_compatible");
+        m.base_url = Some("http://alice:hunter2@127.0.0.1:8597/v1".into());
+        let problems = validate_inference(&m);
+        assert!(
+            problems.iter().any(|p| p.contains("username or password")),
+            "{problems:?}"
+        );
+        // The refusal is the one moment this value is guaranteed to be shown to
+        // somebody, so it must not quote the credential back.
+        for problem in &problems {
+            assert!(
+                !problem.contains("hunter2") && !problem.contains("alice"),
+                "a rejection echoed the credential it was rejecting: {problem}"
+            );
+        }
+
+        // A malformed URL is quoted back redacted too — and the malformed ones
+        // are the likeliest to have been typed by hand with a password in them.
+        let mut bad = inference("openai_compatible");
+        bad.base_url = Some("ftp://alice:hunter2@127.0.0.1/v1".into());
+        for problem in validate_inference(&bad) {
+            assert!(
+                !problem.contains("hunter2"),
+                "a rejection echoed the credential it was rejecting: {problem}"
+            );
+        }
+    }
+
+    #[test]
     fn inline_credential_in_key_name_is_rejected() {
         let mut m = inference("openrouter");
         m.api_key_secret = Some("sk-or-v1-abcdef0123456789".into());
@@ -2824,6 +2895,46 @@ mod tests {
         assert_eq!(
             normalize_setup_base_url("openai_compatible", Some("https://llm.test/api")),
             Some("https://llm.test/api".to_string())
+        );
+    }
+
+    #[test]
+    fn setup_normalisation_reads_an_uppercase_scheme_as_a_scheme() {
+        // Never a second scheme in front of the first: that shape is how a
+        // credential once hid from `endpoint_has_credentials`.
+        assert_eq!(
+            normalize_setup_base_url("openai_compatible", Some("HTTP://127.0.0.1:1234")).as_deref(),
+            Some("HTTP://127.0.0.1:1234/v1")
+        );
+        assert_eq!(
+            normalize_setup_base_url("ollama", Some("HTTPS://llm.test/api")).as_deref(),
+            Some("HTTPS://llm.test/api")
+        );
+        let credentialed =
+            normalize_setup_base_url("openai_compatible", Some("HTTP://alice:hunter2@host/v1"))
+                .expect("normalised");
+        assert!(
+            catalogue::endpoint_has_credentials(&credentialed),
+            "`{credentialed}` must still read as carrying a credential"
+        );
+        // A single-slash scheme is a scheme, not a host: it is repaired to
+        // `http://` rather than having a second one prepended, so the credential
+        // stays in the first authority where the refusal reads it.
+        let single_slash =
+            normalize_setup_base_url("openai_compatible", Some("http:/alice:hunter2@host/v1"))
+                .expect("normalised");
+        assert_eq!(single_slash, "http://alice:hunter2@host/v1");
+        assert!(
+            catalogue::endpoint_has_credentials(&single_slash),
+            "`{single_slash}` must still read as carrying a credential"
+        );
+        assert_eq!(
+            normalize_setup_base_url("ollama", Some("http:/localhost:11434")).as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            normalize_setup_base_url("openai_compatible", Some("HTTPS:///llm.test/api")).as_deref(),
+            Some("HTTPS://llm.test/api")
         );
     }
 

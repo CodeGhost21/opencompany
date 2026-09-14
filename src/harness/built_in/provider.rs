@@ -1822,6 +1822,11 @@ fn model_unavailable_advice(
         ),
         (_, None) => "update the company's `[inference].models` mapping".to_string(),
     };
+    // Redacted here rather than at the two call sites, so a third one cannot
+    // reintroduce the leak. An endpoint may carry userinfo, and this sentence is
+    // operator-facing: it reaches the console and gets screenshotted into
+    // tickets.
+    let models_url = crate::company::inference::catalogue::redact_endpoint(models_url);
     Some(format!(
         "the configured inference model is not available from the provider — {where_to_fix}, to \
          one the provider offers (list them with `GET {models_url}`). {error}"

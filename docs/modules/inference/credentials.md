@@ -22,6 +22,43 @@ The manifest can only ever *name* a slot (`[inference].api_key_secret`), never
 hold a value, and validation rejects a value there that looks like a pasted
 credential.
 
+### The fifth place a credential can hide: the endpoint
+
+A URL can carry userinfo — `http://alice:hunter2@127.0.0.1:8597/v1` — and a
+`base_url` is none of the things that make the four slots above safe. It is
+stored as written, it is returned by `GET {scope}/inference`, which is
+`ScopedCompany` rather than admin, so every console reader receives it on every
+page load, and it is interpolated into operator-facing failure text. A password
+in an endpoint is therefore a password in all three at once.
+
+Two independent mechanisms, because they cover different populations:
+
+- **Refused wherever an endpoint is accepted.**
+  `catalogue::endpoint_has_credentials` gates `normalize_local_endpoint`, which
+  every stored endpoint passes through, and `validate_parts`, which is the
+  manifest and console-`PUT` half of the same rule. It is the same class of
+  rule as the `api_key_secret` check beside it: a credential belongs in the
+  write-only slot, not in a field that is read back. The draft probe refuses
+  one too, rather than putting a basic-auth credential on the wire.
+- **Redacted wherever an endpoint is said.** `catalogue::redact_endpoint`
+  replaces the userinfo with `***`. Refusal cannot reach a value stored before
+  the rule existed, or one arriving from a `company.toml` or
+  `OPENCOMPANY_INFERENCE_URL` this host does not own — so every DTO field,
+  operator-facing message and log line that names an endpoint goes through it.
+  The endpoint used to *make* the request does not, which is the whole
+  distinction between the two call sites.
+
+The subtle half is the failure text. `reqwest` already masks userinfo in its own
+`Display`, so an error that quotes the upstream string looks safe — and then a
+`format!` that adds our copy of the URL beside it puts the credential straight
+back. Three separate messages did exactly that.
+
+Strict manifest `validate()` runs only on a first boot with no persisted record
+(`src/runtime/builder.rs`), so the refusal cannot brick a company that is
+already running on such an endpoint. That company is covered by redaction
+instead, and its next edit of the endpoint is refused with a sentence saying
+where to put the credential.
+
 ## How resolution worked before this rework
 
 **Superseded — kept because the defect it describes is why the chain exists.**

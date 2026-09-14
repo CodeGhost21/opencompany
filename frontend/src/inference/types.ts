@@ -9,6 +9,14 @@
 // carries `keyConfigured: boolean` and nothing else. Four independent mechanisms
 // keep credentials off the wire in this subsystem, and the easiest way to break
 // all four at once is to put one on a record for convenience.
+//
+// `baseUrl` is the field that made that sentence briefly untrue. A URL can carry
+// userinfo (`http://user:password@host/v1`), and this shape comes back from a
+// `ScopedCompany` route every console reader can call. The host now refuses such
+// an endpoint everywhere one can be set and redacts it everywhere one is said
+// (`catalogue::endpoint_has_credentials` / `redact_endpoint`), so what arrives
+// here is `http://***@host/v1` at worst — but a `baseUrl` is still a place a
+// credential can hide, which is why it is called out rather than trusted.
 
 /** How a provider expects its credential presented. */
 export type AuthStyle = "bearer" | "anthropic" | "none";

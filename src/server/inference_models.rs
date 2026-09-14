@@ -292,8 +292,10 @@ pub(crate) async fn discover_models(
         let url = format!("{base}{path}");
         match fetch_catalog(&client, &url, bearer, auth).await {
             Ok(models) => return Ok(models),
+            // Redacted: this is a log, and a log is disk. The request above
+            // still went to `url` itself.
             Err(error) if error.not_found => tracing::warn!(
-                %url,
+                url = %catalogue::redact_endpoint(&url),
                 "the account-scoped model catalogue answered 404; falling back to the public \
                  registry, which is not filtered by this key's provider permissions"
             ),
@@ -330,13 +332,19 @@ async fn fetch_catalog(
     // Verified against `platform.claude.com/docs/en/api/models/list`, whose own
     // curl example is `-H 'anthropic-version: 2023-06-01' -H "X-Api-Key: …"`.
     let request = crate::company::inference::probe::apply_auth(client.get(url), auth, bearer);
+    // Every message below names the endpoint **redacted**. A URL may carry
+    // userinfo, and `reqwest` already masks it in its own `Display` — so a
+    // `format!` that interpolates our copy of the URL beside that error is
+    // precisely how a credential that reqwest had already hidden gets put back
+    // into a string the console renders.
+    let named = crate::company::inference::catalogue::redact_endpoint(url);
     let response = request
         .send()
         .await
-        .map_err(|error| DiscoveryError::endpoint(format!("request to {url} failed: {error}")))?;
+        .map_err(|error| DiscoveryError::endpoint(format!("request to {named} failed: {error}")))?;
     let status = response.status();
     let response = response.error_for_status().map_err(|error| {
-        let message = format!("request to {url} failed: {error}");
+        let message = format!("request to {named} failed: {error}");
         match status {
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
                 DiscoveryError::credential(message)
@@ -346,7 +354,7 @@ async fn fetch_catalog(
         }
     })?;
     let payload = response.json::<RegistryResponse>().await.map_err(|error| {
-        DiscoveryError::endpoint(format!("model catalog from {url} was invalid: {error}"))
+        DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
     })?;
     Ok(parse_models(payload))
 }
@@ -541,7 +549,13 @@ pub(crate) async fn catalog_models(
         return Err(failure);
     }
 
-    let endpoint = cache_key(base_url);
+    // Only ever *said*, never used to key or reach anything — so it is the
+    // redacted form. Both messages below are cached and replayed, and the
+    // console route formats them into a banner every reader of the company
+    // sees; interpolating the raw endpoint there put a stored userinfo
+    // credential straight back into text that had redacted it once already
+    // (Codex review on #2281).
+    let endpoint = catalogue::redact_endpoint(&cache_key(base_url));
     let outcome = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, async {
         let _fetch_guard = cache.fetch_lock.lock().await;
         // Another caller may have already refilled the cache while we waited
@@ -763,6 +777,39 @@ mod tests {
         assert!(
             waited < MODEL_CATALOG_TIMEOUT,
             "a turn must not inherit the console's {MODEL_CATALOG_TIMEOUT:?} budget, waited {waited:?}"
+        );
+    }
+
+    /// A failure the catalogue cache writes itself names the endpoint redacted.
+    ///
+    /// The fetch errors were already redacted where they are built; the empty
+    /// catalogue and the timeout are sentences `catalog_models` composes on its
+    /// own, and they are cached and replayed to every later reader. An endpoint
+    /// stored before the credential refusal existed must not come back out of
+    /// either one.
+    #[tokio::test]
+    async fn a_cache_written_catalog_failure_never_names_the_endpoint_credential() {
+        let app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "data": [] })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = format!("http://alice:hunter2@{address}/v1");
+
+        let error = catalog_models(&endpoint, None, None, AuthStyle::Bearer)
+            .await
+            .expect_err("an empty catalogue is reported as a failure");
+        server.abort();
+
+        assert!(
+            error.contains("empty model catalog"),
+            "expected the cache's own sentence, got: {error}"
+        );
+        assert!(
+            !error.contains("hunter2") && !error.contains("alice"),
+            "the cached failure must not carry the endpoint's userinfo: {error}"
         );
     }
 

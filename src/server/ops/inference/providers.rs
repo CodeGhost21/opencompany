@@ -736,9 +736,8 @@ fn plan_add(
                     local.label
                 ))
             })?;
-        let base_url = catalogue::normalize_local_endpoint(&typed).ok_or_else(|| {
-            invalid("A local runtime endpoint must be an http or https address.".to_string())
-        })?;
+        let base_url = catalogue::normalize_local_endpoint(&typed)
+            .ok_or_else(|| invalid(endpoint_refusal(&typed)))?;
         // **The catalogue says whether this runtime wants a credential, and the
         // host has to hold that rule too.** OMLX declares `needs_key: true`; the
         // console's dialog showed and required the field, and the handler
@@ -780,6 +779,9 @@ fn plan_add(
     // invites them to disagree, and the one that appears in a routing entry
     // would then be the one they never chose.
     let label = label.map(str::trim).unwrap_or("").to_string();
+    // Bounded before the slug is derived, so the sentence names what the
+    // operator typed rather than the address that fell out of it.
+    store::check_provider_name(&label).map_err(|e| invalid(e.to_string()))?;
     let slug = store::slugify(&label);
     if slug.is_empty() {
         return Err(invalid(store::SlugError::Empty.to_string()));
@@ -789,7 +791,7 @@ fn plan_add(
         .filter(|u| !u.is_empty())
         .ok_or_else(|| invalid("A custom provider needs an OpenAI-compatible URL.".to_string()))?;
     let base_url = catalogue::normalize_local_endpoint(typed)
-        .ok_or_else(|| invalid("That endpoint must be an http or https address.".to_string()))?;
+        .ok_or_else(|| invalid(endpoint_refusal(typed)))?;
     Ok(AddPlan {
         slug,
         label,
@@ -807,6 +809,21 @@ fn plan_add(
 /// answered at Acme gateway" is not.
 fn advisory_subject(provider: &store::Provider) -> String {
     catalogue::endpoint_host(&provider.base_url).unwrap_or_else(|| provider.label.clone())
+}
+
+/// What to say about an endpoint that cannot be used.
+///
+/// Two reasons, and they need two sentences. "Not an http address" is a typo.
+/// A credential embedded in the authority is a security answer: the endpoint is
+/// stored in the provider record, returned to **every** console reader on the
+/// company status read, and interpolated into operator-facing failure text — so
+/// a password in a URL is a password in all three, and the fix is to move it to
+/// the field that is write-only.
+fn endpoint_refusal(typed: &str) -> String {
+    if catalogue::endpoint_has_credentials(typed) {
+        return catalogue::ENDPOINT_CREDENTIAL_REFUSAL.to_string();
+    }
+    "That endpoint must be an http or https address.".to_string()
 }
 
 /// Undoes an add whose probe rejected the credential.
@@ -907,6 +924,16 @@ async fn edit_provider(
 
     let base_url = match body.base_url.as_deref().map(str::trim) {
         None | Some("") => existing.base_url.clone(),
+        // **The endpoint this host itself served, sent back, is not a change.**
+        // Every provider row carries `redact_endpoint`'s form, which masks
+        // anything that might be userinfo — including a path segment that only
+        // looks like it (`…/proxy/http:***@example.com/v1`). A client that
+        // posts the row back on a rename would otherwise store that mask over a
+        // working endpoint, or have a credentialed legacy row's rename refused
+        // outright (Codex review on #2281).
+        Some(typed) if typed == catalogue::redact_endpoint(&existing.base_url) => {
+            existing.base_url.clone()
+        }
         Some(typed) => {
             // A cloud preset's endpoint is not the operator's to retype: the
             // paths in that table are too varied for a typo to be recoverable,
@@ -916,12 +943,27 @@ async fn edit_provider(
                 existing.base_url.clone()
             } else {
                 catalogue::normalize_local_endpoint(typed).ok_or_else(|| {
-                    ApiError(OpenCompanyError::InvalidRequest(
-                        "That endpoint must be an http or https address.".to_string(),
-                    ))
+                    ApiError(OpenCompanyError::InvalidRequest(endpoint_refusal(typed)))
                 })?
             }
         }
+    };
+
+    // A rename goes through the same bound an add does. The slug is fixed here,
+    // so this bounds only the label — but an edit that could set a name an add
+    // would refuse is a rule the host does not actually hold.
+    let label = match body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        Some(typed) => {
+            store::check_provider_name(typed)
+                .map_err(|e| ApiError(OpenCompanyError::InvalidRequest(e.to_string())))?;
+            typed.to_string()
+        }
+        None => existing.label.clone(),
     };
 
     // **The credential goes first, for the same reason it does on the add path.**
@@ -977,13 +1019,7 @@ async fn edit_provider(
         secrets,
         store::ProviderDraft {
             slug: existing.slug.clone(),
-            label: body
-                .label
-                .as_deref()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .unwrap_or(existing.label.clone()),
+            label,
             kind: existing.kind.clone(),
             base_url,
             models: body.models.unwrap_or(existing.models.clone()),
@@ -1611,8 +1647,12 @@ async fn list_provider_models(
     )
     .await
     {
+        // Redacted on both arms. This route is `ScopedCompany`, and `{error}`
+        // alone is not enough: `reqwest` masks userinfo in its own `Display`,
+        // and then a `format!` like this one re-adds it from the endpoint we
+        // hold.
         Ok(models) => Ok(Json(ProviderCatalogDto {
-            base_url: provider.base_url,
+            base_url: catalogue::redact_endpoint(&provider.base_url),
             models: models.into_iter().map(|m| m.id).collect(),
             free_text_only,
             error: None,
@@ -1620,9 +1660,9 @@ async fn list_provider_models(
         Err(error) => Ok(Json(ProviderCatalogDto {
             error: Some(format!(
                 "Could not list models from {}: {error}. Enter a model id directly.",
-                provider.base_url
+                catalogue::redact_endpoint(&provider.base_url)
             )),
-            base_url: provider.base_url,
+            base_url: catalogue::redact_endpoint(&provider.base_url),
             models: Vec::new(),
             free_text_only,
         })),
@@ -1833,6 +1873,17 @@ async fn test_provider(
 async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) -> Response {
     let _ = &company;
     let kind = body.kind.as_deref().unwrap_or("custom");
+    // Refused before the request is made, not after. A draft is never stored, so
+    // this is not about the store — it is that "probe this URL" would otherwise
+    // be a way to make this host put a basic-auth credential on the wire to an
+    // address the operator names, on an endpoint shape the add flow will refuse
+    // to save anyway.
+    if catalogue::endpoint_has_credentials(&body.base_url) {
+        return ApiError(OpenCompanyError::InvalidRequest(endpoint_refusal(
+            body.base_url.trim(),
+        )))
+        .into_response();
+    }
     let auth = catalogue::auth_style_for(kind);
     let subject = catalogue::endpoint_host(&body.base_url).unwrap_or_else(|| "that host".into());
     match probe::probe_models(

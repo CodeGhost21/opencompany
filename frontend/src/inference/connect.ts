@@ -333,15 +333,27 @@ export function slugify(label: string): string {
   return out.replace(/-+$/, "");
 }
 
+/**
+ * The longest a provider name may be, in characters.
+ *
+ * Mirrors `store::MAX_PROVIDER_NAME_CHARS` on the host, which is where the rule
+ * actually lives — the name becomes the address of a secret
+ * (`provider/<slug>/key`), and an unbounded name produced an unbounded path
+ * that 500ed a credential read and truncated a stored key on the way to failing
+ * the delete. This copy only spares the operator a round trip to find that out.
+ */
+export const MAX_PROVIDER_NAME_CHARS = 80;
+
 /** Why a slug cannot be used. */
-export type SlugError = "empty" | "taken" | "reserved";
+export type SlugError = "empty" | "taken" | "reserved" | "too-long";
 
 /**
  * Whether a derived slug may be used for a **custom** provider.
  *
- * Three named failures rather than a boolean, because they need three different
- * sentences: one is "pick another name", one is "you already have this", and one
- * is "that name belongs to something we ship".
+ * Four named failures rather than a boolean, because they need four different
+ * sentences: one is "pick another name", one is "you already have this", one
+ * is "that name belongs to something we ship", and one is "that name is too
+ * long".
  *
  * The catalogue check applies to custom providers only. Adding the catalogue's
  * own `groq` entry *should* take the slug `groq` — that is the same provider,
@@ -350,6 +362,7 @@ export type SlugError = "empty" | "taken" | "reserved";
 export function checkSlug(providers: readonly Provider[], slug: string): SlugError | null {
   const trimmed = slug.trim();
   if (!trimmed) return "empty";
+  if ([...trimmed].length > MAX_PROVIDER_NAME_CHARS) return "too-long";
   if (providers.some((p) => p.slug === trimmed)) return "taken";
   if (isReservedSlug(trimmed)) return "reserved";
   return null;
@@ -364,6 +377,8 @@ export function slugErrorCopy(error: SlugError): string {
       return "This company already has a provider with that name.";
     case "reserved":
       return "That name belongs to a built-in provider.";
+    case "too-long":
+      return `A provider name can be at most ${MAX_PROVIDER_NAME_CHARS} characters.`;
   }
 }
 
@@ -378,6 +393,7 @@ export function slugErrorCopy(error: SlugError): string {
  */
 export function normalizeEndpoint(raw: string): string | null {
   const trimmed = raw.trim().replace(/\/+$/, "");
+  if (endpointHasCredentials(trimmed)) return null;
   const split = trimmed.indexOf("://");
   if (split === -1) return null;
   const scheme = trimmed.slice(0, split).toLowerCase();
@@ -386,6 +402,50 @@ export function normalizeEndpoint(raw: string): string | null {
   if (!rest.trim()) return null;
   if (!rest.includes("/")) return `${trimmed}/v1`;
   return trimmed;
+}
+
+/**
+ * Whether an endpoint URL carries a credential in its authority
+ * (`http://user:password@host/v1`).
+ *
+ * Mirrors `catalogue::endpoint_has_credentials`. The host refuses such an
+ * endpoint at every point one can be set, and redacts it anywhere one is said;
+ * this copy exists so the operator is told *why* beside the field rather than
+ * after a round trip.
+ *
+ * The `@` has to be inside the authority — a path may legitimately contain one
+ * (`https://host/v1/@me`), and that is not a credential.
+ */
+export function endpointHasCredentials(raw: string): boolean {
+  // As a URL parser reads it: ASCII tab, LF and CR are removed wherever they
+  // appear, so `http:\t//alice:pw@host` is credentialed (Codex review on #2281).
+  const trimmed = raw.trim().replace(/[\t\n\r]/g, "");
+  // Query and fragment are never an authority.
+  const cut = trimmed.search(/[?#]/);
+  const head = cut === -1 ? trimmed : trimmed.slice(0, cut);
+  // Read as an HTTP client reads it, mirroring the host's
+  // `endpoint_credential_range`: a leading `http:`/`https:` (any case) or other
+  // `scheme://`, any run of `/` or `\`, then the authority up to the next `/`
+  // or `\`. The read continues past an authority only for a doubled scheme
+  // (`http://HTTP://alice:pw@host`), never into ordinary path text, so
+  // `https://gateway.example/proxy/http:user@example.com/v1` stays an endpoint.
+  let pos = 0;
+  for (let hop = 0; hop < 8; hop++) {
+    const scheme = /^(?:https?:|[A-Za-z][A-Za-z0-9+.-]*:\/\/)/i.exec(head.slice(pos));
+    if (!scheme && pos > 0) return false;
+    const after = pos + (scheme ? scheme[0].length : 0);
+    const from = after + (/^[/\\]*/.exec(head.slice(after))?.[0].length ?? 0);
+    const tail = head.slice(from);
+    const end = tail.search(/[/\\]/);
+    const authority = end === -1 ? tail : tail.slice(0, end);
+    if (authority.includes("@")) return true;
+    // A doubled `scheme://scheme://` only: one slash after a bare scheme is a
+    // host with an empty port (`http://http:/v1@beta`), as on the host.
+    const doubled = /^[/\\]{2}/.test(tail.slice(authority.length));
+    if (from === pos || !doubled || !/^[A-Za-z][A-Za-z0-9+.-]*:$/.test(authority)) return false;
+    pos = from;
+  }
+  return false;
 }
 
 /**
@@ -399,7 +459,41 @@ export function customProviderReady(
   draft: { label: string; baseUrl: string },
 ): boolean {
   return (
+    checkProviderName(draft.label) === null &&
     checkSlug(providers, slugify(draft.label)) === null &&
     normalizeEndpoint(draft.baseUrl) !== null
   );
+}
+
+/**
+ * Whether a typed provider **name** may be used, before any slug is derived.
+ *
+ * Mirrors `store::check_provider_name`. Separate from {@link checkSlug} for the
+ * same reason it is separate on the host: a name can be long while its slug is
+ * short, because `slugify` drops everything that is not alphanumeric.
+ */
+export function checkProviderName(label: string): SlugError | null {
+  const trimmed = label.trim();
+  if (!trimmed) return "empty";
+  if ([...trimmed].length > MAX_PROVIDER_NAME_CHARS) return "too-long";
+  return null;
+}
+
+/**
+ * Cuts a typed provider name to {@link MAX_PROVIDER_NAME_CHARS} Unicode code
+ * points — the unit the host counts with `chars()`.
+ *
+ * Not the native `maxLength` attribute, which counts UTF-16 code units: most
+ * emoji are one character to the host and two to the DOM, so a name the host
+ * accepts could not be typed or pasted (Codex review on #2281). The same gap
+ * was closed for the company name by `clampToCompanyNameLimit`.
+ */
+export function clampToProviderNameLimit(label: string): string {
+  // Counted on the trimmed name, because `checkProviderName`, the submit and the
+  // host all trim first: spaces around a paste are not part of the name and must
+  // not push its last characters out (Codex review on #2281).
+  const name = Array.from(label.trim());
+  if (name.length <= MAX_PROVIDER_NAME_CHARS) return label;
+  const leading = label.slice(0, label.length - label.trimStart().length);
+  return leading + name.slice(0, MAX_PROVIDER_NAME_CHARS).join("");
 }

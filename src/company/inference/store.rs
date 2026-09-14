@@ -257,11 +257,35 @@ pub struct ProviderDraft {
     pub enabled: bool,
 }
 
+/// The longest a provider name — and therefore the slug derived from it — may
+/// be, in characters.
+///
+/// **Bounded at all** because the name is not only a label: [`slugify`] turns it
+/// into the address of a secret (`provider/<slug>/key`), and a secret key is a
+/// path component in the filesystem store. An unbounded name produced an
+/// unbounded path, which is how a 245-character name came to 500 a credential
+/// read and a 300-character one came to truncate a stored key and then fail the
+/// delete that truncated it. The store no longer breaks on a long key — see
+/// `legacy_secret_absent` in `src/store/fs.rs` — but a rule the store has to
+/// absorb is a rule that was never stated, and the name still has to be legible
+/// in a routing row an operator hand-edits.
+///
+/// **Eighty** because that is the bound this codebase already uses for the other
+/// name a person types and then reads back in a list
+/// (`MAX_DISPLAY_NAME_CHARS`, `src/server/users/mod.rs`), and because it keeps
+/// the derived secret key well inside the canonical filename budget: at 80
+/// characters `provider/<slug>/key` percent-encodes to 97 bytes against a
+/// 200-byte budget, so a provider's credential file is never the
+/// truncated-and-digested form and stays readable on disk by the person
+/// debugging it.
+pub const MAX_PROVIDER_NAME_CHARS: usize = 80;
+
 /// Why a slug cannot be used.
 ///
-/// Three named failures rather than a boolean, because they need three different
-/// sentences: one is "pick another name", one is "you already have this", and one
-/// is "that name belongs to something we ship".
+/// Four named failures rather than a boolean, because they need four different
+/// sentences: one is "pick another name", one is "you already have this", one
+/// is "that name belongs to something we ship", and one is "that name is too
+/// long".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlugError {
     /// Nothing was typed, or it normalised to nothing.
@@ -270,6 +294,8 @@ pub enum SlugError {
     Taken,
     /// The catalogue ships that name.
     Reserved,
+    /// Past [`MAX_PROVIDER_NAME_CHARS`].
+    TooLong,
 }
 
 impl std::fmt::Display for SlugError {
@@ -278,6 +304,10 @@ impl std::fmt::Display for SlugError {
             Self::Empty => write!(f, "a provider needs a name"),
             Self::Taken => write!(f, "this company already has a provider with that name"),
             Self::Reserved => write!(f, "that name belongs to a built-in provider"),
+            Self::TooLong => write!(
+                f,
+                "a provider name may be at most {MAX_PROVIDER_NAME_CHARS} characters"
+            ),
         }
     }
 }
@@ -305,6 +335,26 @@ pub fn slugify(label: &str) -> String {
     out
 }
 
+/// Whether a typed provider **name** may be used at all, before any slug is
+/// derived from it.
+///
+/// Separate from [`check_slug`] because the two bound different things. The slug
+/// is an address; the label is text that lands in the index blob, in the
+/// provider list, and in every advisory that names a provider. A name can be
+/// long while its slug is short (`slugify` drops everything that is not
+/// alphanumeric), so bounding only the slug leaves a page of prose in the store
+/// under a three-character address.
+pub fn check_provider_name(label: &str) -> std::result::Result<(), SlugError> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(SlugError::Empty);
+    }
+    if label.chars().count() > MAX_PROVIDER_NAME_CHARS {
+        return Err(SlugError::TooLong);
+    }
+    Ok(())
+}
+
 /// Whether `slug` may be used for a **custom** provider in a company that
 /// already holds `existing`.
 ///
@@ -312,10 +362,18 @@ pub fn slugify(label: &str) -> String {
 /// own `groq` entry *should* take the slug `groq` — that is the same provider,
 /// not a collision. It is a typed name shadowing a built-in that has to be
 /// refused, because a routing entry saying `groq` would then mean two things.
+///
+/// The length bound is checked **here** rather than only on the label, because
+/// this is the function that stands between a typed name and the address of a
+/// secret ([`provider_key_key`]). A console mirrors it; a console is not a
+/// security boundary.
 pub fn check_slug(existing: &[Provider], slug: &str) -> std::result::Result<(), SlugError> {
     let slug = slug.trim();
     if slug.is_empty() {
         return Err(SlugError::Empty);
+    }
+    if slug.chars().count() > MAX_PROVIDER_NAME_CHARS {
+        return Err(SlugError::TooLong);
     }
     if existing.iter().any(|p| p.slug == slug) {
         return Err(SlugError::Taken);
@@ -1377,6 +1435,48 @@ mod tests {
         assert_eq!(check_slug(&existing, "acme"), Err(SlugError::Taken));
         assert_eq!(check_slug(&existing, "groq"), Err(SlugError::Reserved));
         assert_eq!(check_slug(&existing, "acme-two"), Ok(()));
+    }
+
+    #[test]
+    fn a_provider_name_is_bounded_at_the_limit_and_refused_past_it() {
+        // The bound exists because the name becomes the address of a secret.
+        // At the limit is a legal name; one character past it is not, and the
+        // refusal happens here rather than at the store, where it used to
+        // arrive as `ENAMETOOLONG` after a write had already landed.
+        let at_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS);
+        let past_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS + 1);
+
+        assert_eq!(check_provider_name(&at_limit), Ok(()));
+        assert_eq!(check_provider_name(&past_limit), Err(SlugError::TooLong));
+        assert_eq!(check_provider_name("  "), Err(SlugError::Empty));
+
+        assert_eq!(check_slug(&[], &at_limit), Ok(()));
+        assert_eq!(check_slug(&[], &past_limit), Err(SlugError::TooLong));
+
+        // Characters, not bytes: a name of multi-byte characters is judged by
+        // what the operator typed rather than by how UTF-8 happens to store it.
+        let multibyte = "é".repeat(MAX_PROVIDER_NAME_CHARS);
+        assert_eq!(check_provider_name(&multibyte), Ok(()));
+    }
+
+    #[test]
+    fn a_bounded_name_keeps_its_credential_key_inside_the_filename_budget() {
+        // Why 80 and not some larger round number: the derived secret key has
+        // to stay short enough that the canonical filename is the readable
+        // `%k-` form rather than the truncated-and-digested `%l-` one. The
+        // slug alphabet is `[a-z0-9-]`, one byte per character once
+        // percent-encoded, and `provider/` + `/key` add 17.
+        let key = provider_key_key(&"a".repeat(MAX_PROVIDER_NAME_CHARS));
+        // `provider/` + `/key` is 13 characters around the slug.
+        assert_eq!(key.len(), MAX_PROVIDER_NAME_CHARS + 13);
+        // Percent-encoding is what the budget is measured in. The slug alphabet
+        // (`[a-z0-9-]`) survives as one byte per character; the two `/`
+        // separators become `%2F`, three bytes each.
+        let encoded_len = key.len() + 2 * 2;
+        assert!(
+            encoded_len < 200,
+            "a bounded name must not need a truncated secret filename: {encoded_len} bytes"
+        );
     }
 
     #[tokio::test]
