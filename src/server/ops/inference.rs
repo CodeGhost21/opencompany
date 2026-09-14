@@ -400,6 +400,24 @@ struct ManagedDto {
     /// provider row's: silent until something has actually been learnt.
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<ProviderHealthDto>,
+    /// Whether the console renders this separate legacy Managed row (keys
+    /// rework, issue #2306, slice 2a). `false` once `providers` already lists
+    /// a `tinyhumans` row — an added row, or entry zero on a managed config —
+    /// because that row is then the one TinyHumans row this page ever shows
+    /// (decision Q3). Computed in `effective_status_with`, which has the
+    /// provider list this function does not.
+    legacy_row: bool,
+    /// Whether this legacy row resolves to a credential but has no model
+    /// explicitly chosen for it anywhere in the new sense (decision
+    /// D-key-without-row / X5, 2026-09-15): `provider/tinyhumans/key` set
+    /// with no `tinyhumans` row is a credential, not a configured provider —
+    /// D-set's "set ⇔ a row exists" is unchanged, so this must never read as
+    /// connected/healthy the way an indexed row with a chosen model does.
+    /// `true` whenever `legacy_row && configured`: every source this chain
+    /// can resolve through (a key, the company account, the instance
+    /// identity) sends whatever the legacy tier-substitution rule decides
+    /// rather than an operator-chosen id.
+    needs_model: bool,
 }
 
 /// One provider on the wire.
@@ -888,7 +906,17 @@ async fn effective_status_with(
     let restart_required = restart_pending(runtime, decl.is_some());
     let providers = provider_list(runtime).await?;
     let routes = routing_table(runtime).await?;
-    let managed = managed_state(runtime, platform).await?;
+    let mut managed = managed_state(runtime, platform).await?;
+    // Keys rework (#2306), slice 2a: exactly one TinyHumans row is ever shown
+    // (Q3). The legacy row renders only while its chain resolves AND no row
+    // in the list already carries the `tinyhumans` slug — a `tinyhumans` row
+    // means either an operator added one, or entry zero is already `managed`
+    // (`store::provider_from_runtime` gives it slug `tinyhumans` too), and
+    // either way that row is now the one TinyHumans row this page shows.
+    managed.legacy_row =
+        managed.configured && !providers.iter().any(|p| p.slug == inference::MANAGED_SLUG);
+    // D-key-without-row (X5): moot once the legacy row itself is hidden.
+    managed.needs_model = managed.legacy_row && managed.configured;
     // Independent of `decl`: the shipped defaults are the same regardless of
     // what (if anything) this company has configured.
     let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
@@ -999,6 +1027,14 @@ async fn managed_state(
             .await
             .map_err(ApiError)?,
         health,
+        // Placeholder: `effective_status_with` overrides both once it has the
+        // provider list this function was not given. `source.resolves()` is
+        // the right placeholder for `needs_model` too — if this row never
+        // renders (`legacy_row` ends up `false`), `needs_model` is moot; if it
+        // never resolves (`configured` is `false`), there is no credential to
+        // call out as model-less in the first place.
+        legacy_row: source.resolves(),
+        needs_model: false,
     })
 }
 
@@ -2841,6 +2877,110 @@ base_url = "https://byo.example/v1"
             dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
             "defaultTierModels must not follow the tenant's own model override: {dto}"
         );
+    }
+
+    /// Keys rework (#2306) slice 2a, decision Q3: exactly one TinyHumans row
+    /// is ever shown. A `tinyhumans` row in the index hides the legacy row.
+    #[tokio::test]
+    async fn a_listed_tinyhumans_row_hides_the_legacy_managed_row() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+        let secrets = runtime.secrets().as_ref();
+        store::put_provider(
+            runtime.id(),
+            secrets,
+            store::ProviderDraft {
+                slug: inference::MANAGED_SLUG.to_string(),
+                label: "TinyHumans".to_string(),
+                kind: inference::MANAGED_SLUG.to_string(),
+                base_url: "https://api.tinyhumans.ai/agent-integrations/openrouter".to_string(),
+                models: crate::company::INFERENCE_TIERS
+                    .iter()
+                    .map(|t| ((*t).to_string(), "acme/test-model".to_string()))
+                    .collect(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                runtime.id(),
+                &store::provider_key_key(inference::MANAGED_SLUG),
+                crate::ports::types::SecretValue("th-not-a-real-key".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert_eq!(
+            dto.providers
+                .iter()
+                .filter(|p| p.slug == "tinyhumans")
+                .count(),
+            1,
+            "exactly one tinyhumans row: {:?}",
+            dto.providers
+        );
+        assert!(
+            dto.managed.configured,
+            "the legacy chain still resolves through the same key slot"
+        );
+        assert!(
+            !dto.managed.legacy_row,
+            "a listed tinyhumans row must hide the legacy Managed row"
+        );
+        assert!(
+            !dto.managed.needs_model,
+            "needs_model is moot once the legacy row is hidden"
+        );
+    }
+
+    /// A company whose only TinyHumans credential is the account key
+    /// (`tinyhumans/key`, no row) still shows the legacy Managed row — and it
+    /// never reads as fully configured (D-key-without-row / X5).
+    #[tokio::test]
+    async fn an_account_key_only_company_shows_the_legacy_managed_row() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+        crate::company::company_key::store_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "th-not-a-real-key",
+        )
+        .await
+        .unwrap();
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert!(
+            !dto.providers.iter().any(|p| p.slug == "tinyhumans"),
+            "no tinyhumans row exists yet: {:?}",
+            dto.providers
+        );
+        assert_eq!(dto.managed.source, "company_account");
+        assert!(dto.managed.configured);
+        assert!(
+            dto.managed.legacy_row,
+            "with no tinyhumans row, the legacy row is the only TinyHumans row"
+        );
+        assert!(
+            dto.managed.needs_model,
+            "a key with no row must never read as fully configured (X5)"
+        );
+    }
+
+    /// A company with nothing configured shows no legacy row at all.
+    #[tokio::test]
+    async fn a_company_with_nothing_shows_no_legacy_row() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert!(!dto.managed.configured);
+        assert!(!dto.managed.legacy_row);
+        assert!(!dto.managed.needs_model);
     }
 
     #[tokio::test]

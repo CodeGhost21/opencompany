@@ -188,10 +188,18 @@ describe("providerState / defaultBrokenCopy (decisions X9, X14)", () => {
     provider({ slug: "beta", label: "Beta", enabled: false }),
   ];
 
-  it("classifies removed, disabled, and ok", () => {
+  it("classifies removed, disabled, keyless, and ok", () => {
     expect(providerState("ghost", providers)).toBe("removed");
     expect(providerState("beta", providers)).toBe("disabled");
     expect(providerState("acme", providers)).toBe("ok");
+    expect(
+      providerState("acme", [provider({ slug: "acme", enabled: true, keyConfigured: false })]),
+    ).toBe("noKey");
+  });
+
+  it("says nothing for a keyless-but-enabled default — the host has no default_broken sentence for that; only a turn error naming an agent does", () => {
+    const keyless = [provider({ slug: "acme", label: "Acme", enabled: true, keyConfigured: false })];
+    expect(defaultBrokenCopy({ provider: "acme", model: "x" }, keyless)).toBeNull();
   });
 
   it("says nothing when the default is healthy", () => {
@@ -209,13 +217,13 @@ describe("providerState / defaultBrokenCopy (decisions X9, X14)", () => {
 
   it("names a removed provider, verbatim per decision X9", () => {
     expect(defaultBrokenCopy({ provider: "ghost", model: "x" }, providers)).toBe(
-      "The company default uses ghost, which is removed. Choose a new default in API Keys → LLM.",
+      "The company default uses ghost, which is removed. Choose a new default in Connections → API Keys → LLM.",
     );
   });
 
   it("names a disabled provider by its label", () => {
     expect(defaultBrokenCopy({ provider: "beta", model: "x" }, providers)).toBe(
-      "The company default uses Beta, which is turned off. Choose a new default in API Keys → LLM.",
+      "The company default uses Beta, which is turned off. Choose a new default in Connections → API Keys → LLM.",
     );
   });
 });
