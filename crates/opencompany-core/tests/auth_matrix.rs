@@ -1777,7 +1777,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        467,
+        469,
         "concrete route-method rows",
     );
     assert_eq!(
