@@ -575,24 +575,20 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
 /// field.
 pub const REDACTED_USERINFO: &str = "***";
 
-/// Every byte range of an endpoint that an HTTP client could read as userinfo.
+/// Every byte range of an endpoint that **might** be userinfo — the redaction's
+/// reading, deliberately wider than the refusal's.
 ///
-/// Empty when there is none. A candidate authority starts at the beginning of
-/// the value, after every `://`, and after every `http:` or `https:` in any
-/// case, and any run of `/` or `\` after that start is skipped. It ends at the
-/// next `/` or `\`, and only an `@` inside it counts. So a path may still carry
-/// one (`https://host/v1/@me`), and a gateway that proxies to another URL
-/// (`https://gateway.example/proxy/http://upstream/@me`) is still an endpoint.
-///
-/// **Every start, not the first unambiguous one.** WHATWG URL parsing reads
-/// `http:/alice:pw@host` (one slash), `http:///alice:pw@host` (three),
-/// `http:\\alice:pw@host` (backslashes) and `HTTP:alice:pw@host` (none) as the
-/// same authority. A doubled scheme (`http://HTTP://alice:pw@host`) puts a
-/// credential behind a first authority that has none. Each of those once hid
-/// the credential from the refusal, the redaction, or both. So did stopping at
-/// the first credential when two authorities each held one (Codex and
-/// CodeRabbit review on #2281). Overlapping ranges are merged, and the query and
-/// fragment are never an authority.
+/// A candidate authority starts at the beginning of the value, after every
+/// `://`, and after every `http:` or `https:` in any case; any run of `/` or `\`
+/// after that start is skipped, the candidate ends at the next `/` or `\`, and
+/// only an `@` inside it counts. Every candidate is taken, including ones inside
+/// a path (`https://gw/proxy/http://bob:pw@inner`), and overlapping ranges are
+/// merged. That over-reads on purpose: this decides what is **said** about an
+/// endpoint, and masking a path segment that only looks like a credential costs
+/// a log line some readability, where missing a real one costs the credential.
+/// Whether an endpoint is **refused** is the narrower
+/// [`endpoint_credential_range`], so a well-formed endpoint is never rejected
+/// for path text (Codex and CodeRabbit review on #2281).
 fn endpoint_userinfo_ranges(endpoint: &str) -> Vec<std::ops::Range<usize>> {
     let head = &endpoint[..endpoint.find(['?', '#']).unwrap_or(endpoint.len())];
     // ASCII lowercasing keeps every byte offset, so indices into it are
@@ -631,6 +627,74 @@ fn endpoint_userinfo_ranges(endpoint: &str) -> Vec<std::ops::Range<usize>> {
     merged
 }
 
+/// The userinfo an HTTP client would actually read from `endpoint`, if any.
+///
+/// Read the way WHATWG URL parsing reads a special scheme: a leading `http:` or
+/// `https:` (any case) or another `scheme://`, then any run of `/` or `\`, then
+/// the authority up to the next `/` or `\`. So `http:/alice:pw@host`,
+/// `http:///alice:pw@host`, `http:\\alice:pw@host` and `HTTP:alice:pw@host` all
+/// carry a credential. The read continues past an authority **only** when that
+/// authority is itself a bare scheme (`http://HTTP://alice:pw@host`, or setup
+/// normalisation's `http://http:/alice:pw@host`), never into ordinary path text:
+/// `https://gateway.example/proxy/http:user@example.com/v1` has no userinfo, and
+/// refusing it would reject an endpoint every client accepts (Codex review on
+/// #2281). Every range this returns is also one [`endpoint_userinfo_ranges`]
+/// returns, so whatever is refused is also redacted.
+fn endpoint_credential_range(endpoint: &str) -> Option<std::ops::Range<usize>> {
+    let head = &endpoint[..endpoint.find(['?', '#']).unwrap_or(endpoint.len())];
+    let mut pos = 0;
+    // Bounded: each hop consumes a scheme, so a real value needs two or three.
+    for _ in 0..8 {
+        let scheme_len = scheme_prefix_len(&head[pos..]);
+        if scheme_len == 0 && pos > 0 {
+            return None;
+        }
+        let after = pos + scheme_len;
+        let from = after
+            + head[after..]
+                .bytes()
+                .take_while(|b| matches!(b, b'/' | b'\\'))
+                .count();
+        let tail = &head[from..];
+        let authority = &tail[..tail.find(['/', '\\']).unwrap_or(tail.len())];
+        // `rfind`, not `find`: a password may itself contain an `@`, and the
+        // last one in the authority is the delimiter per RFC 3986.
+        if let Some(at) = authority.rfind('@') {
+            return Some(from..from + at);
+        }
+        let bare_scheme = authority.strip_suffix(':').is_some_and(is_scheme_name);
+        if from == pos || !bare_scheme {
+            return None;
+        }
+        pos = from;
+    }
+    None
+}
+
+/// The length of the scheme `rest` opens with: `http:`/`https:` in any case, or
+/// any other valid `scheme://`. Zero when it opens with none.
+fn scheme_prefix_len(rest: &str) -> usize {
+    let lower = rest.to_ascii_lowercase();
+    if lower.starts_with("https:") {
+        return "https:".len();
+    }
+    if lower.starts_with("http:") {
+        return "http:".len();
+    }
+    match rest.find("://") {
+        Some(i) if is_scheme_name(&rest[..i]) => i + "://".len(),
+        _ => 0,
+    }
+}
+
+/// Whether `name` is a URI scheme name (RFC 3986 §3.1).
+fn is_scheme_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// Whether an endpoint URL carries a credential in its authority
 /// (`http://user:password@host/v1`).
 ///
@@ -643,7 +707,7 @@ fn endpoint_userinfo_ranges(endpoint: &str) -> Vec<std::ops::Range<usize>> {
 /// into operator-facing failure text, and written to a plaintext store — so a
 /// password in one is a password in all three.
 pub fn endpoint_has_credentials(endpoint: &str) -> bool {
-    !endpoint_userinfo_ranges(endpoint.trim()).is_empty()
+    endpoint_credential_range(endpoint.trim()).is_some()
 }
 
 /// What an operator is told when an endpoint they typed carries a credential.
@@ -1723,6 +1787,27 @@ mod tests {
             assert!(!endpoint_has_credentials(good), "`{good}` has no userinfo");
             assert_eq!(redact_endpoint(good), good);
         }
+    }
+
+    #[test]
+    fn a_scheme_in_a_well_formed_path_is_not_an_authority() {
+        // Codex review on #2281: WHATWG parsing gives this endpoint no userinfo.
+        // `http:user@example.com` is path text, so the endpoint is accepted.
+        let gateway = "https://gateway.example/proxy/http:user@example.com/v1";
+        assert!(!endpoint_has_credentials(gateway));
+        assert_eq!(normalize_local_endpoint(gateway).as_deref(), Some(gateway));
+        // What is *said* about it still masks the segment that looks like one:
+        // the redaction reads wider than the refusal, by design.
+        assert_eq!(
+            redact_endpoint(gateway),
+            "https://gateway.example/proxy/http:***@example.com/v1"
+        );
+        // A port-less host that happens to end in `:` does not start a hop.
+        assert!(!endpoint_has_credentials("http://localhost:/v1/@me"));
+        // And a doubled scheme still does — the one case a hop exists for.
+        assert!(endpoint_has_credentials(
+            "https://http://alice@api.acme.example/v1"
+        ));
     }
 
     #[test]
