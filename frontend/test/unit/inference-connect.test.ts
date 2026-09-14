@@ -175,6 +175,21 @@ describe("the slug, which is derived and never typed", () => {
 
     expect(clampToProviderNameLimit("Acme")).toBe("Acme");
   });
+
+  it("clamps on the trimmed name, so surrounding spaces cost no characters", () => {
+    // Codex review on #2281: spaces around a paste are trimmed by the host and
+    // by `checkProviderName`, so they must not push the name's last characters
+    // out of a field that would otherwise accept it.
+    const name = "a".repeat(MAX_PROVIDER_NAME_CHARS);
+    const padded = `${" ".repeat(10)}${name}   `;
+    expect(clampToProviderNameLimit(padded)).toBe(padded);
+    expect(checkProviderName(padded)).toBeNull();
+
+    const over = `${" ".repeat(10)}${"a".repeat(MAX_PROVIDER_NAME_CHARS + 3)}`;
+    const clamped = clampToProviderNameLimit(over);
+    expect(clamped).toBe(`${" ".repeat(10)}${name}`);
+    expect(checkProviderName(clamped)).toBeNull();
+  });
 });
 
 describe("the endpoint an operator types", () => {
@@ -361,6 +376,15 @@ describe("endpointHasCredentials", () => {
     for (const good of ["http://[::1]:11434/v1", "https://api.acme.example:8443/v1/@me"]) {
       expect(endpointHasCredentials(good)).toBe(false);
     }
+  });
+
+  it("does not read a scheme in a well-formed path as an authority", () => {
+    // Codex review on #2281: `http:user@example.com` here is path text.
+    const gateway = "https://gateway.example/proxy/http:user@example.com/v1";
+    expect(endpointHasCredentials(gateway)).toBe(false);
+    expect(normalizeEndpoint(gateway)).toBe(gateway);
+    expect(endpointHasCredentials("http://localhost:/v1/@me")).toBe(false);
+    expect(endpointHasCredentials("https://http://alice@api.acme.example/v1")).toBe(true);
   });
 
   it("still ignores an @ outside every authority", () => {

@@ -421,23 +421,26 @@ export function endpointHasCredentials(raw: string): boolean {
   // Query and fragment are never an authority.
   const cut = trimmed.search(/[?#]/);
   const head = cut === -1 ? trimmed : trimmed.slice(0, cut);
-  // Every place an HTTP client could read an authority, as on the host: the
-  // start, after every `://`, and after every `http:`/`https:` in any case,
-  // skipping any run of `/` or `\` (a special scheme reads both as slashes).
-  // Only an `@` inside that authority counts, so a gateway path that proxies to
-  // another URL is still an endpoint.
-  const starts = [0];
-  for (let i = head.indexOf("://"); i !== -1; i = head.indexOf("://", i + 1)) {
-    starts.push(i + 1);
+  // Read as an HTTP client reads it, mirroring the host's
+  // `endpoint_credential_range`: a leading `http:`/`https:` (any case) or other
+  // `scheme://`, any run of `/` or `\`, then the authority up to the next `/`
+  // or `\`. The read continues past an authority only when it is itself a bare
+  // scheme (`http://HTTP://alice:pw@host`), never into ordinary path text, so
+  // `https://gateway.example/proxy/http:user@example.com/v1` stays an endpoint.
+  let pos = 0;
+  for (let hop = 0; hop < 8; hop++) {
+    const scheme = /^(?:https?:|[A-Za-z][A-Za-z0-9+.-]*:\/\/)/i.exec(head.slice(pos));
+    if (!scheme && pos > 0) return false;
+    const after = pos + (scheme ? scheme[0].length : 0);
+    const from = after + (/^[/\\]*/.exec(head.slice(after))?.[0].length ?? 0);
+    const tail = head.slice(from);
+    const end = tail.search(/[/\\]/);
+    const authority = end === -1 ? tail : tail.slice(0, end);
+    if (authority.includes("@")) return true;
+    if (from === pos || !/^[A-Za-z][A-Za-z0-9+.-]*:$/.test(authority)) return false;
+    pos = from;
   }
-  for (const match of head.matchAll(/https?:/gi)) {
-    starts.push((match.index ?? 0) + match[0].length);
-  }
-  return starts.some((start) => {
-    const authority = head.slice(start).replace(/^[/\\]+/, "");
-    const end = authority.search(/[/\\]/);
-    return (end === -1 ? authority : authority.slice(0, end)).includes("@");
-  });
+  return false;
 }
 
 /**
@@ -481,8 +484,11 @@ export function checkProviderName(label: string): SlugError | null {
  * was closed for the company name by `clampToCompanyNameLimit`.
  */
 export function clampToProviderNameLimit(label: string): string {
-  const chars = Array.from(label);
-  return chars.length > MAX_PROVIDER_NAME_CHARS
-    ? chars.slice(0, MAX_PROVIDER_NAME_CHARS).join("")
-    : label;
+  // Counted on the trimmed name, because `checkProviderName`, the submit and the
+  // host all trim first: spaces around a paste are not part of the name and must
+  // not push its last characters out (Codex review on #2281).
+  const name = Array.from(label.trim());
+  if (name.length <= MAX_PROVIDER_NAME_CHARS) return label;
+  const leading = label.slice(0, label.length - label.trimStart().length);
+  return leading + name.slice(0, MAX_PROVIDER_NAME_CHARS).join("");
 }
