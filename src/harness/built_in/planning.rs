@@ -880,7 +880,7 @@ struct Evidence {
     ///
     /// Issue #886: this is the resolver's answer
     /// ([`resolve_credential`](crate::company::composio::resolve_credential)
-    /// `.configured()`), covering all three tiers — the BYO `composio/token`
+    /// `.configured()`), covering all three tiers — the BYO `composio/tinyhumans/key`
     /// override, the company's own TinyHumans key, and this instance's platform
     /// identity. It used to read only the first slot, so on a hosted tenant it
     /// was `false` for every company, and `verify_composio` told operators "no
@@ -1408,7 +1408,7 @@ async fn refresh_native_capabilities(
 ///
 /// Asks
 /// [`resolve_credential`](crate::company::composio::resolve_credential), which
-/// walks all three tiers: the BYO `composio/token` override, the company's own
+/// walks all three tiers: the BYO `composio/tinyhumans/key` override, the company's own
 /// TinyHumans key, and this instance's platform identity. The previous probe
 /// was [`token_configured`](crate::company::composio::token_configured), which
 /// reads only the first — so on a hosted tenant, where nobody pastes a BYO

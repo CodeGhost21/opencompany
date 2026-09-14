@@ -23,7 +23,7 @@ say which of the two an operator is looking at.
 Under `managed`, `resolve_credential` answers in this order, first hit wins:
 
 ```
-  1. composio/token          the company's own backend bearer   → static
+  1. composio/tinyhumans/key the company's own backend bearer   → static
   2. the company's TinyHumans key                               → company
   3. this instance's platform identity                          → attested
   4. nothing                                                    → none
@@ -43,8 +43,9 @@ attributed to.
 
 ## The BYOK short-circuit — the part that matters
 
-Under `byok`, `resolve_access` reads `composio/api_key` **and nothing else**. The
-managed chain is skipped entirely for the acting credential.
+Under `byok`, `resolve_access` reads `composio/byok/key` (falling back to
+`composio/api_key`) **and nothing else**. The managed chain is skipped entirely
+for the acting credential.
 
 It deliberately does **not** fall back to the managed tiers when the key is
 missing or blank. `Credential::None` there means no tools this cycle, which is
@@ -54,7 +55,8 @@ platform's instead would connect providers into the wrong tenant and bill the
 wrong party.
 
 The mirror image is just as important and is easier to miss: **managed
-resolution reads `composio/token` and the company key, never `composio/api_key`.**
+resolution reads `composio/tinyhumans/key` and the company key, never
+`composio/byok/key`.**
 So a stored BYOK key in managed mode simply goes unread. It does not leak and it
 is not presented anywhere — it is inert. The code's own comment calls this "the
 routing surprise", and names it as the part that matters.
@@ -71,7 +73,7 @@ a **failed second write leaves an inert state rather than an outage**:
 
 - **Selecting BYOK writes the key first.** If the mode write then fails, the
   company is still `managed` holding an unread key — inert, because managed
-  resolution never looks at `composio/api_key`.
+  resolution never looks at `composio/byok/key`.
 - **Clearing writes the mode first.** A fixed key-then-mode order would write the
   *empty* key first; if the mode write then failed the company would stay `byok`
   with an empty key, which resolves to `Credential::None` — the exact "BYOK mode,
@@ -80,7 +82,7 @@ a **failed second write leaves an inert state rather than an outage**:
 ## The trap: `token_configured` is not "does Composio work" (issue #886)
 
 `token_configured` answers exactly one question about exactly one slot: **did
-somebody paste a token into `composio/token`.** That is the *first* tier of
+somebody paste a token into `composio/tinyhumans/key`.** That is the *first* tier of
 three.
 
 On a hosted tenant nobody pastes one — the third tier answers, from the

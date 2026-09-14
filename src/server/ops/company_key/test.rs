@@ -238,7 +238,7 @@ async fn setting_the_key_credentials_composio_with_no_composio_token() {
     .await;
 
     // The company key alone credentials Composio. This is the issue in one
-    // assertion: no `composio/token`, no provider app, still connectable.
+    // assertion: no `composio/tinyhumans/key`, no provider app, still connectable.
     let (_, dto, raw) = send(&state, "brokered", "GET", "/api/v1/company/composio", None).await;
     assert_eq!(dto["credentialSource"], "company", "{raw}");
     assert!(

@@ -13,7 +13,7 @@ and each has a test pinning that.
 
 | Slot | Set by | Means |
 |---|---|---|
-| `composio/token` | `PUT {scope}/composio/token`, admin | a Composio credential this company pasted |
+| `composio/tinyhumans/key` | `PUT {scope}/composio/token`, admin | a Composio credential this company pasted |
 | `tinyhumans/key` | `PUT {scope}/credential` or the link flow, admin | **this company's TinyHumans account** — an identity |
 | `inference/key` | `PUT {scope}/inference`, the setup wizard, the link flow | whatever the declared provider wants — a vendor credential |
 | env | the deployer, once per process | `TINYHUMANS_TOKEN_FILE` (a path, rotated in place) or `TINYHUMANS_API_KEY` (a value) |
@@ -75,7 +75,7 @@ a stale claim carrying its own evidence is one nobody re-checks.
 
 ```
 COMPOSIO                                  INFERENCE  (before)
-  composio/token                            inference/config + inference/key
+  composio/tinyhumans/key                   inference/config + inference/key
         │ absent                                  │ absent
         ▼                                         ▼
   company_key::resolve                      manifest [inference]
@@ -139,7 +139,7 @@ INFERENCE
   5. nothing → agents cannot think, and the banner says which
 
 COMPOSIO
-  1. composio/token                             ← a pasted Composio credential
+  1. composio/tinyhumans/key                    ← a pasted Composio credential
   2. tinyhumans/key                             ← this company's account
   3. the instance identity
   4. nothing → no app tools

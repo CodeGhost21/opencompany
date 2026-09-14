@@ -13,16 +13,16 @@
 //!
 //! ```text
 //!   SearchProvider record              SecretStore (per CompanyId)
-//!   ┌────────────────────┐             ┌──────────────────────────────────┐
-//!   │ slug               │             │ search/providers        index    │
-//!   │ enabled            │ ──names──▶  │ search/provider/<slug>/key       │
-//!   │ endpoint           │             │ search/provider/<slug>/endpoint  │
-//!   │                    │             │ search/default          one slug │
-//!   │   NO KEY FIELD     │             │ ──────────────────────────────── │
-//!   └────────────────────┘             │ search/provider   entry zero     │
-//!                                      │ search/api_key    entry zero     │
-//!                                      │ search/endpoint   entry zero     │
-//!                                      └──────────────────────────────────┘
+//!   ┌────────────────────┐             ┌───────────────────────────────────────────┐
+//!   │ slug               │             │ search/providers  index (+endpoint)       │
+//!   │ enabled            │ ──names──▶  │ search/provider/<slug>/key                │
+//!   │ endpoint           │             │ search/provider/<slug>/endpoint  fallback │
+//!   │                    │             │ search/default          one slug          │
+//!   │   NO KEY FIELD     │             │ ───────────────────────────────────────── │
+//!   └────────────────────┘             │ search/provider   entry zero              │
+//!                                      │ search/api_key    entry zero              │
+//!                                      │ search/endpoint   entry zero              │
+//!                                      └───────────────────────────────────────────┘
 //! ```
 //!
 //! # Convergence, not migration
@@ -122,7 +122,9 @@ pub fn provider_key_key(slug: &str) -> String {
     format!("search/provider/{slug}/key")
 }
 
-/// The instance-address slot for one provider. Not a secret.
+/// The per-slug instance-address slot. Read as a fallback when an index row
+/// carries no `endpoint`, and still written alongside the row for one release
+/// so a rolled-back binary finds the address (#2306). Not a secret.
 pub fn provider_endpoint_key(slug: &str) -> String {
     format!("search/provider/{slug}/endpoint")
 }
@@ -147,15 +149,30 @@ pub struct SearchProvider {
 }
 
 /// The stored shape of one index row. Deliberately not [`SearchProvider`].
+///
+/// Never add `#[serde(deny_unknown_fields)]`: a binary one release older must
+/// still parse a blob this one wrote (it ignores `endpoint`), and this one must
+/// parse blobs written before `endpoint` existed (`serde(default)`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexEntry {
     slug: String,
     #[serde(default = "yes")]
     enabled: bool,
+    /// The instance URL, for a self-hosted provider. Not a secret. Absent from
+    /// the blob (not `null`) when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// Trims, and treats blank as absent — the same rule [`read`] applies.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Reads a stored value, treating empty as absent — the port has no delete, so
@@ -226,7 +243,15 @@ pub async fn list_providers(
     }
 
     for entry in index {
-        let mut endpoint = read(company, secrets, &provider_endpoint_key(&entry.slug)).await?;
+        // 1. The index row itself — where every write since #2306 puts it.
+        let mut endpoint = non_blank(entry.endpoint);
+        // 2. The per-slug key — where it lived from 2026-09-11 until #2306, and
+        //    where a rolled-back binary still writes it.
+        if endpoint.is_none() {
+            endpoint = read(company, secrets, &provider_endpoint_key(&entry.slug)).await?;
+        }
+        // 3. The flat entry-zero address, for the slug the flat keys describe.
+        //
         // **The flat address survives the slug entering the index.**
         //
         // An upgraded company keeps its SearXNG URL in `search/endpoint` alone,
@@ -246,7 +271,9 @@ pub async fn list_providers(
         // delete, so a copy would leave the same value at two addresses with
         // nothing to say which is current, and convergence is deliberately a
         // thing that happens on a real save rather than behind the operator's
-        // back.
+        // back. Since #2306 the next index mutation also writes this address
+        // into the row, which is safe because nothing writes `search/endpoint`
+        // any more — it can only be cleared.
         if endpoint.is_none() && entry_zero.as_deref() == Some(entry.slug.as_str()) {
             endpoint = read(company, secrets, ENDPOINT_SECRET).await?;
         }
@@ -271,6 +298,7 @@ async fn save_index(
         .map(|provider| IndexEntry {
             slug: provider.slug.clone(),
             enabled: provider.enabled,
+            endpoint: non_blank(provider.endpoint.clone()),
         })
         .collect();
     let raw = serde_json::to_string(&index).map_err(|err| {
@@ -409,8 +437,14 @@ async fn put_provider_locked(
     provider: SearchProvider,
 ) -> Result<()> {
     let mut providers: Vec<SearchProvider> = list_providers(company, secrets).await?;
+    let mut provider = provider;
+    provider.endpoint = non_blank(provider.endpoint.take());
 
     if let Some(endpoint) = provider.endpoint.as_deref() {
+        // **Also** the per-slug key, for one release (#2306). The index entry is
+        // what this binary reads first; this copy is what a binary rolled back to
+        // before #2306 reads, since it ignores `IndexEntry.endpoint`. Remove this
+        // write only in a release after the one that ships the index field.
         write(
             company,
             secrets,
@@ -430,7 +464,17 @@ async fn put_provider_locked(
         .iter_mut()
         .find(|existing| existing.slug == provider.slug)
     {
-        Some(existing) => *existing = provider,
+        Some(existing) => {
+            existing.enabled = provider.enabled;
+            // **Merge, never replace.** An omitted address keeps the stored one:
+            // a toggle, a legacy select with no address, or a key replace sends
+            // `None`, and replacing the row would wipe a SearXNG URL — agents then
+            // fall back to managed search and the bill moves to the platform.
+            // Nothing clears an address through here; removal does that.
+            if provider.endpoint.is_some() {
+                existing.endpoint = provider.endpoint;
+            }
+        }
         None => providers.push(provider),
     }
     save_index(company, secrets, &providers).await
@@ -641,8 +685,7 @@ pub async fn load_default_slug(
 ///
 /// Held under the index lock end to end, neither can interleave. An omitted
 /// `endpoint` is left exactly as stored rather than rewritten from a snapshot:
-/// the index carries no address, and [`put_provider_locked`] writes one only
-/// when given one.
+/// [`put_provider_locked`] merges: a `None` address keeps the stored one.
 ///
 /// Creating the row when it does not exist is deliberate — naming a provider
 /// on this route has always connected it — and the credential is written after
