@@ -25,7 +25,7 @@ license.workspace = true
 repository.workspace = true
 description = "Company operating system scaffold built on OpenHuman and TinyHumans Rust modules."
 readme = "../../README.md"
-build = "../../build.rs"
+build = "build.rs"
 keywords = ["company", "agents", "openhuman", "tinyagents", "axum"]
 categories = ["web-programming", "asynchronous"]
 # Each example is a standalone workspace member crate, not a bare-file example
@@ -39,35 +39,35 @@ autobenches = false
 
 [lib]
 name = "opencompany"
-path = "../../src/lib.rs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "opencompany"
-path = "../../src/bin/opencompany.rs"
+path = "src/bin/opencompany.rs"
 
 [[test]]
 name = "auth_matrix"
-path = "../../tests/auth_matrix.rs"
+path = "tests/auth_matrix.rs"
 
 [[test]]
 name = "desktop_e2e"
-path = "../../tests/desktop_e2e.rs"
+path = "tests/desktop_e2e.rs"
 
 [[test]]
 name = "hivemind_e2e"
-path = "../../tests/hivemind_e2e.rs"
+path = "tests/hivemind_e2e.rs"
 
 [[test]]
 name = "offline_e2e"
-path = "../../tests/offline_e2e.rs"
+path = "tests/offline_e2e.rs"
 
 [[test]]
 name = "one_card_per_message"
-path = "../../tests/one_card_per_message.rs"
+path = "tests/one_card_per_message.rs"
 
 [[test]]
 name = "product_identity"
-path = "../../tests/product_identity.rs"
+path = "tests/product_identity.rs"
 
 # Live end-to-end smoke for issue #9: one company agent on the embedded
 # OpenHuman runtime, one turn against the hosted brain. Needs a credential, so
@@ -75,7 +75,7 @@ path = "../../tests/product_identity.rs"
 # the default `cargo build`/CI.
 [[example]]
 name = "live_company_turn"
-path = "../../examples/live_company_turn.rs"
+path = "examples/live_company_turn.rs"
 required-features = ["openhuman"]
 
 # Server-only end-to-end drive of team orchestration: a company template on the
@@ -84,7 +84,7 @@ required-features = ["openhuman"]
 # example anyone can run — but it is not built by the default `cargo build`.
 [[example]]
 name = "team_orchestration_e2e"
-path = "../../examples/team_orchestration_e2e.rs"
+path = "examples/team_orchestration_e2e.rs"
 required-features = ["openhuman", "mcp"]
 
 [dependencies]
@@ -776,7 +776,7 @@ criterion = { version = "0.8", default-features = false, features = [
 # nothing to gate on.
 [[bench]]
 name = "journal_append"
-path = "../../benches/journal_append.rs"
+path = "benches/journal_append.rs"
 harness = false
 
 # Issue #1890 G. Opt-in for the same reason as the bench above: it measures the
@@ -785,6 +785,6 @@ harness = false
 # gate on.
 [[bench]]
 name = "journal_read_before"
-path = "../../benches/journal_read_before.rs"
+path = "benches/journal_read_before.rs"
 harness = false
 
