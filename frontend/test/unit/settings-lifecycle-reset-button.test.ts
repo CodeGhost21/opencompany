@@ -118,14 +118,12 @@ async function render(client: OpenCompanyClient, lifecycle: string, onReset?: ()
 }
 
 describe("the Reset / Start clean button's render gate", () => {
-  it("is left out while the product does not offer company creation", async () => {
-    // Reset archives this company and provisions a replacement through the same
-    // dialog "New company" opens — it is company creation wearing another
-    // label, so it answers the same presentation question the other four
-    // triggers do (`offersCompanyCreation`).
-    await render(clientWith(true), "running", () => {});
-    expect(resetButton()).toBeUndefined();
-  });
+  // "is left out while the product does not offer company creation" is
+  // covered in `settings-lifecycle-reset-button-product-scope.test.ts`, which
+  // imports the real, unmocked `product-scope` module — this file mocks
+  // `COMPANY_SWITCHING_HIDDEN` to `false` at module scope (see the top-of-file
+  // comment) so the flow tests below can reach the control at all, which makes
+  // "the product does not offer it" unrepresentable here.
 
   it("is left out when onReset is not given (mirrors the `offersCompanyCreation` gate upstream)", async () => {
     await render(clientWith(true), "running", undefined);
