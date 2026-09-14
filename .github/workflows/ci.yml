@@ -2349,3 +2349,25 @@ jobs:
   #
   # Keep the display name exactly `PR CI Gate`: it is what the rulesets'
   # `required_status_checks` entry references, and a rename would silently
+  pr-ci-gate:
+    name: PR CI Gate
+    needs:
+      - changes
+      - actions-pinned
+      - markdown-cap
+      - rust
+      - rust-mail
+      - rust-mongodb
+      - rust-gated
+      - rust-gated-binary
+      - console
+      - console-e2e
+      - console-e2e-live-brain
+      - console-e2e-first-run
+      - desktop
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gating lane to pass or be skipped
+        run: echo "${{ toJSON(needs) }}"
