@@ -64,19 +64,16 @@ on:
         default: patch
         type: choice
         options: [patch, minor, major]
-      commit_sha:
-        description: Cut from this commit instead of release HEAD. Must be reachable from release.
-        required: false
-        type: string
-        default: ""
       create_release:
         description: Tag and publish the GitHub Release. Off = bump, verify and build only (a rehearsal).
         required: false
         type: boolean
         default: true
 
+# Read by default; the jobs that push, create, publish or delete say so
+# themselves. A compromised build step then cannot write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-production
@@ -87,6 +84,8 @@ jobs:
     name: Bump version and tag
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
@@ -116,29 +115,14 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
-      - name: Configure git and pick the commit to cut
-        env:
-          COMMIT_SHA: ${{ inputs.commit_sha }}
+      - name: Configure git
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin --tags --prune --prune-tags
-          if [ -n "$COMMIT_SHA" ]; then
-            [[ "$COMMIT_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]] || {
-              echo "::error::commit_sha must be a hex SHA (7-40 chars), got '$COMMIT_SHA'" >&2
-              exit 1
-            }
-            git rev-parse --verify "${COMMIT_SHA}^{commit}" >/dev/null
-            git merge-base --is-ancestor "$COMMIT_SHA" origin/release || {
-              echo "::error::commit_sha $COMMIT_SHA is not reachable from release" >&2
-              exit 1
-            }
-            git checkout --detach "$COMMIT_SHA"
-          else
-            git checkout release
-            git pull origin release --ff-only
-          fi
+          git checkout release
+          git pull origin release --ff-only
 
       - name: Bump version (${{ inputs.release_type }})
         id: bump
@@ -164,23 +148,29 @@ jobs:
 
       # `[skip ci]` is belt-and-braces: a push made with GITHUB_TOKEN does not
       # fire `push` workflows anyway. The commit changes version numbers only.
+      #
+      # The files staged are the ones the bump script reports it wrote, so the
+      # commit can never miss a file the registry gained. Branch and tag go in
+      # ONE `--atomic` push: either both land or neither, so a tag that races
+      # another dispatch cannot leave a stray bump commit behind.
       - name: Commit and push version bump
         id: push
         env:
           VERSION: ${{ steps.bump.outputs.version }}
+          FILES: ${{ steps.bump.outputs.files }}
           TAG: ${{ steps.bump.outputs.tag }}
           CREATE_RELEASE: ${{ inputs.create_release }}
         run: |
           set -euo pipefail
-          git add -A -- Cargo.toml Cargo.lock crates/opencompany-app/Cargo.toml crates/opencompany-app/Cargo.lock \
-            crates/opencompany-app/tauri.conf.json frontend/package.json frontend/package-lock.json
+          # shellcheck disable=SC2086 # FILES is a space-separated list by contract
+          git add -- $FILES
           git commit -m "chore(release): v${VERSION} [skip ci]"
-          git push origin HEAD:release
           if [ "$CREATE_RELEASE" = "true" ]; then
             git tag -a "$TAG" -m "Release $TAG"
-            git push origin "$TAG"
+            git push --atomic origin HEAD:release "refs/tags/$TAG"
           else
             echo "Skipping tag creation (create_release=false)"
+            git push origin HEAD:release
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -246,6 +236,8 @@ jobs:
     needs: [prepare-build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - name: Nothing to draft
         if: ${{ !inputs.create_release }}
@@ -326,6 +318,8 @@ jobs:
   build-desktop:
     name: Build desktop
     needs: [prepare-build, create-release]
+    permissions:
+      contents: write # uploads into the draft Release
     uses: ./.github/workflows/build-desktop.yml
     secrets:
       APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -367,6 +361,10 @@ jobs:
             echo "::error::could not read TENANT_FEATURES from deploy-staging.yml" >&2
             exit 1
           fi
+          if ! [[ "$value" =~ ^[A-Za-z0-9_,-]+$ ]]; then
+            echo "::error::TENANT_FEATURES in deploy-staging.yml is not a plain feature list: '$value'" >&2
+            exit 1
+          fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -394,6 +392,8 @@ jobs:
     if: inputs.create_release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -413,6 +413,8 @@ jobs:
     if: inputs.create_release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       # Every asset a release must carry, or the release is not cut. The DMGs
       # are what a person installs; the archives and signatures are what an
@@ -462,7 +464,9 @@ jobs:
   # reachable. The version-bump commit stays on `release`; that is harmless.
   cleanup-failed-release:
     name: Remove draft and tag if a step failed
-    needs: [prepare-build, verify, create-release, build-desktop, build-docker, updater-manifest]
+    # Including `publish-release`: a failed asset check or a failed
+    # `gh release edit` is exactly the half-built state this job exists for.
+    needs: [prepare-build, verify, create-release, build-desktop, build-docker, updater-manifest, publish-release]
     if: >-
       always()
       && inputs.create_release
@@ -471,9 +475,12 @@ jobs:
           || needs.create-release.result == 'failure' || needs.create-release.result == 'cancelled'
           || needs.build-desktop.result == 'failure' || needs.build-desktop.result == 'cancelled'
           || needs.build-docker.result == 'failure' || needs.build-docker.result == 'cancelled'
-          || needs.updater-manifest.result == 'failure' || needs.updater-manifest.result == 'cancelled')
+          || needs.updater-manifest.result == 'failure' || needs.updater-manifest.result == 'cancelled'
+          || needs.publish-release.result == 'failure' || needs.publish-release.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Delete draft release and tag
         env:

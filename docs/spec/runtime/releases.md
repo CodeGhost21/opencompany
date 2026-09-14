@@ -122,7 +122,7 @@ numbers only and is verified by the cut itself.
 | Production run red, no Release visible | `cleanup-failed-release` deleted the draft and the tag. | Read the failed job, fix on `release` via PR, re-dispatch. The next cut takes the next patch number. |
 | "release→main back-merge hit conflicts" warning | Main and release diverged on the same lines. The release itself is fine and published. | Merge `release` into `main` by hand and resolve. |
 | Release is published but `latest.json` is missing | Cannot happen through this flow — `publish-release` checks for it. If you see it, the release was published some other way. | Cut the next version; a published release cannot be amended. |
-| Need a build from a commit behind the branch head | — | Pass `commit_sha`; it must be reachable from the branch you dispatch from. |
+| Need a build from a commit behind `main`'s head | — | That is what `release` is for: put `release` at that point (promote, or a PR against `release`) and cut from `release`. A bump commit built on an older point cannot be pushed to a branch without force, so there is no "cut this SHA" input. |
 
 ## What is needed once
 

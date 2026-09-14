@@ -374,7 +374,15 @@ jobs:
           TAG: ${{ inputs.tag }}
           ARCHIVE: ${{ steps.updater.outputs.archive }}
           SIGNATURE: ${{ steps.updater.outputs.signature }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$SIGNATURE" -R "$GITHUB_REPOSITORY" --clobber
+        run: |
+          set -euo pipefail
+          for f in "$ARCHIVE" "$SIGNATURE"; do
+            if [ -z "$f" ] || [ ! -s "$f" ]; then
+              echo "::error::package-updater-artifact.sh reported no usable archive/signature (archive='$ARCHIVE', signature='$SIGNATURE'); refusing to upload." >&2
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" "$ARCHIVE" "$SIGNATURE" -R "$GITHUB_REPOSITORY" --clobber
 
       # BOTH matrix legs reach this step, each with its own per-arch filename,
       # so the Release ends up carrying both DMGs.
