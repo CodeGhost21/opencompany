@@ -26,6 +26,7 @@
 //! engine with no key falls back to the managed surface.
 
 pub mod catalogue;
+pub mod copy;
 pub mod probe;
 pub mod resolve;
 pub mod store;
