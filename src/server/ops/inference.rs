@@ -71,7 +71,10 @@ const REBUILT_NOTE: &str = "Saved, and this company's runtime was rebuilt so the
      live now. Agents think with it from their next turn and scheduled workflows fire again — no \
      restart needed.";
 
-mod providers;
+// Keys rework (#2306), slice 4a: `pub(crate)` (not the default private) so
+// `company_key::fan_out` can reach `catalogue_offer` without a second copy of
+// "sort, dedupe, cap" — see that function's own doc comment.
+pub(crate) mod providers;
 
 /// Builds the inference management route fragment.
 pub fn router() -> Router<AppState> {

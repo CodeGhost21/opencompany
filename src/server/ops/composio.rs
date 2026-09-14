@@ -733,6 +733,12 @@ async fn set_token(
     Json(body): Json<SetToken>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
+    // Keys rework (#2306), slice 4a: this route writes the same
+    // `composio/tinyhumans/key` slot the account-key fan-out
+    // (`company_key::fan_out`) copies into, under the same lock — so a
+    // concurrent paste here and account-key save cannot interleave and leave
+    // the two disagreeing about which value is current.
+    let _fan_out_guard = crate::company::company_key::slot_guard(runtime.id()).await;
     let clearing = body.token.trim().is_empty();
     // Only a clear is guarded (in-use-guards.md §1/§6): setting or rotating a
     // non-empty token cannot strand anything this company already had — the
