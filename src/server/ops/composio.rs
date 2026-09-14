@@ -53,12 +53,12 @@
 //!
 //! Either way the token is **write-only** over the API: set through the `token`
 //! field, stored in the secret store under
-//! [`TOKEN_KEY`](crate::company::composio::TOKEN_KEY), and **never** echoed. The
-//! read shape carries only `credentialSource` plus non-secret routing (backend
-//! URL, toolkit allowlist) — never a token, and never a file path. A set / rotate
-//! / clear takes effect on the agents' **next turn** with no restart (the harness
-//! re-resolves the credential each turn and rebuilds the roster when the
-//! *identity* behind it changes).
+//! [`TINYHUMANS_KEY_KEY`](crate::company::composio::TINYHUMANS_KEY_KEY), and
+//! **never** echoed. The read shape carries only `credentialSource` plus
+//! non-secret routing (backend URL, toolkit allowlist) — never a token, and
+//! never a file path. A set / rotate / clear takes effect on the agents'
+//! **next turn** with no restart (the harness re-resolves the credential
+//! each turn and rebuilds the roster when the *identity* behind it changes).
 
 use axum::Json;
 use axum::Router;
@@ -71,8 +71,10 @@ use crate::AppState;
 // longer re-derives the credential tier from booleans, it asks the resolver
 // (`resolve_credential`) — see `credential_source_for` below.
 use crate::company::composio::{
-    CatalogEntry, ComposioMode, backend_url_or_default, resolve_access, store_api_key, store_token,
+    CatalogEntry, ComposioMode, backend_url_or_default, load_mode, resolve_access,
+    resolve_credential, store_api_key, store_token,
 };
+use crate::company::composio_probe::{ComposioProbeClass, classify, describe, describe_verdict};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
@@ -94,6 +96,22 @@ const SWITCH_NOTE: &str =
 const CLEAR_NOTE: &str =
     "Composio token cleared. Agents use whatever credential remains on their next turn.";
 
+/// The reminder attached to storing a managed-route token for a company that is
+/// **on BYOK**.
+///
+/// [`SWITCH_NOTE`] would be a lie here, in the way that matters most: it says
+/// agents pick the token up on their next turn, and they do not. `resolve_access`
+/// reads the BYOK key while the company is on that route, so a token stored for
+/// the managed route sits there doing nothing until somebody chooses that route.
+///
+/// The state is reachable on purpose. A BYOK company whose managed chain
+/// resolves to nothing cannot be offered "Use this" — that would be switching
+/// into an outage — so the console offers the token first and the switch after,
+/// which is the only order that works. Saying "in effect" at the end of the
+/// first step would be reporting the second one as already done.
+const INACTIVE_TOKEN_NOTE: &str = "Composio token saved for the managed route. This company is \
+     still on its own Composio account, so agents keep using that key until you switch routes.";
+
 /// The reminder attached to switching a company onto its own Composio account.
 ///
 /// It names the consequence the radio button cannot: the providers connected
@@ -101,11 +119,11 @@ const CLEAR_NOTE: &str =
 /// visible from the company's own account, so the grid will look empty until
 /// they are connected again there.
 const BYOK_NOTE: &str = "This company now reaches Composio through its own account. Agents pick \
-     that up on their next turn. Providers connected through OpenHuman-managed Composio stay in \
+     that up on their next turn. Providers connected through TinyHumans-managed Composio stay in \
      that account — connect them again here, or clear the key to switch back.";
 
 /// The reminder attached to giving the managed route back.
-const MANAGED_NOTE: &str = "Composio API key cleared. This company is back on OpenHuman-managed \
+const MANAGED_NOTE: &str = "Composio API key cleared. This company is back on TinyHumans-managed \
      Composio from the agents' next turn, with the providers it had connected there.";
 
 /// The toolkits the console should offer for a company, whether that answer
@@ -188,10 +206,8 @@ pub(crate) fn evict_catalog_cache(runtime: &CompanyRuntime) {
 fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
     use crate::app::config::EnvSource;
     let env = crate::app::config::ProcessEnv;
-    let backend_url = backend_url_or_default(
-        env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV),
-        env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
-    );
+    let backend_url =
+        backend_url_or_default(env.get(crate::company::composio::TINYHUMANS_API_URL_ENV));
     composio_toolkits::cache_key(runtime.id(), &backend_url)
 }
 
@@ -262,6 +278,7 @@ pub fn router() -> Router<AppState> {
     scoped("/composio", get(get_status))
         .merge(scoped("/composio/token", put(set_token)))
         .merge(scoped("/composio/api-key", put(set_api_key)))
+        .merge(scoped("/composio/api-key/test", post(test_api_key)))
         .merge(scoped("/composio/authorize", post(authorize)))
         .merge(scoped("/composio/connections", get(connections)))
         .merge(scoped(
@@ -294,6 +311,28 @@ struct ComposioStatusDto {
     ///
     /// A tier name, never a credential and never a path.
     credential_source: CredentialSource,
+    /// Which tier the **managed** chain resolves to, whatever [`Self::mode`]
+    /// says — the company's own backend token, then its TinyHumans key, then
+    /// this instance's platform identity, then nothing.
+    ///
+    /// Under `managed` this is [`Self::credential_source`] by construction:
+    /// both come from the same resolver, so they cannot disagree. Under `byok`
+    /// they differ on purpose. `credentialSource` there names the **Composio
+    /// API key** the calls actually present, because that is what the agents
+    /// hold; this field names what the managed route *would* answer with if the
+    /// key were cleared. Without it the console can show a BYOK company the
+    /// consequence of going back to managed only by making it go back and look.
+    ///
+    /// A **tier name**. Never a credential, never a path, and — the part worth
+    /// saying out loud — **never a boolean about a secret slot**. A
+    /// `tokenConfigured`-shaped field was on this DTO once and was removed by
+    /// issue #886: it answered "did somebody paste something into
+    /// `composio/tinyhumans/key` (then `composio/token`)", which is one tier of
+    /// the chain, and it read `false` for companies whose agents were calling
+    /// `GITHUB_*` tools successfully in the same session. Do not reintroduce
+    /// one under any name. The question it looked like it answered is
+    /// answered here, by the tier that actually resolves.
+    managed_credential_source: CredentialSource,
     /// Which host this company's Composio calls go to — `managed` (proxied
     /// through the OpenHuman backend, the default) or `byok` (straight to this
     /// company's own Composio account).
@@ -364,11 +403,36 @@ struct ComposioStatusDto {
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
+///
+/// [`Self::advisory`] and [`Self::probe_class`] were added **additively** for
+/// issue #2275 and are omitted entirely when there is nothing to say, so every
+/// existing consumer of `status` + `note` reads the same body it always did.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MutationResponse {
     status: ComposioStatusDto,
     note: String,
+    /// What the credential check said, when the write landed anyway.
+    ///
+    /// Present only when a probe failed **non-destructively** — the key is
+    /// stored and in use, and only its reachability is in question. Always
+    /// [`describe`]'s fixed copy, never the upstream error text: that can echo
+    /// request headers or a key fragment, and this lands in a banner somebody
+    /// screenshots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advisory: Option<String>,
+    /// The class behind [`Self::advisory`], so the console can decide how to
+    /// render it (and whether to offer "add anyway") without parsing prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_class: Option<ComposioProbeClass>,
+    /// The `usedBy` this mutation would have refused with, echoed back on a
+    /// **confirmed** clear/switch (`docs/key-reworks/in-use-guards.md` §3) —
+    /// the shape computed *before* the mutation applied, so the console can
+    /// show what it just broke without re-deriving it. `None` on every
+    /// mutation that is not a guarded clear/switch, and on a guarded one that
+    /// had nothing to warn about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by: Option<crate::error::UsedBy>,
 }
 
 /// Set-token body. `token` is write-only intake (never returned): a non-empty
@@ -378,6 +442,13 @@ struct MutationResponse {
 #[serde(rename_all = "camelCase")]
 struct SetToken {
     token: String,
+    /// Confirms a clear that the in-use guard would otherwise refuse
+    /// (`docs/key-reworks/in-use-guards.md` §2). Ignored on a set/rotate —
+    /// only a clear is guarded — and ignored when there is nothing to
+    /// confirm. Defaults to `false`, so a caller that has never heard of this
+    /// field gets the guarded path.
+    #[serde(default)]
+    confirm_in_use: bool,
 }
 
 /// Set-API-key body. `apiKey` is write-only intake (never returned): a non-empty
@@ -394,6 +465,27 @@ struct SetToken {
 #[serde(rename_all = "camelCase")]
 struct SetApiKey {
     api_key: String,
+    /// Store the key without checking it first.
+    ///
+    /// The escape hatch for a key that is valid but whose check cannot
+    /// complete — a proxy in the way, a network the host cannot see past.
+    /// Defaults to **false**, so a caller that has never heard of this field
+    /// gets the checked path; nothing opts in by omission.
+    ///
+    /// The route simply honours it. Gating the *offer* on a probe having
+    /// already failed is the console's job (see `connect-flow.md`: "add anyway"
+    /// is unlocked by a typed probe failure and cleared on every retry), and it
+    /// has to be, because a route cannot tell a considered override from a
+    /// client that sends `true` always. What the route can guarantee is the
+    /// default, which is what it guarantees.
+    #[serde(default)]
+    skip_verify: bool,
+    /// Confirms a route switch (or a BYOK key clear back to managed) that the
+    /// in-use guard would otherwise refuse (`docs/key-reworks/in-use-guards.md`
+    /// §2). Ignored when the write does not change the company's route —
+    /// rotating a key already in use is never guarded. Defaults to `false`.
+    #[serde(default)]
+    confirm_in_use: bool,
 }
 
 /// `POST …/composio/authorize` body: the toolkit slug (`gmail` / `slack` /
@@ -511,29 +603,44 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         None => (false, Vec::new()),
     };
     let env = crate::app::config::ProcessEnv;
-    let (env_url, api_url) = {
+    let api_url = {
         use crate::app::config::EnvSource;
-        (
-            env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV),
-            env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
-        )
+        env.get(crate::company::composio::TINYHUMANS_API_URL_ENV)
     };
-    let (mode, credential_source) = access_for(
-        runtime,
-        TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
-    )
-    .await?;
+    let token_source = TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new);
+    let (mode, credential_source) = access_for(runtime, token_source.clone()).await?;
+    // The managed chain, asked unconditionally.
+    //
+    // `access_for` short-circuits under BYOK — `resolve_access` reads the
+    // company's Composio API key and stops — so `credential_source` there names
+    // the BYOK key and says nothing about the route the company would return
+    // to. Nor is the managed chain resolved anywhere else on this path: the
+    // catalog fetch goes through `resolve_tenant`, which calls the same
+    // `resolve_access` and therefore dials `backend.composio.dev` with the BYOK
+    // key. So the managed tier has to be resolved here, explicitly, or not at
+    // all.
+    //
+    // The cost is secret-store reads and no network — the same reads the
+    // managed path already makes on every status poll — which is why this is
+    // unconditional rather than `if mode.is_byok()`. One derivation, one code
+    // path, and no branch where the field could come from somewhere else.
+    let managed_credential_source =
+        resolve_credential(runtime.id(), runtime.secrets().as_ref(), token_source)
+            .await
+            .map_err(ApiError)?
+            .source();
     let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
     // Report the host the calls actually reach. Under BYOK the managed backend
     // URL is resolved and then not used, so echoing it would be misdirection.
     let backend_url = match mode {
         ComposioMode::Byok => crate::company::composio::DIRECT_BASE_URL.to_string(),
-        ComposioMode::Managed => backend_url_or_default(env_url, api_url),
+        ComposioMode::Managed => backend_url_or_default(api_url),
     };
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
         granted,
         credential_source,
+        managed_credential_source,
         mode,
         backend_url,
         toolkits,
@@ -550,6 +657,68 @@ async fn get_status(company: ScopedCompany) -> Result<Json<ComposioStatusDto>, A
     Ok(Json(effective_status(company.runtime.as_ref()).await?))
 }
 
+/// The `usedBy` a Composio credential clear or mode switch would carry, per
+/// `docs/key-reworks/in-use-guards.md` §2's `surfaces` table: `surfaces:
+/// [Composio]` iff `composio/mode` currently selects `slot` — the route the
+/// credential being cleared/switched belongs to — else `None`, the whole
+/// field omitted rather than emitted empty, matching every other producer of
+/// this shape.
+///
+/// `current_mode` is the mode the caller already read, passed in rather than
+/// re-read here: [`set_token`] reads it purely to call this, and
+/// [`set_api_key`] already needed it to decide whether the route is
+/// switching at all, so a second read here could only disagree with the
+/// caller's own under a concurrent write between them. `slot` names which
+/// route the touched credential belongs to —
+/// [`ComposioMode::Managed`] for `composio/tinyhumans/key`
+/// ([`TINYHUMANS_KEY_KEY`](crate::company::composio::TINYHUMANS_KEY_KEY)),
+/// [`ComposioMode::Byok`] for `composio/byok/key`
+/// ([`BYOK_KEY_KEY`](crate::company::composio::BYOK_KEY_KEY)) — so `mode ==
+/// slot` is exactly "a workload would actually lose tool access": the
+/// credential being touched is the one calls are currently resolving
+/// through.
+///
+/// This replaces the previous signal (`has_connected_integrations` reading
+/// `composio/defaults`, this company's pinned toolkit connections): cheap
+/// but imprecise, since a pin can exist under a route this mutation does not
+/// even touch, and it could not tell a clear on the *active* slot from one
+/// on the inactive one. The mode match is both cheaper (no secret-store read
+/// beyond the one the caller already made) and exact — it is the literal
+/// condition in-use-guards.md §2 states.
+///
+/// Composio never populates `default` or `agents`: it has no default/pair
+/// concept of its own (§1: "only `surfaces`, since Composio has no
+/// default/agent-pair concept").
+fn composio_used_by(
+    current_mode: ComposioMode,
+    slot: ComposioMode,
+) -> Option<crate::error::UsedBy> {
+    (current_mode == slot).then(|| crate::error::UsedBy {
+        surfaces: vec![crate::error::UsedBySurface::Composio],
+        ..Default::default()
+    })
+}
+
+/// §2's fixed sentence for "a key clear/disable with only `surfaces`":
+/// `"<Label>'s key is used by <surfaces, comma-joined>."`.
+///
+/// This is the only shape a Composio-native guard ever produces (Composio has
+/// no `default`/`agents` — see [`composio_used_by`]), and applying the
+/// template here reads self-referentially: "Composio's key is used by
+/// Composio." That is not a mistake. The `surfaces` vocabulary
+/// (`llm`/`composio`/`search`) exists to name *other* product areas that
+/// share one credential — e.g. the TinyHumans account key also brokering
+/// Composio — and Composio clearing its *own* token or key has exactly one
+/// surface that can depend on it: Composio itself, via the toolkit
+/// connections pinned under it. There is no better noun in the shared
+/// vocabulary for "this company's connected integrations", so the literal
+/// application of the template is what this function does; a human reading
+/// the sentence still gets the right idea (something Composio-shaped breaks),
+/// which is what the message is for.
+fn composio_in_use_message() -> String {
+    "Composio's key is used by Composio.".to_string()
+}
+
 /// `PUT …/composio/token` — set / rotate / clear this company's BYO token. See
 /// the module docs: the hosted path needs no token, and standalone operation
 /// (where this is the only option) is unsupported.
@@ -564,6 +733,31 @@ async fn set_token(
     Json(body): Json<SetToken>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
+    let clearing = body.token.trim().is_empty();
+    // Only a clear is guarded (in-use-guards.md §1/§6): setting or rotating a
+    // non-empty token cannot strand anything this company already had — the
+    // credential it presents only gets more likely to resolve. Computed
+    // before the write, per §3, so a confirmed clear echoes exactly what it
+    // would have refused with. `composio/tinyhumans/key` only feeds a live
+    // call while the route is `managed` (§2's surfaces table) — under `byok`
+    // this clear touches nothing the agents are currently resolving through.
+    let used_by = if clearing {
+        let mode = load_mode(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+        composio_used_by(mode, ComposioMode::Managed)
+    } else {
+        None
+    };
+    if clearing
+        && !body.confirm_in_use
+        && let Some(used_by) = used_by.clone()
+    {
+        return Err(ApiError(crate::error::OpenCompanyError::InUse {
+            message: composio_in_use_message(),
+            used_by,
+        }));
+    }
     store_token(runtime.id(), runtime.secrets().as_ref(), &body.token)
         .await
         .map_err(ApiError)?;
@@ -576,19 +770,36 @@ async fn set_token(
     // After the store, so the journal records a completed change. An empty
     // value is a clear, not a set — the two are worth telling apart in an
     // audit trail, since one grants access and the other withdraws it.
-    let change = if body.token.trim().is_empty() {
+    let change = if clearing {
         "credential_cleared"
     } else {
         "credential_set"
     };
     journal(&company, change, None).await?;
+    // Read once and answered from, rather than read twice: the note below is a
+    // statement about the same status this response carries, and deriving the
+    // two from separate reads is how a page comes to show a sentence that
+    // disagrees with the row underneath it.
+    let status = effective_status(runtime).await?;
+    let note = if clearing {
+        CLEAR_NOTE.to_string()
+    } else if matches!(status.mode, ComposioMode::Managed) {
+        SWITCH_NOTE.to_string()
+    } else {
+        // Stored for a route this company is not on. See `INACTIVE_TOKEN_NOTE`.
+        INACTIVE_TOKEN_NOTE.to_string()
+    };
     Ok(Json(MutationResponse {
-        status: effective_status(runtime).await?,
-        note: if body.token.trim().is_empty() {
-            CLEAR_NOTE.to_string()
-        } else {
-            SWITCH_NOTE.to_string()
-        },
+        status,
+        note,
+        // Not probed. This route sets a bearer the *TinyHumans backend*
+        // recognises, and there is no cheap call here that distinguishes a bad
+        // bearer from a backend that is down — which is the distinction the
+        // whole classifier exists to make. Checking it badly would be worse
+        // than not checking it.
+        advisory: None,
+        probe_class: None,
+        used_by,
     }))
 }
 
@@ -614,7 +825,64 @@ async fn set_api_key(
     Json(body): Json<SetApiKey>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let mode = store_api_key(runtime.id(), runtime.secrets().as_ref(), &body.api_key)
+    let api_key = body.api_key.trim();
+
+    // The mode this write would select, mirroring `store_api_key`'s own rule:
+    // a non-empty key means BYOK, an empty one gives the managed route back.
+    let requested_mode = if api_key.is_empty() {
+        ComposioMode::Managed
+    } else {
+        ComposioMode::Byok
+    };
+    let before_mode = load_mode(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    // Guarded only when the ROUTE actually changes (in-use-guards.md §2/§6):
+    // a rotate (byok → byok, or an empty-clear on a company that was already
+    // managed) is never a switch, so `switching` alone decides whether this
+    // is a guarded action at all. Separately, `composio_used_by` decides
+    // whether that switch has anything to report: `composio/byok/key` only
+    // feeds a live call while `before_mode` already reads `byok` — a switch
+    // FROM managed TO byok (`before_mode == Managed`) sets a key nothing was
+    // resolving through yet, so it reports nothing, matching §2's rule that
+    // `surfaces` fires only when the mode already selects the slot being
+    // touched.
+    let switching = before_mode != requested_mode;
+    let used_by = if switching {
+        composio_used_by(before_mode, ComposioMode::Byok)
+    } else {
+        None
+    };
+    if switching
+        && !body.confirm_in_use
+        && let Some(used_by) = used_by.clone()
+    {
+        return Err(ApiError(crate::error::OpenCompanyError::InUse {
+            message: composio_in_use_message(),
+            used_by,
+        }));
+    }
+
+    // Probe the DRAFT, before anything is written. The clear path is never
+    // probed — withdrawing a credential is always allowed, and there would be
+    // nothing to check — and `skipVerify` is the operator's explicit opt-out.
+    let probe = if api_key.is_empty() || body.skip_verify {
+        None
+    } else {
+        classified_probe(runtime, api_key).await
+    };
+    // Composio rejected the key: nothing is stored, so the company's mode, its
+    // existing key and its cached catalog are all exactly as they were — there
+    // is no rollback here because there was no write. Not journaled either:
+    // nothing about what this company connects through changed.
+    if let Some(class) = probe
+        && class.is_destructive()
+    {
+        return Err(ApiError(crate::error::OpenCompanyError::InvalidRequest(
+            describe(class).to_string(),
+        )));
+    }
+    let mode = store_api_key(runtime.id(), runtime.secrets().as_ref(), api_key)
         .await
         .map_err(ApiError)?;
     evict_catalog_cache(runtime);
@@ -633,7 +901,230 @@ async fn set_api_key(
             ComposioMode::Byok => BYOK_NOTE.to_string(),
             ComposioMode::Managed => MANAGED_NOTE.to_string(),
         },
+        // A non-destructive class rode through the store: the key is live, and
+        // only the check is in doubt.
+        advisory: probe.map(|class| describe(class).to_string()),
+        probe_class: probe,
+        used_by,
     }))
+}
+
+/// Ask Composio whether it recognises an API key, and classify the answer.
+/// `None` means the check came back clean.
+///
+/// Two callers, one derivation: [`set_api_key`] checks a **draft** before
+/// storing it, and [`test_api_key`] checks the one already **stored**. Both
+/// hand the key in directly, so neither needs the key to be resolvable from
+/// anywhere, and a second copy of this would be a second place for the two
+/// routes' verdicts to drift apart.
+///
+/// The handlers are auth, shape and delegation; every branch worth a test is
+/// either here (one `match`) or in
+/// [`composio_probe`](crate::company::composio_probe), which is pure. What this
+/// function owns is the one rule that cannot live in either: **the raw upstream
+/// reason does not leave this function at all — not to the response, and not
+/// to a log.** It can carry a proxy's HTML, a response header, or a key
+/// fragment, and the only string that leaves this function is the class.
+///
+/// It used to go to `debug`, on the theory that a debug log is private. It is
+/// not: a debug stream reaches log aggregation, exporters and anyone who can
+/// read the host's logs, which is a wider audience than the admin who pasted
+/// the key. The class is what diagnosis needs, and it is still logged.
+async fn classified_probe(runtime: &CompanyRuntime, api_key: &str) -> Option<ComposioProbeClass> {
+    #[cfg(test)]
+    let outcome = match probe_override::get(runtime.id().as_ref()) {
+        Some(forced) => forced,
+        None => probe_transport(api_key).await,
+    };
+    #[cfg(not(test))]
+    let outcome = probe_transport(api_key).await;
+
+    match outcome {
+        Ok(()) => None,
+        Err(raw) => {
+            let class = classify(&raw);
+            tracing::debug!(
+                company = %runtime.id(),
+                class = %class,
+                "[composio] a draft API key did not check out"
+            );
+            Some(class)
+        }
+    }
+}
+
+/// The probe's network call, split on the feature exactly as [`fetch_catalog`]
+/// is.
+#[cfg(feature = "composio")]
+async fn probe_transport(api_key: &str) -> Result<(), String> {
+    crate::harness::composio_direct::probe_api_key(api_key).await
+}
+
+/// Without the `composio` feature there is no client to check a key with.
+///
+/// This reports the key as **un-probeable**, which classifies `unknown` — the
+/// non-destructive class — so the key is stored with an advisory. That is the
+/// same shape [`fetch_catalog`] takes (an honest `Err` that the caller degrades
+/// gracefully from) and it is the only safe direction: refusing the write would
+/// make a default build unable to configure BYOK at all, and treating an
+/// absent client as a rejected credential would throw away a key nothing ever
+/// looked at.
+#[cfg(not(feature = "composio"))]
+async fn probe_transport(_api_key: &str) -> Result<(), String> {
+    Err("Composio is not compiled into this build, so the key could not be checked".to_string())
+}
+
+/// Test-only: force [`classified_probe`]'s transport answer for one company.
+///
+/// The route's three outcomes — rejected, clean, advisory — are the whole point
+/// of the change, and two of them cannot be reached from a default build (which
+/// has no Composio client) nor from a feature build (which would dial
+/// `backend.composio.dev` from a unit test). Keyed by company id rather than
+/// held as one global, for the reason `composio_toolkits::cache` is: the test
+/// binary runs these concurrently in one process, and a single slot would make
+/// them race. `#[cfg(test)]` throughout — there is no seam here in a shipped
+/// build.
+#[cfg(test)]
+mod probe_override {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    type Outcome = Result<(), String>;
+
+    fn map() -> &'static Mutex<HashMap<String, Outcome>> {
+        static MAP: OnceLock<Mutex<HashMap<String, Outcome>>> = OnceLock::new();
+        MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn set(company: &str, outcome: Outcome) {
+        map()
+            .lock()
+            .expect("composio probe override")
+            .insert(company.to_string(), outcome);
+    }
+
+    pub(super) fn get(company: &str) -> Option<Outcome> {
+        map()
+            .lock()
+            .expect("composio probe override")
+            .get(company)
+            .cloned()
+    }
+}
+
+/// `POST …/composio/api-key/test` — check the **stored** Composio API key and
+/// report the verdict. Changes nothing.
+///
+/// ## It never writes, on any path — including `auth`
+///
+/// Not even a rejected key is cleared here, and this is the comment that exists
+/// so a later edit does not "tidy" this into reuse of [`set_api_key`]'s path.
+/// Testing a credential and committing to (or withdrawing from) it are separate
+/// acts — the same rule `POST /api/v1/setup/inference/test` already states — and
+/// a Test button that deleted a company's key on a bad afternoon would be the
+/// worst control on the page: the operator pressed the one thing that promised
+/// to be safe. A key an operator wants gone goes through `PUT …/composio/api-key`
+/// with an empty value, deliberately, which is also the only path that journals
+/// the change.
+///
+/// Consequently there is no journal line here either. Nothing about what this
+/// company connects through changed, and an audit trail that records reads
+/// dilutes the one thing it is for.
+///
+/// ## No body, and there never will be one
+///
+/// The key is read from the company's own store and the endpoint is the
+/// compile-time [`DIRECT_BASE_URL`](crate::company::composio::DIRECT_BASE_URL).
+/// A body carrying a key — or worse, an endpoint — would turn an authenticated
+/// console route into "send this credential to that host", which is the
+/// SSRF-shaped primitive the constant destination currently rules out. A draft
+/// key is checked by [`set_api_key`], which has to be handed one anyway.
+///
+/// ## Admin-only
+///
+/// It performs no write, so this is not the usual write/read split. It spends
+/// the company's own credential against a third party and reports whether that
+/// credential is good — an action taken on the company's behalf, and one whose
+/// answer (`this company's Composio account is rejected`) is about the
+/// company's standing with a vendor rather than about what its agents can do.
+/// Reads stay open to members because they carry no credential and trigger no
+/// outbound call; this one does the second of those.
+async fn test_api_key(company: AdminScopedCompany) -> Result<Json<ApiKeyTestDto>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let api_key = stored_api_key(runtime).await?;
+    // `NotConfigured`, not the catch-all conflict: "there is nothing here to
+    // test" is a permanent state the console reads off the code and renders as
+    // a disabled control, and it must stay distinguishable from a check that
+    // ran and failed. Same code `resolve_tenant` answers with, for the same
+    // distinction.
+    let Some(api_key) = api_key else {
+        return Err(ApiError(crate::error::OpenCompanyError::NotConfigured(
+            "this company is on TinyHumans-managed Composio, so there is no API key to test — \
+             paste one to bring its own Composio account"
+                .to_string(),
+        )));
+    };
+    Ok(Json(match classified_probe(runtime, &api_key).await {
+        None => ApiKeyTestDto {
+            ok: true,
+            probe_class: None,
+            message: None,
+        },
+        Some(class) => ApiKeyTestDto {
+            ok: false,
+            probe_class: Some(class),
+            // `describe_verdict`, not `describe`: this route stored nothing, and
+            // the latter's copy says `Saved, …`.
+            message: Some(describe_verdict(class).to_string()),
+        },
+    }))
+}
+
+/// The company's own Composio API key, or `None` when there is nothing to
+/// check.
+///
+/// `None` covers both ways that happens — the company is on the managed route,
+/// or it is on BYOK with a blank slot — because the answer the caller gives is
+/// the same either way and a second variant would only invite a second
+/// sentence. The BYOK-with-no-key case is already a state
+/// [`resolve_access`] warns about on the agent path.
+async fn stored_api_key(runtime: &CompanyRuntime) -> Result<Option<String>, ApiError> {
+    use crate::company::composio::{load_byok_key, load_mode};
+
+    if !load_mode(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?
+        .is_byok()
+    {
+        return Ok(None);
+    }
+    let stored = load_byok_key(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    Ok(stored
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty()))
+}
+
+/// `POST …/composio/api-key/test` response — a verdict, and never a credential.
+///
+/// [`Self::ok`] alone answers the console's control. The other two are present
+/// only on a failure: the class so the page can decide how to render it, and
+/// the fixed copy for the class so it does not have to hold its own table of
+/// sentences. Both are omitted rather than nulled, matching every other
+/// optional field on this surface.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyTestDto {
+    /// Whether Composio answered the check.
+    ok: bool,
+    /// Why it did not, when it did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe_class: Option<ComposioProbeClass>,
+    /// The operator-facing sentence for [`Self::probe_class`] — always
+    /// [`describe_verdict`]'s fixed copy, never the upstream error text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 /// Records who changed the company's tool access (issue #403).
@@ -726,7 +1217,6 @@ pub(crate) async fn resolve_tenant(
         .map(|record| record.manifest.tools.composio.toolkits.clone())
         .unwrap_or_default();
     let env = crate::app::config::ProcessEnv;
-    let backend_env = env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV);
     let api_env = env.get(crate::company::composio::TINYHUMANS_API_URL_ENV);
     // Resolved here rather than through `TenantComposio::resolve` so a store
     // read failure stays distinguishable from "nothing configured". This is the
@@ -750,7 +1240,7 @@ pub(crate) async fn resolve_tenant(
         return Err(ApiError(crate::error::OpenCompanyError::NotConfigured(
             match access.mode {
                 ComposioMode::Byok => "this company uses its own Composio account but no Composio \
-                     API key is stored — paste one, or clear it to go back to OpenHuman-managed \
+                     API key is stored — paste one, or clear it to go back to TinyHumans-managed \
                      Composio"
                     .to_string(),
                 ComposioMode::Managed => "no Composio credential is available for this company — \
@@ -760,7 +1250,7 @@ pub(crate) async fn resolve_tenant(
         )));
     }
     Ok(crate::harness::composio::TenantComposio::from_access(
-        backend_url_or_default(backend_env, api_env),
+        backend_url_or_default(api_env),
         access,
         toolkits,
     ))
@@ -1388,19 +1878,22 @@ mod tests {
 
     /// Serialises this test against `an_admin_is_unaffected`'s env mutation.
     ///
-    /// In composio builds that test repoints `COMPOSIO_BACKEND_URL_ENV` at a
-    /// loopback backend for its whole body. The cache-seeding tests below derive
-    /// a cache key that embeds that URL, seed the cache under it, then re-derive
-    /// the key on the request path — a process-wide override landing between the
-    /// two reads would change the key and strand the seeded entry, failing the
-    /// `catalogSource == "backend"` assertion. `EnvVarGuard` serialises guard
-    /// users against each other, so taking it here closes the race the way the
-    /// crate documents (unguarded `std::env::var` readers are otherwise fair
-    /// game). Gated to composio builds, where the mutation exists.
+    /// In composio builds that test repoints `TINYHUMANS_API_URL_ENV` at a
+    /// loopback backend for its whole body (Composio's own backend-URL override,
+    /// `OPENCOMPANY_COMPOSIO_BACKEND_URL`, was removed in phase 6a of #2306; the
+    /// tenant's shared API base is the only repoint left). The cache-seeding
+    /// tests below derive a cache key that embeds that URL, seed the cache under
+    /// it, then re-derive the key on the request path — a process-wide override
+    /// landing between the two reads would change the key and strand the seeded
+    /// entry, failing the `catalogSource == "backend"` assertion. `EnvVarGuard`
+    /// serialises guard users against each other, so taking it here closes the
+    /// race the way the crate documents (unguarded `std::env::var` readers are
+    /// otherwise fair game). Gated to composio builds, where the mutation
+    /// exists.
     #[cfg(feature = "composio")]
     fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
         crate::test_support::EnvVarGuard::capture(&[
-            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            crate::company::composio::TINYHUMANS_API_URL_ENV,
         ])
     }
 
@@ -1568,7 +2061,10 @@ mod tests {
             "rotateco",
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            // The managed token clear is guarded while the company is on the
+            // managed route (in-use-guards.md §2) — this test is about
+            // catalog eviction, not the guard, so it confirms.
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
@@ -1646,12 +2142,15 @@ mod tests {
         assert_eq!(dto["credentialSource"], "static");
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
 
-        // Clearing with "" reverts to whatever the instance offers — here nothing.
+        // Clearing with "" reverts to whatever the instance offers — here
+        // nothing. Guarded while the company is on the managed route
+        // (in-use-guards.md §2); this test is about credentialSource, not
+        // the guard, so it confirms.
         let (_, resp, _) = send(
             &state,
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(resp["status"]["credentialSource"], "none");
@@ -1662,9 +2161,13 @@ mod tests {
     /// carrying the key, and clearing it hands the managed route back.
     #[tokio::test]
     async fn a_company_can_bring_its_own_composio_account_and_give_it_back() {
-        const API_KEY: &str = "ak_live_company_own_key";
+        const API_KEY: &str = "ak_not_a_real_key_0123456789";
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
+        // This test is about storing and clearing, not about the check. Pin the
+        // probe clean so a `composio` build runs it against the override rather
+        // than against `backend.composio.dev`.
+        super::probe_override::set("acme", Ok(()));
 
         // Managed is the default and needs nothing stored.
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/composio", None).await;
@@ -1702,12 +2205,14 @@ mod tests {
             "the GET status leaked the key: {raw}"
         );
 
-        // Clearing it returns the company to the managed route.
+        // Clearing it returns the company to the managed route. Guarded
+        // while the company is on BYOK (in-use-guards.md §2); this test is
+        // about the route round-trip, not the guard, so it confirms.
         let (_, resp, _) = send(
             &state,
             "PUT",
             "/api/v1/company/composio/api-key",
-            Some(json!({ "apiKey": "" })),
+            Some(json!({ "apiKey": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(resp["status"]["mode"], "managed");
@@ -1715,6 +2220,740 @@ mod tests {
             resp["status"]["backendUrl"],
             crate::company::composio::DIRECT_BASE_URL
         );
+    }
+
+    // ── The managed tier, reported independently of the mode (#2275) ────
+
+    /// The field's whole reason to exist: under BYOK, `credentialSource` names
+    /// the Composio key the agents present, and `managedCredentialSource` still
+    /// names the tier the **managed** route would answer with.
+    ///
+    /// Driven over the real route rather than over the resolver, because what
+    /// regressed before is not the chain — it is whether the chain's answer
+    /// survives the short-circuit `resolve_access` takes under BYOK and reaches
+    /// the DTO at all.
+    #[tokio::test]
+    async fn the_managed_tier_is_reported_while_byok_is_selected() {
+        const BYOK_KEY: &str = "ak_not_a_real_key_0123456789";
+        use crate::company::company_key;
+        use crate::company::composio::store_token;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "managedtier", GRANTED).await;
+        // The check is not what this test is about; pin it clean so a
+        // `composio` build answers from the override instead of the network.
+        super::probe_override::set("managedtier", Ok(()));
+        let runtime = runtime_of(&state, "managedtier");
+        let secrets = runtime.secrets();
+
+        async fn status(state: &AppState) -> (Value, String) {
+            let (code, dto, raw) = send_for(
+                state,
+                "managedtier",
+                "GET",
+                "/api/v1/company/composio",
+                None,
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "{raw}");
+            (dto, raw)
+        }
+
+        // Nothing stored, and (in the test process) no instance identity: both
+        // fields agree, and agree on nothing.
+        let (dto, _) = status(&state).await;
+        assert_eq!(dto["credentialSource"], "none");
+        assert_eq!(dto["managedCredentialSource"], "none");
+
+        // A pasted `composio/tinyhumans/key` (formerly `composio/token`) is the
+        // managed chain's first tier.
+        store_token(runtime.id(), secrets.as_ref(), "byo-managed-bearer")
+            .await
+            .unwrap();
+        let (dto, _) = status(&state).await;
+        assert_eq!(dto["credentialSource"], "static");
+        assert_eq!(
+            dto["managedCredentialSource"], "static",
+            "under managed the two fields come from the same resolver and cannot differ: {dto}"
+        );
+
+        // Withdraw it over the company's own TinyHumans key: the chain falls
+        // exactly one tier, and both fields follow it.
+        store_token(runtime.id(), secrets.as_ref(), "")
+            .await
+            .unwrap();
+        company_key::store_key(runtime.id(), secrets.as_ref(), "th_company")
+            .await
+            .unwrap();
+        let (dto, _) = status(&state).await;
+        assert_eq!(dto["credentialSource"], "company");
+        assert_eq!(dto["managedCredentialSource"], "company");
+
+        // The point. BYOK is selected, so the agents present the Composio key —
+        // `static`. The managed route is untouched underneath, and the console
+        // can now say so without making the operator clear the key to find out.
+        let (code, resp, raw) = send_for(
+            &state,
+            "managedtier",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": BYOK_KEY })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "byok");
+        assert_eq!(resp["status"]["credentialSource"], "static");
+        assert_eq!(
+            resp["status"]["managedCredentialSource"], "company",
+            "BYOK must not be able to hide which tier the managed route would answer with: {resp}"
+        );
+        assert!(!raw.contains(BYOK_KEY), "the PUT leaked the key: {raw}");
+
+        let (dto, raw) = status(&state).await;
+        assert_eq!(dto["credentialSource"], "static");
+        assert_eq!(dto["managedCredentialSource"], "company");
+        assert!(!raw.contains(BYOK_KEY), "the GET leaked the key: {raw}");
+        assert!(
+            dto.get("token").is_none(),
+            "status must never carry a token"
+        );
+        assert!(
+            dto.get("tokenConfigured").is_none(),
+            "the boolean surface stays gone (#886): {dto}"
+        );
+    }
+
+    /// The `attested` row of the matrix, which the route cannot reach without
+    /// mutating the process environment.
+    ///
+    /// Drives the **exact pair of calls** `effective_status` makes — `access_for`
+    /// for the effective tier, `resolve_credential` for the managed one — against
+    /// a company already switched to BYOK, through the env seam. A company whose
+    /// only credential is the instance identity presents its own Composio key and
+    /// still reports `attested` as what managed would fall back to.
+    #[tokio::test]
+    async fn the_managed_tier_reads_the_instance_identity_under_byok() {
+        use crate::app::config::MapEnv;
+        use crate::company::composio::{resolve_credential, store_api_key};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-managed-tier-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "projected-instance-token").unwrap();
+        let projected = MapEnv::new([(
+            crate::company::credentials::TOKEN_FILE_ENV,
+            path.display().to_string(),
+        )]);
+        let source = super::TinyhumansTokenSource::from_env(&projected).map(std::sync::Arc::new);
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "attestedbyok", GRANTED).await;
+        let runtime = runtime_of(&state, "attestedbyok");
+
+        // Managed, with only the instance identity: both answers are `attested`.
+        assert_eq!(
+            access_for(&runtime, source.clone()).await.unwrap().1,
+            CredentialSource::Attested
+        );
+        assert_eq!(
+            resolve_credential(runtime.id(), runtime.secrets().as_ref(), source.clone())
+                .await
+                .unwrap()
+                .source(),
+            CredentialSource::Attested
+        );
+
+        // Switch to BYOK. The effective tier becomes the company's own Composio
+        // key; the managed chain is unchanged and still answers `attested`.
+        store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+        let (mode, effective) = access_for(&runtime, source.clone()).await.unwrap();
+        assert_eq!(mode, super::ComposioMode::Byok);
+        assert_eq!(effective, CredentialSource::Static);
+        assert_eq!(
+            resolve_credential(runtime.id(), runtime.secrets().as_ref(), source)
+                .await
+                .unwrap()
+                .source(),
+            CredentialSource::Attested,
+            "selecting BYOK must not change what the managed route would resolve to"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── The draft-key check on `PUT …/composio/api-key` (#2275) ──────────
+
+    /// A key Composio rejects is **not stored**, and the refusal says so in the
+    /// classifier's own words.
+    ///
+    /// There is no rollback here because there is no write: the probe runs on
+    /// the draft, before the store, which is the deliberate departure from the
+    /// inference connect flow (that one writes first because its probe resolves
+    /// the key by slug). The proof is the GET afterwards — the company is still
+    /// on the managed route.
+    #[tokio::test]
+    async fn a_rejected_key_is_refused_and_nothing_is_stored() {
+        const BYOK_KEY: &str = "ak_not_a_real_key_0123456789";
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "probeauth", GRANTED).await;
+        super::probe_override::set(
+            "probeauth",
+            Err("Composio answered 401 Unauthorized".to_string()),
+        );
+
+        let (code, body, raw) = send_for(
+            &state,
+            "probeauth",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": BYOK_KEY })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{raw}");
+        assert_eq!(body["code"], "invalid_request", "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(
+                    |message| message.contains(crate::company::composio_probe::describe(
+                        crate::company::composio_probe::ComposioProbeClass::Auth
+                    ))
+                ),
+            "the refusal is the classifier's copy, not an interpolated upstream string: {body}"
+        );
+        assert!(
+            !body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Unauthorized"),
+            "the upstream reason belongs in the debug log, not in the refusal: {body}"
+        );
+        assert!(
+            !raw.contains(BYOK_KEY),
+            "a refusal must not echo the key back: {raw}"
+        );
+
+        let (_, dto, raw) =
+            send_for(&state, "probeauth", "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(
+            dto["mode"], "managed",
+            "a refused key must leave the company exactly where it was: {dto}"
+        );
+        assert!(!raw.contains(BYOK_KEY), "the GET leaked the key: {raw}");
+    }
+
+    /// A check that fails for any reason **other** than the credential keeps the
+    /// key: it is plausibly fine and only the connection is in question. The
+    /// write lands, and the response carries the class and the advisory beside
+    /// it.
+    ///
+    /// The case in the fixture is the one the ordering rule exists for — a
+    /// gateway in the path — which must never read as a bad key.
+    #[tokio::test]
+    async fn a_key_that_could_not_be_checked_is_stored_with_an_advisory() {
+        const BYOK_KEY: &str = "ak_not_a_real_key_0123456789";
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "probeadvise", GRANTED).await;
+        super::probe_override::set("probeadvise", Err("502 Bad Gateway".to_string()));
+
+        let (code, resp, raw) = send_for(
+            &state,
+            "probeadvise",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": BYOK_KEY })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "byok", "the key was stored: {resp}");
+        assert_eq!(resp["probeClass"], "unknown", "{resp}");
+        assert_eq!(
+            resp["advisory"],
+            crate::company::composio_probe::describe(
+                crate::company::composio_probe::ComposioProbeClass::Unknown
+            )
+        );
+        assert!(
+            !raw.contains("Bad Gateway"),
+            "the upstream text belongs in the debug log, not in operator copy: {raw}"
+        );
+        assert!(!raw.contains(BYOK_KEY), "the PUT leaked the key: {raw}");
+    }
+
+    /// A clean check stores the key and says nothing extra — the two additive
+    /// fields are **omitted**, not null, so a consumer that predates them reads
+    /// the body it always did.
+    #[tokio::test]
+    async fn a_clean_check_stores_the_key_and_adds_nothing_to_the_response() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "probeclean", GRANTED).await;
+        super::probe_override::set("probeclean", Ok(()));
+
+        let (code, resp, raw) = send_for(
+            &state,
+            "probeclean",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "byok");
+        assert!(resp.get("advisory").is_none(), "{resp}");
+        assert!(resp.get("probeClass").is_none(), "{resp}");
+    }
+
+    /// `skipVerify` is the "add anyway" escape: a key whose check the route
+    /// would have refused is stored, unexamined, when the caller says so.
+    ///
+    /// Defaulting matters as much as the behaviour — every test above sends no
+    /// `skipVerify` at all and gets the checked path, which is what pins the
+    /// `#[serde(default)]` false.
+    #[tokio::test]
+    async fn skip_verify_stores_a_key_the_check_would_have_refused() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "probeskip", GRANTED).await;
+        super::probe_override::set(
+            "probeskip",
+            Err("Composio answered 401 Unauthorized".to_string()),
+        );
+
+        let (code, resp, raw) = send_for(
+            &state,
+            "probeskip",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789", "skipVerify": true })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "byok", "{resp}");
+        assert!(
+            resp.get("advisory").is_none(),
+            "nothing was checked, so there is nothing to advise about: {resp}"
+        );
+    }
+
+    /// Clearing is **never** checked. Withdrawing a credential is always
+    /// allowed, and a probe that could refuse a clear would strand a company on
+    /// a key it had already decided against.
+    #[tokio::test]
+    async fn clearing_a_key_is_never_checked() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "probeclear", GRANTED).await;
+        super::probe_override::set("probeclear", Ok(()));
+        let (code, _, raw) = send_for(
+            &state,
+            "probeclear",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        // Now make any probe destructive. The clear must still go through.
+        // Guarded while the company is on BYOK (in-use-guards.md §2); this
+        // test is about the probe never blocking a clear, not the guard, so
+        // it confirms.
+        super::probe_override::set(
+            "probeclear",
+            Err("Composio answered 401 Unauthorized".to_string()),
+        );
+        let (code, resp, raw) = send_for(
+            &state,
+            "probeclear",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "managed", "{resp}");
+        assert!(resp.get("advisory").is_none(), "{resp}");
+    }
+
+    // ── `POST …/composio/api-key/test` — check, never change ─────────────
+
+    /// A company on the managed route has no key of its own to check, and a
+    /// company in BYOK with a blank slot has none either. Both answer the same
+    /// permanent `not_configured`, which is what lets the console disable the
+    /// control instead of offering a check that can only fail.
+    #[tokio::test]
+    async fn testing_a_key_that_is_not_there_says_so_rather_than_probing() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "testnokey", GRANTED).await;
+        // Destructive if it ever ran. It must not run.
+        super::probe_override::set(
+            "testnokey",
+            Err("Composio answered 401 Unauthorized".to_string()),
+        );
+
+        // Managed — the default, nothing stored.
+        let (code, body, raw) = send_for(
+            &state,
+            "testnokey",
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "not_configured", "{body}");
+
+        // BYOK selected with an empty slot — the same answer, because the same
+        // thing is true: there is no key here to check.
+        let runtime = runtime_of(&state, "testnokey");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::composio::MODE_KEY,
+                crate::ports::types::SecretValue(crate::company::composio::BYOK_MODE.to_string()),
+            )
+            .await
+            .unwrap();
+        let (code, body, raw) = send_for(
+            &state,
+            "testnokey",
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "not_configured", "{body}");
+    }
+
+    /// The assertion the route exists to keep honest: a **failed** check —
+    /// including the destructive class — leaves the stored key and the stored
+    /// mode byte-identical. Testing a credential and withdrawing it are
+    /// separate acts, and nothing on this path may conflate them.
+    #[tokio::test]
+    async fn a_failed_check_changes_absolutely_nothing() {
+        const BYOK_KEY: &str = "ak_not_a_real_key_0123456789";
+        use crate::company::composio::{BYOK_KEY_KEY, LEGACY_API_KEY_KEY, MODE_KEY};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "testkeeps", GRANTED).await;
+        super::probe_override::set("testkeeps", Ok(()));
+        let (code, _, raw) = send_for(
+            &state,
+            "testkeeps",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": BYOK_KEY })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        let runtime = runtime_of(&state, "testkeeps");
+        async fn slots(
+            runtime: &super::CompanyRuntime,
+        ) -> (Option<String>, Option<String>, Option<String>) {
+            let read = |key: &'static str| async move {
+                runtime
+                    .secrets()
+                    .get(runtime.id(), key)
+                    .await
+                    .unwrap()
+                    .map(|crate::ports::types::SecretValue(v)| v)
+            };
+            (
+                read(MODE_KEY).await,
+                read(BYOK_KEY_KEY).await,
+                read(LEGACY_API_KEY_KEY).await,
+            )
+        }
+        let before = slots(&runtime).await;
+
+        // Now make the check fail in the ONE class that is destructive on the
+        // write route, and check again.
+        super::probe_override::set(
+            "testkeeps",
+            Err("Composio answered 401 Unauthorized".to_string()),
+        );
+        let (code, body, raw) = send_for(
+            &state,
+            "testkeeps",
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["ok"], false, "{body}");
+        assert_eq!(body["probeClass"], "auth", "{body}");
+        assert_eq!(
+            body["message"],
+            crate::company::composio_probe::describe_verdict(
+                crate::company::composio_probe::ComposioProbeClass::Auth
+            ),
+            "a check that stored nothing must not report that it saved: {body}"
+        );
+        assert!(
+            !raw.contains(BYOK_KEY),
+            "the check leaked the stored key: {raw}"
+        );
+
+        assert_eq!(
+            slots(&runtime).await,
+            before,
+            "a failed check must leave the stored mode and key byte-identical"
+        );
+
+        // And the company is still on its own account, as the status says.
+        let (_, dto, raw) =
+            send_for(&state, "testkeeps", "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(dto["mode"], "byok", "{dto}");
+        assert!(!raw.contains(BYOK_KEY), "the GET leaked the key: {raw}");
+    }
+
+    /// A key Composio accepts answers `ok` and nothing else — no class, no
+    /// sentence, and no credential.
+    #[tokio::test]
+    async fn a_clean_check_answers_ok_and_carries_no_credential() {
+        const BYOK_KEY: &str = "ak_not_a_real_key_0123456789";
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "testclean", GRANTED).await;
+        super::probe_override::set("testclean", Ok(()));
+        let (code, _, raw) = send_for(
+            &state,
+            "testclean",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": BYOK_KEY })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        let (code, body, raw) = send_for(
+            &state,
+            "testclean",
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["ok"], true, "{body}");
+        assert!(body.get("probeClass").is_none(), "{body}");
+        assert!(body.get("message").is_none(), "{body}");
+        assert!(!raw.contains(BYOK_KEY), "the check leaked the key: {raw}");
+    }
+
+    // ── Storage addresses and the legacy fallback (#2306) ──────────────
+
+    /// A token `PUT` writes both addresses, and a legacy-only value still reads
+    /// as configured before that first write.
+    #[tokio::test]
+    async fn a_token_put_mirrors_to_the_legacy_slot() {
+        use crate::company::composio::{LEGACY_TOKEN_KEY, TINYHUMANS_KEY_KEY};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "legacytoken", GRANTED).await;
+        let runtime = runtime_of(&state, "legacytoken");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                LEGACY_TOKEN_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (_, dto, raw) = send_for(
+            &state,
+            "legacytoken",
+            "GET",
+            "/api/v1/company/composio",
+            None,
+        )
+        .await;
+        assert_eq!(dto["credentialSource"], "static", "{raw}");
+
+        let (code, _, raw) = send_for(
+            &state,
+            "legacytoken",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "th-not-a-real-key-2" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await.as_deref(),
+            Some("th-not-a-real-key-2")
+        );
+        assert_eq!(
+            read_slot(&runtime, LEGACY_TOKEN_KEY).await.as_deref(),
+            Some("th-not-a-real-key-2")
+        );
+        assert!(
+            !raw.contains("th-not-a-real-key"),
+            "the PUT leaked the token: {raw}"
+        );
+
+        // Guarded while the company is on the managed route
+        // (in-use-guards.md §2); this test is about the mirror write, not
+        // the guard, so it confirms.
+        let (code, _, raw) = send_for(
+            &state,
+            "legacytoken",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await.as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            read_slot(&runtime, LEGACY_TOKEN_KEY).await.as_deref(),
+            Some("")
+        );
+    }
+
+    /// Raw slot contents for a company's runtime, blank-or-absent collapsed to
+    /// `None` only when truly absent (a stored `""` reads back as `Some("")`).
+    async fn read_slot(runtime: &super::CompanyRuntime, key: &'static str) -> Option<String> {
+        runtime
+            .secrets()
+            .get(runtime.id(), key)
+            .await
+            .unwrap()
+            .map(|crate::ports::types::SecretValue(v)| v)
+    }
+
+    /// A legacy-only BYOK key still passes the check route, and a subsequent
+    /// `PUT` mirrors the rotated value to both addresses.
+    #[tokio::test]
+    async fn the_api_key_test_route_reads_a_legacy_byok_key() {
+        use crate::company::composio::{BYOK_KEY_KEY, LEGACY_API_KEY_KEY, MODE_KEY};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "legacybyok", GRANTED).await;
+        let runtime = runtime_of(&state, "legacybyok");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                MODE_KEY,
+                crate::ports::types::SecretValue(crate::company::composio::BYOK_MODE.to_string()),
+            )
+            .await
+            .unwrap();
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                LEGACY_API_KEY_KEY,
+                crate::ports::types::SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        super::probe_override::set("legacybyok", Ok(()));
+
+        let (code, body, raw) = send_for(
+            &state,
+            "legacybyok",
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["ok"], true, "{body}");
+
+        let (code, _, raw) = send_for(
+            &state,
+            "legacybyok",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak-not-a-real-key-2" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        assert_eq!(
+            read_slot(&runtime, BYOK_KEY_KEY).await.as_deref(),
+            Some("ak-not-a-real-key-2")
+        );
+        assert_eq!(
+            read_slot(&runtime, LEGACY_API_KEY_KEY).await.as_deref(),
+            Some("ak-not-a-real-key-2")
+        );
+        assert_eq!(
+            read_slot(&runtime, MODE_KEY).await.as_deref(),
+            Some(crate::company::composio::BYOK_MODE)
+        );
+        assert!(
+            !raw.contains("ak-not-a-real-key"),
+            "the PUT leaked the key: {raw}"
+        );
+    }
+
+    /// Spending the company's Composio credential against a third party is a
+    /// decision taken on the company's behalf, so a member cannot trigger it —
+    /// the same boundary the writes on this surface carry (issue #403).
+    #[tokio::test]
+    async fn a_member_cannot_test_the_company_s_composio_key() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "acme",
+            crate::ports::UserRole::Member,
+        )
+        .await;
+        let (code, body, raw) = send_as(
+            &state,
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+            Auth::Cookie(member),
+        )
+        .await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "{raw}");
+        assert_eq!(body["code"], "forbidden", "{body}");
+    }
+
+    /// A build with no Composio client cannot check a key — and treats that as
+    /// **un-probeable**, not as a rejected credential.
+    ///
+    /// No override: this drives the real `probe_transport`, which in this build
+    /// is the honest "not compiled in" error. Refusing the write here would make
+    /// BYOK unconfigurable on the default build; classifying an absent client as
+    /// `auth` would throw away a key nothing ever looked at.
+    #[cfg(not(feature = "composio"))]
+    #[tokio::test]
+    async fn a_build_without_the_composio_client_stores_the_key_and_says_it_could_not_check() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "probenobuild", GRANTED).await;
+
+        let (code, resp, raw) = send_for(
+            &state,
+            "probenobuild",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["mode"], "byok", "{resp}");
+        assert_eq!(resp["probeClass"], "unknown", "{resp}");
     }
 
     /// Whose Composio account a company acts through — and therefore who pays
@@ -1749,6 +2988,51 @@ mod tests {
         );
     }
 
+    /// A managed-route token stored by a company that is **on BYOK** must not
+    /// claim agents have started using it.
+    ///
+    /// The state is newly reachable: a BYOK company whose managed chain resolves
+    /// to nothing cannot be offered "Use this" — that would be switching into an
+    /// outage — so the console offers the token first and the switch second, and
+    /// that is the only order that works. `SWITCH_NOTE` at the end of the first
+    /// step would report the second as already done, while `resolve_access` is
+    /// still reading the BYOK key.
+    #[tokio::test]
+    async fn a_token_for_the_route_a_company_is_not_on_does_not_claim_effect() {
+        use crate::company::composio::store_api_key;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "inactivetoken", GRANTED).await;
+        let runtime = runtime_of(&state, "inactivetoken");
+        // Straight to the store rather than through the route: the route probes
+        // the draft key, and this test is about the note, not the probe.
+        store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+
+        let (_, resp, _) = send_for(
+            &state,
+            "inactivetoken",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+        let note = resp["note"].as_str().expect("a note").to_string();
+        assert!(
+            !note.contains("next turn"),
+            "the company is on BYOK, so agents do not pick this up next turn: {note}"
+        );
+        assert!(
+            note.contains("still on its own Composio account"),
+            "the note says why the token is not in effect: {note}"
+        );
+    }
+
     /// The note on a write names the operation (issue #1471): a set tells the
     /// operator a new token is live, a clear must not claim one exists — the
     /// effective credential after a clear is whatever tier remains, which may
@@ -1771,11 +3055,14 @@ mod tests {
             "a set announces the new token: {set_note}"
         );
 
+        // Guarded while the company is on the managed route
+        // (in-use-guards.md §2); this test is about the note text, not the
+        // guard, so it confirms.
         let (_, resp, _) = send(
             &state,
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         let clear_note = resp["note"].as_str().expect("a note").to_string();
@@ -1934,6 +3221,7 @@ mod tests {
             in_build: true,
             granted: true,
             credential_source: CredentialSource::Attested,
+            managed_credential_source: CredentialSource::Attested,
             mode: ComposioMode::Managed,
             backend_url: "https://api.tinyhumans.ai".to_string(),
             toolkits: vec!["gmail".to_string()],
@@ -1945,6 +3233,7 @@ mod tests {
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["credentialSource"], "attested");
+        assert_eq!(json["managedCredentialSource"], "attested");
         assert_eq!(json["catalogSource"], "manifest");
         assert_eq!(json["mode"], "managed");
         let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
@@ -1960,6 +3249,7 @@ mod tests {
                 "effectiveToolkits",
                 "granted",
                 "inBuild",
+                "managedCredentialSource",
                 "mode",
                 "openMode",
                 "toolkits",
@@ -2085,10 +3375,10 @@ mod tests {
         let backend = spawn_authorize_backend().await;
         #[cfg(feature = "composio")]
         let env = crate::test_support::EnvVarGuard::capture(&[
-            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            crate::company::composio::TINYHUMANS_API_URL_ENV,
         ]);
         #[cfg(feature = "composio")]
-        env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+        env.set(crate::company::composio::TINYHUMANS_API_URL_ENV, &backend);
 
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
@@ -2246,12 +3536,16 @@ mod tests {
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
 
+        // `confirmInUse` is ignored on the set and needed on the clear (the
+        // company is on the managed route throughout, in-use-guards.md §2)
+        // — this test is about the journaled actor, not the guard, so both
+        // iterations confirm.
         for token in [TOKEN, ""] {
             let (status, _, raw) = send(
                 &state,
                 "PUT",
                 "/api/v1/company/composio/token",
-                Some(json!({ "token": token })),
+                Some(json!({ "token": token, "confirmInUse": true })),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{raw}");
@@ -2594,9 +3888,9 @@ mod tests {
         async fn disconnect_maps_an_unknown_id_to_404_not_502() {
             let (backend, deletes) = spawn_connections_backend(false).await;
             let env = crate::test_support::EnvVarGuard::capture(&[
-                crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+                crate::company::composio::TINYHUMANS_API_URL_ENV,
             ]);
-            env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+            env.set(crate::company::composio::TINYHUMANS_API_URL_ENV, &backend);
 
             let home_dir = home();
             let state = state_with_manifest(home_dir.path(), GRANTED).await;
@@ -2631,9 +3925,9 @@ mod tests {
         async fn disconnect_maps_a_backend_failure_to_502_not_404() {
             let (backend, deletes) = spawn_connections_backend(true).await;
             let env = crate::test_support::EnvVarGuard::capture(&[
-                crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+                crate::company::composio::TINYHUMANS_API_URL_ENV,
             ]);
-            env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+            env.set(crate::company::composio::TINYHUMANS_API_URL_ENV, &backend);
 
             let home_dir = home();
             let state = state_with_manifest(home_dir.path(), GRANTED).await;
@@ -2780,6 +4074,302 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    // ── in-use guards (#2306): confirmInUse gates a clear/switch ──────
+    //
+    // The signal is `composio/mode` (`src/company/composio.rs::MODE_KEY`),
+    // per in-use-guards.md §2's surfaces table: clearing
+    // `composio/tinyhumans/key` reports `surfaces: ["composio"]` iff the
+    // mode currently reads `"managed"`; clearing/switching
+    // `composio/byok/key` reports it iff the mode currently reads `"byok"`.
+    // A company connection pin (`composio/defaults`) is no longer the
+    // signal, so these tests drive the guard by setting the mode — directly,
+    // or through `store_token`/`store_api_key`, which are what set it in
+    // practice.
+
+    /// A managed-token clear is refused with `409 in_use` while the company
+    /// is still on the managed route (the default with nothing else
+    /// stored), and nothing is written.
+    #[tokio::test]
+    async fn clearing_the_managed_token_while_mode_is_managed_is_refused_without_confirmation() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "clearguard", GRANTED).await;
+        let runtime = runtime_of(&state, "clearguard");
+        crate::company::composio::store_token(runtime.id(), runtime.secrets().as_ref(), TOKEN)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Managed,
+            "managed is the default mode with nothing else stored"
+        );
+
+        let (status, body, raw) = send_for(
+            &state,
+            "clearguard",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(
+            body["error"], "Composio's key is used by Composio.",
+            "the message follows in-use-guards.md §2's fixed sentence: {body}"
+        );
+        assert_eq!(
+            body["usedBy"],
+            json!({ "surfaces": ["composio"] }),
+            "{body}"
+        );
+
+        // Refused means nothing changed.
+        assert_eq!(
+            crate::company::composio::load_tinyhumans_key(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(TOKEN),
+            "a refused clear must not have written anything"
+        );
+    }
+
+    /// The same clear, with `confirmInUse: true`, proceeds and echoes the
+    /// `usedBy` it would have refused with (in-use-guards.md §3).
+    #[tokio::test]
+    async fn a_confirmed_clear_of_the_managed_token_succeeds_and_echoes_used_by() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "clearconfirmed", GRANTED).await;
+        let runtime = runtime_of(&state, "clearconfirmed");
+        crate::company::composio::store_token(runtime.id(), runtime.secrets().as_ref(), TOKEN)
+            .await
+            .unwrap();
+
+        let (status, body, raw) = send_for(
+            &state,
+            "clearconfirmed",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(
+            body["usedBy"],
+            json!({ "surfaces": ["composio"] }),
+            "{body}"
+        );
+        assert_eq!(
+            crate::company::composio::load_tinyhumans_key(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            None,
+            "the confirmed clear must have landed"
+        );
+    }
+
+    /// A managed-token clear needs no confirmation while the company is on
+    /// BYOK: `composio/mode` no longer selects the managed slot, so this
+    /// clear is not touching what any live call resolves through, and the
+    /// response carries no `usedBy` — omitted, not null or empty.
+    #[tokio::test]
+    async fn clearing_the_managed_token_while_mode_is_byok_needs_no_confirmation() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "clearunguarded", GRANTED).await;
+        let runtime = runtime_of(&state, "clearunguarded");
+        crate::company::composio::store_token(runtime.id(), runtime.secrets().as_ref(), TOKEN)
+            .await
+            .unwrap();
+        crate::company::composio::store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+
+        let (status, body, raw) = send_for(
+            &state,
+            "clearunguarded",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(body.get("usedBy").is_none(), "{body}");
+        assert_eq!(
+            crate::company::composio::load_tinyhumans_key(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Setting or rotating a non-empty managed token is never guarded — only
+    /// a clear can strand anything the mode currently resolves through.
+    #[tokio::test]
+    async fn setting_a_managed_token_is_never_guarded_even_while_mode_is_managed() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "setnoguard", GRANTED).await;
+
+        let (status, body, raw) = send_for(
+            &state,
+            "setnoguard",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(body.get("usedBy").is_none(), "a set is not guarded: {body}");
+    }
+
+    /// The first move onto BYOK needs no confirmation from Composio's own
+    /// guard: before the write `composio/mode` still reads `"managed"`, so
+    /// `composio/byok/key` is not the slot the mode currently selects, and
+    /// setting it strands nothing (in-use-guards.md §2 — the criterion is
+    /// the mode BEFORE the write, not the one the write is heading to). The
+    /// probe is forced clean so this does not depend on network access under
+    /// the `composio` feature.
+    #[tokio::test]
+    async fn switching_to_byok_while_mode_is_managed_needs_no_confirmation() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "byokswitchunguarded", GRANTED).await;
+        let runtime = runtime_of(&state, "byokswitchunguarded");
+        super::probe_override::set("byokswitchunguarded", Ok(()));
+
+        let (status, body, raw) = send_for(
+            &state,
+            "byokswitchunguarded",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(body.get("usedBy").is_none(), "{body}");
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Byok
+        );
+    }
+
+    /// Giving the managed route back while BYOK is active IS refused without
+    /// confirmation: `composio/mode` already reads `"byok"`, which is
+    /// exactly the slot `composio/byok/key` being cleared belongs to.
+    #[tokio::test]
+    async fn switching_back_to_managed_while_mode_is_byok_is_refused_without_confirmation() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "managedswitchguard", GRANTED).await;
+        let runtime = runtime_of(&state, "managedswitchguard");
+        crate::company::composio::store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+
+        let (status, body, raw) = send_for(
+            &state,
+            "managedswitchguard",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(
+            body["usedBy"],
+            json!({ "surfaces": ["composio"] }),
+            "{body}"
+        );
+
+        // Refused: the company is still on BYOK, key untouched.
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Byok
+        );
+    }
+
+    /// The same switch back to managed, confirmed, lands and echoes
+    /// `usedBy` (in-use-guards.md §3).
+    #[tokio::test]
+    async fn a_confirmed_switch_back_to_managed_succeeds_and_echoes_used_by() {
+        let home_dir = home();
+        let state =
+            state_with_manifest_id(home_dir.path(), "managedswitchconfirmed", GRANTED).await;
+        let runtime = runtime_of(&state, "managedswitchconfirmed");
+        crate::company::composio::store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+
+        let (status, body, raw) = send_for(
+            &state,
+            "managedswitchconfirmed",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(
+            body["usedBy"],
+            json!({ "surfaces": ["composio"] }),
+            "{body}"
+        );
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Managed
+        );
+    }
+
+    /// Rotating a key while staying on the SAME route is never guarded — a
+    /// rotate is not a switch at all (in-use-guards.md §2), so the mode
+    /// match is never even consulted.
+    #[tokio::test]
+    async fn rotating_an_already_byok_key_is_never_guarded() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "byokrotate", GRANTED).await;
+        let runtime = runtime_of(&state, "byokrotate");
+        crate::company::composio::store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
+        super::probe_override::set("byokrotate", Ok(()));
+
+        let (status, body, raw) = send_for(
+            &state,
+            "byokrotate",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_9999999999" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            body.get("usedBy").is_none(),
+            "a same-route rotation is not a switch: {body}"
         );
     }
 }

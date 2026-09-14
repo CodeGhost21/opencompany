@@ -3139,13 +3139,14 @@ impl RuntimeBuilder {
                             // at boot from the company secret store (its own
                             // token, if any) else this instance's platform
                             // identity, plus the manifest toolkit allowlist and
-                            // the env URL override, falling back to the tenant API
-                            // base so staging Composio follows staging. Only
-                            // companies that explicitly grant `composio` resolve at
-                            // all; with no credential obtainable it stays `None`
-                            // (fail closed). `HarnessPool::ensure` re-resolves this
-                            // each turn so a console token change takes effect
-                            // without restart.
+                            // the tenant API base, so staging Composio follows
+                            // staging (the explicit per-surface backend-URL
+                            // override was removed in phase 6a, issue #2306).
+                            // Only companies that explicitly grant `composio`
+                            // resolve at all; with no credential obtainable it
+                            // stays `None` (fail closed). `HarnessPool::ensure`
+                            // re-resolves this each turn so a console token
+                            // change takes effect without restart.
                             // Issue #788: the per-company Chargebee connection,
                             // resolved from THIS company's secret store — never
                             // the environment, because two companies on one host
@@ -3252,15 +3253,12 @@ impl RuntimeBuilder {
                                 use crate::app::config::EnvSource;
                                 let toolkits = self.manifest.tools.composio.toolkits.clone();
                                 let env = crate::app::config::ProcessEnv;
-                                let url =
-                                    env.get(crate::harness::composio::COMPOSIO_BACKEND_URL_ENV);
                                 let api_url =
                                     env.get(crate::harness::composio::TINYHUMANS_API_URL_ENV);
                                 crate::harness::composio::TenantComposio::resolve(
                                     &id,
                                     secrets.as_ref(),
                                     toolkits,
-                                    url,
                                     api_url,
                                     // Falls back to this instance's platform
                                     // identity when the company stored no token

@@ -213,6 +213,49 @@ impl Provider {
             ProviderOrigin::Indexed => None,
         }
     }
+
+    /// This row's one model, read without guessing (keys rework, issue
+    /// #2306, slice 2b). See [`model_on_row`].
+    pub fn model(&self) -> ModelOnRow {
+        model_on_row(&self.models)
+    }
+}
+
+/// A provider row's single model, as read from its `models` map (keys
+/// rework, issue #2306, slice 2b).
+///
+/// The map is a storage encoding (the same id under every tier key), not a
+/// selection — `models` predates this rework and stays that shape so a
+/// rollback binary still reads a model per tier. Two different ids under it
+/// is a row nobody chose one model for, and it is reported, never resolved
+/// by picking one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelOnRow {
+    /// No non-blank value at all.
+    None,
+    /// Exactly one distinct non-blank id (trimmed).
+    One(String),
+    /// Two or more distinct ids, trimmed, sorted ascending, de-duplicated.
+    Ambiguous(Vec<String>),
+}
+
+/// Collapses a tier-keyed `models` map to [`ModelOnRow`]. Entry zero uses the
+/// same function, because its record carries `inference/config.models`
+/// (`provider_from_runtime`, below).
+pub fn model_on_row(models: &BTreeMap<String, String>) -> ModelOnRow {
+    let mut distinct: Vec<String> = models
+        .values()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .collect::<std::collections::BTreeSet<&str>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    match distinct.len() {
+        0 => ModelOnRow::None,
+        1 => ModelOnRow::One(distinct.remove(0)),
+        _ => ModelOnRow::Ambiguous(distinct),
+    }
 }
 
 /// The persisted shape of a non-entry-zero provider.
@@ -257,11 +300,35 @@ pub struct ProviderDraft {
     pub enabled: bool,
 }
 
+/// The longest a provider name — and therefore the slug derived from it — may
+/// be, in characters.
+///
+/// **Bounded at all** because the name is not only a label: [`slugify`] turns it
+/// into the address of a secret (`provider/<slug>/key`), and a secret key is a
+/// path component in the filesystem store. An unbounded name produced an
+/// unbounded path, which is how a 245-character name came to 500 a credential
+/// read and a 300-character one came to truncate a stored key and then fail the
+/// delete that truncated it. The store no longer breaks on a long key — see
+/// `legacy_secret_absent` in `src/store/fs.rs` — but a rule the store has to
+/// absorb is a rule that was never stated, and the name still has to be legible
+/// in a routing row an operator hand-edits.
+///
+/// **Eighty** because that is the bound this codebase already uses for the other
+/// name a person types and then reads back in a list
+/// (`MAX_DISPLAY_NAME_CHARS`, `src/server/users/mod.rs`), and because it keeps
+/// the derived secret key well inside the canonical filename budget: at 80
+/// characters `provider/<slug>/key` percent-encodes to 97 bytes against a
+/// 200-byte budget, so a provider's credential file is never the
+/// truncated-and-digested form and stays readable on disk by the person
+/// debugging it.
+pub const MAX_PROVIDER_NAME_CHARS: usize = 80;
+
 /// Why a slug cannot be used.
 ///
-/// Three named failures rather than a boolean, because they need three different
-/// sentences: one is "pick another name", one is "you already have this", and one
-/// is "that name belongs to something we ship".
+/// Four named failures rather than a boolean, because they need four different
+/// sentences: one is "pick another name", one is "you already have this", one
+/// is "that name belongs to something we ship", and one is "that name is too
+/// long".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlugError {
     /// Nothing was typed, or it normalised to nothing.
@@ -270,6 +337,8 @@ pub enum SlugError {
     Taken,
     /// The catalogue ships that name.
     Reserved,
+    /// Past [`MAX_PROVIDER_NAME_CHARS`].
+    TooLong,
 }
 
 impl std::fmt::Display for SlugError {
@@ -278,6 +347,10 @@ impl std::fmt::Display for SlugError {
             Self::Empty => write!(f, "a provider needs a name"),
             Self::Taken => write!(f, "this company already has a provider with that name"),
             Self::Reserved => write!(f, "that name belongs to a built-in provider"),
+            Self::TooLong => write!(
+                f,
+                "a provider name may be at most {MAX_PROVIDER_NAME_CHARS} characters"
+            ),
         }
     }
 }
@@ -305,6 +378,63 @@ pub fn slugify(label: &str) -> String {
     out
 }
 
+/// Whether a typed provider **name** may be used at all, before any slug is
+/// derived from it.
+///
+/// Separate from [`check_slug`] because the two bound different things. The slug
+/// is an address; the label is text that lands in the index blob, in the
+/// provider list, and in every advisory that names a provider. A name can be
+/// long while its slug is short (`slugify` drops everything that is not
+/// alphanumeric), so bounding only the slug leaves a page of prose in the store
+/// under a three-character address.
+pub fn check_provider_name(label: &str) -> std::result::Result<(), SlugError> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(SlugError::Empty);
+    }
+    if label.chars().count() > MAX_PROVIDER_NAME_CHARS {
+        return Err(SlugError::TooLong);
+    }
+    Ok(())
+}
+
+/// The longest model id accepted, counted in `char`s (not bytes) (keys
+/// rework, issue #2306, slice 2c).
+pub const MAX_MODEL_ID_CHARS: usize = 256;
+
+/// The one validation every model-id write goes through: set-default, add,
+/// edit (keys rework, issue #2306, slice 2c). Returns the trimmed id. Never a
+/// network check: catalogues go stale, and an Azure deployment name is never
+/// in `/models`.
+pub fn check_model_id(raw: &str) -> Result<String> {
+    let invalid = |m: String| OpenCompanyError::InvalidRequest(m);
+    let id = raw.trim();
+    if id.is_empty() {
+        return Err(invalid(
+            "Choose a model. A provider needs one model id.".into(),
+        ));
+    }
+    if id.chars().any(char::is_control) {
+        return Err(invalid(
+            "A model id cannot contain control characters.".into(),
+        ));
+    }
+    if id.chars().any(char::is_whitespace) {
+        return Err(invalid("A model id cannot contain spaces.".into()));
+    }
+    if id.chars().count() > MAX_MODEL_ID_CHARS {
+        return Err(invalid(format!(
+            "A model id can be at most {MAX_MODEL_ID_CHARS} characters."
+        )));
+    }
+    if crate::company::INFERENCE_TIERS.contains(&id) {
+        return Err(invalid(format!(
+            "`{id}` is a workload name, not a model. Choose a model id."
+        )));
+    }
+    Ok(id.to_string())
+}
+
 /// Whether `slug` may be used for a **custom** provider in a company that
 /// already holds `existing`.
 ///
@@ -312,10 +442,18 @@ pub fn slugify(label: &str) -> String {
 /// own `groq` entry *should* take the slug `groq` — that is the same provider,
 /// not a collision. It is a typed name shadowing a built-in that has to be
 /// refused, because a routing entry saying `groq` would then mean two things.
+///
+/// The length bound is checked **here** rather than only on the label, because
+/// this is the function that stands between a typed name and the address of a
+/// secret ([`provider_key_key`]). A console mirrors it; a console is not a
+/// security boundary.
 pub fn check_slug(existing: &[Provider], slug: &str) -> std::result::Result<(), SlugError> {
     let slug = slug.trim();
     if slug.is_empty() {
         return Err(SlugError::Empty);
+    }
+    if slug.chars().count() > MAX_PROVIDER_NAME_CHARS {
+        return Err(SlugError::TooLong);
     }
     if existing.iter().any(|p| p.slug == slug) {
         return Err(SlugError::Taken);
@@ -755,6 +893,137 @@ pub async fn set_managed_enabled(
 /// The [`SecretStore`] key naming the company's default provider.
 pub const DEFAULT_PROVIDER_KEY: &str = "inference/default";
 
+/// A provider slug and the one model to send it (keys rework, issue #2306,
+/// slice 2b): the only shape the new resolution path sends. Serialized field
+/// order is `provider`, then `model`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// A slug from [`list_providers`], which includes entry zero.
+    pub provider: String,
+    /// The id that provider's API accepts. Non-empty after trim.
+    pub model: String,
+}
+
+/// `inference/default`, parsed (keys rework, issue #2306, slice 2b).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultChoice {
+    /// Missing, `""`, or only whitespace.
+    Unset,
+    /// A bare slug (every value stored before this rework), or JSON with a
+    /// blank or absent `model`. Resolves exactly as a bare slug always has.
+    ProviderOnly(String),
+    /// JSON with a non-blank provider and a non-blank model.
+    Full(ModelChoice),
+}
+
+impl DefaultChoice {
+    /// The provider this default names, if any.
+    pub fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Unset => None,
+            Self::ProviderOnly(slug) => Some(slug.as_str()),
+            Self::Full(choice) => Some(choice.provider.as_str()),
+        }
+    }
+
+    /// The full pair, only when both halves are present.
+    pub fn full(&self) -> Option<&ModelChoice> {
+        match self {
+            Self::Full(choice) => Some(choice),
+            _ => None,
+        }
+    }
+}
+
+/// The JSON read shape for [`parse_default`]. `model` is optional so a
+/// provider-only JSON value is representable; unknown fields are ignored (no
+/// `deny_unknown_fields`), so a future field added here never breaks an
+/// older binary reading a value a newer one wrote.
+#[derive(Deserialize)]
+struct StoredDefault {
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The parse rules for `inference/default` (Q1), in order:
+///
+/// 1. Trim. Empty ⇒ [`DefaultChoice::Unset`].
+/// 2. Does not start with `{` ⇒ the whole trimmed value is a slug ⇒
+///    [`DefaultChoice::ProviderOnly`].
+/// 3. Starts with `{` ⇒ deserialize as [`StoredDefault`]. Invalid JSON, a
+///    missing `provider`, or a non-string `provider` ⇒ `OpenCompanyError::Store`.
+/// 4. `provider` blank after trim ⇒ `OpenCompanyError::Store`.
+/// 5. `model` absent, `null`, or blank after trim ⇒ `ProviderOnly(provider)`.
+/// 6. Otherwise ⇒ `Full { provider: trimmed, model: trimmed }`.
+pub fn parse_default(raw: &str) -> Result<DefaultChoice> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DefaultChoice::Unset);
+    }
+    if !trimmed.starts_with('{') {
+        return Ok(DefaultChoice::ProviderOnly(trimmed.to_string()));
+    }
+    let stored: StoredDefault = serde_json::from_str(trimmed).map_err(|e| {
+        OpenCompanyError::Store(format!("inference default is not valid JSON: {e}"))
+    })?;
+    let provider = stored.provider.trim();
+    if provider.is_empty() {
+        return Err(OpenCompanyError::Store(
+            "inference default names no provider".to_string(),
+        ));
+    }
+    match stored
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        Some(model) => Ok(DefaultChoice::Full(ModelChoice {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        })),
+        None => Ok(DefaultChoice::ProviderOnly(provider.to_string())),
+    }
+}
+
+/// Reads and parses `inference/default` (keys rework, issue #2306, slice 2b).
+/// Never writes: a bare slug stays a bare slug on disk (Q1) until an explicit
+/// [`set_default_choice`] rewrites it.
+pub async fn load_default(company: &CompanyId, secrets: &dyn SecretStore) -> Result<DefaultChoice> {
+    let Some(SecretValue(raw)) = secrets.get(company, DEFAULT_PROVIDER_KEY).await? else {
+        return Ok(DefaultChoice::Unset);
+    };
+    parse_default(&raw)
+}
+
+/// Writes a full default as **one** JSON value, e.g.
+/// `{"provider":"tinyhumans","model":"acme/test-model"}` (keys rework, issue
+/// #2306, slice 2b). One write, so a provider can never be paired with
+/// another provider's model even under a failed second write — there is no
+/// second write.
+pub async fn set_default_choice(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    choice: &ModelChoice,
+) -> Result<()> {
+    let provider = choice.provider.trim();
+    let model = choice.model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return Err(OpenCompanyError::InvalidRequest(
+            "a default needs both a provider and a model".to_string(),
+        ));
+    }
+    let raw = serde_json::to_string(&ModelChoice {
+        provider: provider.to_string(),
+        model: model.to_string(),
+    })
+    .map_err(|e| OpenCompanyError::Store(format!("serializing the inference default: {e}")))?;
+    secrets
+        .set(company, DEFAULT_PROVIDER_KEY, SecretValue(raw))
+        .await
+}
+
 /// Which provider this company has **said** is its default, if any.
 ///
 /// A slug in a slot of its own rather than a flag on each record, and that shape
@@ -765,15 +1034,18 @@ pub const DEFAULT_PROVIDER_KEY: &str = "inference/default";
 /// `None` is every company that has not said, which is every company that
 /// existed before this. There is no backfill: [`resolve::primary`] falls back to
 /// the first enabled provider, which is exactly what it did before.
+///
+/// Keys rework (issue #2306), slice 2b: a JSON default answers its
+/// `provider` too, so this stays a thin wrapper over [`load_default`] rather
+/// than a second read path every caller would have to keep in sync with it.
 pub async fn load_default_slug(
     company: &CompanyId,
     secrets: &dyn SecretStore,
 ) -> Result<Option<String>> {
-    let Some(SecretValue(raw)) = secrets.get(company, DEFAULT_PROVIDER_KEY).await? else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+    Ok(load_default(company, secrets)
+        .await?
+        .provider()
+        .map(str::to_string))
 }
 
 /// Marks `slug` as this company's default, replacing whatever was marked.
@@ -970,6 +1242,66 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+
+    // ---- check_model_id (keys rework, issue #2306, slice 2c) ---------------
+
+    #[test]
+    fn a_model_id_is_trimmed() {
+        assert_eq!(
+            check_model_id("  acme/test-model \n").unwrap(),
+            "acme/test-model"
+        );
+    }
+
+    #[test]
+    fn an_empty_model_id_is_refused() {
+        for raw in ["", "   "] {
+            let err = check_model_id(raw).unwrap_err();
+            assert!(err.to_string().contains("Choose a model"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_model_id_with_a_control_character_is_refused() {
+        let err = check_model_id("test\u{0007}model").unwrap_err();
+        assert!(err.to_string().contains("control characters"), "{err}");
+    }
+
+    #[test]
+    fn a_model_id_with_inner_whitespace_is_refused() {
+        let err = check_model_id("test model").unwrap_err();
+        assert!(err.to_string().contains("spaces"), "{err}");
+    }
+
+    #[test]
+    fn a_model_id_is_bounded_in_chars_not_bytes() {
+        assert!(check_model_id(&"é".repeat(256)).is_ok());
+        let err = check_model_id(&"é".repeat(257)).unwrap_err();
+        assert!(err.to_string().contains("256"), "{err}");
+    }
+
+    #[test]
+    fn every_tier_name_is_refused_as_a_model_id() {
+        for tier in crate::company::INFERENCE_TIERS {
+            let err = check_model_id(tier).unwrap_err();
+            assert!(err.to_string().contains("workload name"), "{err}");
+        }
+        let err = check_model_id(" chat-v1 ").unwrap_err();
+        assert!(err.to_string().contains("workload name"), "{err}");
+    }
+
+    #[test]
+    fn model_ids_of_every_shape_pass() {
+        for id in [
+            "acme/test-model",
+            "acme/test-model:free",
+            "test-model:8b",
+            "test-model",
+            "test.deployment-1",
+        ] {
+            assert_eq!(check_model_id(id).unwrap(), id);
+        }
+    }
 
     #[derive(Default)]
     struct MemSecrets {
@@ -1379,6 +1711,48 @@ mod tests {
         assert_eq!(check_slug(&existing, "acme-two"), Ok(()));
     }
 
+    #[test]
+    fn a_provider_name_is_bounded_at_the_limit_and_refused_past_it() {
+        // The bound exists because the name becomes the address of a secret.
+        // At the limit is a legal name; one character past it is not, and the
+        // refusal happens here rather than at the store, where it used to
+        // arrive as `ENAMETOOLONG` after a write had already landed.
+        let at_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS);
+        let past_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS + 1);
+
+        assert_eq!(check_provider_name(&at_limit), Ok(()));
+        assert_eq!(check_provider_name(&past_limit), Err(SlugError::TooLong));
+        assert_eq!(check_provider_name("  "), Err(SlugError::Empty));
+
+        assert_eq!(check_slug(&[], &at_limit), Ok(()));
+        assert_eq!(check_slug(&[], &past_limit), Err(SlugError::TooLong));
+
+        // Characters, not bytes: a name of multi-byte characters is judged by
+        // what the operator typed rather than by how UTF-8 happens to store it.
+        let multibyte = "é".repeat(MAX_PROVIDER_NAME_CHARS);
+        assert_eq!(check_provider_name(&multibyte), Ok(()));
+    }
+
+    #[test]
+    fn a_bounded_name_keeps_its_credential_key_inside_the_filename_budget() {
+        // Why 80 and not some larger round number: the derived secret key has
+        // to stay short enough that the canonical filename is the readable
+        // `%k-` form rather than the truncated-and-digested `%l-` one. The
+        // slug alphabet is `[a-z0-9-]`, one byte per character once
+        // percent-encoded, and `provider/` + `/key` add 17.
+        let key = provider_key_key(&"a".repeat(MAX_PROVIDER_NAME_CHARS));
+        // `provider/` + `/key` is 13 characters around the slug.
+        assert_eq!(key.len(), MAX_PROVIDER_NAME_CHARS + 13);
+        // Percent-encoding is what the budget is measured in. The slug alphabet
+        // (`[a-z0-9-]`) survives as one byte per character; the two `/`
+        // separators become `%2F`, three bytes each.
+        let encoded_len = key.len() + 2 * 2;
+        assert!(
+            encoded_len < 200,
+            "a bounded name must not need a truncated secret filename: {encoded_len} bytes"
+        );
+    }
+
     #[tokio::test]
     async fn an_index_written_before_enabled_existed_reads_as_enabled() {
         // A missing field must not read as "every provider is off", which is
@@ -1638,5 +2012,276 @@ mod tests {
         // which is the property the route now answers from.
         let stored = load_routes(&company, &secrets).await.unwrap();
         assert!(stored.is_empty());
+    }
+
+    // ---- the default's new shape (keys rework, issue #2306, slice 2b) ------
+
+    #[tokio::test]
+    async fn a_json_default_reads_provider_and_model() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(
+                    "  {\"provider\":\" acme \",\"model\":\" acme/other-model \"}\n".into(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Full(ModelChoice {
+                provider: "acme".to_string(),
+                model: "acme/other-model".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_slug_default_reads_as_provider_without_model() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(" acme\n".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::ProviderOnly("acme".to_string())
+        );
+        assert_eq!(
+            load_default_slug(&company(), &secrets)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acme")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_model_in_json_reads_as_provider_only() {
+        let secrets = MemSecrets::default();
+        for raw in [
+            r#"{"provider":"acme"}"#,
+            r#"{"provider":"acme","model":null}"#,
+            r#"{"provider":"acme","model":"  "}"#,
+        ] {
+            secrets
+                .set(
+                    &company(),
+                    DEFAULT_PROVIDER_KEY,
+                    SecretValue(raw.to_string()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                load_default(&company(), &secrets).await.unwrap(),
+                DefaultChoice::ProviderOnly("acme".to_string()),
+                "raw: {raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_json_default_is_an_error() {
+        let secrets = MemSecrets::default();
+        for raw in [
+            r#"{"provider":"#,
+            r#"{"model":"x"}"#,
+            r#"{"provider":"  ","model":"x"}"#,
+            r#"{"provider":5}"#,
+        ] {
+            secrets
+                .set(
+                    &company(),
+                    DEFAULT_PROVIDER_KEY,
+                    SecretValue(raw.to_string()),
+                )
+                .await
+                .unwrap();
+            let err = load_default(&company(), &secrets).await.unwrap_err();
+            assert!(
+                matches!(err, OpenCompanyError::Store(_)),
+                "raw: {raw}: {err}"
+            );
+            assert!(
+                err.to_string().contains("inference default"),
+                "raw: {raw}: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cleared_default_reads_unset() {
+        let secrets = MemSecrets::default();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Unset
+        );
+        assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+
+        clear_default_slug(&company(), &secrets).await.unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Unset
+        );
+
+        secrets
+            .set(&company(), DEFAULT_PROVIDER_KEY, SecretValue("   ".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Unset
+        );
+        assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn setting_a_default_choice_is_one_json_write() {
+        let secrets = MemSecrets::default();
+        set_default_choice(
+            &company(),
+            &secrets,
+            &ModelChoice {
+                provider: " tinyhumans ".to_string(),
+                model: " acme/test-model ".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let map = secrets.map.lock().unwrap();
+        assert_eq!(map.len(), 1, "one write: {map:?}");
+        assert_eq!(
+            map.get(DEFAULT_PROVIDER_KEY).map(String::as_str),
+            Some(r#"{"provider":"tinyhumans","model":"acme/test-model"}"#)
+        );
+        drop(map);
+        assert_eq!(
+            load_default(&company(), &secrets).await.unwrap(),
+            DefaultChoice::Full(ModelChoice {
+                provider: "tinyhumans".to_string(),
+                model: "acme/test-model".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_choice_without_a_model_is_refused_before_writing() {
+        let secrets = MemSecrets::default();
+        let err = set_default_choice(
+            &company(),
+            &secrets,
+            &ModelChoice {
+                provider: "acme".to_string(),
+                model: "  ".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, OpenCompanyError::InvalidRequest(_)), "{err}");
+        assert!(secrets.map.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_default_slug_reads_the_provider_out_of_a_json_default() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(r#"{"provider":"acme","model":"acme/other-model"}"#.to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            load_default_slug(&company(), &secrets)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("acme")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_with_one_distinct_model_collapses_to_it() {
+        let secrets = MemSecrets::default();
+        let mut d = draft("acme");
+        d.models = crate::company::INFERENCE_TIERS
+            .iter()
+            .map(|t| ((*t).to_string(), "acme/other-model".to_string()))
+            .collect();
+        d.models
+            .insert("chat-v1".to_string(), " acme/other-model ".to_string());
+        d.models.insert("extra".to_string(), "".to_string());
+        put_provider(&company(), &secrets, d).await.unwrap();
+        let row = get_provider(&company(), &secrets, "acme")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.model(), ModelOnRow::One("acme/other-model".to_string()));
+    }
+
+    #[test]
+    fn a_row_with_no_model_reads_none() {
+        assert_eq!(model_on_row(&BTreeMap::new()), ModelOnRow::None);
+        let mut blank = BTreeMap::new();
+        blank.insert("chat-v1".to_string(), "  ".to_string());
+        assert_eq!(model_on_row(&blank), ModelOnRow::None);
+    }
+
+    #[test]
+    fn a_row_with_two_distinct_models_is_ambiguous_never_picked() {
+        let mut models = BTreeMap::new();
+        models.insert("chat-v1".to_string(), "b-model".to_string());
+        models.insert("agentic-v1".to_string(), "a-model".to_string());
+        models.insert("reasoning-v1".to_string(), "a-model".to_string());
+        assert_eq!(
+            model_on_row(&models),
+            ModelOnRow::Ambiguous(vec!["a-model".to_string(), "b-model".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_zero_models_collapse_the_same_way() {
+        let secrets = MemSecrets::default();
+        let uniform = crate::company::INFERENCE_TIERS
+            .iter()
+            .map(|t| ((*t).to_string(), "acme/test-model".to_string()))
+            .collect();
+        super::super::save_runtime_config(
+            &company(),
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".to_string(),
+                base_url: None,
+                models: uniform,
+            },
+        )
+        .await
+        .unwrap();
+        let zero = entry_zero(&company(), &secrets).await.unwrap().unwrap();
+        assert_eq!(zero.model(), ModelOnRow::One("acme/test-model".to_string()));
+
+        let mut ambiguous = BTreeMap::new();
+        ambiguous.insert("chat-v1".to_string(), "x/a".to_string());
+        ambiguous.insert("agentic-v1".to_string(), "x/b".to_string());
+        super::super::save_runtime_config(
+            &company(),
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".to_string(),
+                base_url: None,
+                models: ambiguous,
+            },
+        )
+        .await
+        .unwrap();
+        let zero = entry_zero(&company(), &secrets).await.unwrap().unwrap();
+        assert!(matches!(zero.model(), ModelOnRow::Ambiguous(_)));
     }
 }

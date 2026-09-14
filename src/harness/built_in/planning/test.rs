@@ -1411,7 +1411,7 @@ fn platform_identity(
 }
 
 /// The hosted shape, which is the whole of issue #886: **no** BYO
-/// `composio/token` is stored, and the pod's platform identity is what the
+/// `composio/tinyhumans/key` is stored, and the pod's platform identity is what the
 /// toolbelt resolves. The evidence pack must say a credential exists.
 ///
 /// The old probe read only the BYO slot, so it answered `false` here — and the

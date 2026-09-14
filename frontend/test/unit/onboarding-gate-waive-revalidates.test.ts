@@ -73,7 +73,13 @@ async function settle() {
 async function mount(client: OpenCompanyClient, onWaive: () => void) {
   await act(async () => {
     root.render(
-      createElement(IntegrationStep, { client, company: null, onOpenApps: () => {}, onWaive }),
+      createElement(IntegrationStep, {
+        client,
+        company: null,
+        onOpenApps: () => {},
+        onOpenCredential: () => {},
+        onWaive,
+      }),
     );
     await Promise.resolve();
     await Promise.resolve();
@@ -155,6 +161,7 @@ describe("the durable waiver is revalidated against a fresh credential read", ()
             client,
             company: null,
             onOpenApps: () => {},
+            onOpenCredential: () => {},
             onWaive,
           }),
         );

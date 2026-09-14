@@ -87,7 +87,7 @@ struct CapabilityStatusDto {
     /// the running binary was not built with it.
     chargebee_in_build: bool,
     /// Whether a non-empty per-tenant Composio **BYO override** token is stored
-    /// under `composio/token` — never the token itself. Unlike media's env
+    /// under `composio/tinyhumans/key` — never the token itself. Unlike media's env
     /// credential, this is a tenant secret.
     ///
     /// Deliberately narrow, and **not** the answer to "can this company reach
@@ -340,7 +340,7 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
 /// Asks
 /// [`resolve_access`](crate::company::composio::resolve_access) rather
 /// than restating its precedence. The three-tier managed resolution — BYO
-/// `composio/token`, then the company's own TinyHumans key, then this instance's
+/// `composio/tinyhumans/key`, then the company's own TinyHumans key, then this instance's
 /// platform identity — and the BYOK route that bypasses all three, are the
 /// *same* answer
 /// [`TenantComposio::resolve`](crate::harness::composio::TenantComposio::resolve)
@@ -1281,7 +1281,7 @@ mod tests {
     /// walk **all three** credential tiers, not just the BYO slot.
     ///
     /// The hosted case is the one that was wrong. Nobody pastes a
-    /// `composio/token` on a hosted tenant — the pod's platform identity
+    /// `composio/tinyhumans/key` on a hosted tenant — the pod's platform identity
     /// answers, the toolbelt wires up, the agents call `GITHUB_*` — and the
     /// old one-tier probe called that `false`, sending an operator looking for
     /// a missing credential that was never missing.
@@ -1331,6 +1331,40 @@ mod tests {
             .unwrap();
         assert_eq!(
             super::composio_credential_source(runtime.as_ref(), Some(platform_identity())).await,
+            Some(CredentialSource::Static),
+        );
+    }
+
+    /// Storage addresses and the legacy fallback (#2306): a token pasted before
+    /// the rename, still sitting only at the legacy address, must keep reading
+    /// as configured.
+    #[tokio::test]
+    async fn a_legacy_only_token_still_reads_as_configured() {
+        use crate::company::composio;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, GRANTS_COMPOSIO).await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let secrets = runtime.secrets().clone();
+
+        secrets
+            .set(
+                runtime.id(),
+                composio::LEGACY_TOKEN_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            composio::token_configured(runtime.id(), secrets.as_ref())
+                .await
+                .unwrap(),
+            "a legacy-only token must still read as configured"
+        );
+        assert_eq!(
+            super::composio_credential_source(runtime.as_ref(), None).await,
             Some(CredentialSource::Static),
         );
     }

@@ -412,6 +412,81 @@ pub enum OpenCompanyError {
     #[cfg(feature = "openhuman")]
     #[error("harness error: {0}")]
     Harness(String),
+
+    /// A mutation would remove, clear, disable or switch something another
+    /// piece of config still depends on (keys rework, issue #2306): a
+    /// provider row or key the company default or an agent pair names, a
+    /// Composio credential a workload still resolves through, and so on.
+    /// Refused unless the request confirms it (`confirmInUse: true`, or
+    /// `?confirmInUse=true` for a DELETE). Renders as `409 Conflict` like
+    /// [`Self::Conflict`], but with the stable code `in_use` and — following
+    /// the same one-off pattern [`Self::WorkflowInvalid`] uses for
+    /// `problems` — one additive `usedBy` key in the HTTP envelope
+    /// (`src/server/error.rs`) so a client can render exactly what would
+    /// break without re-deriving it. See `docs/key-reworks/in-use-guards.md`.
+    #[error("{message}")]
+    InUse {
+        /// One sentence naming every dependent, e.g. "Anthropic is used by
+        /// the company default and 2 agents: Researcher, Web search."
+        message: String,
+        /// Every dependent found, computed before the mutation would have
+        /// applied. Serialized under the `usedBy` key.
+        used_by: UsedBy,
+    },
+}
+
+/// What still depends on the thing a refused mutation would have
+/// removed/cleared/disabled/switched (keys rework, issue #2306). The wire
+/// shape `docs/key-reworks/in-use-guards.md` §1 fixes: every field is
+/// omitted, never `false`/`null`/`[]`, when it has nothing to say, so
+/// `"usedBy" in dto` on the console is itself the in-use check.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct UsedBy {
+    /// `true` when this is (or is named by) the company's inference default —
+    /// a full `{provider, model}` default, or a bare-slug one naming the same
+    /// provider. Never serialized as `false`; omitted instead.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+    /// Every agent whose pair names this provider, by id and display name, in
+    /// roster order. An agent counts whatever its model half holds — the
+    /// guard is about the **provider** slot, not whether the pair is
+    /// complete.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<UsedByAgent>,
+    /// Which product surfaces resolve through this credential/row. See
+    /// `docs/key-reworks/in-use-guards.md` §1 for exactly when each appears —
+    /// in particular, `Llm` never appears for a key with no provider row
+    /// behind it (D-set: a key alone is not "set").
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<UsedBySurface>,
+}
+
+impl UsedBy {
+    /// Whether every field is empty — i.e. nothing depends on this at all, so
+    /// the mutation needs no confirmation.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// One agent naming a provider/credential in its own pair, for [`UsedBy`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UsedByAgent {
+    /// The agent's stable id (`researcher`), never shown to a person — see
+    /// D-names-in-errors (X7): a sentence names the agent by `name`, and this
+    /// is the id a client keeps for its own use (a link, a request).
+    pub id: String,
+    /// The agent's display name (`Researcher`), what a sentence names it by.
+    pub name: String,
+}
+
+/// A product surface that resolves through a credential/row, for [`UsedBy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UsedBySurface {
+    Llm,
+    Composio,
+    Search,
 }
 
 impl OpenCompanyError {
@@ -514,6 +589,7 @@ impl OpenCompanyError {
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]
             Self::Harness(_) => "harness_error".to_string(),
+            Self::InUse { .. } => "in_use".to_string(),
         }
     }
 }

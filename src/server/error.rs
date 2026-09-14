@@ -91,7 +91,14 @@ impl ApiError {
             | OpenCompanyError::Conflict(_)
             | OpenCompanyError::NotInBuild(_)
             | OpenCompanyError::NotConfigured(_)
-            | OpenCompanyError::EmergencyStop(_) => StatusCode::CONFLICT,
+            | OpenCompanyError::EmergencyStop(_)
+            // Keys rework (#2306): a removal/clear/disable/switch that would
+            // strand a dependent (the default, an agent pair, a workload) is
+            // a conflict with existing config, same status as the other
+            // durable-invariant conflicts above; the `in_use` code and the
+            // additive `usedBy` envelope key (below) are what a client
+            // branches on to retry with `confirmInUse: true`.
+            | OpenCompanyError::InUse { .. } => StatusCode::CONFLICT,
             // A runtime swap is in progress and clears itself within a turn, so
             // this is a retry-me, not a refusal (issue #290).
             OpenCompanyError::Quiescing(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -155,6 +162,15 @@ impl IntoResponse for ApiError {
                 "error": self.0.to_string(),
                 "code": self.0.code(),
                 "problems": problems,
+            })),
+            // Keys rework (#2306): additively carries `usedBy` so the console
+            // can render exactly what an `in_use` refusal would break, the
+            // same way `WorkflowInvalid` above carries `problems`. See
+            // `docs/key-reworks/in-use-guards.md`.
+            OpenCompanyError::InUse { used_by, .. } => Json(json!({
+                "error": self.0.to_string(),
+                "code": self.0.code(),
+                "usedBy": used_by,
             })),
             _ => Json(json!({
                 "error": self.0.to_string(),
@@ -346,5 +362,61 @@ mod test {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["code"], "company_not_found");
         assert!(json.get("problems").is_none(), "{json}");
+    }
+
+    /// Keys rework (#2306): an `InUse` refusal is a 409 with the stable code
+    /// `in_use`, and its envelope additively carries `usedBy` — the same
+    /// one-off pattern `WorkflowInvalid` uses for `problems` above — so a
+    /// client can render exactly what a confirmed retry would break.
+    #[tokio::test]
+    async fn in_use_envelope_carries_used_by() {
+        use crate::error::{UsedBy, UsedByAgent};
+        use axum::body::to_bytes;
+
+        let err = ApiError(OpenCompanyError::InUse {
+            message: "Anthropic is used by the company default and 2 agents: \
+                      Researcher, Web search."
+                .to_string(),
+            used_by: UsedBy {
+                default: true,
+                agents: vec![
+                    UsedByAgent {
+                        id: "researcher".to_string(),
+                        name: "Researcher".to_string(),
+                    },
+                    UsedByAgent {
+                        id: "web_search".to_string(),
+                        name: "Web search".to_string(),
+                    },
+                ],
+                surfaces: Vec::new(),
+            },
+        });
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.0.code(), "in_use");
+
+        let body = err.into_response().into_body();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["code"], "in_use");
+        assert!(json["error"].as_str().unwrap().contains("Anthropic"));
+        assert_eq!(json["usedBy"]["default"], true);
+        assert_eq!(json["usedBy"]["agents"][0]["id"], "researcher");
+        assert!(
+            json["usedBy"].get("surfaces").is_none(),
+            "empty surfaces are omitted"
+        );
+        assert!(json.get("problems").is_none(), "{json}");
+    }
+
+    /// [`crate::error::UsedBy`]'s own contract: every field omitted, never
+    /// `false`/`[]`, when there is nothing to say.
+    #[test]
+    fn used_by_omits_every_empty_field() {
+        use crate::error::UsedBy;
+
+        let value = serde_json::to_value(UsedBy::default()).unwrap();
+        assert_eq!(value, serde_json::json!({}), "{value}");
+        assert!(UsedBy::default().is_empty());
     }
 }

@@ -163,12 +163,11 @@ pub fn harness_inference_from_env(
     ))
 }
 
-/// Resolve the shared hosted-endpoint `(credential, base_url)` pair every hosted
-/// TinyHumans surface addresses — the **one** credential path both chat
-/// inference ([`harness_inference_from_env`]) and embeddings
-/// ([`hosted_embeddings_from_env`](crate::harness::embeddings::hosted_embeddings_from_env))
-/// resolve against, so a rotation or a per-tenant key reaches both without a
-/// second, drifting resolution.
+/// Resolve the shared hosted-endpoint `(credential, base_url)` pair that managed
+/// TinyHumans chat inference addresses — the **one** credential path both
+/// [`harness_inference_from_env`] and [`PlatformCredentialStatus::resolve`] read,
+/// so a rotation or a per-tenant key reaches both without a second, drifting
+/// resolution.
 ///
 /// Precedence mirrors the documented inference order, most specific first:
 ///
@@ -177,8 +176,8 @@ pub fn harness_inference_from_env(
 ///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`.**
 /// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
 ///
-/// The embeddings client POSTs to `{base_url}/embeddings`, the chat client to
-/// `{base_url}/chat/completions` — the same OpenAI-compatible surface.
+/// The chat client POSTs to `{base_url}/chat/completions`, an OpenAI-compatible
+/// surface.
 pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credential, String)> {
     let credential = match env
         .get("OPENCOMPANY_INFERENCE_KEY")
@@ -291,7 +290,7 @@ pub struct PlatformCredentialStatus {
     pub platform_identity: bool,
     /// That identity is the **projected-file** tier rather than a static key.
     pub projected_tier: bool,
-    /// Managed chat inference and embeddings resolved
+    /// Managed chat inference resolved
     /// ([`hosted_endpoint_from_env`]).
     pub inference: bool,
     /// Managed web search resolved ([`search_backend_from_env`]).
@@ -1639,8 +1638,9 @@ pub struct RequestPlan {
 
 /// Builds the [`RequestPlan`] for one turn against a tenant provider.
 ///
-/// * The abstract tier (`chat-v1`, …) is mapped through the tenant
-///   `[inference].models` table; an unmapped tier passes through verbatim.
+/// * A decl with a chosen model (keys rework #2306, slice 2b) sends it;
+///   otherwise the abstract tier (`chat-v1`, …) is mapped through the tenant
+///   `[inference].models` table, and an unmapped tier passes through verbatim.
 /// * OpenRouter gets its mandatory `HTTP-Referer` / `X-Title` attribution
 ///   headers; other providers get none.
 /// * The bearer is resolved from the decl's [`Credential`] **here**, so every
@@ -1665,7 +1665,14 @@ pub async fn request_plan(
     // not proxied, and rewriting `chat-v1` to an OpenRouter slug for it is what
     // produced `Model 'anthropic/claude-sonnet-5' is not available` against an
     // endpoint that publishes `chat-v1` itself.
-    let model = inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary());
+    //
+    // Keys rework (#2306), slice 2b: a decl with a chosen model (a full
+    // company default, or — from 3a — an agent pair) sends it as-is; only a
+    // legacy decl with none falls through to the tier map.
+    let model = match decl.chosen_model() {
+        Some(chosen) => chosen.to_string(),
+        None => inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary()),
+    };
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()
@@ -1822,6 +1829,11 @@ fn model_unavailable_advice(
         ),
         (_, None) => "update the company's `[inference].models` mapping".to_string(),
     };
+    // Redacted here rather than at the two call sites, so a third one cannot
+    // reintroduce the leak. An endpoint may carry userinfo, and this sentence is
+    // operator-facing: it reaches the console and gets screenshotted into
+    // tickets.
+    let models_url = crate::company::inference::catalogue::redact_endpoint(models_url);
     Some(format!(
         "the configured inference model is not available from the provider — {where_to_fix}, to \
          one the provider offers (list them with `GET {models_url}`). {error}"
@@ -2080,27 +2092,36 @@ impl TenantProvider {
     }
 
     /// Re-resolves the effective config from the secret store and updates the
-    /// cached telemetry slug. Errors when no provider is configured at all.
+    /// cached telemetry slug. Errors with [`inference::NO_MODEL_CHOSEN`] (or a
+    /// fail-closed sentence for a broken pin/full default) when nothing
+    /// resolves.
     ///
-    /// `tier` is the abstract tier **this** turn carries, and it is not
-    /// decoration: the company's routing table routes per workload, so resolving
-    /// without it answers "where does this company send work" when the question
-    /// is "where does this company send *this* work". Resolved per turn rather
-    /// than cached for the same reason the credential is — an operator moves a
-    /// row on the Routing tab and the next turn has to honour it.
+    /// `tier` is the abstract tier **this** turn carries. Keys rework (#2306,
+    /// slice 2b): resolution no longer depends on it for a company with an
+    /// agent pair or a full default — [`inference::resolve_for_turn`] decides
+    /// the model directly — but the legacy chain (no pin, no full default)
+    /// still routes per workload exactly as it always did, so `tier` still
+    /// has to reach it.
     async fn resolve(&self, tier: &str) -> anyhow::Result<InferenceDecl> {
-        let decl = inference::resolve_effective_for_tier(
+        let decl = inference::resolve_for_turn(
             &self.company,
             &self.manifest,
             self.env_default.as_ref(),
             self.secrets.as_ref(),
             &self.scope,
+            None, // the agent pair: slice 3a passes `self.pin.clone()`
             tier,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("no inference provider is configured for this company"))?;
+        .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?;
         *self.slug.write().unwrap() = decl.telemetry_slug();
+        // A chosen model (a full default, or — from 3a — a pin) is sent as
+        // given: no tier vocabulary, no catalogue read. Only the legacy arm
+        // below still needs to know what an unmapped tier means to this
+        // endpoint.
+        if decl.chosen_model().is_some() {
+            return Ok(decl);
+        }
         // Ask the endpoint what vocabulary it speaks before deciding whether to
         // rewrite this turn's tier. Cached per company, harness and endpoint for
         // an hour (and per failure for a minute), so this is one extra request
@@ -2122,6 +2143,7 @@ impl TenantProvider {
             bearer.as_deref(),
             Some(&self.catalog_scope()),
             crate::company::inference::catalogue::auth_style_for(&decl.provider),
+            crate::company::inference::catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
         )
         .await;
         Ok(decl.with_vocabulary(vocabulary))
@@ -4896,7 +4918,13 @@ mod tests {
             .invoke(&(), user_request("hi"))
             .await
             .expect_err("no provider configured");
-        assert!(err.to_string().contains("no inference provider"), "{err}");
+        // Keys rework (#2306), slice 2b: `resolve_for_turn`'s refusal replaces
+        // the old "no inference provider is configured" sentence.
+        assert!(
+            err.to_string()
+                .contains("No model is chosen for this company"),
+            "{err}"
+        );
     }
 
     /// The product-identity contract at the transport: `HostedProvider::invoke`

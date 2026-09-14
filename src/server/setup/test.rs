@@ -1677,6 +1677,57 @@ async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
     assert_eq!(result.model.as_deref(), Some("qwen3:8b"));
 }
 
+/// The first-run probe refuses an endpoint carrying a credential **before it
+/// sends anything**, and never echoes the credential back.
+///
+/// The server counts every request it receives: the catalogue read and the
+/// probe would each have presented the userinfo as basic auth, so a refusal
+/// that came after either of them would already have leaked it.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn setup_probe_refuses_a_credentialed_endpoint_before_sending_anything() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = axum::Router::new().fallback({
+        let hits = hits.clone();
+        move || {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { axum::http::StatusCode::NOT_FOUND }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "openai_compatible".to_string(),
+            base_url: Some(format!("http://alice:hunter2@{address}/v1")),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(!result.ok, "a credentialed endpoint must not test green");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing may be sent to an endpoint carrying a credential"
+    );
+    assert!(
+        !result.base_url.contains("hunter2") && !result.base_url.contains("alice"),
+        "the echoed endpoint must be redacted: {}",
+        result.base_url
+    );
+    let error = result.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("username or password"),
+        "expected the refusal sentence, got: {error}"
+    );
+    assert!(!error.contains("hunter2"), "{error}");
+}
+
 /// A designed company beats a template slug. An operator who answered three
 /// questions and edited a roster has expressed a preference a preset cannot
 /// override — and sending both must never produce two companies.

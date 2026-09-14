@@ -37,11 +37,25 @@
 //! tone here is a design-token decision on the console side rather than a column
 //! of this table. The table stays presentation-free.
 //!
-//! And the 27th Rust entry, `openhuman` — their managed first-party backend — is
-//! not a row here. Our equivalent is the managed TinyHumans brain, which is
-//! already modelled with its own auth path ([`super::PLATFORM_BASE_URL`]) and
-//! must keep it. Porting `openhuman` as a row would give the managed brain a
-//! second, bearer-shaped identity.
+//! `openhuman` — their managed first-party backend — is not a row here. Our
+//! equivalent, TinyHumans, **is** a row (slug `tinyhumans`): its OpenRouter
+//! proxy, its bearer key, its paged catalog (keys rework, issue #2306, slice
+//! 2a). The legacy managed *chain* — the fallback that resolves with no row at
+//! all, from an account key or the instance identity — keeps its own auth path
+//! ([`super::PLATFORM_BASE_URL`]) and is unaffected by this row's existence.
+
+/// The shape a provider's `GET {base}/models` answers in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CatalogShape {
+    /// `{"data":[{"id":…}]}`, one response.
+    OpenAi,
+    /// `{"success":true,"data":{"data":[…],"total":N,"limit":L,"offset":O}}`,
+    /// paged. See [`super::paged_catalog`].
+    PagedEnvelope,
+}
+
+/// The path the TinyHumans OpenRouter proxy is served under.
+pub const TINYHUMANS_PROXY_PATH: &str = "/agent-integrations/openrouter";
 
 /// How a provider expects its credential presented.
 ///
@@ -91,7 +105,7 @@ pub struct CloudProvider {
     pub key_placeholder: Option<&'static str>,
 }
 
-/// The 26 hosted providers the add-dialog offers.
+/// The 27 hosted providers the add-dialog offers.
 ///
 /// ## The endpoints are presets, not a pattern
 ///
@@ -325,6 +339,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         endpoint: "https://api-inference.modelscope.cn/v1",
         auth: AuthStyle::Bearer,
         key_placeholder: Some("ms-..."),
+    },
+    // Keys rework (#2306), slice 2a: TinyHumans as an ordinary cloud row on its
+    // OpenRouter proxy. Must stay the LAST entry — `the_console_mirror_lists_the_same_cloud_providers`
+    // compares this table against `frontend/src/inference/catalogue.ts` row by
+    // row, and both tables append it last.
+    CloudProvider {
+        slug: "tinyhumans",
+        label: "TinyHumans",
+        endpoint: "https://api.tinyhumans.ai/agent-integrations/openrouter",
+        auth: AuthStyle::Bearer,
+        key_placeholder: Some("th-..."),
     },
 ];
 
@@ -567,6 +592,209 @@ pub fn endpoint_host(endpoint: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
+/// What [`redact_endpoint`] leaves where the userinfo was.
+///
+/// It replaces the userinfo only; the delimiting `@` survives, so the result
+/// still reads as a URL and the operator can see *that* something was embedded
+/// — which is the sentence they need in order to go and move it into the key
+/// field.
+pub const REDACTED_USERINFO: &str = "***";
+
+/// Every byte range of an endpoint that **might** be userinfo — the redaction's
+/// reading, deliberately wider than the refusal's.
+///
+/// A candidate authority starts at the beginning of the value, after every
+/// `://`, and after every `http:` or `https:` in any case; any run of `/` or `\`
+/// after that start is skipped, the candidate ends at the next `/` or `\`, and
+/// only an `@` inside it counts. Every candidate is taken, including ones inside
+/// a path (`https://gw/proxy/http://bob:pw@inner`), and overlapping ranges are
+/// merged. That over-reads on purpose: this decides what is **said** about an
+/// endpoint, and masking a path segment that only looks like a credential costs
+/// a log line some readability, where missing a real one costs the credential.
+/// Whether an endpoint is **refused** is the narrower
+/// [`endpoint_credential_range`], so a well-formed endpoint is never rejected
+/// for path text (Codex and CodeRabbit review on #2281).
+fn endpoint_userinfo_ranges(endpoint: &str) -> Vec<std::ops::Range<usize>> {
+    let head = &endpoint[..endpoint.find(['?', '#']).unwrap_or(endpoint.len())];
+    // ASCII lowercasing keeps every byte offset, so indices into it are
+    // indices into `head`.
+    let lower = head.to_ascii_lowercase();
+    let mut starts = vec![0];
+    starts.extend(head.match_indices("://").map(|(i, _)| i + ":".len()));
+    for scheme in ["https:", "http:"] {
+        starts.extend(lower.match_indices(scheme).map(|(i, _)| i + scheme.len()));
+    }
+    let mut ranges: Vec<std::ops::Range<usize>> = starts
+        .into_iter()
+        .filter_map(|start| {
+            let rest = &head[start..];
+            let slashes = rest
+                .bytes()
+                .take_while(|b| matches!(b, b'/' | b'\\'))
+                .count();
+            let authority = &rest[slashes..];
+            let len = authority.find(['/', '\\']).unwrap_or(authority.len());
+            // `rfind`, not `find`: a password may itself contain an `@`, and
+            // the last one in the authority is the delimiter per RFC 3986.
+            let at = authority[..len].rfind('@')?;
+            let from = start + slashes;
+            Some(from..from + at)
+        })
+        .collect();
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// The userinfo an HTTP client would actually read from `endpoint`, if any.
+///
+/// Read the way WHATWG URL parsing reads a special scheme: a leading `http:` or
+/// `https:` (any case) or another `scheme://`, then any run of `/` or `\`, then
+/// the authority up to the next `/` or `\`. So `http:/alice:pw@host`,
+/// `http:///alice:pw@host`, `http:\\alice:pw@host` and `HTTP:alice:pw@host` all
+/// carry a credential. The read continues past an authority **only** for a doubled
+/// scheme — an authority that is itself a bare scheme **and** is followed by `//`
+/// (`http://HTTP://alice:pw@host`). One slash after it is a host with an empty
+/// port: `http://http:/v1@beta` is host `http` and path `/v1@beta` to every
+/// parser, and has no userinfo. Never into ordinary path text either:
+/// `https://gateway.example/proxy/http:user@example.com/v1` has no userinfo, and
+/// refusing it would reject an endpoint every client accepts (Codex review on
+/// #2281). Every range this returns is also one [`endpoint_userinfo_ranges`]
+/// returns, so whatever is refused is also redacted.
+fn endpoint_credential_range(endpoint: &str) -> Option<std::ops::Range<usize>> {
+    let head = &endpoint[..endpoint.find(['?', '#']).unwrap_or(endpoint.len())];
+    let mut pos = 0;
+    // Bounded: each hop consumes a scheme, so a real value needs two or three.
+    for _ in 0..8 {
+        let scheme_len = scheme_prefix_len(&head[pos..]);
+        if scheme_len == 0 && pos > 0 {
+            return None;
+        }
+        let after = pos + scheme_len;
+        let from = after
+            + head[after..]
+                .bytes()
+                .take_while(|b| matches!(b, b'/' | b'\\'))
+                .count();
+        let tail = &head[from..];
+        let authority = &tail[..tail.find(['/', '\\']).unwrap_or(tail.len())];
+        // `rfind`, not `find`: a password may itself contain an `@`, and the
+        // last one in the authority is the delimiter per RFC 3986.
+        if let Some(at) = authority.rfind('@') {
+            return Some(from..from + at);
+        }
+        let bare_scheme = authority.strip_suffix(':').is_some_and(is_scheme_name);
+        // A doubled `scheme://scheme://` only. `http://http:/v1@beta` is a host
+        // named `http` with an empty port, not a second scheme (Codex review on
+        // #2281), so a single slash after the bare scheme ends the read.
+        let doubled = tail[authority.len()..]
+            .bytes()
+            .take_while(|b| matches!(b, b'/' | b'\\'))
+            .count()
+            >= 2;
+        if from == pos || !bare_scheme || !doubled {
+            return None;
+        }
+        pos = from;
+    }
+    None
+}
+
+/// The length of the scheme `rest` opens with: `http:`/`https:` in any case, or
+/// any other valid `scheme://`. Zero when it opens with none.
+fn scheme_prefix_len(rest: &str) -> usize {
+    let lower = rest.to_ascii_lowercase();
+    if lower.starts_with("https:") {
+        return "https:".len();
+    }
+    if lower.starts_with("http:") {
+        return "http:".len();
+    }
+    match rest.find("://") {
+        Some(i) if is_scheme_name(&rest[..i]) => i + "://".len(),
+        _ => 0,
+    }
+}
+
+/// Whether `name` is a URI scheme name (RFC 3986 §3.1).
+fn is_scheme_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Whether an endpoint URL carries a credential in its authority
+/// (`http://user:password@host/v1`).
+///
+/// The check every place that **accepts** an endpoint makes, so that a
+/// credential in a URL never reaches storage. It is the same class of rule as
+/// the `[inference].api_key_secret` check in
+/// [`validate_parts`](super::validate_inference): a secret belongs in the
+/// credential slot, which is write-only to the console, and nowhere else. An
+/// endpoint is read back by every console reader on every page load, echoed
+/// into operator-facing failure text, and written to a plaintext store — so a
+/// password in one is a password in all three.
+pub fn endpoint_has_credentials(endpoint: &str) -> bool {
+    endpoint_credential_range(&as_url_parser_reads(endpoint)).is_some()
+}
+
+/// The endpoint as a URL parser sees it: trimmed, with every ASCII tab, line
+/// feed and carriage return removed.
+///
+/// WHATWG URL parsing strips those three wherever they appear, so
+/// `http:\t//alice:pw@host` reaches a client as `http://alice:pw@host`. A scan
+/// that stopped at the tab saw no `@` in the authority, which let the credential
+/// through both the refusal and the redaction (Codex review on #2281).
+fn as_url_parser_reads(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect()
+}
+
+/// What an operator is told when an endpoint they typed carries a credential.
+///
+/// One sentence for every place an endpoint is typed — the provider list and
+/// the first-run setup probe — so the two cannot drift into different advice.
+pub const ENDPOINT_CREDENTIAL_REFUSAL: &str = "That endpoint carries a username or password \
+    in the URL. Remove them and put the credential in the API key field — an endpoint is stored \
+    as written and is readable by everyone who can see this company's settings.";
+
+/// The same endpoint with any embedded credential replaced by
+/// [`REDACTED_USERINFO`].
+///
+/// The second, independent mechanism behind the same invariant as
+/// [`endpoint_has_credentials`]. Rejection keeps userinfo out of anything
+/// written from now on; this keeps it out of anything **said**, including about
+/// values stored before the rejection existed and values that arrived from a
+/// `company.toml` or an `OPENCOMPANY_INFERENCE_URL` this host does not own.
+///
+/// Every endpoint that reaches a response body, an operator-facing message or a
+/// log goes through here. The endpoint used to actually *make* a request does
+/// not — redacting there would break the request, which is the difference
+/// between the two call sites and the reason this is a separate function rather
+/// than something done at the point of storage.
+pub fn redact_endpoint(endpoint: &str) -> String {
+    // Said as a client would read it. Tabs and line breaks are dropped before
+    // the scan rather than masked around, because a client drops them too and
+    // an offset into the raw value would not line up with the credential.
+    let mut out = as_url_parser_reads(endpoint);
+    let ranges = endpoint_userinfo_ranges(&out);
+    // Last range first, so each replacement leaves the earlier offsets valid.
+    for range in ranges.into_iter().rev() {
+        out.replace_range(range, REDACTED_USERINFO);
+    }
+    out
+}
+
 /// The catalogue row for `slug`, if it is a built-in cloud provider.
 pub fn cloud_provider(slug: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.slug == slug)
@@ -580,6 +808,28 @@ pub fn local_runtime(slug: &str) -> Option<&'static LocalRuntime> {
 /// The catalogue row for `option_slug`, if it is a CLI login option.
 pub fn cli_login(option_slug: &str) -> Option<&'static CliLogin> {
     CLI_LOGINS.iter().find(|c| c.option_slug == option_slug)
+}
+
+/// Which catalog shape to read at `base_url` for a provider of `kind`.
+///
+/// `tinyhumans` always pages. Any other kind pages only when its endpoint's
+/// path ends in [`TINYHUMANS_PROXY_PATH`]: the legacy managed declaration has
+/// kind `openrouter` (`super::LEGACY_MANAGED` is a routing word, not a
+/// catalogue kind), and once its base is the proxy — after the managed URL
+/// constants point there, or with an injected `OPENCOMPANY_INFERENCE_URL` set
+/// to the proxy — its model list pages the same way. A read-only path check;
+/// no URL is built and no request is made here.
+pub fn catalog_shape_for(kind: &str, base_url: &str) -> CatalogShape {
+    if kind.trim() == super::MANAGED_SLUG
+        || base_url
+            .trim()
+            .trim_end_matches('/')
+            .ends_with(TINYHUMANS_PROXY_PATH)
+    {
+        CatalogShape::PagedEnvelope
+    } else {
+        CatalogShape::OpenAi
+    }
 }
 
 /// How a credential must be presented to a provider of this kind.
@@ -618,8 +868,19 @@ pub fn auth_style_for(kind: &str) -> AuthStyle {
 /// OpenAI-compatible surface lives and `http://localhost:11434` is what the
 /// runtime's own documentation prints. Appending is not guessing: a path the
 /// operator supplied is left exactly as typed.
+///
+/// An endpoint carrying userinfo (`http://user:password@host/v1`) is **not**
+/// normalised — see [`endpoint_has_credentials`]. This is the point every
+/// stored endpoint passes through, so refusing here is what makes "no
+/// credential is ever stored in a `base_url`" a property of the store rather
+/// than of whichever handler remembered to check. Callers that have a sentence
+/// to give the operator ask [`endpoint_has_credentials`] first; this refusal is
+/// the backstop for the ones that do not.
 pub fn normalize_local_endpoint(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('/');
+    if endpoint_has_credentials(trimmed) {
+        return None;
+    }
     let (scheme, rest) = trimmed.split_once("://")?;
     if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
         return None;
@@ -783,6 +1044,11 @@ pub fn is_reserved_slug(slug: &str) -> bool {
 /// of vendors and these are not vendors; kept in the *reserved* check because
 /// that check has exactly one meaning — a custom provider may not take a name
 /// something else already owns.
+///
+/// `tinyhumans` (`super::MANAGED_SLUG`) is also a cloud row now (slice 2a): it
+/// stays listed here too, so reservation does not depend on the table — a
+/// custom provider named "TinyHumans" is refused whether or not a `tinyhumans`
+/// row has been added yet.
 const INTERNAL_SLUGS: &[&str] = &[super::MANAGED_SLUG, super::LEGACY_MANAGED];
 
 /// Which of the three questions a provider answers.
@@ -861,7 +1127,7 @@ mod tests {
 
     #[test]
     fn the_catalogue_ships_the_counts_the_plan_names() {
-        assert_eq!(CLOUD_PROVIDERS.len(), 26, "cloud providers");
+        assert_eq!(CLOUD_PROVIDERS.len(), 27, "cloud providers");
         assert_eq!(LOCAL_RUNTIMES.len(), 3, "local runtimes");
         assert_eq!(CLI_LOGINS.len(), 2, "CLI logins");
     }
@@ -1041,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_owns_its_slug_even_though_it_is_not_a_catalogue_row() {
+    fn tinyhumans_owns_its_slug_and_is_a_catalogue_row() {
         // `provider/tinyhumans/key` is where the managed credential lives, and
         // `managed` is the word the route grammar uses. A custom provider named
         // "TinyHumans" slugified straight into the first: adding it stored a
@@ -1051,9 +1317,57 @@ mod tests {
         assert!(is_reserved_slug(super::super::MANAGED_SLUG));
         assert!(is_reserved_slug("tinyhumans"));
         assert!(is_reserved_slug("managed"));
-        // Reserved is about the name, not the shape: a company may still be
-        // *on* managed, and this only stops a second thing taking its address.
-        assert!(cloud_provider("tinyhumans").is_none());
+        // Keys rework (#2306) slice 2a: unlike before, `tinyhumans` IS now a
+        // catalogue row too — reservation and catalogue membership are no
+        // longer mutually exclusive for this slug.
+        assert!(cloud_provider("tinyhumans").is_some());
+    }
+
+    #[test]
+    fn tinyhumans_is_a_bearer_row_on_the_proxy() {
+        let tinyhumans = cloud_provider("tinyhumans").expect("tinyhumans is in the catalogue");
+        assert_eq!(
+            tinyhumans.endpoint,
+            "https://api.tinyhumans.ai/agent-integrations/openrouter"
+        );
+        assert_eq!(auth_style_for("tinyhumans"), AuthStyle::Bearer);
+        assert_eq!(tinyhumans.key_placeholder, Some("th-..."));
+    }
+
+    #[test]
+    fn catalog_shape_is_paged_only_for_tinyhumans_or_the_proxy_path() {
+        let proxy = "https://api.tinyhumans.ai/agent-integrations/openrouter";
+        assert_eq!(
+            catalog_shape_for("tinyhumans", proxy),
+            CatalogShape::PagedEnvelope
+        );
+        // Whitespace around the kind, and a blank base URL, still recognise
+        // the kind on its own.
+        assert_eq!(
+            catalog_shape_for(" tinyhumans ", ""),
+            CatalogShape::PagedEnvelope
+        );
+        // A trailing slash on the proxy path still matches.
+        assert_eq!(
+            catalog_shape_for("openrouter", &format!("{proxy}/")),
+            CatalogShape::PagedEnvelope
+        );
+        assert_eq!(
+            catalog_shape_for("openrouter", "https://api.tinyhumans.ai/openai/v1"),
+            CatalogShape::OpenAi
+        );
+        assert_eq!(
+            catalog_shape_for("custom", "http://127.0.0.1:8099/v1"),
+            CatalogShape::OpenAi
+        );
+        for provider in CLOUD_PROVIDERS.iter().filter(|p| p.slug != "tinyhumans") {
+            assert_eq!(
+                catalog_shape_for(provider.slug, provider.endpoint),
+                CatalogShape::OpenAi,
+                "{}: only tinyhumans/the proxy path pages",
+                provider.slug
+            );
+        }
     }
 
     #[test]
@@ -1492,6 +1806,214 @@ mod tests {
         assert_eq!(
             normalize_local_endpoint("http://127.0.0.1:1234/v1/").as_deref(),
             Some("http://127.0.0.1:1234/v1")
+        );
+    }
+
+    #[test]
+    fn an_endpoint_carrying_a_credential_is_not_an_endpoint() {
+        // The security half of the same refusal. `normalize_local_endpoint` is
+        // the funnel every stored endpoint passes through, so refusing here is
+        // what makes "no credential is ever stored in a `base_url`" a property
+        // of the store rather than of whichever handler remembered to check.
+        for bad in [
+            "http://alice:hunter2@127.0.0.1:8597/v1",
+            "https://alice@api.acme.example/v1",
+            "http://alice:hunter2@127.0.0.1:8597",
+            // A password may itself contain an `@`; the authority still has one.
+            "http://alice:hun@ter2@127.0.0.1:8597/v1",
+        ] {
+            assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` must not normalise into something storable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_scheme_does_not_hide_the_credential_behind_it() {
+        // Codex review on #2281: an uppercase scheme was once prefixed with a
+        // second one by setup normalisation, and the first authority (`HTTP:`)
+        // has no `@` — so reading only that one missed the credential entirely.
+        for bad in [
+            "http://HTTP://alice:hunter2@127.0.0.1:8597/v1",
+            "https://http://alice@api.acme.example/v1",
+        ] {
+            assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` must not be storable"
+            );
+            let said = redact_endpoint(bad);
+            assert!(
+                !said.contains("alice") && !said.contains("hunter2"),
+                "`{bad}` redacted to `{said}`"
+            );
+        }
+        // An uppercase scheme on its own is an ordinary endpoint.
+        assert!(endpoint_has_credentials(
+            "HTTP://alice:hunter2@127.0.0.1:8597/v1"
+        ));
+        assert!(!endpoint_has_credentials("HTTPS://api.acme.example/v1"));
+    }
+
+    #[test]
+    fn a_credential_is_found_in_every_authority_an_http_client_could_read() {
+        // Codex and CodeRabbit review on #2281. Each shape once hid its
+        // credential from the refusal, the redaction, or both.
+        for (bad, said) in [
+            // One slash: WHATWG URL parsing still reads the authority after it.
+            (
+                "http:/alice:hunter2@127.0.0.1:8597/v1",
+                "http:/***@127.0.0.1:8597/v1",
+            ),
+            // Three slashes: the extra one is skipped, not an empty authority.
+            (
+                "http:///alice:hunter2@127.0.0.1:8597/v1",
+                "http:///***@127.0.0.1:8597/v1",
+            ),
+            // Backslashes, which a special scheme reads as slashes.
+            (
+                "http:\\\\alice:hunter2@127.0.0.1:8597/v1",
+                "http:\\\\***@127.0.0.1:8597/v1",
+            ),
+            // No slash at all.
+            (
+                "HTTP:alice:hunter2@127.0.0.1:8597/v1",
+                "***@127.0.0.1:8597/v1",
+            ),
+            // Two authorities, two credentials: both go.
+            (
+                "http://alice:one@outer/http://bob:two@inner/v1",
+                "http://***@outer/http://***@inner/v1",
+            ),
+        ] {
+            assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` must not be storable"
+            );
+            assert_eq!(redact_endpoint(bad), said, "`{bad}`");
+        }
+        // A path is still a path. A gateway that proxies to another URL, with
+        // an `@` later in that path, carries no credential and stays storable.
+        let gateway = "https://gateway.example/proxy/http://upstream/@me";
+        assert!(!endpoint_has_credentials(gateway));
+        assert_eq!(normalize_local_endpoint(gateway).as_deref(), Some(gateway));
+        for good in [
+            gateway,
+            "http://127.0.0.1:8597/v1",
+            "http://[::1]:11434/v1",
+            "https://api.acme.example:8443/v1/@me",
+            "localhost:1234/v1",
+        ] {
+            assert!(!endpoint_has_credentials(good), "`{good}` has no userinfo");
+            assert_eq!(redact_endpoint(good), good);
+        }
+    }
+
+    #[test]
+    fn a_scheme_in_a_well_formed_path_is_not_an_authority() {
+        // Codex review on #2281: WHATWG parsing gives this endpoint no userinfo.
+        // `http:user@example.com` is path text, so the endpoint is accepted.
+        let gateway = "https://gateway.example/proxy/http:user@example.com/v1";
+        assert!(!endpoint_has_credentials(gateway));
+        assert_eq!(normalize_local_endpoint(gateway).as_deref(), Some(gateway));
+        // What is *said* about it still masks the segment that looks like one:
+        // the redaction reads wider than the refusal, by design.
+        assert_eq!(
+            redact_endpoint(gateway),
+            "https://gateway.example/proxy/http:***@example.com/v1"
+        );
+        // A port-less host that happens to end in `:` does not start a hop.
+        assert!(!endpoint_has_credentials("http://localhost:/v1/@me"));
+        // Nor does a host *named* like a scheme with one slash after it: every
+        // parser reads `http://http:/v1@beta` as host `http`, empty port, path
+        // `/v1@beta`. It is storable; the wider redaction still masks the
+        // lookalike when it is said.
+        let empty_port = "http://http:/v1@beta";
+        assert!(!endpoint_has_credentials(empty_port));
+        assert_eq!(
+            normalize_local_endpoint(empty_port).as_deref(),
+            Some(empty_port)
+        );
+        assert_eq!(redact_endpoint(empty_port), "http://http:/***@beta");
+        // And a doubled scheme still does — the one case a hop exists for.
+        assert!(endpoint_has_credentials(
+            "https://http://alice@api.acme.example/v1"
+        ));
+    }
+
+    #[test]
+    fn tabs_and_line_breaks_do_not_hide_a_credential() {
+        // Codex review on #2281: a URL parser removes ASCII tab, LF and CR
+        // wherever they appear, so each of these reaches a client carrying
+        // `alice:hunter2`.
+        for bad in [
+            "http:\t//alice:hunter2@127.0.0.1:8597/v1",
+            "http://ali\nce:hunter2@127.0.0.1:8597/v1",
+            "http://http:\t//alice:hunter2@127.0.0.1:8597/v1",
+            "http://alice:hunter2\r@127.0.0.1:8597/v1",
+        ] {
+            assert!(endpoint_has_credentials(bad), "{bad:?} carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "{bad:?} must not be storable"
+            );
+            let said = redact_endpoint(bad);
+            assert!(
+                !said.contains("hunter2") && !said.contains("alice"),
+                "{bad:?} redacted to {said:?}"
+            );
+        }
+        assert_eq!(
+            redact_endpoint("http:\t//alice:hunter2@127.0.0.1:8597/v1"),
+            "http://***@127.0.0.1:8597/v1"
+        );
+    }
+
+    #[test]
+    fn an_at_sign_in_the_path_is_not_a_credential() {
+        // The `@` has to be inside the authority. A path may legitimately carry
+        // one, and refusing those would reject perfectly good endpoints.
+        for good in [
+            "https://api.acme.example/v1/@me",
+            "https://api.acme.example/v1?to=a@b",
+            "https://api.acme.example/v1#a@b",
+        ] {
+            assert!(!endpoint_has_credentials(good), "`{good}` has no userinfo");
+            assert_eq!(redact_endpoint(good), good);
+        }
+    }
+
+    #[test]
+    fn redacting_an_endpoint_removes_the_credential_and_nothing_else() {
+        // Observed in the incident: reqwest masks userinfo in its own error
+        // Display (`for url (http://127.0.0.1:8597/v1/models)`), and then the
+        // handler's own `format!` put it back from the endpoint we hold.
+        assert_eq!(
+            redact_endpoint("http://alice:hunter2@127.0.0.1:8597/v1"),
+            "http://***@127.0.0.1:8597/v1"
+        );
+        assert_eq!(
+            redact_endpoint("https://alice@api.acme.example/v1"),
+            "https://***@api.acme.example/v1"
+        );
+        // The last `@` in the authority is the delimiter, so a password
+        // containing one is removed whole rather than half-left behind.
+        assert_eq!(
+            redact_endpoint("http://alice:hun@ter2@127.0.0.1:8597/v1"),
+            "http://***@127.0.0.1:8597/v1"
+        );
+        // Scheme-less, as `normalize_setup_base_url` accepts.
+        assert_eq!(
+            redact_endpoint("alice:hunter2@localhost:1234/v1"),
+            "***@localhost:1234/v1"
+        );
+        // Nothing to redact: byte-for-byte the same endpoint, trimmed.
+        assert_eq!(
+            redact_endpoint("  https://api.openai.com/v1  "),
+            "https://api.openai.com/v1"
         );
     }
 

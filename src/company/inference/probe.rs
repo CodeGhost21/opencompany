@@ -723,6 +723,21 @@ impl ProbeFailure {
             raw: refusal.to_string(),
         }
     }
+
+    /// A page of the TinyHumans paged catalog that connected but did not parse
+    /// (keys rework, issue #2306, slice 2a).
+    ///
+    /// Classified `Unknown`, never `Auth`: the request reached the endpoint and
+    /// got a 2xx with a body this parser could not read, which says nothing
+    /// about the credential. `ProbeClass::Auth` is the one class that rolls a
+    /// key back on add, so a parse failure must never produce it — a page the
+    /// proxy answers oddly is not proof the key is wrong.
+    fn unreadable(raw: String) -> Self {
+        Self {
+            class: ProbeClass::Unknown,
+            raw,
+        }
+    }
 }
 
 /// Applies a provider's credential to a request in the style that provider's
@@ -771,11 +786,18 @@ pub fn apply_auth(
 /// only [`ProbeClass::Auth`] means the credential should be rolled back — see
 /// the module header for why the naive "roll everything back" answer destroys
 /// valid keys.
+///
+/// `shape` (keys rework, issue #2306, slice 2a) picks the envelope this reads:
+/// [`catalogue::CatalogShape::OpenAi`] is the single-response body this
+/// function always read; [`catalogue::CatalogShape::PagedEnvelope`] pages the
+/// TinyHumans proxy's `{success, data:{data,total,limit,offset}}` shape to
+/// `total`, via [`super::paged_catalog`].
 pub async fn probe_models(
     base_url: &str,
     credential: Option<&str>,
     auth: catalogue::AuthStyle,
     policy: ProbePolicy,
+    shape: catalogue::CatalogShape,
 ) -> Result<Vec<String>, ProbeFailure> {
     check_endpoint_with_credential(
         base_url,
@@ -789,6 +811,10 @@ pub async fn probe_models(
     // caps at 500, so the picker this probe populates silently has no vision
     // model in it. See `catalogue::catalog_query`.
     let url = format!("{base}/models{}", catalogue::catalog_query(base));
+    // What the failure text is allowed to say (`raw` reaches a host log, and a
+    // log is disk — so an endpoint carrying userinfo must not be written into
+    // one verbatim) is computed per request inside `probe_get` now, since a
+    // paged read makes one per page rather than once here.
 
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
@@ -820,19 +846,70 @@ pub async fn probe_models(
         .build()
         .map_err(|e| ProbeFailure::from_raw(format!("could not build the probe client: {e}")))?;
 
+    // Keys rework (#2306), slice 2a: the TinyHumans proxy pages, and a page is
+    // its own GET with its own success/failure classification — `probe_get`
+    // below is what both this branch and the plain OpenAI-shaped read call.
+    // `origin` (above) is the first page's URL, and every later page shares
+    // it, so the same-origin redirect guard still holds across the loop.
+    if shape == catalogue::CatalogShape::PagedEnvelope {
+        let mut collector = super::paged_catalog::Collector::default();
+        loop {
+            let page_url = format!(
+                "{base}{}",
+                super::paged_catalog::page_path(collector.offset())
+            );
+            let body = probe_get(
+                &client,
+                &page_url,
+                auth,
+                credential,
+                super::paged_catalog::PAGE_BODY_CAP,
+            )
+            .await?;
+            let page = super::paged_catalog::parse_page(&body).map_err(|e| {
+                ProbeFailure::unreadable(format!("{}: {e}", catalogue::redact_endpoint(&page_url)))
+            })?;
+            if !matches!(collector.push(page), super::paged_catalog::NextPage::At(_)) {
+                break;
+            }
+        }
+        return Ok(collector.finish().into_iter().map(|e| e.id).collect());
+    }
+
+    let body = probe_get(&client, &url, auth, credential, PROBE_BODY_CAP).await?;
+    Ok(parse_model_ids(&body))
+}
+
+/// One GET, classified on failure. Shared by the plain OpenAI-shaped read and
+/// every page of the TinyHumans paged read (keys rework, issue #2306, slice
+/// 2a) — the request, transport-error and HTTP-failure handling used to live
+/// inline in [`probe_models`]; extracted so a page is not a second copy of it.
+///
+/// `success_cap` bounds a **successful** body (a page can run to
+/// [`super::paged_catalog::PAGE_BODY_CAP`], larger than an ordinary probe's
+/// [`PROBE_BODY_CAP`]); a failure body always reads at the smaller
+/// `PROBE_BODY_CAP`, because nothing needs more of an error to classify it.
+async fn probe_get(
+    client: &reqwest::Client,
+    url: &str,
+    auth: catalogue::AuthStyle,
+    credential: Option<&str>,
+    success_cap: usize,
+) -> Result<String, ProbeFailure> {
+    let named = catalogue::redact_endpoint(url);
     // The one non-bearer entry in the whole catalogue. A probe that assumed one
     // auth style would fail exactly one provider — the one people try first —
     // and would classify the result as `auth`, deleting a perfectly good key.
-    let request = apply_auth(client.get(&url), auth, credential);
+    let request = apply_auth(client.get(url), auth, credential);
 
     let response = request.send().await.map_err(|e| {
         // Classified on the condition alone; the full error, URL and all, is
         // kept for the log. See `ProbeFailure::classified_as`.
-        ProbeFailure::classified_as(transport_condition(&e), format!("{url}: {e}"))
+        ProbeFailure::classified_as(transport_condition(&e), format!("{named}: {e}"))
     })?;
     let status = response.status();
-    let body = read_capped(response).await;
     if !status.is_success() {
+        let body = read_capped_to(response, PROBE_BODY_CAP).await;
         // The body is included in the string the classifier reads, and only
         // there: vendors put "invalid api key" and "model not found" in the
         // body rather than the reason phrase, so classifying on the status
@@ -840,15 +917,20 @@ pub async fn probe_models(
         let classified = build_failure_text(status, body.trim());
         // The reason phrase is for a human reading the log, and stays out of the
         // text above. See `build_failure_text`.
+        // The body goes to a log, and it can echo the request back. A legacy
+        // endpoint with userinfo made `reqwest` send it as `Authorization:
+        // Basic`, and an upstream 4xx that repeats its headers or credentials
+        // would put that password on disk (Codex review on #2281). Scrubbed of
+        // exactly what this request carried because of the endpoint.
         let detail = format!(
-            "{url}: {} {}: {}",
+            "{named}: {} {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error"),
-            body.trim()
+            scrub_endpoint_credential(url, body.trim())
         );
         return Err(ProbeFailure::classified_as(&classified, detail));
     }
-    Ok(parse_model_ids(&body))
+    Ok(read_capped_to(response, success_cap).await)
 }
 
 /// The text [`classify`] reads for an HTTP failure: the status code and the
@@ -894,14 +976,105 @@ fn transport_condition(error: &reqwest::Error) -> &'static str {
     "the check did not complete"
 }
 
-/// Reads at most [`PROBE_BODY_CAP`] bytes, discarding the rest.
+/// `text` with every credential removed that a request to `endpoint` carried
+/// **because of the endpoint's own userinfo**.
+///
+/// `reqwest` lifts `user:password@` out of a URL and sends it as `Authorization:
+/// Basic base64(user:password)`, percent-decoded first. So three forms can come
+/// back in a response body: the password as written in the URL, the password
+/// decoded, and the Basic token. Each is replaced with
+/// [`REDACTED_USERINFO`](catalogue::REDACTED_USERINFO), both padded and unpadded.
+///
+/// **A username with no password is the credential.** `http://sk-secret@host`
+/// is how a token gets pasted into a URL, and `reqwest` sends it as
+/// `Basic base64(sk-secret:)` — so it is scrubbed as written and decoded, like a
+/// password (Codex review on #2281). Beside a password the username is an
+/// account name, and is left so an error naming the account still reads.
+fn scrub_endpoint_credential(endpoint: &str, text: &str) -> String {
+    let Ok(parsed) = url::Url::parse(endpoint.trim()) else {
+        return text.to_string();
+    };
+    let username = percent_decode(parsed.username());
+    let password = parsed.password();
+    if username.is_empty() && password.is_none() {
+        return text.to_string();
+    }
+    let decoded = password.map(percent_decode).unwrap_or_default();
+    let token = base64_standard(format!("{username}:{decoded}").as_bytes());
+    let mut secrets = vec![token.trim_end_matches('=').to_string(), token];
+    match password {
+        Some(raw) => {
+            secrets.push(raw.to_string());
+            secrets.push(decoded);
+        }
+        None => {
+            secrets.push(parsed.username().to_string());
+            secrets.push(username);
+        }
+    }
+    secrets.retain(|secret| !secret.is_empty());
+    // Longest first, so a shorter secret never splits a longer one it sits in.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    let mut out = text.to_string();
+    for secret in &secrets {
+        out = out.replace(secret.as_str(), catalogue::REDACTED_USERINFO);
+    }
+    out
+}
+
+/// Percent-decodes `s` the way `reqwest` decodes URL userinfo; an invalid
+/// escape is kept as written.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Standard padded base64, for matching a Basic token without a dependency this
+/// crate only takes behind a feature.
+fn base64_standard(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Reads at most `cap` bytes, discarding the rest.
 ///
 /// Chunk by chunk rather than `text()`, because `text()` trusts the endpoint to
 /// stop sending. A `Content-Length` header is not a promise either — it is
-/// whatever the far side wrote.
-async fn read_capped(mut response: reqwest::Response) -> String {
+/// whatever the far side wrote. `cap` used to be fixed at [`PROBE_BODY_CAP`];
+/// it is now a parameter so a successful TinyHumans catalog page (keys rework,
+/// slice 2a) can read up to [`super::paged_catalog::PAGE_BODY_CAP`] while a
+/// failure body still reads at the smaller, fixed cap.
+async fn read_capped_to(mut response: reqwest::Response, cap: usize) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    while buf.len() < PROBE_BODY_CAP {
+    while buf.len() < cap {
         match response.chunk().await {
             Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
             // A body that stops mid-stream is still worth classifying on what
@@ -909,7 +1082,7 @@ async fn read_capped(mut response: reqwest::Response) -> String {
             Ok(None) | Err(_) => break,
         }
     }
-    buf.truncate(PROBE_BODY_CAP);
+    buf.truncate(cap);
     String::from_utf8_lossy(&buf).into_owned()
 }
 
@@ -1176,6 +1349,231 @@ mod tests {
             );
         }
         assert!(describe(ProbeClass::Auth, "Acme").starts_with("Could not reach Acme"));
+    }
+
+    // ---- what a failure may write down ---------------------------------------
+
+    #[test]
+    fn a_basic_token_is_encoded_the_way_reqwest_sends_it() {
+        assert_eq!(base64_standard(b"alice:hunter2"), "YWxpY2U6aHVudGVyMg==");
+        assert_eq!(base64_standard(b"a"), "YQ==");
+        assert_eq!(base64_standard(b"ab"), "YWI=");
+        assert_eq!(base64_standard(b""), "");
+        assert_eq!(percent_decode("p%40ss%zz"), "p@ss%zz");
+    }
+
+    #[test]
+    fn every_form_of_the_endpoint_credential_is_scrubbed_from_text() {
+        let endpoint = "http://alice:p%40ss@127.0.0.1:9/v1/models";
+        let token = base64_standard(b"alice:p@ss");
+        let echoed = format!(
+            "rejected Basic {token} / {} for alice:p@ss (raw p%40ss)",
+            token.trim_end_matches('=')
+        );
+        let scrubbed = scrub_endpoint_credential(endpoint, &echoed);
+        for secret in [
+            "p@ss",
+            "p%40ss",
+            token.as_str(),
+            token.trim_end_matches('='),
+        ] {
+            assert!(
+                !scrubbed.contains(secret),
+                "{secret:?} survived: {scrubbed}"
+            );
+        }
+        assert!(
+            scrubbed.contains("alice"),
+            "the account name still reads: {scrubbed}"
+        );
+
+        // Username only: that username is the token, in every form it can echo.
+        let token_only = "http://sk-not%2Ba-real-key@127.0.0.1:9/v1/models";
+        let basic = base64_standard(b"sk-not+a-real-key:");
+        let echoed = format!(
+            "bad key sk-not+a-real-key (sent sk-not%2Ba-real-key) in Basic {basic} / {}",
+            basic.trim_end_matches('=')
+        );
+        let scrubbed = scrub_endpoint_credential(token_only, &echoed);
+        for secret in [
+            "sk-not+a-real-key",
+            "sk-not%2Ba-real-key",
+            basic.as_str(),
+            basic.trim_end_matches('='),
+        ] {
+            assert!(
+                !scrubbed.contains(secret),
+                "{secret:?} survived: {scrubbed}"
+            );
+        }
+        // No userinfo: the text is untouched.
+        assert_eq!(
+            scrub_endpoint_credential("http://127.0.0.1:9/v1", "Basic abc"),
+            "Basic abc"
+        );
+    }
+
+    /// An upstream that echoes the request's `Authorization` header back in its
+    /// 401 body. Served on loopback by hand, so the test needs nothing but tokio.
+    #[tokio::test]
+    async fn a_probe_failure_never_logs_the_basic_credential_an_endpoint_carried() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let authorization = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                })
+                .unwrap_or_default();
+            let body = format!("{{\"error\":\"rejected [{authorization}] for alice:hunter2\"}}");
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.ok();
+            authorization
+        });
+
+        let failure = probe_models(
+            &format!("http://alice:hunter2@{address}/v1"),
+            None,
+            catalogue::AuthStyle::None,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::OpenAi,
+        )
+        .await
+        .expect_err("a 401 is a failure");
+        let sent = server.await.unwrap();
+
+        assert_eq!(
+            sent, "Basic YWxpY2U6aHVudGVyMg==",
+            "the premise: reqwest sends the endpoint's userinfo as Basic auth"
+        );
+        assert!(
+            failure.raw.contains("[Basic ***]"),
+            "the echo reached the log text, scrubbed: {}",
+            failure.raw
+        );
+        for secret in ["hunter2", "YWxpY2U6aHVudGVyMg"] {
+            assert!(
+                !failure.raw.contains(secret),
+                "{secret} reached the log text: {}",
+                failure.raw
+            );
+        }
+    }
+
+    // ---- the paged catalog (keys rework, issue #2306, slice 2a) ------------
+
+    /// A `PagedEnvelope` probe reads every page, following `total`, and sends
+    /// the bearer on every request — not just the first.
+    #[tokio::test]
+    async fn a_paged_probe_reads_every_page_with_the_bearer() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_route = seen.clone();
+        let app = axum::Router::new().route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(
+                move |Query(params): Query<HashMap<String, String>>,
+                      headers: axum::http::HeaderMap| {
+                    let seen = seen_for_route.clone();
+                    async move {
+                        let query = params
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join("&");
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        seen.lock().unwrap().push((query, auth));
+                        let offset: usize = params.get("offset").and_then(|o| o.parse().ok()).unwrap_or(0);
+                        let data = if offset == 0 {
+                            serde_json::json!([{"id": "acme/test-model"}, {"id": "acme/other-model"}])
+                        } else {
+                            serde_json::json!([{"id": "acme/third-model"}])
+                        };
+                        axum::Json(serde_json::json!({
+                            "success": true,
+                            "data": {"data": data, "total": 3, "limit": 500, "offset": offset},
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{address}/agent-integrations/openrouter");
+
+        let ids = probe_models(
+            &base,
+            Some("th-not-a-real-key"),
+            catalogue::AuthStyle::Bearer,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect("the paged catalog reads");
+        server.abort();
+
+        assert_eq!(
+            ids,
+            vec!["acme/test-model", "acme/other-model", "acme/third-model"]
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one request per page, got: {seen:?}");
+        assert!(seen[0].0.contains("limit=500") && seen[0].0.contains("offset=0"));
+        assert!(seen[1].0.contains("limit=500") && seen[1].0.contains("offset=2"));
+        for (_, auth) in seen.iter() {
+            assert_eq!(auth.as_deref(), Some("Bearer th-not-a-real-key"));
+        }
+    }
+
+    /// A page that answers the OpenAI shape (not the envelope) classifies
+    /// `Unknown`, never `Auth` — a body that fails to parse says nothing about
+    /// the credential.
+    #[tokio::test]
+    async fn a_paged_probe_that_gets_an_openai_body_is_unknown_not_auth() {
+        let app = axum::Router::new().route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"data": [{"id": "acme/test-model"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{address}/agent-integrations/openrouter");
+
+        let failure = probe_models(
+            &base,
+            Some("th-not-a-real-key"),
+            catalogue::AuthStyle::Bearer,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect_err("an OpenAI-shaped body is not the envelope");
+        server.abort();
+
+        assert_eq!(failure.class, ProbeClass::Unknown);
     }
 
     // ---- the SSRF guard -----------------------------------------------------

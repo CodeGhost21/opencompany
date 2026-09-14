@@ -140,7 +140,15 @@ struct ModelCatalogDto {
 /// exactly the companies that never configured anything.
 async fn resolved_endpoint(
     runtime: &CompanyRuntime,
-) -> Result<Option<(String, Option<String>, catalogue::AuthStyle)>, ApiError> {
+) -> Result<
+    Option<(
+        String,
+        Option<String>,
+        catalogue::AuthStyle,
+        catalogue::CatalogShape,
+    )>,
+    ApiError,
+> {
     let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let platform = platform_default(&crate::app::config::ProcessEnv);
@@ -155,7 +163,11 @@ async fn resolved_endpoint(
     // value and the header it belongs in. Splitting them is how the catalog
     // read came to send every provider a bearer.
     let auth = catalogue::auth_style_for(&decl.provider);
-    Ok(Some((decl.base_url.clone(), bearer, auth)))
+    // Keys rework (#2306), slice 2a: the shape this endpoint's `/models`
+    // answers in, so a `tinyhumans` row (or an env default already pointed
+    // at the proxy) reads its paged envelope rather than the OpenAI shape.
+    let shape = catalogue::catalog_shape_for(&decl.provider, &decl.base_url);
+    Ok(Some((decl.base_url.clone(), bearer, auth, shape)))
 }
 
 /// `GET …/inference/models` — the model catalog of the endpoint **this company**
@@ -169,7 +181,7 @@ async fn resolved_endpoint(
 /// serves.
 async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let Some((base_url, bearer, auth)) = resolved_endpoint(runtime).await? else {
+    let Some((base_url, bearer, auth, shape)) = resolved_endpoint(runtime).await? else {
         // Nothing resolves — not even a platform default on this host. There is
         // no endpoint to ask, and saying so beats listing some other vendor's
         // catalog as if it were this company's.
@@ -194,6 +206,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         bearer.as_deref(),
         Some(runtime.id().as_ref()),
         auth,
+        shape,
     )
     .await
     {
@@ -202,7 +215,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
                 models.iter().map(|model| model.id.as_str()),
             );
             Ok(Json(ModelCatalogDto {
-                base_url,
+                base_url: catalogue::redact_endpoint(&base_url),
                 models,
                 tier_vocabulary: Some(vocabulary.as_str()),
                 tier_defaults: vocabulary.tier_defaults(),
@@ -210,10 +223,15 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
             }))
         }
         Err(error) => Ok(Json(ModelCatalogDto {
+            // Redacted, not raw. `reqwest` masks userinfo in its own `Display`,
+            // but this `format!` re-adds it from the endpoint we hold — which
+            // is how a stored `http://user:password@host/v1` came to be printed
+            // in full in a banner an operator screenshots into a ticket.
             error: Some(format!(
-                "Could not list models from {base_url}: {error}. Enter model ids directly."
+                "Could not list models from {endpoint}: {error}. Enter model ids directly.",
+                endpoint = catalogue::redact_endpoint(&base_url)
             )),
-            base_url,
+            base_url: catalogue::redact_endpoint(&base_url),
             models: Vec::new(),
             tier_vocabulary: None,
             tier_defaults: BTreeMap::new(),
@@ -347,6 +365,38 @@ struct InferenceStatusDto {
     routes: BTreeMap<String, String>,
     /// What the **managed** brain would resolve to, and who pays for it.
     managed: ManagedDto,
+    /// The stored company default (keys rework, issue #2306, slice 2c):
+    /// `None` when unset; `model: None` when it is a legacy bare-slug
+    /// default (Q1 — never rewritten by anything but an explicit
+    /// set-default). No `skip_serializing_if`: `null` on the wire is itself
+    /// the "no default" answer, distinct from the field being missing on an
+    /// older host.
+    default_choice: Option<DefaultChoiceDto>,
+}
+
+/// The company's stored `{provider, model}` default, on the wire (`store::DefaultChoice`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultChoiceDto {
+    provider: String,
+    model: Option<String>,
+}
+
+/// Maps a parsed [`inference::store::DefaultChoice`] to the wire shape, pure
+/// so the bare-slug and unset cases are unit-tested without a store.
+fn default_choice_dto(choice: inference::store::DefaultChoice) -> Option<DefaultChoiceDto> {
+    use inference::store::DefaultChoice;
+    match choice {
+        DefaultChoice::Unset => None,
+        DefaultChoice::ProviderOnly(provider) => Some(DefaultChoiceDto {
+            provider,
+            model: None,
+        }),
+        DefaultChoice::Full(c) => Some(DefaultChoiceDto {
+            provider: c.provider,
+            model: Some(c.model),
+        }),
+    }
 }
 
 /// The managed tier's honest state.
@@ -382,6 +432,24 @@ struct ManagedDto {
     /// provider row's: silent until something has actually been learnt.
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<ProviderHealthDto>,
+    /// Whether the console renders this separate legacy Managed row (keys
+    /// rework, issue #2306, slice 2a). `false` once `providers` already lists
+    /// a `tinyhumans` row — an added row, or entry zero on a managed config —
+    /// because that row is then the one TinyHumans row this page ever shows
+    /// (decision Q3). Computed in `effective_status_with`, which has the
+    /// provider list this function does not.
+    legacy_row: bool,
+    /// Whether this legacy row resolves to a credential but has no model
+    /// explicitly chosen for it anywhere in the new sense (decision
+    /// D-key-without-row / X5, 2026-09-15): `provider/tinyhumans/key` set
+    /// with no `tinyhumans` row is a credential, not a configured provider —
+    /// D-set's "set ⇔ a row exists" is unchanged, so this must never read as
+    /// connected/healthy the way an indexed row with a chosen model does.
+    /// `true` whenever `legacy_row && configured`: every source this chain
+    /// can resolve through (a key, the company account, the instance
+    /// identity) sends whatever the legacy tier-substitution rule decides
+    /// rather than an operator-chosen id.
+    needs_model: bool,
 }
 
 /// One provider on the wire.
@@ -453,6 +521,29 @@ struct ProviderDto {
     /// to one that works.
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<ProviderHealthDto>,
+    /// This row's one model, read without guessing (keys rework, issue
+    /// #2306, slice 2c). `None` when it has none, or when `modelAmbiguous`
+    /// is `true` — never guessed by picking one of several stored ids.
+    model: Option<String>,
+    /// Two or more distinct ids under the row's tier keys: nobody chose one
+    /// model for this row (`store::ModelOnRow::Ambiguous`). The console
+    /// shows "Needs a model"; never resolved on its own.
+    model_ambiguous: bool,
+    /// What else depends on this row (keys rework, issue #2306): the company
+    /// default, agents pinned to it. Omitted (not `null`) when nothing does
+    /// — see `docs/key-reworks/in-use-guards.md` §1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by: Option<crate::error::UsedBy>,
+}
+
+/// `(model, model_ambiguous)` from a row's collapsed [`inference::store::ModelOnRow`].
+fn model_on_row_dto(row: inference::store::ModelOnRow) -> (Option<String>, bool) {
+    use inference::store::ModelOnRow;
+    match row {
+        ModelOnRow::One(m) => (Some(m), false),
+        ModelOnRow::None => (None, false),
+        ModelOnRow::Ambiguous(_) => (None, true),
+    }
 }
 
 /// What the system last learnt about reaching a provider.
@@ -511,13 +602,16 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
             state: h.state.clone(),
             at: h.at.clone(),
         });
+        // Read before `provider.models` moves into the struct literal below.
+        let (model, model_ambiguous) = model_on_row_dto(provider.model());
+        let used_by = providers::provider_used_by(runtime, &provider.slug).await?;
         out.push(ProviderDto {
             is_default: primary.as_deref() == Some(provider.slug.as_str()),
             id: provider.id.as_str().to_string(),
             slug: provider.slug,
             label: provider.label,
             kind: provider.kind,
-            base_url: provider.base_url,
+            base_url: catalogue::redact_endpoint(&provider.base_url),
             models: provider.models,
             enabled: provider.enabled,
             key_configured,
@@ -526,6 +620,9 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
                 store::ProviderOrigin::Indexed => "indexed",
             },
             health,
+            model,
+            model_ambiguous,
+            used_by,
         });
     }
     Ok(out)
@@ -858,18 +955,44 @@ async fn effective_status_with(
             |d| d.base_url.clone(),
         ),
     };
+    // This route is `ScopedCompany`, not admin — every console reader gets this
+    // field on every page load. A credential embedded in the endpoint is
+    // refused at every point one can be set, but an endpoint stored before that
+    // rule existed, or one arriving from a `company.toml` or
+    // `OPENCOMPANY_INFERENCE_URL` this host does not own, still has to be safe
+    // to *say*.
+    let base_url = catalogue::redact_endpoint(&base_url);
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
     let providers = provider_list(runtime).await?;
     let routes = routing_table(runtime).await?;
-    let managed = managed_state(runtime, platform).await?;
+    let mut managed = managed_state(runtime, platform).await?;
+    // Keys rework (#2306), slice 2a: exactly one TinyHumans row is ever shown
+    // (Q3). The legacy row renders only while its chain resolves AND no row
+    // in the list already carries the `tinyhumans` slug — a `tinyhumans` row
+    // means either an operator added one, or entry zero is already `managed`
+    // (`store::provider_from_runtime` gives it slug `tinyhumans` too), and
+    // either way that row is now the one TinyHumans row this page shows.
+    managed.legacy_row =
+        managed.configured && !providers.iter().any(|p| p.slug == inference::MANAGED_SLUG);
+    // D-key-without-row (X5): moot once the legacy row itself is hidden.
+    managed.needs_model = managed.legacy_row && managed.configured;
     // Independent of `decl`: the shipped defaults are the same regardless of
     // what (if anything) this company has configured.
     let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
         .iter()
         .map(|(tier, model)| (tier.to_string(), model.to_string()))
         .collect();
+    // Keys rework (#2306), slice 2c: the stored default, independent of
+    // `decl` the same way `default_tier_models` is — a company can have a
+    // full default that names a now-gone provider (X14) and still have
+    // `decl` resolve through the legacy chain underneath it.
+    let default_choice = default_choice_dto(
+        inference::store::load_default(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?,
+    );
     Ok(match decl {
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
@@ -888,6 +1011,7 @@ async fn effective_status_with(
             providers,
             routes,
             managed,
+            default_choice,
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -910,6 +1034,7 @@ async fn effective_status_with(
             providers,
             routes,
             managed,
+            default_choice,
         },
     })
 }
@@ -965,13 +1090,23 @@ async fn managed_state(
     Ok(ManagedDto {
         source: source.as_str().to_string(),
         configured: source.resolves(),
-        base_url: platform
-            .map(|p| p.base_url.clone())
-            .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        base_url: catalogue::redact_endpoint(
+            &platform
+                .map(|p| p.base_url.clone())
+                .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+        ),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
             .map_err(ApiError)?,
         health,
+        // Placeholder: `effective_status_with` overrides both once it has the
+        // provider list this function was not given. `source.resolves()` is
+        // the right placeholder for `needs_model` too — if this row never
+        // renders (`legacy_row` ends up `false`), `needs_model` is moot; if it
+        // never resolves (`configured` is `false`), there is no credential to
+        // call out as model-less in the first place.
+        legacy_row: source.resolves(),
+        needs_model: false,
     })
 }
 
@@ -1207,7 +1342,7 @@ async fn unauthenticated_reason(
          fall back on — a request to {base} would carry no Authorization header and be rejected, \
          so none was sent. Save a key that {base} accepts above, or point this company at an \
          endpoint that needs none.",
-        base = decl.base_url
+        base = catalogue::redact_endpoint(&decl.base_url)
     )))
 }
 
@@ -1231,7 +1366,8 @@ fn probe_failure(decl: &inference::InferenceDecl, raw: &str) -> (String, &'stati
                  stored against the provider selected when it was saved, so a key for another \
                  vendor fails here even while this card reports one is set. Re-save the key under \
                  {}, or Remove key to fall back. The provider said: {raw}",
-                decl.base_url, decl.provider
+                catalogue::redact_endpoint(&decl.base_url),
+                decl.provider
             ),
             "credential_rejected",
         );
@@ -1329,6 +1465,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                     bearer.as_deref(),
                     Some(runtime.id().as_ref()),
                     catalogue::auth_style_for(&decl.provider),
+                    catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
                 )
                 .await;
                 decl.with_vocabulary(vocabulary)
@@ -1475,6 +1612,32 @@ base_url = "https://byo.example/v1"
         let id = CompanyId::new(name);
         save_record(home, &id, &manifest()).await;
         let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, name).await;
+        state
+    }
+
+    /// [`state_with_company`] over a caller-supplied manifest.
+    ///
+    /// The strict `validate()` only runs on a first boot with no persisted
+    /// record (`src/runtime/builder.rs`), and `save_record` writes one first —
+    /// so this can plant a manifest a fresh company would now be refused. That
+    /// is the point: an endpoint stored before the refusal existed is exactly
+    /// the case the redaction half of the rule is for.
+    async fn state_with_manifest(
+        home: &std::path::Path,
+        name: &str,
+        manifest_toml: &str,
+    ) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new(name);
+        save_record(home, &id, &manifest).await;
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
             .with_id(id.clone())
             .build()
             .await
@@ -2166,6 +2329,256 @@ base_url = "https://byo.example/v1"
     }
 
     // ---------------------------------------------------------------------
+    // A credential embedded in an endpoint: refused on the way in, redacted on
+    // the way out. Three paths, because the leak had three.
+    // ---------------------------------------------------------------------
+
+    /// The credential a test endpoint carries. Obviously fake, and asserted on
+    /// by substring everywhere below — a leak anywhere is a leak.
+    const EMBEDDED_PASSWORD: &str = "hunter2";
+    /// Loopback discard: refuses immediately, offline and deterministically.
+    const CREDENTIALED_ENDPOINT: &str = "http://alice:hunter2@127.0.0.1:9/unreachable/v1";
+    const CREDENTIALED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [inference]\nprovider = \"openai_compatible\"\n\
+         base_url = \"http://alice:hunter2@127.0.0.1:9/unreachable/v1\"\n";
+
+    /// Path 1 — it is never stored.
+    #[tokio::test]
+    async fn an_endpoint_carrying_a_credential_is_refused_before_anything_is_written() {
+        let home_dir = home();
+        let state = state_with_company_named(home_dir.path(), "credurl-add").await;
+
+        for body in [
+            json!({
+                "kind": "custom",
+                "label": "Acme gateway",
+                "baseUrl": CREDENTIALED_ENDPOINT,
+            }),
+            // The local-runtime category types its own endpoint too.
+            json!({ "kind": "ollama", "baseUrl": CREDENTIALED_ENDPOINT }),
+        ] {
+            let (status, _, raw) = send_as(
+                &state,
+                "credurl-add",
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {raw}");
+            assert!(
+                !raw.contains(EMBEDDED_PASSWORD),
+                "the refusal echoed the credential it was refusing: {raw}"
+            );
+        }
+
+        // The draft probe refuses it too, rather than putting a basic-auth
+        // credential on the wire to an address the operator named.
+        let (status, _, raw) = send_as(
+            &state,
+            "credurl-add",
+            "POST",
+            "/api/v1/company/inference/probe",
+            Some(json!({ "baseUrl": CREDENTIALED_ENDPOINT })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+        assert!(!raw.contains(EMBEDDED_PASSWORD), "{raw}");
+
+        // And nothing landed: no stored endpoint anywhere in the status read.
+        let (_, _, raw) = send_as(
+            &state,
+            "credurl-add",
+            "GET",
+            "/api/v1/company/inference",
+            None,
+        )
+        .await;
+        assert!(
+            !raw.contains(EMBEDDED_PASSWORD),
+            "a refused endpoint reached the store: {raw}"
+        );
+    }
+
+    /// Path 2 — the catalog-read failure note does not re-add it.
+    ///
+    /// `reqwest` redacts userinfo in its own error `Display`; the handler's own
+    /// `format!` used to put it back from the endpoint we hold.
+    #[tokio::test]
+    async fn a_catalog_read_failure_names_the_endpoint_without_its_credential() {
+        let home_dir = home();
+        let state =
+            state_with_manifest(home_dir.path(), "credurl-models", CREDENTIALED_MANIFEST).await;
+
+        let (status, body, raw) = send_as(
+            &state,
+            "credurl-models",
+            "GET",
+            "/api/v1/company/inference/models",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            !raw.contains(EMBEDDED_PASSWORD),
+            "the catalog route leaked an embedded credential: {raw}"
+        );
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("Could not list models from"),
+            "the failure still names the endpoint it could not reach: {raw}"
+        );
+        assert!(
+            error.contains("http://***@127.0.0.1:9/unreachable/v1"),
+            "the endpoint is redacted, not dropped — the operator still needs to \
+             recognise which one it was: {raw}"
+        );
+    }
+
+    /// Path 3 — the read DTO, on the non-admin route every console reader calls.
+    #[tokio::test]
+    async fn the_company_status_read_redacts_an_endpoint_credential() {
+        let home_dir = home();
+        let state =
+            state_with_manifest(home_dir.path(), "credurl-status", CREDENTIALED_MANIFEST).await;
+
+        let (status, body, raw) = send_as(
+            &state,
+            "credurl-status",
+            "GET",
+            "/api/v1/company/inference",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            !raw.contains(EMBEDDED_PASSWORD),
+            "`GET …/inference` is `ScopedCompany`, so this is the password on the \
+             wire for every console reader: {raw}"
+        );
+        assert_eq!(
+            body["baseUrl"].as_str(),
+            Some("http://***@127.0.0.1:9/unreachable/v1"),
+            "{raw}"
+        );
+    }
+
+    /// The same rule over a provider **row**, which is a different DTO built
+    /// from a different store.
+    #[tokio::test]
+    async fn a_provider_row_redacts_an_endpoint_credential() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+        // Written straight to the store, as a record predating the refusal
+        // would be — the handler now refuses this endpoint.
+        store::put_provider(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            store::ProviderDraft {
+                slug: "acme-gateway".into(),
+                label: "Acme gateway".into(),
+                kind: "custom".into(),
+                base_url: CREDENTIALED_ENDPOINT.into(),
+                models: BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        let row = dto
+            .providers
+            .iter()
+            .find(|p| p.slug == "acme-gateway")
+            .expect("the planted provider is listed");
+        assert_eq!(row.base_url, "http://***@127.0.0.1:9/unreachable/v1");
+        assert!(
+            !serde_json::to_string(&dto)
+                .unwrap()
+                .contains(EMBEDDED_PASSWORD),
+            "the whole status DTO must be free of it, not just the field we looked at"
+        );
+    }
+
+    /// Defect B, end to end: a name past the bound is a 400 before any write,
+    /// not a 500 with a truncated credential behind it.
+    #[tokio::test]
+    async fn a_provider_name_past_the_bound_is_refused_rather_than_breaking_the_store() {
+        use crate::company::inference::store::MAX_PROVIDER_NAME_CHARS;
+
+        let home_dir = home();
+        let state = state_with_company_named(home_dir.path(), "longname").await;
+
+        // At the bound: accepted, and its credential round-trips through the
+        // store — including the clear the delete issues.
+        let at_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS);
+        let (status, _, raw) = send_as(
+            &state,
+            "longname",
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": at_limit,
+                "baseUrl": UNREACHABLE,
+                "key": "sk-not-a-real-key",
+                "model": "acme-model",
+                "addAnyway": true,
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a name at the bound is legal: {raw}"
+        );
+        // The company's first (and only) provider auto-became its default
+        // (X1), so removing it needs confirmation like any other in-use row.
+        let (status, _, raw) = send_as(
+            &state,
+            "longname",
+            "DELETE",
+            &format!("/api/v1/company/inference/providers/{at_limit}?confirmInUse=true"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "removing it clears the credential, which is the write that used to \
+             fail after truncating it: {raw}"
+        );
+
+        // Past the bound: refused, and refused *before* the key is written.
+        let past_limit = "a".repeat(MAX_PROVIDER_NAME_CHARS + 1);
+        let (status, _, raw) = send_as(
+            &state,
+            "longname",
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": past_limit,
+                "baseUrl": UNREACHABLE,
+                "key": "sk-not-a-real-key",
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a 500 here is the incident: {raw}"
+        );
+        assert!(
+            raw.contains(&MAX_PROVIDER_NAME_CHARS.to_string()),
+            "the refusal says what the limit is: {raw}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // Issue #597 — the card must report the endpoint requests actually reach,
     // not the built-in production constant.
     // ---------------------------------------------------------------------
@@ -2541,6 +2954,110 @@ base_url = "https://byo.example/v1"
         );
     }
 
+    /// Keys rework (#2306) slice 2a, decision Q3: exactly one TinyHumans row
+    /// is ever shown. A `tinyhumans` row in the index hides the legacy row.
+    #[tokio::test]
+    async fn a_listed_tinyhumans_row_hides_the_legacy_managed_row() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+        let secrets = runtime.secrets().as_ref();
+        store::put_provider(
+            runtime.id(),
+            secrets,
+            store::ProviderDraft {
+                slug: inference::MANAGED_SLUG.to_string(),
+                label: "TinyHumans".to_string(),
+                kind: inference::MANAGED_SLUG.to_string(),
+                base_url: "https://api.tinyhumans.ai/agent-integrations/openrouter".to_string(),
+                models: crate::company::INFERENCE_TIERS
+                    .iter()
+                    .map(|t| ((*t).to_string(), "acme/test-model".to_string()))
+                    .collect(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                runtime.id(),
+                &store::provider_key_key(inference::MANAGED_SLUG),
+                crate::ports::types::SecretValue("th-not-a-real-key".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert_eq!(
+            dto.providers
+                .iter()
+                .filter(|p| p.slug == "tinyhumans")
+                .count(),
+            1,
+            "exactly one tinyhumans row: {:?}",
+            dto.providers
+        );
+        assert!(
+            dto.managed.configured,
+            "the legacy chain still resolves through the same key slot"
+        );
+        assert!(
+            !dto.managed.legacy_row,
+            "a listed tinyhumans row must hide the legacy Managed row"
+        );
+        assert!(
+            !dto.managed.needs_model,
+            "needs_model is moot once the legacy row is hidden"
+        );
+    }
+
+    /// A company whose only TinyHumans credential is the account key
+    /// (`tinyhumans/key`, no row) still shows the legacy Managed row — and it
+    /// never reads as fully configured (D-key-without-row / X5).
+    #[tokio::test]
+    async fn an_account_key_only_company_shows_the_legacy_managed_row() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+        crate::company::company_key::store_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "th-not-a-real-key",
+        )
+        .await
+        .unwrap();
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert!(
+            !dto.providers.iter().any(|p| p.slug == "tinyhumans"),
+            "no tinyhumans row exists yet: {:?}",
+            dto.providers
+        );
+        assert_eq!(dto.managed.source, "company_account");
+        assert!(dto.managed.configured);
+        assert!(
+            dto.managed.legacy_row,
+            "with no tinyhumans row, the legacy row is the only TinyHumans row"
+        );
+        assert!(
+            dto.managed.needs_model,
+            "a key with no row must never read as fully configured (X5)"
+        );
+    }
+
+    /// A company with nothing configured shows no legacy row at all.
+    #[tokio::test]
+    async fn a_company_with_nothing_shows_no_legacy_row() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+
+        let dto = effective_status_with(&runtime, None, false).await.unwrap();
+        assert!(!dto.managed.configured);
+        assert!(!dto.managed.legacy_row);
+        assert!(!dto.managed.needs_model);
+    }
+
     #[tokio::test]
     async fn revert_clears_the_runtime_override() {
         let home_dir = home();
@@ -2838,7 +3355,7 @@ base_url = "https://byo.example/v1"
             "/api/v1/company/inference/providers",
             // A base URL is sent and must be ignored: the paths in that table
             // are too varied for an override to be anything but a mistake.
-            Some(json!({ "kind": "groq", "baseUrl": "https://wrong.example/v1" })),
+            Some(json!({ "kind": "groq", "baseUrl": "https://wrong.example/v1", "model": "acme/test-model" })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
@@ -2847,6 +3364,72 @@ base_url = "https://byo.example/v1"
         assert_eq!(groq["baseUrl"], "https://api.groq.com/openai/v1");
         assert_eq!(groq["label"], "Groq");
         assert_eq!(groq["enabled"], true, "a new provider arrives on");
+    }
+
+    #[tokio::test]
+    async fn a_rename_that_posts_back_the_served_endpoint_keeps_the_stored_one() {
+        // Codex review on #2281. The row is served through `redact_endpoint`,
+        // which masks a path segment that only looks like userinfo. A console
+        // that posts that value back on a rename must not overwrite a working
+        // endpoint with the mask.
+        const GATEWAY: &str = "http://127.0.0.1:9/proxy/http:user@example.com/v1";
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Acme gateway",
+                "baseUrl": GATEWAY,
+                "key": "sk-not-a-real-key",
+                "model": "acme-model",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a path is not a credential: {raw}");
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let served = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme-gateway")
+            .expect("the row was created")["baseUrl"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(served, GATEWAY, "the row is served redacted: {served}");
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/acme-gateway",
+            Some(json!({ "label": "Acme renamed", "baseUrl": served })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        use crate::company::inference::store;
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("registered");
+        let stored = store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+        let acme = stored
+            .iter()
+            .find(|p| p.slug == "acme-gateway")
+            .expect("still listed");
+        assert_eq!(
+            acme.base_url, GATEWAY,
+            "the stored endpoint survived the rename"
+        );
+        assert_eq!(acme.label, "Acme renamed");
     }
 
     #[tokio::test]
@@ -2867,7 +3450,7 @@ base_url = "https://byo.example/v1"
                 "POST",
                 "/api/v1/company/inference/providers",
                 Some(
-                    json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE, "key": key }),
+                    json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE, "key": key, "model": "acme-model" }),
                 ),
             )
             .await;
@@ -2901,6 +3484,7 @@ base_url = "https://byo.example/v1"
                 "label": "Acme gateway",
                 "baseUrl": UNREACHABLE,
                 "key": "sk-not-a-real-key",
+                "model": "acme-model",
             })),
         )
         .await;
@@ -2966,7 +3550,7 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers",
-            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key" })),
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "acme-model" })),
         )
         .await;
         let (status, _, raw) = send(
@@ -2978,10 +3562,12 @@ base_url = "https://byo.example/v1"
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
 
+        // The company's only provider auto-became its default (X1), so the
+        // delete needs confirmation like any other in-use row.
         let (status, resp, raw) = send(
             &state,
             "DELETE",
-            "/api/v1/company/inference/providers/acme",
+            "/api/v1/company/inference/providers/acme?confirmInUse=true",
             None,
         )
         .await;
@@ -3004,7 +3590,7 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers",
-            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-model" })),
         )
         .await;
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
@@ -3035,7 +3621,7 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers",
-            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key" })),
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "acme-model" })),
         )
         .await;
         send(
@@ -3046,11 +3632,13 @@ base_url = "https://byo.example/v1"
         )
         .await;
 
+        // `acme` auto-became the company default (X1) on that first add, so
+        // disabling it needs confirmation like any other in-use row.
         let (status, resp, raw) = send(
             &state,
             "POST",
             "/api/v1/company/inference/providers/acme/enabled",
-            Some(json!({ "enabled": false })),
+            Some(json!({ "enabled": false, "confirmInUse": true })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
@@ -3186,13 +3774,14 @@ base_url = "https://byo.example/v1"
                 &state,
                 "POST",
                 "/api/v1/company/inference/providers",
-                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE })),
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE, "model": "acme-model" })),
             )
             .await;
         }
 
-        // With no marker, the default is list order — today's behaviour, which
-        // is exactly what makes this change need no migration.
+        // X1 (2026-09-15): the first provider added auto-becomes the default,
+        // with no marker the operator set explicitly — but the observable
+        // answer is the same one "list order" used to give.
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(default_slug(&dto).as_deref(), Some("first"));
 
@@ -3202,7 +3791,7 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers/second/default",
-            None,
+            Some(json!({ "model": "second-model" })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
@@ -3234,7 +3823,7 @@ base_url = "https://byo.example/v1"
                 &state,
                 "POST",
                 "/api/v1/company/inference/providers",
-                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE })),
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE, "model": "acme-model" })),
             )
             .await;
         }
@@ -3242,28 +3831,30 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers/second/default",
-            None,
+            Some(json!({ "model": "second-model" })),
         )
         .await;
 
-        // Switched off, the marker is CLEARED rather than moved: moving it
-        // would mark something the operator never chose, which is the
-        // positional default this replaces.
+        // Switched off: the **derived** `isDefault`/`default_slug` view moves
+        // to the first enabled provider (`resolve::primary`'s existing
+        // fallback), even though the stored marker itself is left exactly as
+        // it was (X14) — see `a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker`
+        // below for the direct assertion on the raw value.
         send(
             &state,
             "POST",
             "/api/v1/company/inference/providers/second/enabled",
-            Some(json!({ "enabled": false })),
+            Some(json!({ "enabled": false, "confirmInUse": true })),
         )
         .await;
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(
             default_slug(&dto).as_deref(),
             Some("first"),
-            "a disabled provider is never the default"
+            "a disabled provider is never the reported default"
         );
 
-        // And a delete takes the marker with the record.
+        // And a delete leaves the same derived view unchanged.
         send(
             &state,
             "POST",
@@ -3275,16 +3866,109 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers/second/default",
-            None,
+            Some(json!({ "model": "second-model" })),
         )
         .await;
         send(
             &state,
             "DELETE",
-            "/api/v1/company/inference/providers/second",
+            "/api/v1/company/inference/providers/second?confirmInUse=true",
             None,
         )
         .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+    }
+
+    /// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+    /// disabling, clearing the key of, or deleting the provider
+    /// `inference/default` names never rewrites that **stored** value — only
+    /// the derived `isDefault`/`defaultChoice` view changes, via
+    /// `resolve::primary`'s existing first-enabled fallback. This is the
+    /// regression `disabling_or_deleting_the_default_never_leaves_it_marked`
+    /// above cannot catch, because it only reads that derived view (which
+    /// already looked the same whether or not the raw marker was cleared).
+    #[tokio::test]
+    async fn a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        let id = CompanyId::new("acme");
+
+        for label in ["First", "Second"] {
+            send(
+                &state,
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "acme-model" })),
+            )
+            .await;
+        }
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/default",
+            Some(json!({ "model": "second-model" })),
+        )
+        .await;
+
+        async fn raw_marker(state: &AppState, id: &CompanyId) -> Option<String> {
+            let runtime = state.registry().get(id).expect("registered");
+            let secrets = runtime.secrets();
+            store::load_default_slug(id, secrets.as_ref())
+                .await
+                .unwrap()
+        }
+        assert_eq!(raw_marker(&state, &id).await.as_deref(), Some("second"));
+
+        // Disabling it: the stored marker is untouched. `second` is in use
+        // (it is the default), so the guard needs confirmation.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/enabled",
+            Some(json!({ "enabled": false, "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a disable must not rewrite inference/default"
+        );
+
+        // Clearing its key (edit with an empty key): still untouched. Also
+        // guarded, for the same reason.
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/second",
+            Some(json!({ "key": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a key clear must not rewrite inference/default"
+        );
+
+        // Deleting it: still untouched, even though no row now answers to it.
+        send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/second?confirmInUse=true",
+            None,
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a delete must not rewrite inference/default"
+        );
+
+        // The derived view still degrades gracefully — this is what the
+        // console's status read and banner are for.
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(default_slug(&dto).as_deref(), Some("first"));
     }
@@ -3298,14 +3982,16 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers",
-            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-model" })),
         )
         .await;
+        // `acme` auto-became the default on that add (X1), so disabling it
+        // needs confirmation.
         send(
             &state,
             "POST",
             "/api/v1/company/inference/providers/acme/enabled",
-            Some(json!({ "enabled": false })),
+            Some(json!({ "enabled": false, "confirmInUse": true })),
         )
         .await;
 
@@ -3313,10 +3999,393 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers/acme/default",
-            None,
+            Some(json!({ "model": "acme-model" })),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ---- 2c: a model is required everywhere ---------------------------------
+
+    #[tokio::test]
+    async fn setting_a_default_requires_a_model() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        )
+        .await;
+
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/acme/default",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+        assert!(
+            err["error"].as_str().unwrap().contains("Choose a model"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_model_may_not_be_a_tier_name_or_contain_spaces() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        )
+        .await;
+
+        for bad in ["chat-v1", "test model", &"x".repeat(257)] {
+            let (status, _, raw) = send(
+                &state,
+                "POST",
+                "/api/v1/company/inference/providers/acme/default",
+                Some(json!({ "model": bad })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {raw}");
+        }
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/acme/default",
+            Some(json!({ "model": "x".repeat(256) })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "256 chars is exactly the bound: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_add_without_a_model_is_refused_before_anything_is_written() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!raw.contains("sk-not-a-real-key"), "{raw}");
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert!(dto["providers"].as_array().unwrap().is_empty());
+
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "acme-1" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+    }
+
+    #[tokio::test]
+    async fn editing_a_providers_model_is_no_longer_silently_dropped() {
+        // Round-2 console review: `EditProvider` used to take only a `models`
+        // map, so the console's `model` field was silently ignored while a
+        // success toast showed.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        )
+        .await;
+
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/acme",
+            Some(json!({ "model": "acme-2" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        let acme = resp["status"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme")
+            .unwrap();
+        assert_eq!(acme["model"], "acme-2");
+        assert_eq!(acme["models"]["chat-v1"], "acme-2");
+
+        // `acme` auto-became the default (X1), so its model moved with the
+        // row (2c: editing the default row's model moves the default too).
+        assert_eq!(resp["status"]["defaultChoice"]["model"], "acme-2");
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_default_choice_and_each_rows_model() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert!(dto["defaultChoice"].is_null());
+
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        )
+        .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let acme = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme")
+            .unwrap();
+        assert_eq!(acme["model"], "acme-1");
+        assert_eq!(acme["modelAmbiguous"], false);
+        assert_eq!(dto["defaultChoice"]["provider"], "acme");
+        assert_eq!(dto["defaultChoice"]["model"], "acme-1");
+    }
+
+    /// Pure: the bare-slug/unset/full mappings, independent of a store.
+    #[test]
+    fn the_status_maps_a_bare_slug_default_to_a_null_model() {
+        use crate::company::inference::store::{DefaultChoice, ModelChoice};
+
+        assert!(default_choice_dto(DefaultChoice::Unset).is_none());
+
+        let bare = default_choice_dto(DefaultChoice::ProviderOnly("acme".to_string())).unwrap();
+        assert_eq!(bare.provider, "acme");
+        assert!(bare.model.is_none());
+
+        let full = default_choice_dto(DefaultChoice::Full(ModelChoice {
+            provider: "acme".to_string(),
+            model: "acme/other-model".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(full.provider, "acme");
+        assert_eq!(full.model.as_deref(), Some("acme/other-model"));
+    }
+
+    /// Pure: `ModelOnRow` collapses to the DTO's `(model, modelAmbiguous)`.
+    #[test]
+    fn an_ambiguous_row_reports_no_model_and_the_flag() {
+        use crate::company::inference::store::ModelOnRow;
+
+        assert_eq!(
+            model_on_row_dto(ModelOnRow::Ambiguous(vec![
+                "a".to_string(),
+                "b".to_string()
+            ])),
+            (None, true)
+        );
+        assert_eq!(model_on_row_dto(ModelOnRow::None), (None, false));
+        assert_eq!(
+            model_on_row_dto(ModelOnRow::One("a".to_string())),
+            (Some("a".to_string()), false)
+        );
+    }
+
+    // ---- the in-use guard (docs/key-reworks/in-use-guards.md) ---------------
+
+    #[tokio::test]
+    async fn the_first_provider_and_model_added_becomes_the_default_with_no_opt_out() {
+        // Decision D-first-default (X1, 2026-09-15): no `makeDefault` sent.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "First", "baseUrl": UNREACHABLE, "model": "first-model" })),
+        )
+        .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["defaultChoice"]["provider"], "first");
+        assert_eq!(dto["defaultChoice"]["model"], "first-model");
+
+        // A second provider never touches an existing default (X1's other half).
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Second", "baseUrl": UNREACHABLE, "model": "second-model" })),
+        )
+        .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["defaultChoice"]["provider"], "first");
+    }
+
+    #[tokio::test]
+    async fn deleting_the_default_provider_is_refused_without_confirmation() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        )
+        .await;
+
+        let (status, err, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/acme",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "in_use");
+        assert!(err["error"].as_str().unwrap().contains("Acme"), "{err}");
+        assert_eq!(err["usedBy"]["default"], true);
+
+        // The row must still be there: a refusal writes nothing.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert!(
+            dto["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["slug"] == "acme"),
+            "{dto}"
+        );
+
+        // Confirmed, it proceeds and echoes what it broke.
+        let (status, resp, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/acme?confirmInUse=true",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["usedBy"]["default"], true);
+    }
+
+    #[tokio::test]
+    async fn disabling_the_default_provider_is_refused_without_confirmation() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        )
+        .await;
+
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/acme/enabled",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "in_use");
+
+        let (status, resp, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/acme/enabled",
+            Some(json!({ "enabled": false, "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["usedBy"]["default"], true);
+    }
+
+    #[tokio::test]
+    async fn clearing_the_key_of_the_default_provider_is_refused_without_confirmation() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "acme-1" })),
+        )
+        .await;
+
+        let (status, err, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/acme",
+            Some(json!({ "key": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "in_use");
+
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/acme",
+            Some(json!({ "key": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["usedBy"]["default"], true);
+        // Q8, generalized (X14): the confirmed clear never moves the default.
+        assert_eq!(resp["status"]["defaultChoice"]["provider"], "acme");
+    }
+
+    #[tokio::test]
+    async fn a_provider_not_in_use_needs_no_confirmation() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "First", "baseUrl": UNREACHABLE, "model": "first-model" })),
+        )
+        .await;
+        // Second is not the default (X1 never moved it there), so removing it
+        // needs no confirmation and its `usedBy` is absent.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Second", "baseUrl": UNREACHABLE, "model": "second-model" })),
+        )
+        .await;
+
+        let (status, resp, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/second",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(resp.get("usedBy").is_none(), "{resp}");
     }
 
     /// The slug the status reports as the default, if any.
@@ -3408,7 +4477,7 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers",
-            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-model" })),
         )
         .await;
         let (_, routes, _) = send(
@@ -3454,7 +4523,7 @@ base_url = "https://byo.example/v1"
             &state,
             "POST",
             "/api/v1/company/inference/providers",
-            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-model" })),
         )
         .await;
         assert_eq!(

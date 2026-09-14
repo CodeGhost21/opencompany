@@ -137,12 +137,27 @@ export function IntegrationStep({
   client,
   company,
   onOpenApps,
+  onOpenCredential,
   onWaive,
 }: {
   client: OpenCompanyClient;
   company: string | null;
-  /** Leaves the gate for the real Apps page — see `OnboardingGate`'s `onLeave`. */
+  /**
+   * Leaves the gate for the real Apps page — see `OnboardingGate`'s `onLeave`.
+   * Taken once a credential exists: Apps is where a provider is connected.
+   */
   onOpenApps: () => void;
+  /**
+   * Leaves the gate for the page where the credential this card names can
+   * actually be entered.
+   *
+   * Not Apps. Since the Connections split (#2259) Apps is `OAuthView` and has
+   * no credential field at all, so "Enter a credential in Apps" sent a founder
+   * with nothing to paste into to a page with nowhere to paste it. The caller
+   * decides the page, because it depends on which credential the copy puts
+   * first.
+   */
+  onOpenCredential: () => void;
   /** Records this step as answered as far as this build allows. */
   onWaive: () => void;
 }) {
@@ -296,15 +311,17 @@ export function IntegrationStep({
           <p>
             Agents reach Gmail, Slack and GitHub through a connected account. Before any
             provider can be connected, this company needs a credential to connect it with —{" "}
-            {/* `COMPOSIO_MANAGED_HIDDEN` took the OpenHuman-managed route out of Apps
-                (`OAuthView` hides `CompanyCredentialCard` behind the same flag), so
-                naming a TinyHumans account key here sent the founder after a credential
-                the page this card links to no longer accepts. Reading the flag rather
-                than restating its current value keeps re-enabling that surface the
-                single edit `product-scope.ts` promises it is. */}
+            {/* Reads `COMPOSIO_MANAGED_HIDDEN` rather than restating its current
+                value, which is what kept re-enabling the managed route the single
+                edit `product-scope.ts` promises it is — and that edit has now
+                happened. While the flag was set, the OpenHuman-managed route was
+                out of Apps, so naming a TinyHumans account key here sent the
+                founder after a credential the page this card links to would not
+                accept. With the route back, both credentials finish this step and
+                both are named: the account key is the one-click half. */}
             {COMPOSIO_MANAGED_HIDDEN
               ? "a Composio API key of your own."
-              : "a TinyHumans account key, or a Composio token of your own."}
+              : "a TinyHumans account key, or a Composio API key of your own."}
           </p>
           <p className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2">
             <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
@@ -317,8 +334,11 @@ export function IntegrationStep({
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={onOpenApps} data-testid="gate-integration-open-apps">
-          {hasCredential ? "Connect a provider in Apps" : "Enter a credential in Apps"}
+        <Button
+          onClick={hasCredential ? onOpenApps : onOpenCredential}
+          data-testid="gate-integration-open-apps"
+        >
+          {hasCredential ? "Connect a provider in Apps" : "Enter a credential"}
           <ArrowRight className="size-4" />
         </Button>
         {/* A credential that exists is always a completable step — offering to

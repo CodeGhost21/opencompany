@@ -30,7 +30,7 @@
 //! Three sources, in strict precedence:
 //!
 //! 1. **The company's own Composio token**, stored in its [`SecretStore`] under
-//!    [`TOKEN_KEY`] by the console. A company that brings its own Composio
+//!    [`TINYHUMANS_KEY_KEY`] by the console. A company that brings its own Composio
 //!    identity keeps it, always. This is the self-hosting escape hatch, not a
 //!    deployment mode.
 //! 2. **The company's own TinyHumans credential** —
@@ -101,8 +101,8 @@ use crate::ports::types::CompanyId;
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
 pub use crate::company::composio::{
-    API_KEY_KEY, COMPOSIO_BACKEND_URL_ENV, ComposioMode, DIRECT_BASE_URL, TINYHUMANS_API_URL_ENV,
-    TOKEN_KEY, backend_url_or_default, resolve_access, resolve_credential,
+    BYOK_KEY_KEY, ComposioMode, DIRECT_BASE_URL, TINYHUMANS_API_URL_ENV, TINYHUMANS_KEY_KEY,
+    backend_url_or_default, resolve_access, resolve_credential,
 };
 
 /// A per-tenant Composio configuration: the backend URL, how the outbound bearer
@@ -295,7 +295,7 @@ impl TenantComposio {
     /// to act through their own Composio account must never silently act
     /// through the platform's.
     ///
-    /// Managed precedence: the company's **own Composio** token under [`TOKEN_KEY`] wins
+    /// Managed precedence: the company's **own Composio** token under [`TINYHUMANS_KEY_KEY`] wins
     /// — a company that pasted one keeps it even on the hosted platform. Failing
     /// that, the shared brokered-credential seam
     /// [`company_key::resolve`](crate::company::company_key::resolve) answers:
@@ -304,10 +304,11 @@ impl TenantComposio {
     /// its own key if it has one, otherwise the identity of the instance it runs
     /// in, which the backend resolves to that instance's owner.
     ///
-    /// The URL resolves from [`COMPOSIO_BACKEND_URL_ENV`], then the tenant API
-    /// base [`TINYHUMANS_API_URL_ENV`], then [`DEFAULT_BACKEND_URL`] — see
-    /// [`backend_url_or_default`]. `toolkits` is the manifest allowlist, threaded
-    /// through unchanged.
+    /// The URL resolves from the tenant API base [`TINYHUMANS_API_URL_ENV`],
+    /// then [`DEFAULT_BACKEND_URL`] — see [`backend_url_or_default`]. The
+    /// explicit per-surface override (`OPENCOMPANY_COMPOSIO_BACKEND_URL`) was
+    /// removed in phase 6a (issue #2306). `toolkits` is the manifest allowlist,
+    /// threaded through unchanged.
     ///
     /// A secret-store read error yields `None` — **fail closed, no tools this
     /// cycle** — rather than falling through to the instance identity. This is
@@ -320,7 +321,6 @@ impl TenantComposio {
         company: &CompanyId,
         secrets: &dyn SecretStore,
         toolkits: Vec<String>,
-        backend_url_env: Option<String>,
         api_url_env: Option<String>,
         token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
@@ -367,13 +367,9 @@ impl TenantComposio {
                     Credential::None
                 };
                 Some(
-                    Self::from_access(
-                        backend_url_or_default(backend_url_env, api_url_env),
-                        access,
-                        toolkits,
-                    )
-                    .with_catalog_credential(catalog)
-                    .with_defaults(defaults),
+                    Self::from_access(backend_url_or_default(api_url_env), access, toolkits)
+                        .with_catalog_credential(catalog)
+                        .with_defaults(defaults),
                 )
             }
         }
@@ -2912,7 +2908,7 @@ mod tests {
         // nothing restored it), which made an ops-route assertion on
         // `credentialSource == "none"` flake depending on test order.
         assert!(
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
                 .await
                 .is_none(),
             "no credential at all must fail closed"
@@ -2920,7 +2916,7 @@ mod tests {
 
         // Nothing stored, but this instance has an identity → it is used.
         let attested =
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("the platform identity resolves");
         assert_eq!(
@@ -2930,11 +2926,11 @@ mod tests {
 
         // An explicitly-empty stored token is not a token: still the source.
         secrets
-            .set(&company, TOKEN_KEY, SecretValue("   ".to_string()))
+            .set(&company, TINYHUMANS_KEY_KEY, SecretValue("   ".to_string()))
             .await
             .unwrap();
         let attested =
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("the platform identity resolves");
         assert_eq!(
@@ -2943,7 +2939,7 @@ mod tests {
         );
         // …and with no source either, an empty stored token fails closed.
         assert!(
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
                 .await
                 .is_none()
         );
@@ -2952,7 +2948,7 @@ mod tests {
         secrets
             .set(
                 &company,
-                TOKEN_KEY,
+                TINYHUMANS_KEY_KEY,
                 SecretValue("tenant-token-xyz".to_string()),
             )
             .await
@@ -2961,7 +2957,6 @@ mod tests {
             &company,
             &secrets,
             vec!["gmail".into()],
-            None,
             None,
             Some(source()),
         )
@@ -2975,13 +2970,12 @@ mod tests {
         assert_eq!(resolved.backend_url, "https://api.tinyhumans.ai");
         assert_eq!(resolved.toolkits, vec!["gmail".to_string()]);
 
-        // With no explicit override, the tenant API base is threaded into the
-        // backend URL so a staging tenant's Composio follows staging.
+        // The tenant API base is threaded into the backend URL so a staging
+        // tenant's Composio follows staging.
         let staged = TenantComposio::resolve(
             &company,
             &secrets,
             Vec::new(),
-            None,
             Some("https://staging-api.tinyhumans.ai".into()),
             None,
         )
@@ -3016,7 +3010,7 @@ mod tests {
         // With no instance identity at all, the company key alone credentials
         // Composio — the case this issue exists to fix, since a pod with no
         // projected token previously had to fall back to a pasted token.
-        let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
+        let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
             .await
             .expect("the company key resolves without any instance identity");
         assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
@@ -3025,18 +3019,22 @@ mod tests {
         // And it outranks the instance's identity: the company acts as itself,
         // not as the pod it happens to run in.
         let resolved =
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("resolves");
         assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
 
         // A pasted Composio token still outranks it — the BYO hatch survives.
         secrets
-            .set(&company, TOKEN_KEY, SecretValue("byo-composio".to_string()))
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("byo-composio".to_string()),
+            )
             .await
             .unwrap();
         let resolved =
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("resolves");
         assert_eq!(token_of(&resolved).await.as_deref(), Some("byo-composio"));
@@ -3045,26 +3043,132 @@ mod tests {
         // Clearing the BYO token falls back to the company key, not to the
         // instance — clearing one tier must not silently re-borrow another.
         secrets
-            .set(&company, TOKEN_KEY, SecretValue(String::new()))
+            .set(&company, TINYHUMANS_KEY_KEY, SecretValue(String::new()))
+            .await
+            .unwrap();
+        // Also blank the legacy address explicitly (P2-3): a whitespace-only
+        // `composio/token` must not itself be read as "the legacy address
+        // holds a value" and shadow the company key — it must fall through
+        // exactly as an unwritten legacy address does.
+        secrets
+            .set(
+                &company,
+                crate::company::composio::LEGACY_TOKEN_KEY,
+                SecretValue("   ".to_string()),
+            )
             .await
             .unwrap();
         let resolved =
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("resolves");
         assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+        assert_eq!(resolved.credential().source(), CredentialSource::Company);
 
         // Clearing the company key too falls all the way back to the instance.
         company_key::store_key(&company, &secrets, "")
             .await
             .unwrap();
         let resolved =
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("resolves");
         assert_eq!(
             token_of(&resolved).await.as_deref(),
             Some("platform-identity")
+        );
+    }
+
+    /// Storage addresses and the legacy fallback (#2306), exercised against a
+    /// real backend so the nested address (`composio/tinyhumans/key`) is proven
+    /// on disk, not just in `MemSecrets`.
+    #[tokio::test]
+    async fn a_legacy_only_token_still_wires_managed_composio() {
+        use crate::company::credentials::CredentialSource;
+        use crate::ports::SecretStore;
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-legacy-token-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        secrets
+            .set(
+                &company,
+                crate::company::composio::LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
+            .await
+            .expect("a legacy-only token still resolves");
+        assert_eq!(
+            token_of(&resolved).await.as_deref(),
+            Some("th-not-a-real-key")
+        );
+        assert_eq!(resolved.credential().source(), CredentialSource::Static);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_only_byok_key_still_resolves_the_byok_route() {
+        use crate::company::composio::{BYOK_MODE, MODE_KEY};
+        use crate::ports::SecretStore;
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-legacy-byok-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                crate::company::composio::LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, None)
+            .await
+            .expect("a legacy-only BYOK key still resolves");
+        assert_eq!(resolved.mode(), ComposioMode::Byok);
+        assert_eq!(
+            token_of(&resolved).await.as_deref(),
+            Some("ak-not-a-real-key")
+        );
+
+        crate::company::composio::store_api_key(&company, &secrets, "ak-not-a-real-key-2")
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets
+                .get(&company, BYOK_KEY_KEY)
+                .await
+                .unwrap()
+                .map(|SecretValue(v)| v)
+                .as_deref(),
+            Some("ak-not-a-real-key-2")
+        );
+        assert_eq!(
+            secrets
+                .get(&company, crate::company::composio::LEGACY_API_KEY_KEY)
+                .await
+                .unwrap()
+                .map(|SecretValue(v)| v)
+                .as_deref(),
+            Some("ak-not-a-real-key-2")
         );
     }
 
@@ -3106,7 +3210,6 @@ mod tests {
             &BrokenSecrets,
             Vec::new(),
             None,
-            None,
             // An instance identity IS available — and must still not be used,
             // because we cannot tell whether this company has a key of its own.
             Some(Arc::new(TinyhumansTokenSource::static_key(
@@ -3135,9 +3238,8 @@ mod tests {
         let secrets = FsSecretStore::new(dir.path());
         let company = CompanyId::new("acme");
 
-        let resolve = async || {
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None).await
-        };
+        let resolve =
+            async || TenantComposio::resolve(&company, &secrets, Vec::new(), None, None).await;
 
         company_key::store_key(&company, &secrets, "key-a")
             .await
@@ -3384,7 +3486,7 @@ mod tests {
             .unwrap();
         store_api_key(&company, &secrets, "ak_live").await.unwrap();
 
-        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None, None)
+        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
             .await
             .expect("a BYOK company has a config");
 
@@ -3417,7 +3519,7 @@ mod tests {
         let company = CompanyId::new("acme");
         store_api_key(&company, &secrets, "ak_live").await.unwrap();
 
-        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None, None)
+        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
             .await
             .expect("a BYOK company has a config");
         assert_eq!(
@@ -3447,7 +3549,7 @@ mod tests {
         let company = CompanyId::new("acme");
         store_api_key(&company, &secrets, "ak_live").await.unwrap();
 
-        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None, None)
+        let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
             .await
             .expect("a BYOK company has a config");
         assert_eq!(config.mode(), ComposioMode::Byok);
@@ -3463,7 +3565,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            TenantComposio::resolve(&bare, &secrets, vec![], None, None, None)
+            TenantComposio::resolve(&bare, &secrets, vec![], None, None)
                 .await
                 .is_none(),
             "an operator who asked for their own account must never silently get the platform's"
