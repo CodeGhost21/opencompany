@@ -6073,6 +6073,27 @@ mod tests {
         );
     }
 
+    /// Keys rework slice 3a: an overlay teammate's own `{provider, model}` pair
+    /// carries straight through to the synthesized `ManifestAgent`, the same
+    /// way `model`/`harness` already do — `build_agent`'s pin logic reads it
+    /// from there.
+    #[test]
+    fn overlay_agent_to_manifest_carries_the_provider() {
+        let overlay = OverlayAgent {
+            provider: Some("anthropic".into()),
+            id: "sam".into(),
+            name: "Sam".into(),
+            role: "Web search".into(),
+            description: None,
+            tools: None,
+            model: Some("test-model-small".into()),
+            harness: None,
+        };
+        let manifest = overlay_agent_to_manifest(&overlay);
+        assert_eq!(manifest.provider.as_deref(), Some("anthropic"));
+        assert_eq!(manifest.model.as_deref(), Some("test-model-small"));
+    }
+
     /// Issue #661 / L5: a grant edit changes the roster the harness must build, so
     /// it has to move the overlay fingerprint — otherwise a re-grant would
     /// persist, render as applied, and be silently ignored until the process
@@ -6159,6 +6180,51 @@ mod tests {
         assert_eq!(
             overlay_fingerprint(&model, &[], &[]),
             overlay_fingerprint(&model_again, &[], &[])
+        );
+    }
+
+    /// G5: a provider-only change to the pair (keys rework slice 3a) must move
+    /// both the overlay and the override fingerprints on its own — the same
+    /// staleness the `model`/`harness` hashes above guard against. Without
+    /// this a PATCH that only rebinds the provider half would save and change
+    /// nothing about the running roster until a restart.
+    #[test]
+    fn a_provider_edit_moves_the_overlay_and_override_fingerprints() {
+        let overlays = |provider: Option<&str>| {
+            vec![OverlayAgent {
+                provider: provider.map(str::to_string),
+                id: "a".into(),
+                name: "A".into(),
+                role: "r".into(),
+                description: None,
+                tools: None,
+                model: Some("test-model-large".into()),
+                harness: None,
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&overlays(None), &[], &[]),
+            overlay_fingerprint(&overlays(Some("anthropic")), &[], &[]),
+            "an overlay's provider must move the overlay fingerprint"
+        );
+
+        let edits = |provider: Option<&str>| {
+            vec![crate::ports::types::AgentOverride {
+                agent_id: "ceo".into(),
+                provider: provider.map(str::to_string),
+                model: Some("test-model-large".to_string()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &edits(None), &[]),
+            overlay_fingerprint(&[], &edits(Some("anthropic")), &[]),
+            "a manifest teammate's provider edit must move the overlay fingerprint too"
+        );
+        assert_ne!(
+            override_fingerprint(&edits(None)),
+            override_fingerprint(&edits(Some("anthropic"))),
+            "and the override fingerprint on its own"
         );
     }
 

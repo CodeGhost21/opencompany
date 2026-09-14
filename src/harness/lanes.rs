@@ -214,9 +214,10 @@ fn agents_on(record: &CompanyRecord, harness_id: &str, default_harness: &str) ->
 /// bound, and looking it back up by id from `record` at prompt time would
 /// mean `LocalAcpAgent` holding a `&CompanyRecord` across turns rather than
 /// the plain snapshot `resolve_acp_engine` already builds once. Only agents
-/// with a model override appear here — `CompanyManifest::validate` already
-/// confirmed every override sits on an `acp`-bound agent, so a `built_in`
-/// company's agents never enter this map at all.
+/// with a model override appear here — a `built_in` agent's `model` is its
+/// pair's model (keys rework slice 3a, issue #2306) and never reaches this
+/// map, because the map is built only for `acp` harness ids and an agent
+/// enters it only when bound to that id.
 fn agent_models_on(
     record: &CompanyRecord,
     harness_id: &str,

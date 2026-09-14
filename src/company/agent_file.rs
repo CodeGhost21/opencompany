@@ -531,6 +531,25 @@ mod tests {
         );
     }
 
+    /// The provider half of the pair (keys rework slice 3a, issue #2306)
+    /// reaches the built `Agent` the same way `model` does — same reasoning
+    /// as the test above: an unwired field is silently neither honoured nor
+    /// refused.
+    #[test]
+    fn a_per_file_teammate_carries_its_provider() {
+        let dir = bundle(&[(
+            "researcher.toml",
+            "role = \"Researcher\"\nprovider = \"anthropic\"\nmodel = \"test-model-large\"\n",
+        )]);
+        let agents = load_agents(dir.path()).expect("loads");
+        let researcher = agents
+            .iter()
+            .find(|a| a.id == "researcher")
+            .expect("parsed");
+        assert_eq!(researcher.provider.as_deref(), Some("anthropic"));
+        assert_eq!(researcher.model.as_deref(), Some("test-model-large"));
+    }
+
     #[test]
     fn a_subdirectory_toml_is_a_document_not_a_teammate() {
         // `prompt_files` may point at a `.toml` briefing; descending into
