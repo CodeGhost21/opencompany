@@ -787,7 +787,12 @@ pub fn normalize_setup_base_url(provider: &str, raw: Option<&str>) -> Option<Str
         return Some(raw.trim_end_matches('/').to_string());
     }
 
-    let mut url = if raw.starts_with("http://") || raw.starts_with("https://") {
+    // The scheme is case-insensitive (RFC 3986 §3.1). Matching it with a
+    // case-sensitive prefix turned `HTTP://host/v1` into `http://HTTP://host/v1`
+    // — a URL whose first authority is `HTTP:`, which hid any userinfo behind it
+    // from the credential check (Codex review on #2281).
+    let lower = raw.to_ascii_lowercase();
+    let mut url = if lower.starts_with("http://") || lower.starts_with("https://") {
         raw.to_string()
     } else {
         format!("http://{raw}")
@@ -2880,6 +2885,27 @@ mod tests {
         assert_eq!(
             normalize_setup_base_url("openai_compatible", Some("https://llm.test/api")),
             Some("https://llm.test/api".to_string())
+        );
+    }
+
+    #[test]
+    fn setup_normalisation_reads_an_uppercase_scheme_as_a_scheme() {
+        // Never a second scheme in front of the first: that shape is how a
+        // credential once hid from `endpoint_has_credentials`.
+        assert_eq!(
+            normalize_setup_base_url("openai_compatible", Some("HTTP://127.0.0.1:1234")).as_deref(),
+            Some("HTTP://127.0.0.1:1234/v1")
+        );
+        assert_eq!(
+            normalize_setup_base_url("ollama", Some("HTTPS://llm.test/api")).as_deref(),
+            Some("HTTPS://llm.test/api")
+        );
+        let credentialed =
+            normalize_setup_base_url("openai_compatible", Some("HTTP://alice:hunter2@host/v1"))
+                .expect("normalised");
+        assert!(
+            catalogue::endpoint_has_credentials(&credentialed),
+            "`{credentialed}` must still read as carrying a credential"
         );
     }
 

@@ -581,14 +581,29 @@ pub const REDACTED_USERINFO: &str = "***";
 /// `None` when there is none. The `@` must be inside the **authority**: a path
 /// may legitimately contain one (`https://host/v1/@me`), and that is not a
 /// credential.
+///
+/// **Every** `://` is tried as the start of an authority, not only the first.
+/// A malformed value can carry a second scheme — `HTTP://alice:pw@host/v1`
+/// once became `http://HTTP://alice:pw@host/v1` when a case-sensitive prefix
+/// check added a scheme it did not recognise — and reading only the first
+/// authority (`HTTP:`) waved the credential behind it straight through both the
+/// refusal and the redaction (Codex review on #2281). Over-matching is the safe
+/// direction here: a URL with a second `://` whose authority holds an `@` is
+/// refused or redacted, never stored or said verbatim.
 fn endpoint_userinfo_range(endpoint: &str) -> Option<std::ops::Range<usize>> {
-    let start = endpoint.find("://").map_or(0, |i| i + "://".len());
-    let rest = endpoint.get(start..)?;
-    let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    // `rfind`, not `find`: a password may itself contain an `@`, and the last
-    // one in the authority is the delimiter per RFC 3986.
-    let at = rest.get(..authority_len)?.rfind('@')?;
-    Some(start..start + at)
+    let starts: Vec<usize> = endpoint
+        .match_indices("://")
+        .map(|(i, sep)| i + sep.len())
+        .collect();
+    let starts = if starts.is_empty() { vec![0] } else { starts };
+    starts.into_iter().find_map(|start| {
+        let rest = endpoint.get(start..)?;
+        let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        // `rfind`, not `find`: a password may itself contain an `@`, and the
+        // last one in the authority is the delimiter per RFC 3986.
+        let at = rest.get(..authority_len)?.rfind('@')?;
+        Some(start..start + at)
+    })
 }
 
 /// Whether an endpoint URL carries a credential in its authority
@@ -1600,6 +1615,33 @@ mod tests {
                 "`{bad}` must not normalise into something storable"
             );
         }
+    }
+
+    #[test]
+    fn a_second_scheme_does_not_hide_the_credential_behind_it() {
+        // Codex review on #2281: an uppercase scheme was once prefixed with a
+        // second one by setup normalisation, and the first authority (`HTTP:`)
+        // has no `@` — so reading only that one missed the credential entirely.
+        for bad in [
+            "http://HTTP://alice:hunter2@127.0.0.1:8597/v1",
+            "https://http://alice@api.acme.example/v1",
+        ] {
+            assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` must not be storable"
+            );
+            let said = redact_endpoint(bad);
+            assert!(
+                !said.contains("alice") && !said.contains("hunter2"),
+                "`{bad}` redacted to `{said}`"
+            );
+        }
+        // An uppercase scheme on its own is an ordinary endpoint.
+        assert!(endpoint_has_credentials(
+            "HTTP://alice:hunter2@127.0.0.1:8597/v1"
+        ));
+        assert!(!endpoint_has_credentials("HTTPS://api.acme.example/v1"));
     }
 
     #[test]
