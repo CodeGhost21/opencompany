@@ -79,10 +79,14 @@ jobs:
       # `fetch-depth: 0`: the tag-exists check and the back-merge both need
       # real history, and a shallow clone makes `merge-base` lie.
       # Least privilege: this job only pushes the version-bump commit and tag
-      # (and the back-merge to main) — contents: write is all it needs. Branch-
-      # ruleset bypass (repository settings → Rules) comes from the App's identity in
-      # the ruleset bypass list, not from token scopes; a push made with
-      # GITHUB_TOKEN would be rejected by `Protect main` / `Protect release`.
+      # (and the back-merge to main) — contents: write covers that. It also
+      # needs workflows: write: the back-merge from `release` can carry
+      # changes under `.github/workflows/**`, and GitHub rejects a GitHub App
+      # push that touches a workflow file unless the token holds that
+      # permission explicitly. Branch-ruleset bypass (repository settings →
+      # Rules) comes from the App's identity in the ruleset bypass list, not
+      # from token scopes; a push made with GITHUB_TOKEN would be rejected by
+      # `Protect main` / `Protect release`.
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -90,6 +94,7 @@ jobs:
           app-id: ${{ secrets.XGITHUB_APP_ID }}
           private-key: ${{ secrets.XGITHUB_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-workflows: write
 
       - name: Checkout source branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
