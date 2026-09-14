@@ -3184,6 +3184,7 @@ base_url = "https://byo.example/v1"
         // back to OpenRouter every time. Where it resolves to is still reported,
         // on the two fields that answer that question.
         assert_eq!(resp["status"]["provider"], "managed");
+        eprintln!("DEBUG_STATUS {}", resp["status"]);
         assert_eq!(
             resp["status"]["slug"], "openrouter",
             "attribution follows the endpoint, not the label"
