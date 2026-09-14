@@ -11,14 +11,25 @@ All of it lives in `src/company/composio.rs`.
 | Key | Holds | Read by |
 |---|---|---|
 | `composio/mode` | `"managed"` or `"byok"` | every path, first |
-| `composio/token` | the **managed** bearer — the *TinyHumans backend* recognises it | managed resolution only |
-| `composio/api_key` | the company's **own** Composio key (`ak_…`) — *Composio* recognises it | BYOK resolution only |
+| `composio/tinyhumans/key` | the **managed** bearer — the *TinyHumans backend* recognises it | managed resolution only (read fallback: `composio/token`) |
+| `composio/byok/key` | the company's **own** Composio key (`ak_…`) — *Composio* recognises it | BYOK resolution only (read fallback: `composio/api_key`) |
 | `composio/defaults` | which connected account each toolkit acts as | the execute path |
+
+### Legacy addresses (#2306)
+
+`composio/tinyhumans/key` and `composio/byok/key` replace the pre-rework
+addresses `composio/token` and `composio/api_key`. Reads try the new address
+first, falling back to the legacy one only when the new address is absent or
+blank; the two pairs are never crossed. For one release every write stores the
+same value at both addresses, and a clear clears both, so a rolled-back binary
+(which reads only the legacy address) keeps working. There is no boot-time
+migration. A later release stops the legacy write; that is a follow-up, not
+part of #2306.
 
 ## Why the two credentials are not one slot
 
-`composio/token` is presented to `api.tinyhumans.ai`. `composio/api_key` is
-presented to `backend.composio.dev`. **They authenticate different hosts.**
+`composio/tinyhumans/key` is presented to `api.tinyhumans.ai`. `composio/byok/key`
+is presented to `backend.composio.dev`. **They authenticate different hosts.**
 
 A single slot holding "whatever the current mode wants" would mean switching mode
 without re-entering a credential presents the previous host's secret to the new
@@ -88,8 +99,8 @@ BYOK would read as though nothing had happened.
 their own Composio dashboard. Scoping to the company id instead would isolate two
 OpenCompany companies sharing one key, but would also hide every connection the
 operator already made in that account — which is the first thing a BYOK operator
-looks for. The shared-account caveat is the same one `composio/token` already
-carries: two companies pasting one credential share one entity, and that cannot
+looks for. The shared-account caveat is the same one `composio/tinyhumans/key`
+already carries: two companies pasting one credential share one entity, and that cannot
 be prevented from this side.
 
 ## `composio/defaults`

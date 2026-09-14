@@ -212,9 +212,9 @@ own surface can afford:
   "nothing configured" and cannot be guessed past.
 
 A surface may prepend its **own** escape hatch above that seam. Composio keeps
-its BYO `composio/token` for a company that insists on using its own Composio
-account, so its full order is `composio/token` → company key → instance
-identity → none. What no surface may do is resolve a *company* identity some
+its BYO `composio/tinyhumans/key` for a company that insists on using its own
+Composio account, so its full order is `composio/tinyhumans/key` → company key
+→ instance identity → none. What no surface may do is resolve a *company* identity some
 other way.
 
 That composed order is itself derived **once**, in
@@ -236,7 +236,7 @@ that one is not a tier at all.
 | | managed | byok |
 | --- | --- | --- |
 | Host | the OpenHuman backend's `/agent-integrations/composio/*` | `backend.composio.dev` |
-| Credential | the precedence chain above | this company's own Composio API key (`composio/api_key`) |
+| Credential | the precedence chain above | this company's own Composio API key (`composio/byok/key`) |
 | Who bills | the platform | whoever owns that Composio account |
 | Toolkit gate | the backend's server-enforced allowlist | the company's own Composio dashboard |
 
