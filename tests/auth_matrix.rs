@@ -1339,6 +1339,43 @@ const OPERATOR_DIRECT_ROUTES: &[Route] = &[
         wait: Wait::None,
         red_cells: RedCells::None,
     },
+    // `GET {scope}/agents/{agent_id}/session` — the same read as
+    // `chat/history` above, narrowed to one teammate and widened to every
+    // channel it can reach. It resolves its principal through the *same*
+    // `history_viewer` gate, so it carries the same access class: anything
+    // stricter here would claim an authority the handler does not enforce,
+    // and anything looser would understate it.
+    //
+    // Both scope forms carry a row because both are registered in
+    // `operator.rs`, and this matrix is closed against the source path set —
+    // listing one would fail `source_path_set_equals_the_ops_matrix_path_set`
+    // exactly as omitting both just did.
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/companies/{id}/agents/{agent_id}/session",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
+        path: "/api/v1/company/agents/{agent_id}/session",
+        address: Address::Exact,
+        source: Source::Operator,
+        access: Access::Addressed,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
     Route {
         method: Verb::Get,
         path: "/api/v1/companies/{id}/chat/attribution-audit",
@@ -1735,7 +1772,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
     assert_eq!(OVERLAPPING_EXTERNAL_ROUTES.len(), 1);
     assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 16);
-    assert_eq!(OPERATOR_DIRECT_ROUTES.len(), 11);
+    assert_eq!(OPERATOR_DIRECT_ROUTES.len(), 13);
     assert_eq!(
         all_routes()
             .map(|route| route_patterns(route).len())
