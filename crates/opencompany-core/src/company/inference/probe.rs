@@ -1484,7 +1484,9 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::{Arc, Mutex};
 
-        let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        // Each page's `(query string, bearer)` as the fake server saw it.
+        type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let seen_for_route = seen.clone();
         let app = axum::Router::new().route(
             "/agent-integrations/openrouter/models",

@@ -2154,13 +2154,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let map = secrets.map.lock().unwrap();
-        assert_eq!(map.len(), 1, "one write: {map:?}");
-        assert_eq!(
-            map.get(DEFAULT_PROVIDER_KEY).map(String::as_str),
-            Some(r#"{"provider":"tinyhumans","model":"acme/test-model"}"#)
-        );
-        drop(map);
+        // Scoped so the guard is released before the `.await` below: clippy's
+        // `await_holding_lock` is right that a `std` guard across an await is a
+        // deadlock waiting to happen, even though this one never contends.
+        {
+            let map = secrets.map.lock().unwrap();
+            assert_eq!(map.len(), 1, "one write: {map:?}");
+            assert_eq!(
+                map.get(DEFAULT_PROVIDER_KEY).map(String::as_str),
+                Some(r#"{"provider":"tinyhumans","model":"acme/test-model"}"#)
+            );
+        }
         assert_eq!(
             load_default(&company(), &secrets).await.unwrap(),
             DefaultChoice::Full(ModelChoice {
