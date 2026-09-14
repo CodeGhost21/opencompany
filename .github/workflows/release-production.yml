@@ -1,5 +1,5 @@
 # Cut a PRODUCTION release from the `release` branch: bump the version, tag
-# `v<version>`, verify the tree, build and notarize both macOS DMGs plus the
+# `v<version>`, build and notarize both macOS DMGs plus the
 # auto-updater's artifacts, write the release notes, and publish the GitHub
 # Release — all from one dispatch.
 #
@@ -68,7 +68,7 @@ on:
         type: choice
         options: [patch, minor, major]
       create_release:
-        description: Tag and publish the GitHub Release. Off = bump, verify and build only (a rehearsal).
+        description: Tag and publish the GitHub Release. Off = bump and build only (a rehearsal).
         required: false
         type: boolean
         default: true
