@@ -623,6 +623,50 @@ pub async fn forget_connection(
     Ok(true)
 }
 
+/// Whether this company has any local, concrete evidence that Composio is
+/// actually in use — the signal a token clear or a mode switch would strand
+/// (keys rework, issue #2306; `docs/key-reworks/in-use-guards.md`).
+///
+/// ## Why `composio/defaults` and not the live connection list
+///
+/// Composio has no `default`/agent-pair concept the way an inference provider
+/// does (`docs/key-reworks/in-use-guards.md` §1: "only `surfaces`"), and this
+/// codebase has no per-agent "uses Composio" pairing to check either — every
+/// agent either has the `composio` tool namespace or does not, with nothing
+/// that names which *toolkit*. So the only thing worth asking is "did this
+/// company actually connect anything", and there are two candidate answers:
+///
+/// * `GET .../composio/connections` — the live, authoritative list. It is a
+///   network call to the Composio/TinyHumans backend, bounded by a
+///   multi-second timeout, and it can fail for reasons that have nothing to
+///   do with whether the company is "in use" (a slow upstream, a rejected
+///   credential). Calling it from inside a write path that must otherwise be
+///   near-instant would make clearing a token slower and less reliable than
+///   the destructive action it is guarding.
+/// * [`DEFAULTS_KEY`] — this company's per-toolkit connection **pins**
+///   (`set_default` / [`load_defaults`]). A single local secret-store read,
+///   no network, no timeout. It under-counts (a company can have live
+///   connections with nothing pinned) but it never over-counts, and a
+///   non-empty pin is unambiguous evidence: an operator went to the trouble
+///   of choosing which account a toolkit acts as. That pin's connection id is
+///   scoped to whichever backend/entity was live when it was set — the
+///   module's own `BYOK_NOTE` and `MANAGED_NOTE`
+///   (`src/server/ops/composio.rs`) already say, in prose, that a route
+///   switch strands the providers connected under the old one, and this is
+///   that same fact made cheaply checkable.
+///
+/// So this is the "cheaply-computed, concrete" signal the guard uses, at the
+/// cost of missing an unpinned-but-connected company (which sees no warning
+/// where a network read might have offered one). A store read error
+/// **propagates** rather than degrading to "not in use": a guard that fails
+/// open on an unreadable store is not a guard.
+pub async fn has_connected_integrations(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<bool> {
+    Ok(!load_defaults(company, secrets).await?.is_empty())
+}
+
 async fn save_defaults(
     company: &CompanyId,
     secrets: &dyn SecretStore,
@@ -903,6 +947,48 @@ mod tests {
         let left = load_defaults(&company, &secrets).await.unwrap();
         assert_eq!(left.get("slack").map(String::as_str), Some("ca_workspace"));
         assert!(!left.contains_key("gmail"));
+    }
+
+    // ── in-use guards (#2306): has_connected_integrations ─────────────
+
+    #[tokio::test]
+    async fn a_company_with_no_pins_has_no_connected_integrations() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        assert!(
+            !has_connected_integrations(&company, &secrets)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_pin_counts_as_connected() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        set_default(&company, &secrets, "gmail", "ca_ops")
+            .await
+            .unwrap();
+        assert!(
+            has_connected_integrations(&company, &secrets)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_last_pin_returns_to_not_connected() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        set_default(&company, &secrets, "gmail", "ca_ops")
+            .await
+            .unwrap();
+        clear_default(&company, &secrets, "gmail").await.unwrap();
+        assert!(
+            !has_connected_integrations(&company, &secrets)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
