@@ -254,6 +254,20 @@ export interface ManagedState {
    * `configured`, which is today's behaviour.
    */
   legacyRow?: boolean;
+  /**
+   * Whether this legacy row's chain resolves with no model chosen — the same
+   * X5 state an ordinary row's `model`/`modelAmbiguous` pair expresses,
+   * mirrored here because the legacy chain has no row to carry those fields
+   * on. Sent as `legacy_row && configured` (round-2 review, P1-3): true for
+   * every state in which {@link showsLegacyManagedRow} in `ProviderList.tsx`
+   * renders this row at all, so "Key added — choose a model" is what it ever
+   * shows — never a connected look this chain cannot back with a model.
+   * Optional because an older host does not send it; absent reads as `false`,
+   * which is wrong for an older host's own not-yet-modelled rows but is the
+   * same "an older host doesn't know about this yet" gap every optional field
+   * here has.
+   */
+  needsModel?: boolean;
 }
 
 /**

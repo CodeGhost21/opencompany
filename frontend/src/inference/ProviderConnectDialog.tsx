@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { probeDraft } from "@/api/inference";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -21,12 +22,15 @@ import {
   credentialAsk,
   customProviderReady,
   endpointHasCredentials,
+  modelAskFromProbe,
   modelIdErrorCopy,
   normalizeEndpoint,
+  probeEndpoint,
   slugErrorCopy,
   slugify,
 } from "./connect";
 import type { ModelAsk } from "./connect";
+import { isAzureEndpoint } from "./catalogue";
 import { ModelField } from "./ModelField";
 import type { Provider } from "./types";
 
@@ -111,6 +115,7 @@ export function ProviderConnectDialog({
   error,
   offerAddAnyway,
   modelAsk,
+  noDefaultYet,
   replacesKey,
   onCancel,
   onBack,
@@ -140,6 +145,14 @@ export function ProviderConnectDialog({
    * itself, no model needed" case.
    */
   modelAsk: ModelAsk | null;
+  /**
+   * Whether the company has no stored default yet (round-2 review, P2-2) —
+   * decision X1's own trigger, "if a default already exists, adding never
+   * changes it". Keyed on the status's `defaultChoice`, not on whether this is
+   * literally the first row: a company with rows but no chosen default still
+   * gets the "this becomes the default" note on its next add.
+   */
+  noDefaultYet?: boolean;
   /**
    * Whether connecting this option replaces a key already saved for the legacy
    * Managed row (keys rework, issue #2306, slice 2a) — TinyHumans and the
@@ -183,13 +196,12 @@ export function ProviderConnectDialog({
   // Seeded from the row's own model in edit mode — leaving it unchanged sends
   // nothing (`submit` compares against this same seed).
   const [model, setModel] = useState(() => editing?.model ?? "");
-  // Orchestrator decision X1 (2026-09-15): the first provider a company
-  // connects always becomes its default — there is no checkbox to untick, and
-  // no client-sent `makeDefault` flag. The host decides and sets it; this
-  // dialog only says so. Every later add offers no default control at all —
-  // "Set as default" (`DefaultModelDialog`) is the one way to change it after
-  // connecting, and it confirms before replacing an existing full default.
-  const firstProvider = providers.length === 0;
+  // Orchestrator decision X1 (2026-09-15): the first default a company sets
+  // sticks — there is no checkbox to untick, and no client-sent `makeDefault`
+  // flag. The host decides and sets it; this dialog only says so. Every later
+  // add offers no default control at all — "Set as default"
+  // (`DefaultModelDialog`) is the one way to change it after connecting, and
+  // it confirms before replacing an existing full default.
 
   // The row being edited is not its own collision. Its slug is already taken —
   // by it — and `edit` is keyed on the stored slug rather than on this one, so
@@ -207,10 +219,58 @@ export function ProviderConnectDialog({
 
   const step: "details" | "model" | "edit" = editing ? "edit" : modelAsk ? "model" : "details";
 
+  /**
+   * Round-2 review, P1-7: the model list in edit mode used to be read live
+   * against the **stored** key, even after the operator had just typed a new
+   * one to replace it — so a keyless row's list always failed, and "Replace
+   * key" never listed models with the key actually being typed. A freshly
+   * typed key probes the same way the add flow's step 1 does; leaving it
+   * blank keeps reading the stored row's own live catalogue.
+   */
+  const typedKey = key.trim();
+  const [editProbe, setEditProbe] = useState<ModelAsk | null>(null);
+  const [editProbing, setEditProbing] = useState(false);
+  useEffect(() => {
+    if (step !== "edit" || !typedKey || !endpointOk) {
+      setEditProbe(null);
+      setEditProbing(false);
+      return;
+    }
+    let live = true;
+    setEditProbing(true);
+    const url = probeEndpoint(optionSlug ?? "custom", baseUrl);
+    const timer = setTimeout(() => {
+      const run = url
+        ? probeDraft(client, company, { baseUrl: url, key: typedKey, kind: optionSlug ?? "custom" })
+        : Promise.resolve(null);
+      void run
+        .then((probe) => {
+          if (live) setEditProbe(modelAskFromProbe(url, probe, isAzureEndpoint));
+        })
+        .catch(() => {
+          if (live) setEditProbe(modelAskFromProbe(url, null, isAzureEndpoint));
+        })
+        .finally(() => {
+          if (live) setEditProbing(false);
+        });
+    }, 400);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      setEditProbing(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately debounced on the typed key, not every render
+  }, [client, company, step, typedKey, baseUrl, optionSlug, endpointOk]);
+
   const detailsOk =
     (custom
       ? customProviderReady(rivals, { label, baseUrl })
-      : endpointOk && (!ask.needsKey || key.trim().length > 0));
+      // Round-2 review, P1-7a: a key is never required to save an edit — an
+      // untouched field already means "leave it alone" (`keyToSend` below),
+      // and gating the button on it made fixing a row's *model* alone — the
+      // main repair path "Needs a model" opens now — mean re-entering its
+      // key first.
+      : endpointOk && (!ask.needsKey || editing != null || key.trim().length > 0));
   const ready =
     step === "model"
       ? modelError === null
@@ -245,8 +305,13 @@ export function ProviderConnectDialog({
       addAnyway,
     });
 
+  // Round-2 review, P0-2: Escape and an overlay click are ignored while
+  // `busy` — a probe or a write is in flight, and closing mid-request is
+  // exactly the moment the caller's own `attempt` counter exists to guard
+  // against; refusing the close here means there is nothing for it to catch
+  // in the common case.
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+    <Dialog open={open} onOpenChange={(next) => !next && !busy && onCancel()}>
       <DialogContent className="sm:max-w-md" data-testid="inference-connect-provider">
         <DialogHeader>
           <DialogTitle>{step === "model" ? `${ask.title}: choose a model` : ask.title}</DialogTitle>
@@ -348,15 +413,18 @@ export function ProviderConnectDialog({
                 writes the company's TinyHumans **account**, which is a different
                 credential with a different lifecycle — it is rotated, and it moves
                 every brokered surface at once, not just this one. It already has a
-                home on Connections → Account, and a second form for one credential
-                is how two surfaces come to disagree about whether a company has
-                it. So this links there rather than duplicating it. */}
+                home on Connections → API Keys → Account (round-2 review, P3-1:
+                verified against `connection-pages.ts` — the "keys" group is
+                labelled "API Keys" and its `api-key` page "Account"), and a
+                second form for one credential is how two surfaces come to
+                disagree about whether a company has it. So this links there
+                rather than duplicating it. */}
             {managed && (
               <div className="grid gap-1.5 rounded-md border border-border px-3 py-2">
                 <p className="text-sm font-medium">Or connect your TinyHumans account</p>
                 <p className="text-xs text-muted-foreground">
                   One account key pays for thinking and for app connections, and rotating it
-                  reaches both. Set it up on Connections → Account.
+                  reaches both. Set it up on Connections → API Keys → Account.
                 </p>
                 <a
                   className="text-xs font-medium underline underline-offset-4"
@@ -384,29 +452,38 @@ export function ProviderConnectDialog({
               <ModelField
                 client={client}
                 company={company}
-                slug={step === "edit" ? (editing?.slug ?? null) : null}
+                // Fetch mode (live against the stored key) only when edit mode
+                // has no freshly typed key to probe instead — round-2 review,
+                // P1-7b: a typed key feeds `editProbe` in list mode below, so
+                // the list is read against the key actually being saved.
+                slug={step === "edit" && !typedKey ? (editing?.slug ?? null) : null}
                 id={step === "edit" ? "inference-edit-model" : "inference-connect-model"}
                 value={model}
                 disabled={busy}
                 onChange={setModel}
                 // In the add flow the list is already in hand from the draft
-                // probe that opened this step — nothing is fetched again. In
-                // edit mode the row is already saved, so its own catalogue is
-                // read live instead (`slug` above, `models` omitted).
+                // probe that opened this step — nothing is fetched again.
                 {...(step === "model" && modelAsk
                   ? { models: modelAsk.models, freeTextOnly: modelAsk.freeTextOnly, catalogError: modelAsk.error }
-                  : {})}
+                  : step === "edit" && typedKey
+                    ? editProbing
+                      ? { models: [], freeTextOnly: false, catalogError: "Reading this provider's models…" }
+                      : editProbe
+                        ? { models: editProbe.models, freeTextOnly: editProbe.freeTextOnly, catalogError: editProbe.error }
+                        : {}
+                    : {})}
               />
               {model.trim() && modelError && (
                 <p className="text-xs text-status-blocked-text" data-testid="inference-model-id-error">
                   {modelIdErrorCopy(modelError)}
                 </p>
               )}
-              {/* Decision X1: the first provider a company connects always
-                  becomes its default. No checkbox — the host decides, this
+              {/* Decision X1 (round-2 review, P2-2, keyed on the stored
+                  default rather than on row count): the first default a
+                  company sets sticks. No checkbox — the host decides, this
                   just says so. Every later add offers no default control at
                   all; "Set as default" on the row is the way to change it. */}
-              {step === "model" && firstProvider && (
+              {step === "model" && noDefaultYet && (
                 <p className="text-xs text-muted-foreground" data-testid="inference-first-default-note">
                   This becomes the company default.
                 </p>

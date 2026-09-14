@@ -611,6 +611,30 @@ export function rowNeedsModel(
 }
 
 /**
+ * Whether saving `model` as `providerSlug`'s default would replace a
+ * **different** stored default — the X4 confirm step's own gate (round-2
+ * review, P2-1).
+ *
+ * Includes a bare-slug default naming a different provider: the earlier
+ * condition required `current.model != null` across the *whole* expression,
+ * which suppressed the confirm exactly where it mattered — replacing an
+ * unfinished "provider chosen, no model" default with an entirely different
+ * provider, silently. Completing *this same* row's own bare-slug default, or
+ * saving the exact pair already stored, both still save directly — there is
+ * nothing for a confirm to usefully name in either case.
+ */
+export function replacesDifferentDefault(
+  current: DefaultChoice | null | undefined,
+  providerSlug: string,
+  model: string,
+): boolean {
+  return (
+    current != null &&
+    (current.provider !== providerSlug || (current.model != null && current.model !== model.trim()))
+  );
+}
+
+/**
  * What to seed the "Set as default" model field with: the row's own model when
  * it has one, else the stored choice's model when the choice names this row
  * (the bare-slug case), else blank.

@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { removalImpact, removalWarnings } from "@/inference/removal";
+import { hasUsedBy, removalImpact, removalWarnings, usedBySentence } from "@/inference/removal";
 import type { Provider } from "@/inference/types";
 
 function provider(over: Partial<Provider> = {}): Provider {
@@ -59,18 +59,18 @@ describe("removalWarnings: provider (full delete)", () => {
     expect(lines.some((l) => l.includes("does not change the default"))).toBe(true);
   });
 
-  it("names every pinned agent, correctly pluralised", () => {
+  it("names every pinned agent, correctly pluralised, in the required usedBy sentence (P1-5)", () => {
     const one = removalWarnings("provider", "Acme", {
       lastEnabled: false,
       usedBy: { agents: [{ id: "a1", name: "Researcher" }] },
     });
-    expect(one.join(" ")).toContain("Pinned by 1 agent: Researcher.");
+    expect(one).toContain("Used by 1 agent: Researcher.");
 
     const two = removalWarnings("provider", "Acme", {
       lastEnabled: false,
       usedBy: { agents: [{ id: "a1", name: "Researcher" }, { id: "a2", name: "Web search" }] },
     });
-    expect(two.join(" ")).toContain("Pinned by 2 agents: Researcher, Web search.");
+    expect(two).toContain("Used by 2 agents: Researcher, Web search.");
   });
 
   it("says when nothing else would be able to think", () => {
@@ -120,16 +120,79 @@ describe("removalWarnings: disable / enable — every toggle confirms now", () =
 });
 
 describe("removalWarnings: other surfaces sharing the credential", () => {
-  it("names them, excluding llm itself", () => {
+  it("names them by display label, excluding llm itself (X7)", () => {
     const lines = removalWarnings("key", "Acme", {
       lastEnabled: false,
       usedBy: { surfaces: ["llm", "composio", "search"] },
     });
-    expect(lines.join(" ")).toContain("also used by composio and search");
+    expect(lines).toContain("Used by Composio and Search.");
   });
 
   it("says nothing when llm is the only surface listed", () => {
     const lines = removalWarnings("key", "Acme", { lastEnabled: false, usedBy: { surfaces: ["llm"] } });
     expect(lines).toHaveLength(1);
+  });
+});
+
+describe("usedBySentence — the one sentence every confirm dialog names usedBy with (P1-5)", () => {
+  it("is null when nothing is set", () => {
+    expect(usedBySentence(undefined)).toBeNull();
+    expect(usedBySentence(null)).toBeNull();
+    expect(usedBySentence({})).toBeNull();
+  });
+
+  it("default only", () => {
+    expect(usedBySentence({ default: true })).toBe("Used by the company default.");
+  });
+
+  it("one agent, singular", () => {
+    expect(usedBySentence({ agents: [{ id: "a1", name: "Researcher" }] })).toBe(
+      "Used by 1 agent: Researcher.",
+    );
+  });
+
+  it("several agents, plural, in order", () => {
+    expect(
+      usedBySentence({
+        agents: [{ id: "a1", name: "Researcher" }, { id: "a2", name: "Web search" }],
+      }),
+    ).toBe("Used by 2 agents: Researcher, Web search.");
+  });
+
+  it("default and one agent together, exactly as required", () => {
+    expect(
+      usedBySentence({ default: true, agents: [{ id: "a1", name: "Researcher" }] }),
+    ).toBe("Used by the company default and 1 agent: Researcher.");
+  });
+
+  it("default and several agents together", () => {
+    expect(
+      usedBySentence({
+        default: true,
+        agents: [{ id: "a1", name: "Researcher" }, { id: "a2", name: "Web search" }],
+      }),
+    ).toBe("Used by the company default and 2 agents: Researcher, Web search.");
+  });
+
+  it("maps surfaces to display names and drops its own surface", () => {
+    expect(usedBySentence({ surfaces: ["llm", "composio"] })).toBe("Used by Composio.");
+    expect(usedBySentence({ surfaces: ["composio", "search"] }, "llm")).toBe("Used by Composio and Search.");
+    expect(usedBySentence({ surfaces: ["llm"] })).toBeNull();
+  });
+});
+
+describe("hasUsedBy", () => {
+  it("is false for nothing set", () => {
+    expect(hasUsedBy(undefined)).toBe(false);
+    expect(hasUsedBy(null)).toBe(false);
+    expect(hasUsedBy({})).toBe(false);
+    expect(hasUsedBy({ surfaces: [] })).toBe(false);
+    expect(hasUsedBy({ agents: [] })).toBe(false);
+  });
+
+  it("is true when any field is set", () => {
+    expect(hasUsedBy({ default: true })).toBe(true);
+    expect(hasUsedBy({ agents: [{ id: "a1", name: "Researcher" }] })).toBe(true);
+    expect(hasUsedBy({ surfaces: ["composio"] })).toBe(true);
   });
 });

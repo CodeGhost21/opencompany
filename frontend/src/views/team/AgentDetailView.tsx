@@ -31,6 +31,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -318,6 +319,16 @@ export function AgentDetailView({
    */
   const [providerDraft, setProviderDraft] = useState("");
   const [savingHarness, setSavingHarness] = useState(false);
+  /**
+   * Whether Save is about to clear an existing pin back to the company
+   * default, awaiting confirmation (round-2 review, P2-5: "checklist line 229
+   * lists pair clear among the actions that confirm"). Gated on the *save*,
+   * not on clicking "Use company default" in the form: that button only
+   * changes the draft, which Cancel can still discard, and confirming a
+   * change nothing has committed to yet would be a speed bump with nothing
+   * behind it.
+   */
+  const [confirmClearPair, setConfirmClearPair] = useState(false);
   /**
    * The company's declared harnesses, for the picker's options. Best-effort
    * and silent on failure, like `PolicySettings`' own `wiredTools`: an older
@@ -648,7 +659,7 @@ export function AgentDetailView({
    * partial-save contract `agentEdits`/`save` follow above; a blank model
    * draft still clears with `null` rather than being refused.
    */
-  async function saveHarnessAndModel() {
+  async function saveHarnessAndModel(opts?: { confirmed?: boolean }) {
     if (!agent) return;
     const harness = harnessEdit(agent.harness, harnessDraft === HARNESS_DEFAULT ? "" : harnessDraft);
     const draftKind = resolvedHarnessKind(harnesses, harnessDraft === HARNESS_DEFAULT ? undefined : harnessDraft);
@@ -678,6 +689,14 @@ export function AgentDetailView({
       return;
     }
 
+    // Round-2 review, P2-5: this save would clear an existing pin back to the
+    // company default — confirm it first, the same as every other action this
+    // rework put behind a confirm dialog.
+    if (edits.provider === null && agent.provider && !opts?.confirmed) {
+      setConfirmClearPair(true);
+      return;
+    }
+
     setSavingHarness(true);
     try {
       const updated = await client.updateAgent(agentId, edits, company);
@@ -688,6 +707,7 @@ export function AgentDetailView({
       if (displayedAgentIdRef.current !== agentId) return;
       setAgent(updated);
       setEditingHarness(false);
+      setConfirmClearPair(false);
       toast.success("Harness updated.");
     } catch (error) {
       toast.error(
@@ -1122,7 +1142,13 @@ export function AgentDetailView({
               harnessDraft={harnessDraft}
               modelDraft={modelDraft}
               providerDraft={providerDraft}
-              providers={(inference?.providers ?? []).filter((p) => p.enabled)}
+              // Round-2 review, P1-6: the FULL list, not enabled-only — a
+              // disabled provider still has to resolve to its own label and
+              // to `providerState`'s "disabled" (not "removed") through
+              // `pairLabel`/`agentPairBrokenCopy`/`resolveAgentDefault`, all
+              // of which this same list feeds. `HarnessAndModel` filters to
+              // enabled rows itself, only for the picker's new-pin options.
+              providers={inference?.providers ?? []}
               defaultChoice={inference?.defaultChoice}
               client={client}
               company={company}
@@ -1213,7 +1239,42 @@ export function AgentDetailView({
           void saveAvatar(avatar);
         }}
       />
-
+      {/* Round-2 review, P2-5: confirms before Save actually clears an
+          existing pin back to the company default — see `saveHarnessAndModel`'s
+          own doc on why this gates the save rather than the "Use company
+          default" button. */}
+      <Dialog
+        open={confirmClearPair}
+        onOpenChange={(next) => !next && !savingHarness && setConfirmClearPair(false)}
+      >
+        <DialogContent className="sm:max-w-md" data-testid="agent-pair-clear-confirm">
+          <DialogHeader>
+            <DialogTitle>Clear {agent?.name ?? "this teammate"}&apos;s pair?</DialogTitle>
+            <DialogDescription>
+              It goes back to using the company default the moment you confirm — pin another
+              provider and model any time to change that.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={savingHarness}
+              onClick={() => setConfirmClearPair(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={savingHarness}
+              data-testid="agent-pair-clear-confirm-submit"
+              onClick={() => void saveHarnessAndModel({ confirmed: true })}
+            >
+              {savingHarness ? "Saving…" : "Clear pair"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1750,7 +1811,12 @@ function HarnessAndModel({
   modelDraft: string;
   /** The provider half of the pair on a built-in harness (keys rework, issue #2306, slice 3b). `""` = company default. */
   providerDraft: string;
-  /** Enabled providers only — a disabled one is never offered as a new pin. */
+  /**
+   * Every provider this company has, enabled or not (round-2 review, P1-6) —
+   * label resolution, `agentPairBrokenCopy` and `resolveAgentDefault` all need
+   * a disabled row present to say "turned off" rather than "removed". Filtered
+   * to enabled-only internally, only for the picker's new-pin options.
+   */
   providers: readonly Provider[];
   defaultChoice: DefaultChoice | null | undefined;
   client: OpenCompanyClient;
@@ -1771,6 +1837,8 @@ function HarnessAndModel({
     harnessDraft === HARNESS_DEFAULT ? undefined : harnessDraft,
   );
   const defaultHarness = harnesses.find((h) => h.default);
+  /** The picker's own new-pin options — a disabled provider is never offered as a new pin (round-2 review, P1-6). */
+  const pinnable = providers.filter((p) => p.enabled);
 
   /**
    * The models the drafted harness advertises.
@@ -1953,7 +2021,7 @@ function HarnessAndModel({
                     onModelChange(next ? (providers.find((p) => p.slug === next)?.model ?? "") : "");
                   }}
                 >
-                  <SelectTrigger className="w-full" data-testid="agent-provider-select">
+                  <SelectTrigger id="agent-provider-select" className="w-full" data-testid="agent-provider-select">
                     <SelectValue>
                       {() =>
                         providerDraft === ""
@@ -1966,7 +2034,7 @@ function HarnessAndModel({
                     <SelectItem value={PROVIDER_COMPANY_DEFAULT}>
                       {companyDefaultLabel(defaultChoice, providers)}
                     </SelectItem>
-                    {providers.map((p) => (
+                    {pinnable.map((p) => (
                       <SelectItem key={p.slug} value={p.slug}>
                         {p.label}
                         {p.model && <span className="text-muted-foreground"> · {p.model}</span>}
@@ -1976,10 +2044,16 @@ function HarnessAndModel({
                         stays visible, never silently dropped (F6) — a typo
                         slug only ever comes from a hand-authored manifest, but
                         an operator can still remove or disable a provider a
-                        pin already names. */}
-                    {agent.provider && !providers.some((p) => p.slug === agent.provider) && (
+                        pin already names. Checked against `pinnable`, not the
+                        full list (round-2 review, P1-6): a disabled provider
+                        is IN the full list but not its own `SelectItem` above,
+                        so without this it would have no row at all rather
+                        than showing as "not available". Its real label is
+                        used when the row still exists — a raw slug is only
+                        the truly-gone case. */}
+                    {agent.provider && !pinnable.some((p) => p.slug === agent.provider) && (
                       <SelectItem value={agent.provider}>
-                        {agent.provider}
+                        {providers.find((p) => p.slug === agent.provider)?.label ?? agent.provider}
                         <span className="text-muted-foreground"> — not available</span>
                       </SelectItem>
                     )}

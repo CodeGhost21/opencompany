@@ -15,7 +15,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { NO_CREDENTIAL_RESOLVES, managedRow, showsLegacyManagedRow } from "@/inference/ProviderList";
+import {
+  NO_CREDENTIAL_RESOLVES,
+  legacyManagedShowsSwitch,
+  legacyManagedSubline,
+  managedRow,
+  showsLegacyManagedRow,
+} from "@/inference/ProviderList";
 import { MANAGED_NOT_SET_UP, MANAGED_SWITCHED_OFF, managedFallbackNote } from "@/inference/managed-copy";
 import type { ManagedState } from "@/api/inference";
 
@@ -72,6 +78,30 @@ describe("showsLegacyManagedRow (keys rework, decision Q3: exactly one TinyHuman
 
   it("never shows when the host did not say anything at all", () => {
     expect(showsLegacyManagedRow(undefined)).toBe(false);
+  });
+});
+
+describe("legacyManagedSubline / legacyManagedShowsSwitch (round-2 review, P1-3, decision X5)", () => {
+  it("shows the X5 sub-line, never the connected-sounding one, once the host says needsModel", () => {
+    expect(legacyManagedSubline({ ...managed("company_account"), needsModel: true })).toBe(
+      "Key added — choose a model",
+    );
+    expect(legacyManagedSubline({ ...managed("instance"), needsModel: true })).toBe(
+      "Key added — choose a model",
+    );
+  });
+
+  it("falls back to the ordinary managedRow text once a model is chosen", () => {
+    expect(legacyManagedSubline({ ...managed("company_account"), needsModel: false })).toBe(
+      managedRow("company_account"),
+    );
+    expect(legacyManagedSubline(managed("instance"))).toBe(managedRow("instance"));
+  });
+
+  it("hides the live switch exactly when needsModel is true", () => {
+    expect(legacyManagedShowsSwitch({ needsModel: true })).toBe(false);
+    expect(legacyManagedShowsSwitch({ needsModel: false })).toBe(true);
+    expect(legacyManagedShowsSwitch({})).toBe(true);
   });
 });
 
