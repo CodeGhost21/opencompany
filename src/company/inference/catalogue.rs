@@ -1708,6 +1708,12 @@ mod tests {
                 "HTTP:alice:hunter2@127.0.0.1:8597/v1",
                 "***@127.0.0.1:8597/v1",
             ),
+            // CodeRabbit review on #2281: credentials in two authorities. One
+            // conservative range, to the last `@`, covers both.
+            (
+                "http://alice:one@outer/http://bob:two@inner/v1",
+                "http://***@inner/v1",
+            ),
         ] {
             assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
             assert!(

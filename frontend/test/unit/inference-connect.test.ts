@@ -345,6 +345,7 @@ describe("endpointHasCredentials", () => {
     expect(endpointHasCredentials("http:/alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
     expect(endpointHasCredentials("http://http:/alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
     expect(endpointHasCredentials("alice:/hunter2@127.0.0.1:8597/v1")).toBe(true);
+    expect(endpointHasCredentials("http://alice:one@outer/http://bob:two@inner/v1")).toBe(true);
     expect(normalizeEndpoint("http:/alice:hunter2@127.0.0.1:8597/v1")).toBeNull();
     for (const good of ["http://[::1]:11434/v1", "https://api.acme.example:8443/v1/@me"]) {
       expect(endpointHasCredentials(good)).toBe(false);
