@@ -281,8 +281,15 @@ export function MessageComposer({
   const scopeDeleteRef = useRef(deleteAttachment);
   scopeDeleteRef.current = deleteAttachment;
   // The upload is in flight: the paperclip spins and Send waits, so a message
-  // cannot post ahead of the bytes it references.
+  // cannot post ahead of the bytes it references. `uploadingCountRef` includes
+  // queued batches as well as the one currently uploading: clearing the state
+  // when any one batch finishes would let Send race the rest of the queue.
   const [uploading, setUploading] = useState(false);
+  const uploadingCountRef = useRef(0);
+  // Paste and drop may dispatch several `addFiles` calls before the first
+  // upload resolves. Start each batch only after its predecessor has staged
+  // its files, so its capacity calculation observes the latest pending count.
+  const uploadQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [attachError, setAttachError] = useState<string>();
   const fileInput = useRef<HTMLInputElement>(null);
   const [dragDepth, setDragDepth] = useState(0);
@@ -526,38 +533,53 @@ export function MessageComposer({
   }
 
   /** Upload picked or dropped files sequentially and stage every successful one. */
-  async function addFiles(files: File[]) {
-    if (!uploadAttachment || files.length === 0) return;
-    const room = Math.max(0, 20 - pendingRef.current.length);
-    const selected = files.filter((file) => file.size > 0).slice(0, room);
-    if (selected.length === 0) {
-      setAttachError(room === 0 ? "A message can carry at most 20 files." : "Empty files and folders can't be attached.");
-      return;
-    }
+  function addFiles(files: File[]): Promise<void> {
+    if (!uploadAttachment || files.length === 0) return Promise.resolve();
+    const upload = uploadAttachment;
+    uploadingCountRef.current += 1;
     setUploading(true);
-    setAttachError(undefined);
-    try {
-      for (const file of selected) {
-        const reference = await uploadAttachment(file);
-        if (!mountedRef.current || scopeDeleteRef.current !== deleteAttachment) {
-          deleteAttachment?.(reference.nodeId);
-          continue;
+    const batch = async () => {
+      try {
+        const room = Math.max(0, 20 - pendingRef.current.length);
+        const selected = files.filter((file) => file.size > 0).slice(0, room);
+        if (selected.length === 0) {
+          setAttachError(
+            room === 0
+              ? "A message can carry at most 20 files."
+              : "Empty files and folders can't be attached.",
+          );
+          return;
         }
-        const staged: PendingAttachment = { reference, delete: deleteAttachment };
-        pendingRef.current = [...pendingRef.current, staged];
-        setPending(pendingRef.current);
+        setAttachError(undefined);
+        for (const file of selected) {
+          const reference = await upload(file);
+          if (!mountedRef.current || scopeDeleteRef.current !== deleteAttachment) {
+            deleteAttachment?.(reference.nodeId);
+            continue;
+          }
+          const staged: PendingAttachment = { reference, delete: deleteAttachment };
+          pendingRef.current = [...pendingRef.current, staged];
+          setPending(pendingRef.current);
+        }
+        if (files.length > selected.length) {
+          setAttachError("Some files were skipped: messages accept 20 non-empty files.");
+        }
+      } catch (err) {
+        if (!mountedRef.current) return;
+        // The filename is operator content — the message says an upload failed
+        // without echoing what it was called.
+        setAttachError(err instanceof Error ? err.message : "Couldn't attach that file.");
+      } finally {
+        uploadingCountRef.current -= 1;
+        if (mountedRef.current) setUploading(uploadingCountRef.current > 0);
       }
-      if (files.length > selected.length) {
-        setAttachError("Some files were skipped: messages accept 20 non-empty files.");
-      }
-    } catch (err) {
-      if (!mountedRef.current) return;
-      // The filename is operator content — the message says an upload failed
-      // without echoing what it was called.
-      setAttachError(err instanceof Error ? err.message : "Couldn't attach that file.");
-    } finally {
-      if (mountedRef.current) setUploading(false);
-    }
+    };
+    const queued = uploadQueueRef.current.then(batch, batch);
+    // A failed batch must not block later paste/drop events. `batch` handles
+    // upload errors itself, but retain this rejection handler for future
+    // changes that throw before its cleanup.
+    uploadQueueRef.current = queued.catch(() => undefined);
+    return queued;
   }
 
   async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -581,7 +603,7 @@ export function MessageComposer({
   }
 
   function carriesFiles(event: React.DragEvent): boolean {
-    return !disabled && Array.from(event.dataTransfer.types).includes("Files");
+    return !!uploadAttachment && !disabled && Array.from(event.dataTransfer.types).includes("Files");
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
