@@ -707,7 +707,22 @@ fn is_scheme_name(name: &str) -> bool {
 /// into operator-facing failure text, and written to a plaintext store — so a
 /// password in one is a password in all three.
 pub fn endpoint_has_credentials(endpoint: &str) -> bool {
-    endpoint_credential_range(endpoint.trim()).is_some()
+    endpoint_credential_range(&as_url_parser_reads(endpoint)).is_some()
+}
+
+/// The endpoint as a URL parser sees it: trimmed, with every ASCII tab, line
+/// feed and carriage return removed.
+///
+/// WHATWG URL parsing strips those three wherever they appear, so
+/// `http:\t//alice:pw@host` reaches a client as `http://alice:pw@host`. A scan
+/// that stopped at the tab saw no `@` in the authority, which let the credential
+/// through both the refusal and the redaction (Codex review on #2281).
+fn as_url_parser_reads(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect()
 }
 
 /// What an operator is told when an endpoint they typed carries a credential.
@@ -733,10 +748,12 @@ pub const ENDPOINT_CREDENTIAL_REFUSAL: &str = "That endpoint carries a username 
 /// between the two call sites and the reason this is a separate function rather
 /// than something done at the point of storage.
 pub fn redact_endpoint(endpoint: &str) -> String {
-    let trimmed = endpoint.trim();
-    let mut out = trimmed.to_string();
+    // Said as a client would read it. Tabs and line breaks are dropped before
+    // the scan rather than masked around, because a client drops them too and
+    // an offset into the raw value would not line up with the credential.
+    let mut out = as_url_parser_reads(endpoint);
     // Last range first, so each replacement leaves the earlier offsets valid.
-    for range in endpoint_userinfo_ranges(trimmed).into_iter().rev() {
+    for range in endpoint_userinfo_ranges(&out.clone()).into_iter().rev() {
         out.replace_range(range, REDACTED_USERINFO);
     }
     out
@@ -1808,6 +1825,34 @@ mod tests {
         assert!(endpoint_has_credentials(
             "https://http://alice@api.acme.example/v1"
         ));
+    }
+
+    #[test]
+    fn tabs_and_line_breaks_do_not_hide_a_credential() {
+        // Codex review on #2281: a URL parser removes ASCII tab, LF and CR
+        // wherever they appear, so each of these reaches a client carrying
+        // `alice:hunter2`.
+        for bad in [
+            "http:\t//alice:hunter2@127.0.0.1:8597/v1",
+            "http://ali\nce:hunter2@127.0.0.1:8597/v1",
+            "http://http:\t//alice:hunter2@127.0.0.1:8597/v1",
+            "http://alice:hunter2\r@127.0.0.1:8597/v1",
+        ] {
+            assert!(endpoint_has_credentials(bad), "{bad:?} carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "{bad:?} must not be storable"
+            );
+            let said = redact_endpoint(bad);
+            assert!(
+                !said.contains("hunter2") && !said.contains("alice"),
+                "{bad:?} redacted to {said:?}"
+            );
+        }
+        assert_eq!(
+            redact_endpoint("http:\t//alice:hunter2@127.0.0.1:8597/v1"),
+            "http://***@127.0.0.1:8597/v1"
+        );
     }
 
     #[test]

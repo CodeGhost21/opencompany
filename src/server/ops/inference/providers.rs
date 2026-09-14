@@ -924,6 +924,16 @@ async fn edit_provider(
 
     let base_url = match body.base_url.as_deref().map(str::trim) {
         None | Some("") => existing.base_url.clone(),
+        // **The endpoint this host itself served, sent back, is not a change.**
+        // Every provider row carries `redact_endpoint`'s form, which masks
+        // anything that might be userinfo — including a path segment that only
+        // looks like it (`…/proxy/http:***@example.com/v1`). A client that
+        // posts the row back on a rename would otherwise store that mask over a
+        // working endpoint, or have a credentialed legacy row's rename refused
+        // outright (Codex review on #2281).
+        Some(typed) if typed == catalogue::redact_endpoint(&existing.base_url) => {
+            existing.base_url.clone()
+        }
         Some(typed) => {
             // A cloud preset's endpoint is not the operator's to retype: the
             // paths in that table are too varied for a typo to be recoverable,

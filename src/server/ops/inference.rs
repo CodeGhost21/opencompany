@@ -3138,6 +3138,70 @@ base_url = "https://byo.example/v1"
     }
 
     #[tokio::test]
+    async fn a_rename_that_posts_back_the_served_endpoint_keeps_the_stored_one() {
+        // Codex review on #2281. The row is served through `redact_endpoint`,
+        // which masks a path segment that only looks like userinfo. A console
+        // that posts that value back on a rename must not overwrite a working
+        // endpoint with the mask.
+        const GATEWAY: &str = "http://127.0.0.1:9/proxy/http:user@example.com/v1";
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, _, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Acme gateway",
+                "baseUrl": GATEWAY,
+                "key": "sk-not-a-real-key",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a path is not a credential: {raw}");
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let served = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme-gateway")
+            .expect("the row was created")["baseUrl"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(served, GATEWAY, "the row is served redacted: {served}");
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/acme-gateway",
+            Some(json!({ "label": "Acme renamed", "baseUrl": served })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("registered");
+        let stored = store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+        let acme = stored
+            .iter()
+            .find(|p| p.slug == "acme-gateway")
+            .expect("still listed");
+        assert_eq!(
+            acme.base_url, GATEWAY,
+            "the stored endpoint survived the rename"
+        );
+        assert_eq!(acme.label, "Acme renamed");
+    }
+
+    #[tokio::test]
     async fn a_second_provider_holds_its_own_credential() {
         // The first moment two keys exist at once, which is the whole point of
         // the list: today one slot per company means switching provider strands
