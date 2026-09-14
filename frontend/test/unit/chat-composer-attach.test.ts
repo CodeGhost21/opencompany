@@ -115,6 +115,9 @@ describe("composer paperclip (issue #1682)", () => {
   it("omits the paperclip entirely when no upload handler is given", async () => {
     await render(false);
     expect(paperclip()).toBeNull();
+
+    const event = await drop([new File(["thread reply"], "reply.txt", { type: "text/plain" })]);
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it("uploads a picked file and shows a removable chip", async () => {
@@ -177,6 +180,41 @@ describe("composer paperclip (issue #1682)", () => {
       [reference, second],
       undefined,
     );
+  });
+
+  it("serializes overlapping attachment batches at the twenty-file limit", async () => {
+    let resolveTwentieth!: (value: AttachmentDto) => void;
+    let calls = 0;
+    upload = vi.fn(() => {
+      calls += 1;
+      if (calls === 20) {
+        return new Promise<AttachmentDto>((resolve) => {
+          resolveTwentieth = resolve;
+        });
+      }
+      return Promise.resolve({ ...reference, nodeId: `node-${calls}`, name: `file-${calls}.txt` });
+    });
+    await render();
+
+    for (let i = 1; i < 20; i += 1) {
+      await pick(new File(["x"], `file-${i}.txt`, { type: "text/plain" }));
+    }
+
+    // The first new batch is awaiting its upload while the second arrives.
+    // Queueing defers the latter's capacity calculation until the twentieth
+    // file has staged, at which point it must be rejected without an upload.
+    await paste([new File(["x"], "twentieth.txt", { type: "text/plain" })]);
+    await drop([new File(["x"], "overflow.txt", { type: "text/plain" })]);
+    expect(upload).toHaveBeenCalledTimes(20);
+
+    await act(async () => {
+      resolveTwentieth({ ...reference, nodeId: "node-20", name: "twentieth.txt" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(upload).toHaveBeenCalledTimes(20);
+    expect(container.querySelectorAll('[aria-label^="Remove "]')).toHaveLength(20);
   });
 
   it("uploads an image pasted from the clipboard and stages it as an attachment", async () => {
