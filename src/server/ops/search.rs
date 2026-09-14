@@ -762,14 +762,14 @@ async fn set_default(
         Some(slug) => {
             let slug = slug.to_ascii_lowercase();
             let info = catalogue_entry(&slug)?;
-            if !store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            // Checked and marked under the index lock that removal also takes,
+            // so a removal cannot land between the check and the write and
+            // leave a deleted slug marked as the default.
+            if !store::set_default_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug)
                 .await?
-                .iter()
-                .any(|provider| provider.slug == slug)
             {
                 return Err(invalid(format!("{} is not connected", info.label)));
             }
-            store::set_default_slug(runtime.id(), runtime.secrets().as_ref(), &slug).await?;
         }
         None => store::clear_default_slug(runtime.id(), runtime.secrets().as_ref()).await?,
     }
@@ -1025,22 +1025,20 @@ async fn apply_to(
     }
     if let Some(endpoint) = supplied(body.endpoint.as_deref()) {
         validate_endpoint(&endpoint).await?;
-        let enabled = store::list_providers(runtime.id(), runtime.secrets().as_ref())
-            .await?
-            .into_iter()
-            .find(|provider| provider.slug == slug)
-            .map(|provider| provider.enabled)
-            .unwrap_or(true);
-        store::put_provider(
+        // The same connected-only update the modern re-address route uses. This
+        // read the row's `enabled` flag and then called `put_provider`, which
+        // RECREATES a row — so a removal landing in between was undone, and a
+        // provider the operator had just disconnected came back.
+        if !store::update_endpoint_if_present(
             runtime.id(),
             runtime.secrets().as_ref(),
-            SearchProvider {
-                slug: slug.to_string(),
-                enabled,
-                endpoint: Some(endpoint),
-            },
+            slug,
+            Some(endpoint),
         )
-        .await?;
+        .await?
+        {
+            return Err(invalid("that provider was disconnected — try again"));
+        }
     }
     Ok(Json(status_of(runtime).await?))
 }

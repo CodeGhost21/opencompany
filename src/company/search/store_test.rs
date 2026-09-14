@@ -896,3 +896,132 @@ async fn disconnect_all_removes_what_is_connected_when_it_runs() {
         );
     }
 }
+
+#[tokio::test]
+async fn re_addressing_a_provider_keeps_its_place_in_the_list() {
+    // With no default marked, the first usable row answers. Moving an edited
+    // row to the end turned "change SearXNG's address" into "switch every agent
+    // to the other provider".
+    let secrets = MemSecrets::default();
+    for (slug, endpoint) in [
+        ("searxng", Some("http://old.acme.internal".to_string())),
+        ("brave", None),
+    ] {
+        put_provider(
+            &company(),
+            &secrets,
+            SearchProvider {
+                slug: slug.to_string(),
+                enabled: true,
+                endpoint,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    assert!(
+        update_endpoint_if_present(
+            &company(),
+            &secrets,
+            "searxng",
+            Some("http://new.acme.internal".to_string()),
+        )
+        .await
+        .unwrap()
+    );
+
+    let order: Vec<String> = list_providers(&company(), &secrets)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|provider| provider.slug)
+        .collect();
+    assert_eq!(order, vec!["searxng", "brave"]);
+}
+
+#[tokio::test]
+async fn a_default_is_not_marked_on_a_provider_that_is_not_connected() {
+    let secrets = MemSecrets::default();
+    assert!(
+        !set_default_if_connected(&company(), &secrets, "brave")
+            .await
+            .unwrap()
+    );
+    assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "brave".to_string(),
+            enabled: true,
+            endpoint: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        set_default_if_connected(&company(), &secrets, "brave")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        load_default_slug(&company(), &secrets)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("brave")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn marking_a_default_while_it_is_removed_never_leaves_a_dangling_marker() {
+    // Either the mark lands first and the removal clears it, or the removal
+    // lands first and the mark is refused. Neither order may leave `brave` in
+    // the marker with no `brave` row.
+    for _ in 0..20 {
+        let secrets = std::sync::Arc::new(SlowSecrets::default());
+        put_provider(
+            &company(),
+            secrets.as_ref(),
+            SearchProvider {
+                slug: "brave".to_string(),
+                enabled: true,
+                endpoint: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let marking = {
+            let secrets = secrets.clone();
+            tokio::spawn(async move {
+                set_default_if_connected(&company(), secrets.as_ref(), "brave").await
+            })
+        };
+        let removing = {
+            let secrets = secrets.clone();
+            tokio::spawn(
+                async move { delete_provider(&company(), secrets.as_ref(), "brave").await },
+            )
+        };
+        marking.await.expect("task").expect("mark");
+        removing.await.expect("task").expect("remove");
+
+        assert!(
+            list_providers(&company(), secrets.as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            load_default_slug(&company(), secrets.as_ref())
+                .await
+                .unwrap()
+                .filter(|slug| !slug.is_empty()),
+            None,
+            "the removed slug must not be left marked"
+        );
+    }
+}

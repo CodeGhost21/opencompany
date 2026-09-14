@@ -369,3 +369,63 @@ fn a_longer_code_carrying_the_same_token_is_still_a_rejected_key() {
     // from anybody else.
     assert_ne!(classify("searxng", &status(422, body)), ProbeClass::Auth);
 }
+
+/// Serves one canned HTTP response on a local port and returns its address.
+async fn serve_once(head: &'static str, body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "{head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn a_searxng_login_page_answering_200_is_not_a_working_instance() {
+    // A reverse proxy in front of the instance answers the JSON request with
+    // its HTML login page and a 200. Reported as success, that row was
+    // announced as working and could become active while every search failed.
+    let info = crate::company::search::catalogue::entry("searxng").expect("searxng");
+    let endpoint = serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html",
+        "<html><body>Sign in</body></html>",
+    )
+    .await;
+    let failure = probe(info, None, Some(&endpoint))
+        .await
+        .expect_err("HTML is not SearXNG's JSON");
+    assert_eq!(classify("searxng", &failure), ProbeClass::Endpoint);
+}
+
+#[tokio::test]
+async fn a_searxng_204_is_not_a_working_instance() {
+    let info = crate::company::search::catalogue::entry("searxng").expect("searxng");
+    let endpoint = serve_once("HTTP/1.1 204 No Content", "").await;
+    let failure = probe(info, None, Some(&endpoint))
+        .await
+        .expect_err("an empty answer is not a search");
+    assert_eq!(classify("searxng", &failure), ProbeClass::Endpoint);
+}
+
+#[tokio::test]
+async fn a_searxng_json_answer_is_a_working_instance() {
+    // The control: the check must not refuse the ordinary healthy case.
+    let info = crate::company::search::catalogue::entry("searxng").expect("searxng");
+    let endpoint = serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json",
+        r#"{"query":"opencompany","results":[]}"#,
+    )
+    .await;
+    probe(info, None, Some(&endpoint))
+        .await
+        .expect("a JSON answer from SearXNG is a working instance");
+}

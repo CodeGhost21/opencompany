@@ -408,11 +408,7 @@ async fn put_provider_locked(
     secrets: &dyn SecretStore,
     provider: SearchProvider,
 ) -> Result<()> {
-    let mut providers: Vec<SearchProvider> = list_providers(company, secrets)
-        .await?
-        .into_iter()
-        .filter(|existing| existing.slug != provider.slug)
-        .collect();
+    let mut providers: Vec<SearchProvider> = list_providers(company, secrets).await?;
 
     if let Some(endpoint) = provider.endpoint.as_deref() {
         write(
@@ -424,7 +420,19 @@ async fn put_provider_locked(
         .await?;
     }
 
-    providers.push(provider);
+    // **In place, not moved to the end.** Order is not cosmetic here: with no
+    // default marked, `resolve::active` picks the first usable row. Removing
+    // the existing row and appending the new one meant that changing
+    // SearXNG's address — an edit that should change nothing else — could
+    // silently move every agent, and the bill, onto whichever provider had been
+    // second. A genuinely new slug still goes at the end.
+    match providers
+        .iter_mut()
+        .find(|existing| existing.slug == provider.slug)
+    {
+        Some(existing) => *existing = provider,
+        None => providers.push(provider),
+    }
     save_index(company, secrets, &providers).await
 }
 
@@ -612,6 +620,34 @@ pub async fn load_default_slug(
     secrets: &dyn SecretStore,
 ) -> Result<Option<String>> {
     read(company, secrets, DEFAULT_PROVIDER_KEY).await
+}
+
+/// Marks a provider as the default **only if it is connected**, atomically.
+///
+/// The route checked the row existed and then wrote the marker, two separate
+/// steps. A removal landing between them saw no marker to clear, deleted the
+/// row, and the write then left the deleted slug in `search/default`: the
+/// request answered 200 without selecting anything, and reconnecting that slug
+/// later made it active without anyone choosing it. Removal clears the marker
+/// under this same lock, so check-and-write here and check-and-clear there
+/// cannot interleave.
+///
+/// `false` means it is not connected, and the marker was not touched.
+pub async fn set_default_if_connected(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+) -> Result<bool> {
+    let _guard = index_guard(company).await;
+    if !list_providers(company, secrets)
+        .await?
+        .iter()
+        .any(|provider| provider.slug == slug)
+    {
+        return Ok(false);
+    }
+    set_default_slug(company, secrets, slug).await?;
+    Ok(true)
 }
 
 /// Marks one provider as the one agents search through.

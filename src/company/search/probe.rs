@@ -203,6 +203,14 @@ fn classify_status(slug: &str, status: u16, body: &str) -> ProbeClass {
         return ProbeClass::Format;
     }
 
+    // A SearXNG address that answered 2xx with something that is not its JSON
+    // is not a SearXNG search answering — a login page in front of it, or an
+    // empty response. `Endpoint` says exactly that, and keeps the row so the
+    // address can be corrected.
+    if slug == "searxng" && (200..300).contains(&status) {
+        return ProbeClass::Endpoint;
+    }
+
     if status == 429 || status == 402 {
         return ProbeClass::Quota;
     }
@@ -544,12 +552,38 @@ pub async fn probe(
 
     let status = response.status().as_u16();
     if response.status().is_success() {
+        // For SearXNG a 2xx is not yet proof. A reverse proxy's login page
+        // answers 200, an empty 204 answers 2xx, and both would have been
+        // announced as a working instance and possibly made active — while
+        // the search tool expects JSON and fails on every turn. The three
+        // account providers are fixed hosts reached with a credential, where a
+        // 2xx is theirs; this is the one address an operator types.
+        if info.slug == "searxng" {
+            let json_typed = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().contains("json"));
+            let body = read_capped(response).await;
+            if !(json_typed && looks_like_a_json_object(&body)) {
+                return Err(ProbeFailure::Status { status, body });
+            }
+        }
         return Ok(());
     }
     Err(ProbeFailure::Status {
         status,
         body: read_capped(response).await,
     })
+}
+
+/// Whether a (possibly capped) body opens like the JSON object SearXNG serves.
+///
+/// Only the opening is checked, deliberately: the body is capped at
+/// [`BODY_CAP`], so a real result page is usually cut mid-document and a full
+/// parse would reject every healthy instance with more than a few results.
+fn looks_like_a_json_object(body: &str) -> bool {
+    body.trim_start().starts_with('{')
 }
 
 /// How much of a failing response is read before the rest is dropped.
