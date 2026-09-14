@@ -17,8 +17,10 @@
 //
 // So the condition the old tests pinned is now enforced by *absence*, and that
 // is what is pinned here — plus the component's own rule, tested directly
-// rather than through a page, since `CompanyCredentialCard` is now its only
-// caller and it was the one caller that was always right.
+// rather than through a page. Its last caller was `CompanyCredentialCard`,
+// which no page renders since the Account page moved its two links onto the
+// account and balance rows (#2279); the rule is still worth pinning while the
+// component exists.
 
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";

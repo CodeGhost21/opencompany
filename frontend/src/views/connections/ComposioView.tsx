@@ -77,9 +77,10 @@ export function ComposioView({ client, company }: Props) {
 
         {/* `CompanyCredentialCard` used to sit here, above the rows: the
             general answer (one TinyHumans key authorising every brokered
-            surface) over the Composio-specific one. It is gone from THIS page
-            and unchanged on the API Key page, which is the only place it
-            renders now.
+            surface) over the Composio-specific one. It is gone from THIS page,
+            and the Account page no longer renders it either: that page states
+            the key as one row with a paste dialog behind it (#2279), so the card
+            has no caller left.
 
             Two surfaces for one credential is the reason. The card carried its
             own paste field and Save for the company key, and the rows below
@@ -92,8 +93,9 @@ export function ComposioView({ client, company }: Props) {
 
             What leaves with it: `HubAccountLinks` — "Manage API keys" and "Top
             up balance" — which the card rendered and the rows have no
-            equivalent for. Both are still one click away on the API Key page,
-            where the key they act on is set. */}
+            equivalent for. Both are still one click away on the Account page,
+            where the key they act on is set — as "Manage keys" on the account
+            row and "Top up" on the balance row. */}
 
         {/* Remounted on a credential change so its status is re-read: the tier
             it reports (`company` vs `attested` vs `none`) is downstream of the
