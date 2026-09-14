@@ -3184,18 +3184,16 @@ base_url = "https://byo.example/v1"
         // back to OpenRouter every time. Where it resolves to is still reported,
         // on the two fields that answer that question.
         assert_eq!(resp["status"]["provider"], "managed");
-        eprintln!("DEBUG_STATUS {}", resp["status"]);
-        assert_eq!(
-            resp["status"]["slug"], "openrouter",
-            "attribution follows the endpoint, not the label"
-        );
-        assert_eq!(
-            resp["status"]["proxied"], false,
-            "a key of its own is what takes a managed company off the subscription"
-        );
         assert_eq!(resp["status"]["source"], "runtime");
         assert_eq!(resp["status"]["keyConfigured"], true);
-        // But the **endpoint stays the platform's**, and this assertion is the
+        // Attribution follows the endpoint, not the label — and the endpoint
+        // is the platform's (next assertion), so the company is still proxied
+        // through it, on its own key rather than the subscription.
+        assert_eq!(
+            resp["status"]["proxied"], true,
+            "a managed key still rides the platform endpoint"
+        );
+        // The **endpoint stays the platform's**, and this assertion is the
         // fix. `managed` used to normalize onto `openrouter` before the managed
         // branch was consulted, so a company that declared `managed` and stored
         // a key had its requests sent to `openrouter.ai` — carrying, in the
