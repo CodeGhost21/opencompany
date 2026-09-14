@@ -398,6 +398,43 @@ pub fn check_provider_name(label: &str) -> std::result::Result<(), SlugError> {
     Ok(())
 }
 
+/// The longest model id accepted, counted in `char`s (not bytes) (keys
+/// rework, issue #2306, slice 2c).
+pub const MAX_MODEL_ID_CHARS: usize = 256;
+
+/// The one validation every model-id write goes through: set-default, add,
+/// edit (keys rework, issue #2306, slice 2c). Returns the trimmed id. Never a
+/// network check: catalogues go stale, and an Azure deployment name is never
+/// in `/models`.
+pub fn check_model_id(raw: &str) -> Result<String> {
+    let invalid = |m: String| OpenCompanyError::InvalidRequest(m);
+    let id = raw.trim();
+    if id.is_empty() {
+        return Err(invalid(
+            "Choose a model. A provider needs one model id.".into(),
+        ));
+    }
+    if id.chars().any(char::is_control) {
+        return Err(invalid(
+            "A model id cannot contain control characters.".into(),
+        ));
+    }
+    if id.chars().any(char::is_whitespace) {
+        return Err(invalid("A model id cannot contain spaces.".into()));
+    }
+    if id.chars().count() > MAX_MODEL_ID_CHARS {
+        return Err(invalid(format!(
+            "A model id can be at most {MAX_MODEL_ID_CHARS} characters."
+        )));
+    }
+    if crate::company::INFERENCE_TIERS.contains(&id) {
+        return Err(invalid(format!(
+            "`{id}` is a workload name, not a model. Choose a model id."
+        )));
+    }
+    Ok(id.to_string())
+}
+
 /// Whether `slug` may be used for a **custom** provider in a company that
 /// already holds `existing`.
 ///
@@ -1205,6 +1242,66 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+
+    // ---- check_model_id (keys rework, issue #2306, slice 2c) ---------------
+
+    #[test]
+    fn a_model_id_is_trimmed() {
+        assert_eq!(
+            check_model_id("  acme/test-model \n").unwrap(),
+            "acme/test-model"
+        );
+    }
+
+    #[test]
+    fn an_empty_model_id_is_refused() {
+        for raw in ["", "   "] {
+            let err = check_model_id(raw).unwrap_err();
+            assert!(err.to_string().contains("Choose a model"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_model_id_with_a_control_character_is_refused() {
+        let err = check_model_id("test\u{0007}model").unwrap_err();
+        assert!(err.to_string().contains("control characters"), "{err}");
+    }
+
+    #[test]
+    fn a_model_id_with_inner_whitespace_is_refused() {
+        let err = check_model_id("test model").unwrap_err();
+        assert!(err.to_string().contains("spaces"), "{err}");
+    }
+
+    #[test]
+    fn a_model_id_is_bounded_in_chars_not_bytes() {
+        assert!(check_model_id(&"é".repeat(256)).is_ok());
+        let err = check_model_id(&"é".repeat(257)).unwrap_err();
+        assert!(err.to_string().contains("256"), "{err}");
+    }
+
+    #[test]
+    fn every_tier_name_is_refused_as_a_model_id() {
+        for tier in crate::company::INFERENCE_TIERS {
+            let err = check_model_id(tier).unwrap_err();
+            assert!(err.to_string().contains("workload name"), "{err}");
+        }
+        let err = check_model_id(" chat-v1 ").unwrap_err();
+        assert!(err.to_string().contains("workload name"), "{err}");
+    }
+
+    #[test]
+    fn model_ids_of_every_shape_pass() {
+        for id in [
+            "acme/test-model",
+            "acme/test-model:free",
+            "test-model:8b",
+            "test-model",
+            "test.deployment-1",
+        ] {
+            assert_eq!(check_model_id(id).unwrap(), id);
+        }
+    }
 
     #[derive(Default)]
     struct MemSecrets {
