@@ -112,37 +112,12 @@ export function setCompanyCredential(
 }
 
 /**
- * A started key grant: where to send the browser.
- *
- * The console navigates to this and nothing more. It never sees the PKCE
- * verifier, and it never sees the key — both stay on the host, which is the
- * point of doing the exchange there (see `server::hub_link`).
- */
-export interface CredentialLinkStart {
-  authorizeUrl: string;
-}
-
-/**
- * Begin a one-click TinyHumans connection. Admin-only; 404 on a host with no hub.
- *
- * The returned URL is a **top-level navigation**, not a fetch: the hub signs the
- * person in through their provider and shows them a consent screen, and both
- * need to happen on the hub's own origin with its own address bar visible.
- */
-export function startCredentialLink(
-  client: OpenCompanyClient,
-  company: string | null,
-): Promise<CredentialLinkStart> {
-  return client.post<CredentialLinkStart>(`${client.scopeFor(company)}/credential/link/start`, {});
-}
-
-/**
  * Finish a connection: hand the host the code the hub returned, and the `state`
  * it started with.
  *
  * The host redeems these for a key and stores it as both the company credential
  * and the inference key. The response is the same shape a paste would have
- * produced, so the card that called this can repaint from it either way.
+ * produced, so the page that redeemed it can repaint from it either way.
  */
 export function finishCredentialLink(
   client: OpenCompanyClient,

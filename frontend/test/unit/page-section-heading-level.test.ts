@@ -50,12 +50,13 @@ const PAGES = [
     // outline is exactly what a split changes, and this `h2` now heads under
     // this page's `h1` rather than the accounts page's.
     //
-    // ONE section, not two. `CompanyCredentialCard` was the other and no longer
-    // renders here: it asked for the company's TinyHumans key in its own
+    // ONE section, not two. The company-credential card was the other and no
+    // longer renders here: it asked for the company's TinyHumans key in its own
     // language directly above rows that report that same key, so the page put
     // one credential on screen twice. The Account page stopped rendering it
-    // too (#2279), so it has no caller left, and nothing here pins it — which
-    // is correct: this list is per-page outlines, and it is part of none.
+    // too (#2279), so it had no caller left and was deleted (#2306); nothing
+    // here pins it — which is correct: this list is per-page outlines, and it
+    // is part of none.
     view: "connections/ComposioView",
     sections: ["connections/ComposioSection"],
   },
