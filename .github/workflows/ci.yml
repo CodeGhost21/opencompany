@@ -2333,3 +2333,70 @@ jobs:
       - name: Package (from crates/opencompany-app)
         working-directory: crates/opencompany-app
         run: ../../frontend/node_modules/.bin/tauri build --debug --no-bundle
+
+  # The one check the branch rulesets require (`.github/rulesets/`). Every
+  # lane above is `if:`-gated on the changed areas, and a required status
+  # check that never reports blocks the PR forever — so the rulesets cannot
+  # name the lanes themselves. This job always runs (`if: always()`), waits on
+  # every gating lane, and fails unless each one either passed or was skipped
+  # by its own area filter. `cancelled` and `failure` both fail it.
+  #
+  # The advisory `Console (current Node, advisory)` lane is deliberately not
+  # listed: it is `continue-on-error` and exists to surface drift, not to
+  # block a merge.
+  #
+  # Keep the display name exactly `PR CI Gate`: it is what the rulesets'
+  # `required_status_checks` entry references, and a rename would silently
+  # block every PR until the ruleset is edited to match.
+  pr-ci-gate:
+    name: PR CI Gate
+    needs:
+      - changes
+      - actions-pinned
+      - markdown-cap
+      - rust
+      - rust-mail
+      - rust-mongodb
+      - rust-gated
+      - rust-gated-binary
+      - console
+      - console-e2e
+      - console-e2e-live-brain
+      - console-e2e-first-run
+      - desktop
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gating lane to pass or be skipped
+        env:
+          RESULTS: |
+            Changed areas=${{ needs.changes.result }}
+            Actions pinned=${{ needs['actions-pinned'].result }}
+            Markdown line cap=${{ needs['markdown-cap'].result }}
+            Rust=${{ needs.rust.result }}
+            Rust (mail)=${{ needs['rust-mail'].result }}
+            Rust (mongodb)=${{ needs['rust-mongodb'].result }}
+            Rust (openhuman, tinymemory)=${{ needs['rust-gated'].result }}
+            Gated host binary=${{ needs['rust-gated-binary'].result }}
+            Console=${{ needs.console.result }}
+            Console E2E=${{ needs['console-e2e'].result }}
+            Console E2E (live brain)=${{ needs['console-e2e-live-brain'].result }}
+            Console E2E (first run)=${{ needs['console-e2e-first-run'].result }}
+            Desktop=${{ needs.desktop.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS='=' read -r name result; do
+            [ -n "$name" ] || continue
+            echo "${name}: ${result}"
+            case "$result" in
+              success|skipped) ;;
+              *) failed=1 ;;
+            esac
+          done <<< "$RESULTS"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::At least one gating lane did not pass; see the results above." >&2
+            exit 1
+          fi
+          echo "All gating lanes passed or were skipped by their area filter."
