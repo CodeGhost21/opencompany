@@ -3056,7 +3056,7 @@ pub struct ReplyTo {
 /// the same small set of facts for both: what kind of target it is, its stable
 /// id, and the already-redacted label the button should show. Artifact links
 /// additionally need the owning task and pinned version.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatOutput {
     /// Which console route resolves [`target_id`](Self::target_id).
@@ -3082,6 +3082,47 @@ pub enum ChatOutputKind {
     WorkspaceNode,
     /// A versioned artifact attached to a board task.
     Artifact,
+}
+
+impl<'de> Deserialize<'de> for ChatOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireChatOutput {
+            kind: ChatOutputKind,
+            target_id: String,
+            title: String,
+            #[serde(default)]
+            task_id: Option<String>,
+            #[serde(default)]
+            version: Option<u32>,
+        }
+
+        let output = WireChatOutput::deserialize(deserializer)?;
+        match (
+            output.kind,
+            output.task_id.is_some(),
+            output.version.is_some(),
+        ) {
+            (ChatOutputKind::WorkspaceNode, false, false)
+            | (ChatOutputKind::Artifact, true, true) => Ok(Self {
+                kind: output.kind,
+                target_id: output.target_id,
+                title: output.title,
+                task_id: output.task_id,
+                version: output.version,
+            }),
+            (ChatOutputKind::WorkspaceNode, _, _) => Err(serde::de::Error::custom(
+                "workspace-node outputs must not include taskId or version",
+            )),
+            (ChatOutputKind::Artifact, _, _) => Err(serde::de::Error::custom(
+                "artifact outputs must include both taskId and version",
+            )),
+        }
+    }
 }
 
 /// A message the company emits on a channel.
@@ -6104,6 +6145,27 @@ pub struct PaymentReceipt {
 mod test {
     use super::*;
     use crate::ports::workflow_runner::DeliveryStatus;
+
+    #[test]
+    fn chat_outputs_reject_metadata_for_the_wrong_kind() {
+        let workspace = r#"{"kind":"workspace-node","targetId":"node-1","title":"Draft"}"#;
+        let artifact = r#"{"kind":"artifact","targetId":"artifact-1","title":"Brief","taskId":"task-1","version":2}"#;
+        assert!(serde_json::from_str::<ChatOutput>(workspace).is_ok());
+        assert!(serde_json::from_str::<ChatOutput>(artifact).is_ok());
+
+        for invalid in [
+            r#"{"kind":"workspace-node","targetId":"node-1","title":"Draft","taskId":"task-1"}"#,
+            r#"{"kind":"workspace-node","targetId":"node-1","title":"Draft","version":2}"#,
+            r#"{"kind":"artifact","targetId":"artifact-1","title":"Brief"}"#,
+            r#"{"kind":"artifact","targetId":"artifact-1","title":"Brief","taskId":"task-1"}"#,
+            r#"{"kind":"artifact","targetId":"artifact-1","title":"Brief","version":2}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ChatOutput>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 
     /// The answers must survive the **blob**, not merely the record.
     ///

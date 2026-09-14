@@ -57,6 +57,19 @@ impl TurnOutputCollector {
         });
     }
 
+    /// Removes a workspace node from the active turn after it was deleted.
+    pub fn remove_workspace_node(&self, node_id: &str) {
+        let Ok(scope) = CURRENT_OUTPUT_SCOPE.try_with(|scope| *scope) else {
+            return;
+        };
+        let mut buckets = self.inner.lock().expect("turn output collector");
+        if let Some(outputs) = buckets.get_mut(&scope) {
+            outputs.retain(|output| {
+                output.kind != ChatOutputKind::WorkspaceNode || output.target_id != node_id
+            });
+        }
+    }
+
     /// Registers one artifact revision recorded for the active chat turn.
     /// Calls from dispatched cards and other non-chat contexts are unscoped
     /// and intentionally ignored.
@@ -219,5 +232,20 @@ mod tests {
         let claim = collector.claim();
         claim.scoped(async {}).await;
         assert!(claim.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_node_removes_its_live_turn_output() {
+        let collector = TurnOutputCollector::default();
+        let claim = collector.claim();
+        claim
+            .scoped(async {
+                collector.workspace_node("deleted", "draft.md");
+                collector.workspace_node("kept", "final.md");
+                collector.remove_workspace_node("deleted");
+            })
+            .await;
+
+        assert_eq!(ids(claim.drain()), vec!["kept"]);
     }
 }

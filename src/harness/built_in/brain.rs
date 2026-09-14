@@ -4571,9 +4571,12 @@ impl HarnessBrain {
                     // falling back to the embedded engine — the router's job.
                     let run_turn = self.run_turn();
                     let record = self.record();
-                    let turn = self
-                        .delegation_runner(run_turn.as_ref(), &record)
-                        .handle_operator_message(&responder, prompt, None)
+                    let output_claim = self.deps.pending_publishes.output_collector().claim();
+                    let turn = output_claim
+                        .scoped(
+                            self.delegation_runner(run_turn.as_ref(), &record)
+                                .handle_operator_message(&responder, prompt, None),
+                        )
                         .await?;
                     let mut responses = vec![OutboundMessage {
                         message_id: None,
@@ -4660,8 +4663,8 @@ impl HarnessBrain {
                         .iter()
                         .map(|publish| publish.source.clone())
                         .collect();
-                    let mut published_card = self
-                        .file_conversation_batch(
+                    let mut published_card = output_claim
+                        .scoped(self.file_conversation_batch(
                             &responder,
                             spawned_task.as_deref(),
                             // Nothing threaded a scheduled turn: it posts into
@@ -4671,7 +4674,7 @@ impl HarnessBrain {
                             publish_claim.is_some(),
                             published,
                             &mut responses[0].text,
-                        )
+                        ))
                         .await;
                     // Issue #989: a capped scheduled turn gets the same
                     // unpublished-file recovery as an operator turn. The nudge
@@ -4685,8 +4688,8 @@ impl HarnessBrain {
                         let unpublished = publish::unpublished(&changed.files, &published_sources);
                         if !unpublished.is_empty() {
                             let nudge_control = SteerControl::new();
-                            let _declined = self
-                                .nudge_for_unpublished(
+                            let _declined = output_claim
+                                .scoped(self.nudge_for_unpublished(
                                     run_turn.as_ref(),
                                     &responder,
                                     prompt,
@@ -4696,11 +4699,11 @@ impl HarnessBrain {
                                     &nudge_control,
                                     None,
                                     None,
-                                )
+                                ))
                                 .await;
                             let nudge_published = self.deps.pending_publishes.drain();
-                            if let Some(card_id) = self
-                                .file_conversation_batch(
+                            if let Some(card_id) = output_claim
+                                .scoped(self.file_conversation_batch(
                                     &responder,
                                     spawned_task.as_deref(),
                                     ChatTarget::channel(Some(
@@ -4709,7 +4712,7 @@ impl HarnessBrain {
                                     publish_claim.is_some(),
                                     nudge_published,
                                     &mut responses[0].text,
-                                )
+                                ))
                                 .await
                             {
                                 published_card = published_card.or(Some(card_id));
@@ -4717,6 +4720,7 @@ impl HarnessBrain {
                         }
                     }
                     drop(publish_claim);
+                    responses[0].outputs = output_claim.drain();
                     // `published_card` wins over the turn's own card, the same
                     // rule the operator path applies (#463): it names the card
                     // the deliverable actually landed on, which is usually the
