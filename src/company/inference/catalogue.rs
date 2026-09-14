@@ -578,32 +578,76 @@ pub const REDACTED_USERINFO: &str = "***";
 /// The byte range of an endpoint's userinfo — everything between `://` (or the
 /// start, for a scheme-less value) and the `@` that ends the credential.
 ///
-/// `None` when there is none. The `@` must be inside the **authority**: a path
-/// may legitimately contain one (`https://host/v1/@me`), and that is not a
+/// `None` when there is none. For a value with **one unambiguous reading** — a
+/// single valid scheme followed by `://`, or no scheme at all, and no other
+/// `:/` anywhere before the query — the `@` must be inside the authority: a
+/// path may legitimately contain one (`https://host/v1/@me`), and that is not a
 /// credential.
 ///
-/// **Every** `://` is tried as the start of an authority, not only the first.
-/// A malformed value can carry a second scheme — `HTTP://alice:pw@host/v1`
-/// once became `http://HTTP://alice:pw@host/v1` when a case-sensitive prefix
-/// check added a scheme it did not recognise — and reading only the first
-/// authority (`HTTP:`) waved the credential behind it straight through both the
-/// refusal and the redaction (Codex review on #2281). Over-matching is the safe
-/// direction here: a URL with a second `://` whose authority holds an `@` is
-/// refused or redacted, never stored or said verbatim.
+/// **Anything else is malformed, and is read conservatively.** Every `@` before
+/// the query or fragment counts, and the range runs from just after a leading
+/// `http:`/`https:` and its slashes (or from the start) to the last of them.
+/// This used to follow one shape of URL at a time, and each malformed shape hid
+/// the credential from both the refusal and the redaction: a doubled scheme
+/// (`http://HTTP://alice:pw@host`), and a single-slash one (`http:/alice:pw@host`)
+/// whose first `/` ended the "authority" before the `@` (Codex review on #2281).
+/// Over-matching a value no client would read as a plain endpoint is the safe
+/// direction: it is refused or redacted, never stored or said verbatim.
 fn endpoint_userinfo_range(endpoint: &str) -> Option<std::ops::Range<usize>> {
-    let starts: Vec<usize> = endpoint
-        .match_indices("://")
-        .map(|(i, sep)| i + sep.len())
-        .collect();
-    let starts = if starts.is_empty() { vec![0] } else { starts };
-    starts.into_iter().find_map(|start| {
-        let rest = endpoint.get(start..)?;
-        let authority_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    // Query and fragment are never the authority in any reading of the value.
+    let head = &endpoint[..endpoint.find(['?', '#']).unwrap_or(endpoint.len())];
+    if let Some(start) = unambiguous_authority_start(head) {
+        let rest = &head[start..];
+        let authority_len = rest.find('/').unwrap_or(rest.len());
         // `rfind`, not `find`: a password may itself contain an `@`, and the
         // last one in the authority is the delimiter per RFC 3986.
-        let at = rest.get(..authority_len)?.rfind('@')?;
-        Some(start..start + at)
-    })
+        let at = rest[..authority_len].rfind('@')?;
+        return Some(start..start + at);
+    }
+    let start = leading_http_scheme_len(head);
+    let at = head[start..].rfind('@')?;
+    Some(start..start + at)
+}
+
+/// Where the authority starts, when `head` can be read only one way.
+///
+/// `None` means malformed: a scheme that is not a scheme, or a `:/` anywhere
+/// after the authority's start — which is what a second scheme, or a scheme
+/// with one slash, looks like.
+fn unambiguous_authority_start(head: &str) -> Option<usize> {
+    match head.find("://") {
+        Some(i) => {
+            let scheme = &head[..i];
+            let start = i + "://".len();
+            let valid_scheme = scheme
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+            (valid_scheme && !head[start..].contains(":/")).then_some(start)
+        }
+        None => (!head.contains(":/")).then_some(0),
+    }
+}
+
+/// The length of a leading `http:`/`https:` (any case) and the slashes after it.
+///
+/// Kept out of a conservative redaction only so the result still says what kind
+/// of address it was. Nothing else is trusted to be non-secret.
+fn leading_http_scheme_len(head: &str) -> usize {
+    let lower = head.to_ascii_lowercase();
+    ["https:", "http:"]
+        .into_iter()
+        .find(|scheme| lower.starts_with(scheme))
+        .map_or(0, |scheme| {
+            scheme.len()
+                + head[scheme.len()..]
+                    .bytes()
+                    .take_while(|b| *b == b'/')
+                    .count()
+        })
 }
 
 /// Whether an endpoint URL carries a credential in its authority
@@ -1642,6 +1686,47 @@ mod tests {
             "HTTP://alice:hunter2@127.0.0.1:8597/v1"
         ));
         assert!(!endpoint_has_credentials("HTTPS://api.acme.example/v1"));
+    }
+
+    #[test]
+    fn a_malformed_endpoint_is_scrubbed_conservatively() {
+        // Codex review on #2281: `http:/alice:hunter2@host` has no `://`, so an
+        // authority read ended at the first `/` before ever reaching the `@`.
+        // A value with no single reading has every `@` before its query counted.
+        for (bad, said) in [
+            (
+                "http:/alice:hunter2@127.0.0.1:8597/v1",
+                "http:/***@127.0.0.1:8597/v1",
+            ),
+            // What setup normalisation makes of the line above.
+            (
+                "http://http:/alice:hunter2@127.0.0.1:8597/v1",
+                "http://***@127.0.0.1:8597/v1",
+            ),
+            ("alice:/hunter2@127.0.0.1:8597/v1", "***@127.0.0.1:8597/v1"),
+            (
+                "HTTP:alice:hunter2@127.0.0.1:8597/v1",
+                "***@127.0.0.1:8597/v1",
+            ),
+        ] {
+            assert!(endpoint_has_credentials(bad), "`{bad}` carries userinfo");
+            assert!(
+                normalize_local_endpoint(bad).is_none(),
+                "`{bad}` must not be storable"
+            );
+            assert_eq!(redact_endpoint(bad), said, "`{bad}`");
+        }
+        // Conservatism is for malformed values only. Ports, IPv6 literals, a
+        // scheme-less origin and an `@` in a well-formed path stay untouched.
+        for good in [
+            "http://127.0.0.1:8597/v1",
+            "http://[::1]:11434/v1",
+            "https://api.acme.example:8443/v1/@me",
+            "localhost:1234/v1",
+        ] {
+            assert!(!endpoint_has_credentials(good), "`{good}` has no userinfo");
+            assert_eq!(redact_endpoint(good), good);
+        }
     }
 
     #[test]

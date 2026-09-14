@@ -2907,6 +2907,16 @@ mod tests {
             catalogue::endpoint_has_credentials(&credentialed),
             "`{credentialed}` must still read as carrying a credential"
         );
+        // A single-slash scheme is not recognised, so a second one is still
+        // prepended — and the credential behind it must still be found.
+        let single_slash =
+            normalize_setup_base_url("openai_compatible", Some("http:/alice:hunter2@host/v1"))
+                .expect("normalised");
+        assert_eq!(single_slash, "http://http:/alice:hunter2@host/v1");
+        assert!(
+            catalogue::endpoint_has_credentials(&single_slash),
+            "`{single_slash}` must still read as carrying a credential"
+        );
     }
 
     // ---- first-run probe (decl_for_probe) ----------------------------------
