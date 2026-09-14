@@ -25,7 +25,7 @@ members = ["crates/opencompany-core", "crates/opencompany-tui"]
 exclude = ["vendor", "worktrees", "crates/opencompany-app"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/opencompany"
