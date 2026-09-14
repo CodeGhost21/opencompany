@@ -2349,6 +2349,7 @@ jobs:
   #
   # Keep the display name exactly `PR CI Gate`: it is what the rulesets'
   # `required_status_checks` entry references, and a rename would silently
+  # block every PR until the ruleset is edited to match.
   pr-ci-gate:
     name: PR CI Gate
     needs:
