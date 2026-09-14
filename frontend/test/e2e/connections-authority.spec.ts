@@ -208,8 +208,27 @@ test("a member sees what is connected but is offered nothing that changes it", a
     await expect(memberPage.getByTestId("mcp-json-save")).toHaveCount(0);
 
     // ---- Inference: what every teammate's turn costs -----------------------
+    //
+    // This used to assert `inference-save` has count 0. That id went with the
+    // single-provider form (#2262), so the assertion held for an admin too and
+    // proved nothing.
+    //
+    // The LLM page gates by DISABLING, not hiding: `ProvidersTab` renders
+    // "Add a provider" for every viewer with `disabled={!canManage}`, and the
+    // Routing tab's controls do the same. So the member assertion is the one
+    // the code actually makes — the control is there, and it is disabled — plus
+    // the page's own read-only notice. Absence would be the wrong contract, and
+    // `toHaveCount(0)` on any of these ids would pass for a reason unrelated to
+    // authority.
+    //
+    // A member does reach this render: `useInference` treats the member's `403`
+    // on the admin-only routes read as readable and still settles `ready`, so
+    // the tab is not replaced by its unreachable state.
     await openSettingsPage(memberPage, "inference");
-    await expect(memberPage.getByTestId("inference-save")).toHaveCount(0);
+    await expect(memberPage.getByTestId("inference-read-only")).toBeVisible({ timeout: 30_000 });
+    const addProvider = memberPage.getByTestId("inference-add-open");
+    await expect(addProvider).toBeVisible({ timeout: 30_000 });
+    await expect(addProvider).toBeDisabled();
   } finally {
     await memberContext.close();
   }
@@ -280,6 +299,16 @@ test("an admin is still offered every control across the four pages", async ({ p
   await page.getByTestId("mcp-tab-json").click();
   await expect(page.getByTestId("mcp-json-revert")).toBeVisible();
 
+  // The same control the member case asserts is disabled, enabled here — which
+  // is what stops that assertion being true of every viewer. `useCanManage`
+  // fails closed until the role read answers, so `toBeEnabled` waits for the
+  // resolved role rather than reading the first render.
+  //
+  // "Add a provider" and not the Routing tab's Save (`inference-own-save`):
+  // that Save renders only when the company's routing mode is `own`, so it
+  // would pass or fail by the mode the harness company happens to boot in.
+  // "Add a provider" is on the default tab in every mode, on both lanes.
   await openSettingsPage(page, "inference");
-  await expect(page.getByTestId("inference-save")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("inference-read-only")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("inference-add-open")).toBeEnabled({ timeout: 30_000 });
 });
