@@ -787,15 +787,25 @@ pub fn normalize_setup_base_url(provider: &str, raw: Option<&str>) -> Option<Str
         return Some(raw.trim_end_matches('/').to_string());
     }
 
-    // The scheme is case-insensitive (RFC 3986 §3.1). Matching it with a
-    // case-sensitive prefix turned `HTTP://host/v1` into `http://HTTP://host/v1`
-    // — a URL whose first authority is `HTTP:`, which hid any userinfo behind it
-    // from the credential check (Codex review on #2281).
+    // An `http:` or `https:` the operator typed is the scheme, in any case (RFC
+    // 3986 §3.1) and with however many slashes they typed after it — URL parsing
+    // reads `http:/host` and `http:///host` as `http://host`. Only a value with no
+    // scheme at all gets one. Prefixing a second scheme onto `HTTP://host` or
+    // `http:/alice:pw@host` produced `http://HTTP://…` and `http://http:/…`,
+    // whose credential no longer sat in the first authority (Codex review on
+    // #2281).
     let lower = raw.to_ascii_lowercase();
-    let mut url = if lower.starts_with("http://") || lower.starts_with("https://") {
-        raw.to_string()
-    } else {
-        format!("http://{raw}")
+    let typed_scheme = ["https:", "http:"]
+        .into_iter()
+        .find(|scheme| lower.starts_with(scheme))
+        .map(str::len);
+    let mut url = match typed_scheme {
+        Some(len) => format!(
+            "{}//{}",
+            &raw[..len],
+            raw[len..].trim_start_matches(['/', '\\'])
+        ),
+        None => format!("http://{raw}"),
     };
     url = url.trim_end_matches('/').to_string();
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
@@ -2907,15 +2917,24 @@ mod tests {
             catalogue::endpoint_has_credentials(&credentialed),
             "`{credentialed}` must still read as carrying a credential"
         );
-        // A single-slash scheme is not recognised, so a second one is still
-        // prepended — and the credential behind it must still be found.
+        // A single-slash scheme is a scheme, not a host: it is repaired to
+        // `http://` rather than having a second one prepended, so the credential
+        // stays in the first authority where the refusal reads it.
         let single_slash =
             normalize_setup_base_url("openai_compatible", Some("http:/alice:hunter2@host/v1"))
                 .expect("normalised");
-        assert_eq!(single_slash, "http://http:/alice:hunter2@host/v1");
+        assert_eq!(single_slash, "http://alice:hunter2@host/v1");
         assert!(
             catalogue::endpoint_has_credentials(&single_slash),
             "`{single_slash}` must still read as carrying a credential"
+        );
+        assert_eq!(
+            normalize_setup_base_url("ollama", Some("http:/localhost:11434")).as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            normalize_setup_base_url("openai_compatible", Some("HTTPS:///llm.test/api")).as_deref(),
+            Some("HTTPS://llm.test/api")
         );
     }
 

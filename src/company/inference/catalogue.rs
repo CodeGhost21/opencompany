@@ -633,9 +633,11 @@ fn endpoint_userinfo_ranges(endpoint: &str) -> Vec<std::ops::Range<usize>> {
 /// `https:` (any case) or another `scheme://`, then any run of `/` or `\`, then
 /// the authority up to the next `/` or `\`. So `http:/alice:pw@host`,
 /// `http:///alice:pw@host`, `http:\\alice:pw@host` and `HTTP:alice:pw@host` all
-/// carry a credential. The read continues past an authority **only** when that
-/// authority is itself a bare scheme (`http://HTTP://alice:pw@host`, or setup
-/// normalisation's `http://http:/alice:pw@host`), never into ordinary path text:
+/// carry a credential. The read continues past an authority **only** for a doubled
+/// scheme — an authority that is itself a bare scheme **and** is followed by `//`
+/// (`http://HTTP://alice:pw@host`). One slash after it is a host with an empty
+/// port: `http://http:/v1@beta` is host `http` and path `/v1@beta` to every
+/// parser, and has no userinfo. Never into ordinary path text either:
 /// `https://gateway.example/proxy/http:user@example.com/v1` has no userinfo, and
 /// refusing it would reject an endpoint every client accepts (Codex review on
 /// #2281). Every range this returns is also one [`endpoint_userinfo_ranges`]
@@ -663,7 +665,15 @@ fn endpoint_credential_range(endpoint: &str) -> Option<std::ops::Range<usize>> {
             return Some(from..from + at);
         }
         let bare_scheme = authority.strip_suffix(':').is_some_and(is_scheme_name);
-        if from == pos || !bare_scheme {
+        // A doubled `scheme://scheme://` only. `http://http:/v1@beta` is a host
+        // named `http` with an empty port, not a second scheme (Codex review on
+        // #2281), so a single slash after the bare scheme ends the read.
+        let doubled = tail[authority.len()..]
+            .bytes()
+            .take_while(|b| matches!(b, b'/' | b'\\'))
+            .count()
+            >= 2;
+        if from == pos || !bare_scheme || !doubled {
             return None;
         }
         pos = from;
@@ -1772,11 +1782,6 @@ mod tests {
                 "HTTP:alice:hunter2@127.0.0.1:8597/v1",
                 "***@127.0.0.1:8597/v1",
             ),
-            // What setup normalisation makes of the one-slash line.
-            (
-                "http://http:/alice:hunter2@127.0.0.1:8597/v1",
-                "http://http:/***@127.0.0.1:8597/v1",
-            ),
             // Two authorities, two credentials: both go.
             (
                 "http://alice:one@outer/http://bob:two@inner/v1",
@@ -1822,6 +1827,17 @@ mod tests {
         );
         // A port-less host that happens to end in `:` does not start a hop.
         assert!(!endpoint_has_credentials("http://localhost:/v1/@me"));
+        // Nor does a host *named* like a scheme with one slash after it: every
+        // parser reads `http://http:/v1@beta` as host `http`, empty port, path
+        // `/v1@beta`. It is storable; the wider redaction still masks the
+        // lookalike when it is said.
+        let empty_port = "http://http:/v1@beta";
+        assert!(!endpoint_has_credentials(empty_port));
+        assert_eq!(
+            normalize_local_endpoint(empty_port).as_deref(),
+            Some(empty_port)
+        );
+        assert_eq!(redact_endpoint(empty_port), "http://http:/***@beta");
         // And a doubled scheme still does — the one case a hop exists for.
         assert!(endpoint_has_credentials(
             "https://http://alice@api.acme.example/v1"
