@@ -145,7 +145,7 @@ describe("the operator overview landing page (#1321)", () => {
     await settle();
 
     expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
-    expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')?.textContent).toContain("Open");
+    expect(container.querySelector('[href="#/company/tasks/task-1?run=run-1"]')?.textContent).toContain("Open");
   });
 
   it("keeps the previous-visit boundary intact across StrictMode's mount replay (#1745)", async () => {
@@ -182,7 +182,7 @@ describe("the operator overview landing page (#1321)", () => {
 
     // A clobbered boundary ("now") would push this run's finish time before
     // it, so it silently drops out of the since-visit panel.
-    expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')).not.toBeNull();
+    expect(container.querySelector('[href="#/company/tasks/task-1?run=run-1"]')).not.toBeNull();
   });
 
   it("uses the new scope's own boundary immediately on a scope switch, never the old scope's", async () => {
@@ -230,7 +230,7 @@ describe("the operator overview landing page (#1321)", () => {
     // A stale read of A's boundary would surface this failure under "since
     // your visit"; B's own (later) boundary must instead read it as absent.
     expect(container.textContent).toContain("No failed attempts were recorded since the previous visit.");
-    expect(container.querySelector('[href="#/tasks/task-1?run=run-1"]')).toBeNull();
+    expect(container.querySelector('[href="#/company/tasks/task-1?run=run-1"]')).toBeNull();
   });
 
   it("reads failures on their own page, so paused attempts cannot crowd one out of the since-visit answer", async () => {
@@ -262,7 +262,7 @@ describe("the operator overview landing page (#1321)", () => {
     await settle();
 
     expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
-    expect(container.querySelector('[href="#/tasks/task-1?run=failed-1"]')).not.toBeNull();
+    expect(container.querySelector('[href="#/company/tasks/task-1?run=failed-1"]')).not.toBeNull();
   });
 
   it("re-reads the run panels when the shell reports a run status change", async () => {
@@ -393,7 +393,7 @@ describe("the operator overview landing page (#1321)", () => {
 
     await render(client(Promise.resolve([failed])), readyFeed);
     await settle();
-    expect(container.querySelector('[href="#/tasks/failed-1?run=failed-1"]')).not.toBeNull();
+    expect(container.querySelector('[href="#/company/tasks/failed-1?run=failed-1"]')).not.toBeNull();
 
     // …away to another view, and back. Same page load, so the same modules.
     act(() => root.unmount());
@@ -407,7 +407,7 @@ describe("the operator overview landing page (#1321)", () => {
 
     expect(container.textContent).toContain("Failed attempts recorded after the previous visit.");
     expect(container.textContent).not.toContain("No failed attempts were recorded since the previous visit.");
-    expect(container.querySelector('[href="#/tasks/failed-1?run=failed-1"]')).not.toBeNull();
+    expect(container.querySelector('[href="#/company/tasks/failed-1?run=failed-1"]')).not.toBeNull();
   });
 
   it("records the visit only once the mount commits (#1700)", async () => {

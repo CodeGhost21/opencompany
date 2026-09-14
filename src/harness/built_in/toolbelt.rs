@@ -92,11 +92,257 @@ use oh::security::{
     AuditLogger, AutonomyLevel, SecurityPolicy, get_or_create_workspace_audit_logger,
 };
 use oh::tools::{
-    ApplyPatchTool, CsvExportTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool,
-    ShellTool, Tool, WebFetchTool, WorkspaceStateTool,
+    ApplyPatchTool, CurlTool, GitOperationsTool, HttpRequestTool, ImageInfoTool, Tool,
+    WebFetchTool, WorkspaceStateTool,
 };
 
 use crate::harness::policy::PolicyMode;
+
+use oh::tools::traits::{
+    PermissionLevel, ToolCallOptions, ToolCategory, ToolResult, ToolRunContext, ToolScope,
+    ToolSpec, ToolTimeout,
+};
+
+trait ToolGuard: Send + Sync {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult>;
+
+    fn timeout_policy(&self, inner: ToolTimeout) -> ToolTimeout {
+        inner
+    }
+}
+
+struct GuardedTool<T, G> {
+    inner: T,
+    guard: G,
+}
+
+#[async_trait::async_trait]
+impl<T: Tool, G: ToolGuard> Tool for GuardedTool<T, G> {
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner.execute(args).await
+    }
+
+    async fn execute_with_options(
+        &self,
+        args: serde_json::Value,
+        options: ToolCallOptions,
+    ) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner.execute_with_options(args, options).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        args: serde_json::Value,
+        options: ToolCallOptions,
+        context: Option<&dyn ToolRunContext>,
+    ) -> anyhow::Result<ToolResult> {
+        if let Some(refusal) = self.guard.refusal(&args) {
+            return Ok(refusal);
+        }
+        self.inner
+            .execute_with_context(args, options, context)
+            .await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+    fn supports_markdown(&self) -> bool {
+        self.inner.supports_markdown()
+    }
+    fn permission_level(&self) -> PermissionLevel {
+        self.inner.permission_level()
+    }
+    fn permission_level_with_args(&self, args: &serde_json::Value) -> PermissionLevel {
+        self.inner.permission_level_with_args(args)
+    }
+    fn scope(&self) -> ToolScope {
+        self.inner.scope()
+    }
+    fn category(&self) -> ToolCategory {
+        self.inner.category()
+    }
+    fn is_concurrency_safe(&self, args: &serde_json::Value) -> bool {
+        self.inner.is_concurrency_safe(args)
+    }
+    fn external_effect(&self) -> bool {
+        self.inner.external_effect()
+    }
+    fn external_effect_with_args(&self, args: &serde_json::Value) -> bool {
+        self.inner.external_effect_with_args(args)
+    }
+    fn host_extension(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        self.inner.host_extension()
+    }
+    fn host_call_extension(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.inner.host_call_extension(args)
+    }
+    fn max_result_size_chars(&self) -> Option<usize> {
+        self.inner.max_result_size_chars()
+    }
+    fn timeout_policy(&self, args: &serde_json::Value) -> ToolTimeout {
+        self.guard.timeout_policy(self.inner.timeout_policy(args))
+    }
+    fn display_label(&self, args: &serde_json::Value) -> Option<String> {
+        self.inner.display_label(args)
+    }
+    fn display_detail(&self, args: &serde_json::Value) -> Option<String> {
+        self.inner.display_detail(args)
+    }
+}
+
+/// Each export admits at most 100,000 rows, 16 MiB of JSON and 8 MiB of CSV.
+struct CsvLimits;
+
+const MAX_CSV_ROWS: usize = 100_000;
+const MAX_CSV_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
+
+type CsvExportTool = GuardedTool<oh::tools::CsvExportTool, CsvLimits>;
+
+impl CsvExportTool {
+    fn new(security: Arc<SecurityPolicy>) -> Self {
+        Self {
+            inner: oh::tools::CsvExportTool::new(security),
+            guard: CsvLimits,
+        }
+    }
+}
+
+fn csv_cell_bytes(cell: &str) -> usize {
+    let quoted = cell.contains([',', '"', '\n', '\r']);
+    cell.len()
+        + if quoted {
+            2 + cell.bytes().filter(|&b| b == b'"').count()
+        } else {
+            0
+        }
+}
+
+impl ToolGuard for CsvLimits {
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
+        let data = args.get("data")?.as_str()?;
+        if data.len() > MAX_CSV_INPUT_BYTES {
+            return Some(ToolResult::error(format!(
+                "CSV input exceeds {MAX_CSV_INPUT_BYTES} bytes"
+            )));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
+        let rows = parsed.as_array()?;
+        if rows.len() > MAX_CSV_ROWS {
+            return Some(ToolResult::error(format!(
+                "CSV export exceeds {MAX_CSV_ROWS} rows"
+            )));
+        }
+        let columns: Vec<&str> = match args.get("columns").and_then(serde_json::Value::as_array) {
+            Some(columns) => columns
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect(),
+            None => rows
+                .first()
+                .and_then(serde_json::Value::as_object)
+                .map(|object| object.keys().map(String::as_str).collect())
+                .unwrap_or_default(),
+        };
+        let mut bytes = columns.len().max(1);
+        for column in &columns {
+            bytes = bytes.saturating_add(csv_cell_bytes(column));
+        }
+        for row in rows {
+            bytes = bytes.saturating_add(columns.len().max(1));
+            for column in &columns {
+                let cell = match row.get(column) {
+                    None | Some(serde_json::Value::Null) => std::borrow::Cow::Borrowed(""),
+                    Some(serde_json::Value::String(value)) => {
+                        std::borrow::Cow::Borrowed(value.as_str())
+                    }
+                    Some(value) => std::borrow::Cow::Owned(value.to_string()),
+                };
+                bytes = bytes.saturating_add(csv_cell_bytes(&cell));
+                if bytes > MAX_CSV_BYTES {
+                    return Some(ToolResult::error(format!(
+                        "CSV export exceeds {MAX_CSV_BYTES} bytes"
+                    )));
+                }
+            }
+        }
+        if bytes > MAX_CSV_BYTES {
+            return Some(ToolResult::error(format!(
+                "CSV export exceeds {MAX_CSV_BYTES} bytes"
+            )));
+        }
+        None
+    }
+}
+
+/// The high-risk flag blocks execution independently of the autonomy tier.
+struct HighRiskCommands(Arc<SecurityPolicy>);
+
+type ShellTool = GuardedTool<oh::tools::ShellTool, HighRiskCommands>;
+
+impl ShellTool {
+    fn new(
+        security: Arc<SecurityPolicy>,
+        runtime: Arc<dyn RuntimeAdapter>,
+        audit: Arc<AuditLogger>,
+    ) -> Self {
+        Self {
+            inner: oh::tools::ShellTool::new(Arc::clone(&security), runtime, audit),
+            guard: HighRiskCommands(security),
+        }
+    }
+
+    fn with_audit(
+        self,
+        audit: ShellAudit,
+    ) -> GuardedTool<crate::harness::audit::AuditedShellTool, HighRiskCommands> {
+        GuardedTool {
+            inner: crate::harness::audit::AuditedShellTool::new(self.inner, audit),
+            guard: self.guard,
+        }
+    }
+}
+
+impl ToolGuard for HighRiskCommands {
+    fn timeout_policy(&self, inner: ToolTimeout) -> ToolTimeout {
+        match inner {
+            ToolTimeout::Secs(secs @ 1..=3600) => ToolTimeout::Secs(secs),
+            _ => ToolTimeout::Inherit,
+        }
+    }
+
+    fn refusal(&self, args: &serde_json::Value) -> Option<ToolResult> {
+        let command = args.get("command")?.as_str()?;
+        if !self.0.block_high_risk_commands
+            || self.0.command_risk_level(command) != oh::security::policy::CommandRiskLevel::High
+            || self.0.check_gated_command(command).is_err()
+        {
+            return None;
+        }
+        Some(ToolResult::error(
+            "[policy-blocked] Command blocked: high-risk commands are disallowed by policy",
+        ))
+    }
+}
 
 /// Subdirectory under the agent workspace that `curl` downloads land in.
 const CURL_DEST_SUBDIR: &str = "downloads";
@@ -408,10 +654,7 @@ pub fn shell_tools(
         return Vec::new();
     };
     vec![
-        Box::new(crate::harness::audit::AuditedShellTool::new(
-            ShellTool::new(security, runtime, Arc::clone(&audit.logger)),
-            audit,
-        )),
+        Box::new(ShellTool::new(security, runtime, Arc::clone(&audit.logger)).with_audit(audit)),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
     ]
 }
@@ -1241,6 +1484,49 @@ mod tests {
         assert!(!full.require_approval_for_medium_risk);
     }
 
+    /// `workspace_only` is a field on the policy this module builds, but the
+    /// enforcement lives in the vendored `SecurityPolicy::validate_path`. This
+    /// drives the real vendored check, not a stub, so a traversal or symlink
+    /// escape is actually refused rather than merely configured.
+    #[tokio::test]
+    async fn exec_security_refuses_a_traversal_and_a_symlink_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::write(workspace.join("inside.txt"), b"ok").expect("seed file");
+
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("secret.txt"), b"nope").expect("seed secret");
+
+        let policy = exec_security(&workspace, PolicyMode::Full);
+
+        let traversal = policy.validate_path("../outside/secret.txt").await;
+        assert!(
+            traversal.is_err(),
+            "a `..` component must be refused before any resolve: {traversal:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            let link = workspace.join("escape-link");
+            std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+            let via_symlink = policy.validate_path("escape-link/secret.txt").await;
+            assert!(
+                via_symlink.is_err(),
+                "a symlink resolving outside the workspace must be refused: {via_symlink:?}"
+            );
+        }
+
+        // Sanity: a real file inside the workspace is still reachable, so the
+        // refusals above are workspace_only doing its job, not a broken policy.
+        let inside = policy.validate_path("inside.txt").await;
+        assert!(
+            inside.is_ok(),
+            "a file inside the workspace must resolve: {inside:?}"
+        );
+    }
+
     /// `auto` must not loosen shell execution (issue #560).
     ///
     /// This is the test for the decision argued on [`autonomy_for`], and it
@@ -1391,6 +1677,174 @@ mod tests {
             GateDecision::Prompt,
             "supervised must park (require approval for) destructive commands"
         );
+    }
+
+    /// High-risk commands are refused independently of the autonomy tier.
+    #[tokio::test]
+    async fn block_high_risk_commands_refuses_a_destructive_command_even_under_full_autonomy() {
+        let ws = std::env::temp_dir();
+        let full = test_security(&ws, PolicyMode::Full);
+        let tool = ShellTool::new(full, native_runtime(), AuditLogger::disabled());
+        let result = tool
+            .execute(json!({ "command": "rm -rf /tmp/oc-toolbelt-conf002-nonexistent-xyz" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "block_high_risk_commands=true must refuse a destructive command even under Full \
+             autonomy, independent of the autonomy-tier gate: {}",
+            result.output()
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_factory_blocks_high_risk_commands_on_every_execution_path() {
+        let ws = tempfile::Builder::new()
+            .prefix("oc-shell-guard-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let target = ws.path().join("protected");
+        std::fs::create_dir(&target).unwrap();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Full),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws.path(),
+        );
+        let tool = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        let args = json!({ "command": format!("rm -rf {}", target.display()) });
+        for result in [
+            tool.execute(args.clone()).await.unwrap(),
+            tool.execute_with_options(args.clone(), ToolCallOptions::default())
+                .await
+                .unwrap(),
+            tool.execute_with_context(args, ToolCallOptions::default(), None)
+                .await
+                .unwrap(),
+        ] {
+            assert!(result.is_error, "{}", result.output());
+            assert!(result.output().contains("high-risk"), "{}", result.output());
+        }
+        assert!(target.is_dir());
+        let result = tool
+            .execute(json!({ "command": "printf safe-command" }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output());
+        assert!(result.output().contains("safe-command"));
+        assert_eq!(tool.permission_level(), PermissionLevel::Execute);
+        assert_eq!(tool.max_result_size_chars(), Some(30_000));
+        assert_eq!(
+            tool.timeout_policy(&json!({ "timeout_secs": 17 })),
+            ToolTimeout::Secs(17)
+        );
+
+        let audit_dir = tempfile::tempdir().unwrap();
+        let audit = shell_audit(audit_dir.path()).unwrap();
+        let sink = audit.sink.clone();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Readonly),
+            native_runtime(),
+            Some(audit),
+            ws.path(),
+        );
+        let tool = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        let command = format!("rm -rf {}", target.display());
+        let result = tool.execute(json!({ "command": command })).await.unwrap();
+        assert!(result.is_error, "{}", result.output());
+        assert!(result.output().contains("read-only"), "{}", result.output());
+        assert!(std::fs::read_to_string(sink).unwrap().contains(&command));
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn high_risk_guard_respects_the_flag_without_blocking_ordinary_commands() {
+        let ws = tempfile::tempdir().unwrap();
+        let enabled = HighRiskCommands(test_security(ws.path(), PolicyMode::Full));
+        for command in [
+            "printf safe",
+            "touch note.txt",
+            "curl https://example.invalid",
+        ] {
+            assert!(enabled.refusal(&json!({ "command": command })).is_none());
+        }
+        assert!(enabled.refusal(&json!({ "command": "sudo id" })).is_some());
+        let mut security = exec_security(ws.path(), PolicyMode::Full);
+        security.block_high_risk_commands = false;
+        let disabled = HighRiskCommands(Arc::new(security));
+        assert!(disabled.refusal(&json!({ "command": "sudo id" })).is_none());
+    }
+
+    #[test]
+    fn shell_timeout_policy_honors_its_schema_fallback_claim() {
+        use oh::tools::traits::ToolTimeout;
+
+        let ws = std::env::temp_dir();
+        let security = test_security(&ws, PolicyMode::Full);
+        let tool = ShellTool::new(security, native_runtime(), AuditLogger::disabled());
+
+        let schema = tool.parameters_schema();
+        let description = schema["properties"]["timeout_secs"]["description"]
+            .as_str()
+            .expect("timeout_secs has a description");
+        assert!(
+            description.contains("falls back to the configured tool timeout"),
+            "the schema must describe the configured fallback: {description}"
+        );
+
+        assert_eq!(
+            tool.timeout_policy(&json!({})),
+            ToolTimeout::Inherit,
+            "an omitted timeout must inherit the configured deadline"
+        );
+        assert_eq!(
+            tool.timeout_policy(&json!({ "timeout_secs": 0 })),
+            ToolTimeout::Inherit,
+            "an invalid zero timeout must inherit the configured deadline"
+        );
+    }
+
+    #[test]
+    fn shell_factory_preserves_explicit_deadlines_and_inherits_for_invalid_values() {
+        let ws = tempfile::tempdir().unwrap();
+        let tools = shell_tools(
+            test_security(ws.path(), PolicyMode::Full),
+            native_runtime(),
+            Some(ShellAudit::disabled()),
+            ws.path(),
+        );
+        let shell = tools.iter().find(|tool| tool.name() == "shell").unwrap();
+        for args in [
+            json!({}),
+            json!({"timeout_secs": null}),
+            json!({"timeout_secs": 0}),
+            json!({"timeout_secs": -1}),
+            json!({"timeout_secs": 1.5}),
+            json!({"timeout_secs": "17"}),
+            json!({"timeout_secs": 3601}),
+            json!({"timeout_secs": u64::MAX}),
+        ] {
+            assert_eq!(
+                shell.timeout_policy(&args),
+                ToolTimeout::Inherit,
+                "invalid or absent deadline must inherit: {args}"
+            );
+            let (deadline, seconds) =
+                oh::tools::timeout::resolve_tool_deadline(shell.timeout_policy(&args));
+            assert_eq!(
+                deadline,
+                Some(std::time::Duration::from_secs(seconds)),
+                "the execution adapter must resolve a finite inherited deadline"
+            );
+            assert!(seconds > 0);
+        }
+        for secs in [1, 17, 3600] {
+            assert_eq!(
+                shell.timeout_policy(&json!({"timeout_secs": secs})),
+                ToolTimeout::Secs(secs),
+                "valid explicit deadline must survive the audit wrapper"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1647,6 +2101,289 @@ mod tests {
         assert!(
             composio_capability_admits(true, &deny_shell),
             "a denial of another namespace must not withhold composio"
+        );
+    }
+
+    // --- FAIL-axis: what the sandbox belt does when its dependency fails -----
+
+    /// `read_workspace_state` is wired beside the shell tool against a
+    /// workspace path that `build_agent` creates only on a best-effort basis —
+    /// a failed `ensure_agent_workspace` is logged, not fatal, and the belt is
+    /// still built over the absent directory. Reading a workspace that is not
+    /// there must therefore degrade to a reported result, never a panic or a
+    /// hang, or the first turn of a company whose disk was full dies inside a
+    /// tool instead of telling the operator.
+    #[tokio::test]
+    async fn workspace_state_survives_a_workspace_that_was_never_created() {
+        let parent = tempfile::Builder::new()
+            .prefix("oc-toolbelt-nows-")
+            .tempdir()
+            .expect("tempdir");
+        let missing = parent.path().join("never-created");
+        assert!(!missing.exists(), "the premise is an absent workspace");
+
+        let tool = WorkspaceStateTool::new(missing.clone());
+        let result = tool.execute(json!({})).await;
+
+        let result = result.expect("a missing workspace must not abort the tool call");
+        assert!(
+            !result.output().is_empty(),
+            "the tool must say something about the workspace it could not read"
+        );
+        assert!(
+            !missing.exists(),
+            "a read-only state probe must not create the workspace as a side effect"
+        );
+    }
+
+    /// A multi-edit patch whose LAST hunk is unappliable must leave the file
+    /// exactly as it was. `apply_patch` takes a batch, and a batch that writes
+    /// the hunks it liked before discovering the one it cannot is a partial
+    /// write: the agent is told the patch failed while the file on disk holds
+    /// half of it, and the next read disagrees with the last report.
+    #[tokio::test]
+    async fn apply_patch_leaves_no_partial_write_when_a_later_hunk_fails() {
+        let ws_dir = tempfile::Builder::new()
+            .prefix("oc-toolbelt-partial-")
+            .tempdir()
+            .expect("tempdir");
+        let ws = ws_dir.path();
+        let target = ws.join("notes.txt");
+        let original = "alpha\nbravo\ncharlie\n";
+        std::fs::write(&target, original).expect("seed file");
+
+        let security = test_security(ws, PolicyMode::Full);
+        let tool = ApplyPatchTool::new(security);
+
+        // Hunk 1 matches; hunk 2 names a string that is not in the file.
+        let result = tool
+            .execute(json!({
+                "edits": [
+                    { "path": "notes.txt", "old_string": "alpha", "new_string": "ALPHA" },
+                    { "path": "notes.txt", "old_string": "no-such-anchor", "new_string": "x" }
+                ]
+            }))
+            .await
+            .expect("tool call completes");
+
+        assert!(
+            result.is_error,
+            "a batch with an unappliable hunk must be reported as failed: {}",
+            result.output()
+        );
+        let on_disk = std::fs::read_to_string(&target).expect("read back");
+        assert_eq!(
+            on_disk, original,
+            "a failed patch batch must not leave the earlier hunk written to disk"
+        );
+    }
+
+    /// `git_operations` is wired for every `code`-granted agent against the
+    /// agent's own workspace, which is an ordinary directory — `build_agent`
+    /// creates it and nothing initialises a repository in it. Every operation
+    /// must therefore report the missing repository rather than panicking or
+    /// walking up to whatever repository happens to contain the workspace.
+    #[tokio::test]
+    async fn git_operations_refuses_a_workspace_that_is_not_a_repository() {
+        let ws_dir = tempfile::Builder::new()
+            .prefix("oc-toolbelt-norepo-")
+            .tempdir()
+            .expect("tempdir");
+        let ws = ws_dir.path();
+        assert!(!ws.join(".git").exists(), "the premise is a bare directory");
+
+        let security = test_security(ws, PolicyMode::Full);
+        let tool = GitOperationsTool::new(security, ws.to_path_buf());
+
+        for operation in ["status", "log", "diff"] {
+            let result = tool
+                .execute(json!({ "operation": operation }))
+                .await
+                .expect("a missing repository must not abort the tool call");
+            assert!(
+                result.is_error,
+                "`{operation}` on a non-repository must be reported as an error: {}",
+                result.output()
+            );
+        }
+    }
+
+    /// A corrupted repository is the same contract one step further in: `.git`
+    /// exists, so the operation is attempted, and the failure comes back from
+    /// git itself. It must still arrive as a reported error.
+    #[tokio::test]
+    async fn git_operations_reports_a_corrupted_repository_rather_than_panicking() {
+        let ws_dir = tempfile::Builder::new()
+            .prefix("oc-toolbelt-badrepo-")
+            .tempdir()
+            .expect("tempdir");
+        let ws = ws_dir.path();
+        // A `.git` that is a file of garbage: present enough to be found, not a
+        // repository by any reading.
+        std::fs::write(ws.join(".git"), "not a git directory").expect("seed .git");
+
+        let security = test_security(ws, PolicyMode::Full);
+        let tool = GitOperationsTool::new(security, ws.to_path_buf());
+
+        let result = tool
+            .execute(json!({ "operation": "status" }))
+            .await
+            .expect("a corrupted repository must not abort the tool call");
+        assert!(
+            result.is_error,
+            "a corrupted repository must be reported as an error: {}",
+            result.output()
+        );
+    }
+
+    /// Exports above the row ceiling are refused before any workspace write.
+    #[tokio::test]
+    async fn csv_export_refuses_an_unbounded_row_count() {
+        let ws_dir = tempfile::Builder::new()
+            .prefix("oc-toolbelt-csvcap-")
+            .tempdir()
+            .expect("tempdir");
+        let ws = ws_dir.path();
+        let security = test_security(ws, PolicyMode::Full);
+        let tool = CsvExportTool::new(security);
+
+        let rows: Vec<serde_json::Value> = (0..200_000)
+            .map(|i| json!({ "id": i, "note": "padding padding padding padding" }))
+            .collect();
+        let data = serde_json::to_string(&rows).expect("serialise rows");
+
+        let result = tool
+            .execute(json!({ "data": data, "filename": "huge.csv" }))
+            .await
+            .expect("tool call completes");
+
+        assert!(
+            result.is_error,
+            "an export of {} rows must be refused by a stated ceiling, not written: {}",
+            rows.len(),
+            result.output()
+        );
+    }
+
+    #[tokio::test]
+    async fn csv_factory_caps_rendered_bytes_on_every_execution_path() {
+        let ws = tempfile::tempdir().unwrap();
+        let tools = code_tools(test_security(ws.path(), PolicyMode::Full), ws.path());
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name() == "csv_export")
+            .unwrap();
+        let args = json!({
+            "data": serde_json::to_string(&json!([{ "value": "x".repeat(MAX_CSV_BYTES / 2) }])).unwrap(),
+            "columns": ["value", "value"],
+            "filename": "oversized.csv"
+        });
+        for result in [
+            tool.execute(args.clone()).await.unwrap(),
+            tool.execute_with_options(args.clone(), ToolCallOptions::default())
+                .await
+                .unwrap(),
+            tool.execute_with_context(args, ToolCallOptions::default(), None)
+                .await
+                .unwrap(),
+        ] {
+            assert!(result.is_error, "{}", result.output());
+            assert!(result.output().contains("bytes"), "{}", result.output());
+        }
+        assert!(!ws.path().join("exports").exists());
+
+        let result = tool
+            .execute(json!({
+                "data": r#"[{"value":"comma, quote\" and newline\n"}]"#,
+                "filename": "small.csv"
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output());
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("exports/small.csv")).unwrap(),
+            "value\n\"comma, quote\"\" and newline\n\"\n"
+        );
+    }
+
+    #[test]
+    fn csv_limits_admit_the_exact_row_and_byte_boundaries() {
+        let row_args =
+            |count| json!({ "data": serde_json::to_string(&vec![json!({}); count]).unwrap() });
+        assert!(CsvLimits.refusal(&row_args(MAX_CSV_ROWS)).is_none());
+        assert!(CsvLimits.refusal(&row_args(MAX_CSV_ROWS + 1)).is_some());
+        let byte_args = |count| json!({ "data": serde_json::to_string(&json!([{ "x": "y".repeat(count) }])).unwrap() });
+        assert!(CsvLimits.refusal(&byte_args(MAX_CSV_BYTES - 3)).is_none());
+        assert!(CsvLimits.refusal(&byte_args(MAX_CSV_BYTES - 2)).is_some());
+        assert!(
+            CsvLimits
+                .refusal(&json!({ "data": " ".repeat(MAX_CSV_INPUT_BYTES + 1) }))
+                .is_some()
+        );
+        assert_eq!(csv_cell_bytes("a,\"\n\r"), 8);
+    }
+
+    /// The SSRF allowlist is a per-company setting, and `http_request` — the
+    /// arbitrary-method tool, the one that can POST — is constructed from the
+    /// same `allowed_domains` vector as `web_fetch` in [`web_tools`]. A strict
+    /// (non-empty) list must therefore bind it just as tightly: a public host
+    /// the company did not list is refused before any request leaves.
+    #[tokio::test]
+    async fn a_strict_domain_allowlist_binds_http_request_as_it_binds_web_fetch() {
+        let ws = std::env::temp_dir();
+        let security = test_security(&ws, PolicyMode::Full);
+        let tools = web_tools(security, vec!["allowed.example.com".to_string()], &ws);
+
+        for tool in &tools {
+            if !matches!(tool.name(), "web_fetch" | "http_request") {
+                continue;
+            }
+            let result = tool
+                .execute(json!({ "url": "https://not-listed.example.org/" }))
+                .await
+                .expect("tool call completes");
+            assert!(
+                result.is_error,
+                "{} must refuse a host outside a strict allowlist: {}",
+                tool.name(),
+                result.output()
+            );
+        }
+    }
+
+    /// `image_info` parses dimensions out of a file the agent names, so the
+    /// input it is handed is attacker-shaped in the ordinary case (a download
+    /// the agent just made with `curl`, into the same workspace). It must bound
+    /// the file by size *before* parsing, so an oversized file is refused
+    /// rather than read into memory and walked.
+    #[tokio::test]
+    async fn image_info_refuses_an_oversized_file_before_parsing_it() {
+        let ws_dir = tempfile::Builder::new()
+            .prefix("oc-toolbelt-bigimg-")
+            .tempdir()
+            .expect("tempdir");
+        let ws = ws_dir.path();
+        let path = ws.join("bomb.png");
+
+        // A PNG magic header followed by padding past any sane ceiling. The
+        // header makes it parseable-looking; the size is the thing under test.
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.resize(12 * 1024 * 1024, 0u8);
+        std::fs::write(&path, &bytes).expect("seed oversized image");
+
+        let security = test_security(ws, PolicyMode::Full);
+        let tool = ImageInfoTool::new(security);
+
+        let result = tool
+            .execute(json!({ "path": path.to_string_lossy() }))
+            .await
+            .expect("tool call completes");
+
+        assert!(
+            result.is_error,
+            "a {}-byte image must be refused on size before it is parsed: {}",
+            bytes.len(),
+            result.output()
         );
     }
 }

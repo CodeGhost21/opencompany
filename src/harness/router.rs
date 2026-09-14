@@ -474,6 +474,7 @@ mod tests {
         let manifest: crate::company::CompanyManifest =
             toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest parses");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: company(),

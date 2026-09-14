@@ -44,7 +44,7 @@ const DESCRIBED = {
   target: "www.bbc.com",
   delivered: [],
   performed: [],
-  note: "Approving this re-runs the whole workflow from the start…",
+  note: "Approving this re-runs the whole automation from the start…",
 };
 
 function run(over: Partial<WorkflowRunOutcome> = {}): WorkflowRunOutcome {
@@ -65,7 +65,7 @@ function parkedDelivery(): DeliveryReport {
   return { node: "summary", kind: "owner", status: "pending", detail: "waiting on you" };
 }
 
-describe("a paused workflow gate says what it is approving (#846)", () => {
+describe("a paused automation gate says what it is approving (#846)", () => {
   it("names the tool rather than the mechanism", () => {
     expect(approvalAction(gateCard(DESCRIBED))).toBe("Fetch a web page");
   });
@@ -112,7 +112,7 @@ describe("a paused workflow gate says what it is approving (#846)", () => {
   it("falls back to the old line for an older host that names no tool", () => {
     // Absence is meaningful: a host from before this change omits `tool`, and
     // the card must read exactly as it did rather than showing a blank label.
-    expect(approvalAction(gateCard(AS_REPORTED))).toBe("Continue a paused workflow");
+    expect(approvalAction(gateCard(AS_REPORTED))).toBe("Continue a paused automation");
   });
 
   it("leaves every other kind's card alone", () => {

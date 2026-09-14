@@ -310,7 +310,7 @@ function OwnerChoice({
         <p className="min-w-0 text-sm leading-relaxed">
           <span className="font-medium">Who owns this?</span>{" "}
           <span className="text-muted-foreground">
-            More than one teammate could take it, so it is waiting on you rather
+            More than one agent could take it, so it is waiting on you rather
             than being handed to whichever one the plan named first.
           </span>
         </p>

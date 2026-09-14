@@ -70,7 +70,7 @@ function issueToPr(): WorkflowGraph {
 const xOf = (nodes: ReturnType<typeof layout>["nodes"], id: string) =>
   nodes.find((n) => n.id === id)!.position.x;
 
-describe("cyclic workflow layout", () => {
+describe("cyclic automation layout", () => {
   it("breaks the loop's return edge, not an edge on the way in", () => {
     const broken = [...backEdges(issueToPr())].map((e) => `${e.from}->${e.to}`).sort();
     // Exactly the two returns. Breaking `read_and_plan->review_plan` instead
@@ -113,7 +113,7 @@ describe("cyclic workflow layout", () => {
   });
 
   it("breaks the authored return when a branch enters the loop's middle", () => {
-    // `agentic_math_lab/euler_solve`, shipped. `cost` fans out to BOTH `solve`
+    // `math_lab/euler_solve`, shipped. `cost` fans out to BOTH `solve`
     // and `approach`, so a DFS reaches `solve` first, descends to `agree`, and
     // finds `approach -> solve` closing onto the stack — an ordinary forward
     // edge. Breaking that one lays `approach` out AFTER `agree`, so the normal

@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { DeskDto } from "@/api/types";
 import { buildOrgTree } from "@/lib/org";
 import type { TeamMember } from "@/lib/team";
-import { buildChannels, deskFromDto } from "@/views/chat/model";
+import { buildChannels, deskFromDto } from "@/views/room/model";
 
 /**
  * The console half of the `auto` channel (issue #1835).
@@ -17,7 +17,7 @@ import { buildChannels, deskFromDto } from "@/views/chat/model";
  * answerer is picked per message. Three consumers used to derive a lead from
  * position alone, and each is pinned here: `deskFromDto` must carry the mode
  * at all (dropping a DTO field silently is how issue #369 lost memberships),
- * `buildChannels` must flag the channel so `ChatView` withholds `leadId`, and
+ * `buildChannels` must flag the channel so `RoomView` withholds `leadId`, and
  * `buildOrgTree` must not crown seat zero.
  *
  * Every assertion has a paired one on a lead desk, because the failure that
@@ -122,14 +122,14 @@ describe("buildOrgTree", () => {
 /**
  * The three review findings on #1872, pinned in the source-contract idiom
  * `chat-rail-focus.test.ts` established for shell wiring a jsdom render
- * cannot reach (the dialog's submit and `ChatView`'s create callback both
+ * cannot reach (the dialog's submit and `RoomView`'s create callback both
  * need the whole client and every hook to render).
  */
 describe("channel creation guards (#1872 review)", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
-  const dialog = () => read("views/chat/ChannelCreateDialog.tsx");
-  const chatView = () => read("views/ChatView.tsx");
+  const dialog = () => read("views/room/ChannelCreateDialog.tsx");
+  const chatView = () => read("views/RoomView.tsx");
 
   it("refuses to submit an auto channel with no members, with a field-level reason", () => {
     const src = dialog();
@@ -151,7 +151,7 @@ describe("channel creation guards (#1872 review)", () => {
 
   it("drops a createDesk completion that lands after a scope switch", () => {
     const src = dialog();
-    // Captured at submit, compared at completion — the same shape ChatView's
+    // Captured at submit, compared at completion — the same shape RoomView's
     // send path uses against its scopeRef. A create that resolves after the
     // operator moved company must not hand its desk to the new scope's rail.
     expect(src).toContain("const scopeAtSubmit = scopeNow.current;");

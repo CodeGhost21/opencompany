@@ -245,10 +245,17 @@ Two corrections to that reporting came out of issue #1796:
     labelled with the currency and shows the minor-unit value it will send. The
     `*_in_minor_units` naming exists because "invoice Alan $100" becomes a $1.00
     invoice otherwise, and a UI that hides the unit re-opens exactly that hole.
-  - **Idempotency.** The dialog mints a `idempotency_key` on open and sends it,
-    so a double-clicked Send is one invoice. `InvoiceSummary` sets a replay flag
-    when Chargebee returned an earlier invoice for the key — the toast says
-    "already sent" rather than "sent", because a replayed response is otherwise
+  - **Idempotency.** The `idempotency_key` is derived from the invoice's own
+    content — customer, currency, due term, line items — via
+    `deriveInvoiceIdempotencyKey`, not minted on open, so a double-clicked Send
+    and a close-reopen retry of the same failed send are both one invoice.
+    `invoice-force-new` folds a nonce into the hash for a deliberate duplicate,
+    minted once when the box is checked and reused across a retry — including
+    a close/reopen or a remount — until the send succeeds or the box is
+    unchecked, so an ambiguous forced-send failure cannot mint a second real
+    invoice on retry. `InvoiceSummary` sets a replay flag when Chargebee
+    returned an earlier invoice for the key — the toast says "already sent"
+    rather than "sent", because a replayed response is otherwise
     byte-identical to a fresh one.
 - **Webhook** — the panel shows `webhookUrl` with a copy button, exactly as
   `BillingView` does now, and says plainly when the host has no public URL that

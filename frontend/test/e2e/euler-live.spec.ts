@@ -29,7 +29,7 @@ import { dispatch, openMainLine, say, silenceTour } from "./orchestration";
  * delegated correctly, ran every turn, closed every card and reached a
  * confidently wrong conclusion is green everywhere in this directory.
  *
- * This lane closes that. The company under test is `companies/agentic_math_lab`
+ * This lane closes that. The company under test is `companies/math_lab`
  * and the goal is a Project Euler problem, which is the rare piece of work with
  * an operator-checkable outcome: one exact integer, published, and reachable
  * only by computing it. The verdict is that integer, so what passes here is not
@@ -49,7 +49,7 @@ import { dispatch, openMainLine, say, silenceTour } from "./orchestration";
  *
  * The one method claim that *is* enforced is `computed()`: the answer has to
  * have come out of a program the lab ran. That, and not the manifest, is what
- * makes the number evidence. `agentic_math_lab` holding no `web` or `search`
+ * makes the number evidence. `math_lab` holding no `web` or `search`
  * grant (see `SEARCH_DENIED_COMPANIES` in `src/company/content_test.rs`)
  * removes the shortcut an agent would reach for first, but it closes no
  * network — `shell` is granted and there is no sandbox

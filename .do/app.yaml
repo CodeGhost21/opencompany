@@ -24,7 +24,7 @@ spec:
         # ── the switch: which company (module) runs ──
         - key: OPENCOMPANY_COMPANY
           scope: RUN_TIME
-          value: agentic_marketing_agency
+          value: marketing_agency
         - key: OPENCOMPANY_DISCOVERABLE
           scope: RUN_TIME
           value: "false"

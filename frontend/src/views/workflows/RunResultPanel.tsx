@@ -5,6 +5,7 @@
 // Extracted verbatim from `WorkflowsView.tsx` (issue #303).
 
 import { SquareKanban } from "lucide-react";
+import { consoleHref } from "@/lib/console-paths";
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -18,8 +19,8 @@ import type {
 } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
-import type { DecidedApproval } from "@/views/chat/model";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
+import type { DecidedApproval } from "@/views/room/model";
 
 import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { DeliveryRows } from "./RunHistoryPanel";
@@ -280,7 +281,7 @@ export function RunResultPanel({
                   // something that is not there.
                   canDecideHere ? "below or in Approvals" : "in Approvals"
                 } and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
-              : "Nothing here can be approved; change the policy and run the workflow again."}
+              : "Nothing here can be approved; change the policy and run the automation again."}
           </p>
         )}
         {/* Issue #1014 (PR-B): the gated tool names per blocked node, and a link
@@ -434,8 +435,8 @@ function BoardRows({ board }: { board: WorkflowRunBoardRow[] }) {
             </Badge>
             {row.taskId ? (
               <a
-                href={`#/tasks/${encodeURIComponent(row.taskId)}`}
-                className="flex w-fit items-center gap-1 text-2xs font-medium text-accent-foreground underline-offset-2 hover:underline"
+                href={consoleHref("tasks", row.taskId)}
+                className="flex w-fit items-center gap-1 text-2xs font-medium text-accent-foreground transition-opacity hover:opacity-80"
               >
                 <SquareKanban className="size-3 shrink-0" />
                 {label}

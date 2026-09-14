@@ -94,6 +94,7 @@ description = "Notion pages."
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),

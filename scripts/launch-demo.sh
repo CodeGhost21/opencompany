@@ -16,7 +16,7 @@ Examples:
   ./scripts/launch-demo.sh marketing up
   ./scripts/launch-demo.sh marketing down
   ./scripts/launch-demo.sh marketing down -v  # also delete its data volume
-  ./scripts/launch-demo.sh agentic_software_company up
+  ./scripts/launch-demo.sh software_company up
 
 Run ./scripts/list-demos.sh to see available names.
 EOF

@@ -152,22 +152,19 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         self.inner.is_empty(company).await
     }
 
-    /// Writes through, then announces `updated`.
-    ///
-    /// Unconditional, unlike [`BoardAnnouncer`](crate::runtime::BoardAnnouncer)'s
-    /// identical-re-save suppression: a `write` always advances the node's
-    /// `updated_at_millis`, which is the revision token the agent tools' CAS
-    /// compares against, so a write that stores the same bytes has still
-    /// changed the node in the way that matters. Detecting "same body" would
-    /// also cost a full read of every note on every save, to save a refetch.
-    async fn write(
+    /// Announces `updated` only after a successful write.
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: crate::ports::workspace::WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
-        let node = self.inner.write(company, id, content, author).await?;
+        let node = self
+            .inner
+            .write_with_revision(company, id, content, author, expected_updated_at)
+            .await?;
         self.announce(company, id, CHANGE_UPDATED).await;
         Ok(node)
     }
@@ -526,6 +523,32 @@ mod test {
             vec![
                 ("n-1".to_string(), "opened".to_string()),
                 ("n-1".to_string(), "updated".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conditional_writes_cross_all_decorators_and_only_announce_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FsOps::new(dir.path()));
+        let guarded = Arc::new(crate::runtime::DerivedGuardWorkspace::new(
+            backend.clone(),
+            backend,
+        ));
+        let metered = Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
+            guarded,
+            crate::runtime::WorkspaceQuota::default(),
+        ));
+        let log = Arc::new(MemLog::default());
+        let store = Arc::new(WorkspaceAnnouncer::new(metered, log.clone()));
+        crate::store::conformance::assert_workspace_conditional_write(store.clone(), store).await;
+        assert_eq!(
+            changes(&log),
+            vec![
+                ("note".to_string(), CHANGE_OPENED.to_string()),
+                ("note".to_string(), CHANGE_UPDATED.to_string()),
+                ("note".to_string(), CHANGE_UPDATED.to_string()),
+                ("note".to_string(), CHANGE_UPDATED.to_string()),
             ]
         );
     }

@@ -33,7 +33,7 @@ vi.mock("@/api/tasks", async (importOriginal) => ({
   steerTask,
 }));
 
-const { InflightRunBar } = await import("@/views/chat/InflightRunBar");
+const { InflightRunBar } = await import("@/views/room/InflightRunBar");
 
 const CLIENT = {
   scopeFor: (company: string | null) => `/api/v1/${company ?? "company"}`,

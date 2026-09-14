@@ -73,9 +73,12 @@ describe("Navigation rails", () => {
   });
 
   it("still name themselves, so demoting those captions cost nothing", () => {
-    for (const name of ["SettingsSection", "finance/FinanceSection"]) {
-      const source = readFileSync(`${SRC}/views/${name}.tsx`, "utf8");
-      expect(source, `${name} must name its <nav>`).toMatch(/<nav\s+aria-label="/);
+    // Finance drew one of the two rails this rule was written for. It draws
+    // none now — its pages are nested rows on the section rail below (#2130) —
+    // so the shared rail is what has to keep naming itself in its place.
+    for (const path of ["views/SettingsSection.tsx", "components/section-rail.tsx"]) {
+      const source = readFileSync(`${SRC}/${path}`, "utf8");
+      expect(source, `${path} must name its <nav>`).toMatch(/<nav\s+aria-label=[{"]/);
     }
 
     // The Settings groups are named by reference rather than by a heading.

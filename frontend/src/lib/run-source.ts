@@ -138,7 +138,7 @@ export function runSource(run: RunSummary, index: RunSourceIndex = {}): RunSourc
       // "is it a DM" answer is "not a known desk", read from the index rather
       // than guessed from the record — `agentId === chatId` is true for a
       // desk-channel run too, and stamping `dm:` on one would link
-      // `#/chat/dm:engineering`, which ChatView treats as an unknown channel
+      // `#/chat/dm:engineering`, which RoomView treats as an unknown channel
       // (issue #1671).
       href: chatHref(run.chatId, name === undefined),
       resolved: name !== undefined,

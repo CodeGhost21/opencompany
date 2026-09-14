@@ -46,12 +46,19 @@ test.beforeEach(async ({ page }) => {
 
 const trigger = (page: Page) => page.getByRole("button", { name: "Change theme" });
 
+// Appearance is its own page now (`settings-pages.ts`), one Card deliberately
+// thin enough to read as a single subject — so at the suite's ordinary
+// viewport it never needs to scroll at all, and #922's repro needs it to.
+// A short viewport is what still puts real content below a real fold without
+// touching the page itself.
+test.use({ viewport: { width: 1280, height: 150 } });
+
 /** Pin the theme before the app boots, so the first paint is the one under test. */
 async function openSettings(page: Page, theme: "dark" | "light") {
   await page.addInitScript((value) => {
     window.localStorage.setItem("theme", value);
   }, theme);
-  await page.goto("/#/settings");
+  await page.goto("/#/settings/appearance");
   await expect(trigger(page)).toBeVisible();
   await expect(page.locator("html")).toHaveClass(new RegExp(`\\b${theme}\\b`));
 }

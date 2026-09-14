@@ -29,10 +29,10 @@ function item(label: string): HTMLElement {
 }
 
 describe("the overview graph legend", () => {
-  it("gives stages a colour distinct from both workflows and AI teammates", () => {
+  it("gives stages a colour distinct from both automations and AI agents", () => {
     const workflowIcon = item("Workflow").querySelector("svg");
     const stageIcon = item("Stage").querySelector("svg");
-    const employeeIcon = item("AI teammate").querySelector("svg");
+    const employeeIcon = item("AI agent").querySelector("svg");
 
     expect(workflowIcon?.style.color).toBe("var(--brain-2)");
     expect(employeeIcon?.style.color).toBe("var(--accent)");

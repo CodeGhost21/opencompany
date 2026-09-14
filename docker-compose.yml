@@ -4,7 +4,7 @@
 #   docker compose up --build
 #
 # The switch is OPENCOMPANY_COMPANY: an example directory name
-# (agentic_venture_capital, agentic_marketing_agency, …) or an alias (fund,
+# (venture_capital, marketing_agency, …) or an alias (fund,
 # marketing, software, studio, accelerator, law, signals, …).
 name: opencompany
 
@@ -18,7 +18,7 @@ services:
     image: opencompany:local
     environment:
       # Which module spins up.
-      OPENCOMPANY_COMPANY: ${OPENCOMPANY_COMPANY:-agentic_marketing_agency}
+      OPENCOMPANY_COMPANY: ${OPENCOMPANY_COMPANY:-marketing_agency}
       OPENCOMPANY_DISCOVERABLE: ${OPENCOMPANY_DISCOVERABLE:-false}
       # Optional: cargo features to compile the host with (e.g. "medulla").
       # Blank = the small default build; the dev overlay reads it so a key has

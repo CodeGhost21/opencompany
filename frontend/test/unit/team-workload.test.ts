@@ -48,7 +48,7 @@ function task(assignee: string, stage: string, id = `${assignee}-${stage}`): Tas
 }
 
 describe("workloadByAssignee", () => {
-  it("counts a teammate's cards in every column the host has not closed", () => {
+  it("counts an agent's cards in every column the host has not closed", () => {
     const loads = workloadByAssignee(
       [
         task("maya", "todo"),

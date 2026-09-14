@@ -7,6 +7,7 @@
 // detail address lands the operator on a read-only page with the control they
 // asked for one more click away.
 
+import { consoleHref } from "@/lib/console-paths";
 import type { AgentDetailDto } from "@/api/types";
 import { avatarRef } from "@/lib/avatar";
 import { summarizeGrants, tierLabel, type ToolGrantSummary } from "@/lib/agent";
@@ -87,6 +88,6 @@ function clip(text: string, limit: number): string {
  * instead of leaving the page.
  */
 export function agentHref(agentId: string, options: { edit?: boolean } = {}): string {
-  const path = `#/team/${encodeURIComponent(agentId)}`;
+  const path = consoleHref("team", agentId);
   return options.edit ? `${path}?edit` : path;
 }

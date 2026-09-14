@@ -8,7 +8,8 @@ durable and consistent, drives it with **Medulla** (TinyHumans' hosted
 orchestrator-first model), and makes every company a first-class, discoverable
 citizen of the **tiny.place** agent economy.
 
-Two personas are served by the same crate:
+Two personas are served by the same host crate (`crates/opencompany-core`;
+see [repository-layout.md](../repository-layout.md) for the crate layout):
 
 - **Prosumer operator** — a non-technical person running a one-person
   business. Installs one binary, pastes one key (`TINYHUMANS_API_KEY`), picks
@@ -97,6 +98,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/harnesses.md](runtime/harnesses.md) | Named execution engines: `built_in` vs `acp`, transports, per-agent binding |
 | [runtime/harnesses-acp.md](runtime/harnesses-acp.md) | The ACP transports in detail: `local` vs `runner`, readiness probing, resuming a teammate's session across a restart, and streaming its execution state while the turn runs |
 | [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
+| [../key-reworks/README.md](../key-reworks/README.md) | The keys rework plan (issue #2306): provider + model everywhere, company default and agent pairs, Composio and search key names, routing removal — phased, slice by slice |
 | [runtime/globals.md](runtime/globals.md) | The global baseline every company gets: agents, workflows, skills, the starting tool belt, and `[globals].disable` |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
@@ -120,9 +122,11 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [runtime/desktop-instances.md](runtime/desktop-instances.md) | Several local hosts on one machine: the roster, onboarding, dev runs |
 | [runtime/desktop-updates.md](runtime/desktop-updates.md) | Desktop auto-update: the silent-until-actionable prompt, the signed release artifacts, and the keypair an operator must generate before any of it works |
+| [runtime/releases.md](runtime/releases.md) | Cutting a release: promote main to `release`, a staging cut, a production cut — one dispatch each, the version computed rather than typed |
 | [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
-| [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, and the switch that turns it off |
+| [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, a self-hosted OpenPanel collector, and the switch that turns it off |
+| [runtime/analytics-wire.md](runtime/analytics-wire.md) | The OpenPanel `POST /track` contract that transport speaks: the two auth headers, the union body, the names the collector refuses, where an event time goes, where the credential is allowed to travel, and what a drain does when the collector will not answer |
 | [runtime/crash-reporting.md](runtime/crash-reporting.md) | Errors and panics to the operator's own Sentry: the two DSNs, what a report carries, the credential scrubber, and how to prove it works |
 | [runtime/tracing.md](runtime/tracing.md) | Performance tracing and the request timeline: the sample-rate knobs and what they cost, the console-to-host distributed trace, transaction scrubbing, and why Session Replay is not shipped |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |

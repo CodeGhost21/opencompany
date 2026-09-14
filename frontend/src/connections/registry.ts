@@ -27,6 +27,7 @@ import type { Transport } from "@/api/transport";
 import {
   closeSshTunnel,
   forgetConnection,
+  forgetSessionInCore,
   openSshTunnel,
   adoptSessionIntoCore,
   registerConnection,
@@ -719,6 +720,41 @@ export async function adoptSession(id: ConnectionId, session: string): Promise<v
     return;
   }
   adoptCredential(id, { kind: "session", value: session });
+}
+
+/**
+ * Signs this connection out, locally — the other half of {@link adoptSession}.
+ *
+ * The host's session record is revoked by `auth/logout` before this is called;
+ * this is what makes the console stop *acting* signed in. Three things, in the
+ * order they have to happen:
+ *
+ * 1. The core forgets its keychain entry, on the desktop. Left in place, the
+ *    next launch's `oc_connect` would present a token the host has already
+ *    revoked and the row would come back as a mysterious refusal rather than
+ *    as a clean sign-in screen. Awaited, so a keychain that refused the
+ *    deletion surfaces to the person signing out instead of ambushing them
+ *    later — the same reason `adoptSession` awaits its write.
+ * 2. The credential goes back to `cookie`, which is what a connection that has
+ *    never signed in carries. This also drops the token out of the profile
+ *    store, so a reload does not resurrect it. A no-op for the same-origin
+ *    browser case, where the credential already *is* the (now-cleared) cookie.
+ * 3. The row is marked `unauthenticated`, which is the state `ConnectionConsole`
+ *    renders the sign-in screen from. Set here rather than left to the next
+ *    401 so the console changes the moment the person asks it to, without a
+ *    round trip they would watch it fail.
+ *
+ * Per connection, like every other status write here: signing out of one host
+ * leaves the others exactly as they were.
+ */
+export async function forgetSession(id: ConnectionId): Promise<void> {
+  if (isDesktopRuntime()) {
+    await forgetSessionInCore(id);
+  }
+  adoptCredential(id, { kind: "cookie" });
+  // After the reseat, not before: `adoptCredential` rebuilds the record from
+  // the one it found, so a status written first would be copied back over.
+  patch(id, { status: "unauthenticated" });
 }
 
 /**

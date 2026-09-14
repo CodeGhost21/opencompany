@@ -68,7 +68,7 @@ describe("addMemberMessage", () => {
   it("omits the follow-up clause when nothing was owed", () => {
     const msg = addMemberMessage({ kind: "console-only", name: "Ada" });
     expect(msg.description).toBe(
-      "This host can't save teammates, so they'll be gone when the console reloads.",
+      "This host can't save agents, so they'll be gone when the console reloads.",
     );
   });
 
@@ -147,11 +147,11 @@ describe("addMemberFailure", () => {
   it("falls back when the failure carried no message", () => {
     expect(addMemberFailure("boom")).toEqual({
       kind: "failed",
-      message: "Couldn't add teammate.",
+      message: "Couldn't add agent.",
     });
-    expect(addMemberFailure(null, "Could not create teammate.")).toEqual({
+    expect(addMemberFailure(null, "Could not create agent.")).toEqual({
       kind: "failed",
-      message: "Could not create teammate.",
+      message: "Could not create agent.",
     });
   });
 });

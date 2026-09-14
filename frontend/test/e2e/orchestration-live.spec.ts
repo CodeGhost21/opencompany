@@ -134,9 +134,9 @@ test("a real model takes a goal, gives it to its team, and closes it out", async
   await say(
     page,
     "Our workspace has a Standards note. I want a short \"How we write\" one-pager " +
-      "for new teammates based on it, saved into the workspace, and then checked by " +
+      "for new agents based on it, saved into the workspace, and then checked by " +
       "somebody else for clarity. Break that into two pieces of work, give each one " +
-      "to whichever teammate should own it, and do not do the work yourself in this " +
+      "to whichever agent should own it, and do not do the work yourself in this " +
       "message.",
   );
 

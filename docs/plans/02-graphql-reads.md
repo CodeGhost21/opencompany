@@ -296,5 +296,5 @@ helper.
 
 Four-case suite per query + SDL snapshot per
 [09-verification.md §2](09-verification.md). Exit: every field above resolves
-against `companies/agentic_marketing_agency` in the e2e harness; GraphiQL
+against `companies/marketing_agency` in the e2e harness; GraphiQL
 spot-check documented in the PR.

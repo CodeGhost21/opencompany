@@ -11,7 +11,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = resolve(here, "../../public");
 
 describe("avatarFor", () => {
-  it("gives the same teammate the same face every time", () => {
+  it("gives the same agent the same face every time", () => {
     // The whole reason this is a hash and not a random draw: nothing is
     // persisted, so a reload must not reshuffle the roster's faces.
     const first = avatarFor("agent_research_lead");
@@ -29,7 +29,7 @@ describe("avatarFor", () => {
     expect(distinct.size).toBeGreaterThan(5);
   });
 
-  it("seeds on the id, so renaming a teammate keeps its face", () => {
+  it("seeds on the id, so renaming an agent keeps its face", () => {
     // The model calls `avatarFor(dto.id || name)` for exactly this reason.
     expect(avatarFor("agent_maya")).toBe(avatarFor("agent_maya"));
     expect(avatarFor("agent_maya")).not.toBe(avatarFor("agent_maya_renamed"));

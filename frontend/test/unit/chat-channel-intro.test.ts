@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { staticAvatarSrc } from "@/lib/avatar";
 import { avatarFor, type TeamMember } from "@/lib/team";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
-import type { Channel } from "@/views/chat/model";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
+import type { Channel } from "@/views/room/model";
 
 /**
  * What the channel intro draws above a channel's name (issue #1327).
@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe("the channel intro's mark", () => {
-  it("draws a DM's teammate, face and all", () => {
+  it("draws a DM's agent, face and all", () => {
     render({
       id: "dm:agent_ada",
       name: "Ada",

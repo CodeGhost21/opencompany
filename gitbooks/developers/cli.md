@@ -17,7 +17,7 @@ opencompany <command> [options]
 Run the Axum HTTP host.
 
 ```sh
-opencompany serve --company companies/agentic_marketing_agency
+opencompany serve --company companies/marketing_agency
 ```
 
 | Flag | Purpose |
@@ -34,7 +34,7 @@ Validate a company manifest and print its effective configuration in plain
 language.
 
 ```sh
-opencompany check companies/agentic_marketing_agency
+opencompany check companies/marketing_agency
 ```
 
 Takes a manifest file or a directory containing `company.toml` / `agents.toml`
@@ -46,7 +46,7 @@ Report the effective runtime configuration, which layer set each value, and
 what's missing per optional capability.
 
 ```sh
-opencompany doctor --company companies/agentic_marketing_agency
+opencompany doctor --company companies/marketing_agency
 opencompany doctor --json
 ```
 

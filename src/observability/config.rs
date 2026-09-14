@@ -49,8 +49,8 @@ pub const TRACES_SAMPLE_RATE_ENV: &str = "OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE"
 
 /// A Sentry DSN.
 ///
-/// A newtype rather than a bare `String`, on the `analytics::ProjectToken`
-/// precedent and for the same reason: it must never be printed, logged or
+/// A newtype rather than a bare `String`, on the
+/// `analytics::ClientCredentials` precedent and for the same reason: it must never be printed, logged or
 /// serialized by accident. It derives **neither** `Debug` nor `Serialize` — the
 /// hand-written `Debug` redacts — because `serde_json::to_value(&some_config)`
 /// is exactly how a credential reaches a payload.

@@ -74,12 +74,12 @@ async function mockCompanySwitchApi(page: Page) {
   ];
   const workflows = {
     acme: [
-      { id: "shared-workflow", name: "Acme shared workflow" },
-      { id: "acme-default", name: "Acme default workflow" },
+      { id: "shared-workflow", name: "Acme shared automation" },
+      { id: "acme-default", name: "Acme default automation" },
     ],
     other: [
-      { id: "other-default", name: "Other default workflow" },
-      { id: "shared-workflow", name: "Other shared workflow" },
+      { id: "other-default", name: "Other default automation" },
+      { id: "shared-workflow", name: "Other shared automation" },
     ],
   };
 
@@ -128,7 +128,7 @@ async function mockCompanySwitchApi(page: Page) {
   });
 }
 
-test("workflows tab selection is preserved across tab switches (#864)", async ({ page, request }) => {
+test("automations tab selection is preserved across tab switches (#864)", async ({ page, request }) => {
   const stamp = Date.now();
   const firstId = `e2e-864-first-${stamp}`;
   const secondId = `e2e-864-second-${stamp}`;
@@ -146,12 +146,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await openWorkflow(page, secondName);
     await expect(page).toHaveURL(new RegExp(`#/workflows/${secondId}$`));
 
-    // Room and Flows: two section rows, both reachable in one click from
+    // Room and Automations: two section rows, both reachable in one click from
     // anywhere. Workspace is a child under Company now, so stepping away
     // through it would take two clicks and test the sidebar rather than the
     // remembered workflow this spec is about.
     await page.getByRole("button", { name: "Room", exact: true }).click();
-    await page.getByRole("button", { name: "Flows", exact: true }).click();
+    await page.getByRole("button", { name: "Automations", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(secondName);
 
     await page.goto(`/#/workflows/${firstId}`);
@@ -160,12 +160,12 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     // is the flake, not the console.
     await expect(openWorkflowName(page)).toHaveText(firstName, { timeout: 30_000 });
 
-    // Room and Flows: two section rows, both reachable in one click from
+    // Room and Automations: two section rows, both reachable in one click from
     // anywhere. Workspace is a child under Company now, so stepping away
     // through it would take two clicks and test the sidebar rather than the
     // remembered workflow this spec is about.
     await page.getByRole("button", { name: "Room", exact: true }).click();
-    await page.getByRole("button", { name: "Flows", exact: true }).click();
+    await page.getByRole("button", { name: "Automations", exact: true }).click();
     await expect(openWorkflowName(page)).toHaveText(firstName);
   } finally {
     await deleteWorkflow(request, firstId);
@@ -173,14 +173,27 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
   }
 });
 
-test("a company switch does not reuse the previous company's workflow route (#864)", async ({
+// Skipped, not deleted: #864 is still a real guarantee and this is still the
+// spec for it. What is gone is any way to *reach* the switch.
+// `src/product-scope.ts` sets `COMPANY_SWITCHING_HIDDEN`, which makes
+// `showCompanies` false in `host-switcher.tsx`; with `HOSTS_HIDDEN` alongside it
+// the trigger has nothing to open and falls to its nameplate branch. So
+// `getByTestId("host-switcher").click()` opens no menu and the "Other" item this
+// drives never exists — the 60s timeout it failed with, not a routing regression.
+//
+// Driving the switch another way would assert a path no operator can take.
+// Skipped at the declaration rather than on the flag because `test/e2e` cannot
+// import `@/product-scope`: this project supplies no `@/*` alias, deliberately
+// (see `tsconfig.e2e.json`). When company switching comes back, clear the flag
+// and drop this `.skip`.
+test.skip("a company switch does not reuse the previous company's automation route (#864)", async ({
   page,
 }) => {
   await mockCompanySwitchApi(page);
   await page.goto("/#/workflows/shared-workflow");
 
   await page.locator('[role="button"]').filter({ hasText: "Acme" }).click();
-  await expect(openWorkflowName(page)).toHaveText("Acme shared workflow", {
+  await expect(openWorkflowName(page)).toHaveText("Acme shared automation", {
     timeout: 30_000,
   });
 
@@ -205,5 +218,5 @@ test("a company switch does not reuse the previous company's workflow route (#86
   await expect(openWorkflowName(page)).toHaveCount(0);
   // `other` has a `shared-workflow` of its own, so a view that merely kept the
   // id would have resolved to a real graph and looked correct.
-  await expect(page.getByText("Other shared workflow", { exact: true })).toBeVisible();
+  await expect(page.getByText("Other shared automation", { exact: true })).toBeVisible();
 });

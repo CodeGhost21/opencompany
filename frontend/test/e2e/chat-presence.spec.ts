@@ -91,7 +91,7 @@ async function openChannel(page: Page, channelId: string) {
 const pane = (page: Page) => page.getByRole("complementary").last();
 
 async function openPane(page: Page) {
-  const toggle = page.getByRole("button", { name: /teammates$/i });
+  const toggle = page.getByRole("button", { name: /agents$/i });
   if ((await toggle.getAttribute("aria-pressed")) !== "true") await toggle.click();
   await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
 }
@@ -148,13 +148,13 @@ test("an away status renders distinctly from online", async ({ page }) => {
 });
 
 /** Teammates are not people: an agent has no session and no machine to be at. */
-test("a teammate row carries no presence dot", async ({ page }) => {
+test("an agent row carries no presence dot", async ({ page }) => {
   await mockApi(page, { seed: [{ userId: "u-ada", status: "online", atMillis: Date.now() }] });
   await openChannel(page, "engineering");
   await openPane(page);
 
-  const teammate = pane(page).getByText("Rae", { exact: false }).first();
-  await expect(teammate).toBeVisible();
+  const agent = pane(page).getByText("Rae", { exact: false }).first();
+  await expect(agent).toBeVisible();
   // Exactly as many dots as there are people rows — none of them on a teammate.
   const dots = await pane(page).getByTestId("presence-dot").count();
   const rows = await pane(page).getByTestId("person-row").count();

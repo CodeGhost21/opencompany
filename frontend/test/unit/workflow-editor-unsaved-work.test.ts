@@ -181,7 +181,7 @@ afterAll(() => {
 });
 
 describe("unsaved graph edits are not thrown away silently (#1006)", () => {
-  it("names the workflow being edited, so a swapped selection is visible", async () => {
+  it("names the automation being edited, so a swapped selection is visible", async () => {
     await open(stubClient(), () => {});
     expect(document.body.textContent).toContain("Weekly report");
   });

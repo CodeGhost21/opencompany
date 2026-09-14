@@ -256,6 +256,28 @@ mod tests {
     ///
     /// `Account::connect` builds a client and does no I/O, so the dummy
     /// credential below never leaves the process.
+    /// The doc comment on [`hosting_tools`] claims an unusable stored
+    /// credential "wires nothing and warns rather than failing the build" —
+    /// `Account::connect` returning `Err` must not leave a partial belt or
+    /// bubble a panic, it must fail closed to an empty `Vec`. `from_str` on an
+    /// unrecognised provider slug fails before any I/O, so this needs no
+    /// network and no vendor client.
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn an_unusable_stored_credential_wires_no_hosting_tools() {
+        let config = TenantHosting {
+            provider: "not-a-real-hosting-provider".to_string(),
+            api_key: "whatever".to_string(),
+            team: None,
+        };
+        let wired = hosting_tools(&config, std::path::PathBuf::from("/tmp"));
+        assert!(
+            wired.is_empty(),
+            "an unrecognised provider must wire zero hosting tools, got: {:?}",
+            wired.iter().map(|t| t.name()).collect::<Vec<_>>()
+        );
+    }
+
     #[cfg(feature = "openhuman")]
     #[test]
     fn every_wired_hosting_tool_is_declared() {

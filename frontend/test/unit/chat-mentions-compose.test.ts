@@ -16,7 +16,7 @@ import {
   utf8ByteLength,
   type Mention,
   type Mentionable,
-} from "@/views/chat/mentions";
+} from "@/views/room/mentions";
 
 /**
  * The composer half of @-mentions.
@@ -623,7 +623,7 @@ describe("mentionablesFor", () => {
     everyone: { label: "everyone", aliases: ["everyone", "channel", "here"] },
   };
 
-  it("marks only the teammates on this channel", () => {
+  it("marks only the agents on this channel", () => {
     const rows = mentionablesFor(directory, ["engineer"]);
     const byLabel = Object.fromEntries(rows.map((r) => [r.label, r]));
     expect(byLabel.Ada.inChannel).toBe(true);
@@ -632,7 +632,7 @@ describe("mentionablesFor", () => {
     expect(byLabel["Jane Doe"].inChannel).toBeUndefined();
   });
 
-  it("reaches a teammate by id or by display name", () => {
+  it("reaches an agent by id or by display name", () => {
     const rows = mentionablesFor(directory, []);
     expect(rankMentionables(rows, "ada")[0].label).toBe("Ada");
   });
@@ -660,9 +660,9 @@ describe("mentionablesFor", () => {
     expect(broadcast?.aliases).toEqual(["all"]);
   });
 
-  it("says how many teammates a desk would address", () => {
+  it("says how many agents a desk would address", () => {
     const rows = mentionablesFor(directory, []);
-    expect(rows.find((r) => r.target.kind === "desk")?.hint).toContain("1 teammate");
+    expect(rows.find((r) => r.target.kind === "desk")?.hint).toContain("1 agent");
   });
 
   it("excludes the current user from the picker when selfId is provided", () => {
@@ -736,7 +736,7 @@ describe("mentionsOutsideChannel", () => {
     offset: 10,
   };
 
-  it("names a teammate who cannot see this channel", () => {
+  it("names an agent who cannot see this channel", () => {
     expect(mentionsOutsideChannel([onChannel, offChannel], ["engineer"])).toEqual([
       "ceo",
     ]);
@@ -755,7 +755,7 @@ describe("mentionsOutsideChannel", () => {
     expect(mentionsOutsideChannel([person], ["engineer"])).toEqual([]);
   });
 
-  it("deduplicates when the same teammate is mentioned twice", () => {
+  it("deduplicates when the same agent is mentioned twice", () => {
     const dup: Mention = {
       target: { kind: "agent", id: "ceo" },
       text: "@ceo",

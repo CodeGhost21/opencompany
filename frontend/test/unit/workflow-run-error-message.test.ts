@@ -11,7 +11,7 @@ describe("stripEnginePrefixes", () => {
     ).toBe("the writer agent has no model");
   });
 
-  it("also strips a workflow kind when it is the only engine prefix", () => {
+  it("also strips an automation kind when it is the only engine prefix", () => {
     expect(stripEnginePrefixes("http_request: the remote service refused the request")).toBe(
       "the remote service refused the request",
     );

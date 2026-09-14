@@ -505,6 +505,7 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -873,6 +874,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Registers a second company, `beta`, in `state`'s existing registry.
+    async fn add_second_company(state: &AppState, home: &std::path::Path) -> CompanyId {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("beta");
+        store
+            .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                overlay_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        state
+            .registry()
+            .insert(id.clone(), std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(state, "beta").await;
+        id
+    }
+
+    /// AUTH-axis: the doc comment right above (`an_unknown_run_is_not_found`)
+    /// claims a run id minted in another company is what the company-scoped
+    /// store read keeps out, but that test only ever tries an id nobody
+    /// minted anywhere. This is the case it describes but never drove: a run
+    /// that genuinely exists, in a genuinely different company, must be
+    /// invisible from both the list and the detail route.
+    #[tokio::test]
+    async fn a_run_minted_in_another_company_is_invisible_from_this_one() {
+        let dir = home();
+        let (state, _acme) = state_with_company(dir.path()).await;
+        let beta = add_second_company(&state, dir.path()).await;
+
+        let beta_runs = runs_of(&state, &beta);
+        mint(&beta_runs, &beta, "beta-run-1", "beta-card").await;
+
+        let list = json_body(
+            router(state.clone())
+                .oneshot(request("/api/v1/companies/acme/runs"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            list.as_array().expect("array").len(),
+            0,
+            "a run minted in another company must not appear on this one's list: {list}"
+        );
+
+        let response = router(state)
+            .oneshot(request("/api/v1/companies/acme/runs/beta-run-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "a run id that resolves in another company must 404 here, not leak the record"
+        );
     }
 
     /// `stepCount` is a high-water ordinal, capped — so the wire says when the

@@ -61,7 +61,7 @@ test.describe("sidebar toggle reachability", () => {
     const trigger = page.getByRole("button", { name: "Toggle sidebar" });
     await expect(trigger).toBeInViewport();
     await trigger.click();
-    await expect(page.getByText("Flows", { exact: true })).toBeVisible();
+    await expect(page.getByText("Automations", { exact: true })).toBeVisible();
   });
 
   test("the seam control is desktop-only, so the sheet has exactly one way back", async ({
@@ -121,12 +121,16 @@ test.describe("sidebar toggle reachability", () => {
     await expect(sheet).toBeVisible();
     await expect(sheet).toHaveAttribute("aria-modal", "true");
 
-    // Work is a child row under Company, so it is on screen because the sheet
-    // opened on a Company-section address. That is the pattern under test as
-    // much as the sheet is: picking a destination inside an expanded section
-    // still closes the sheet behind it.
-    await sheet.getByRole("button", { name: "Work", exact: true }).click();
-    await expect(page).toHaveURL(/#\/ledgers\/tasks$/);
+    // A channel, not a section's child row. Since #2130 the sheet holds the four
+    // sections and the Room rail — a section's own pages are a content rail, so
+    // "Work" is not in here to pick any more. The channel list is the thing this
+    // sheet now has that nothing else does, and it is the harder case: it is
+    // portalled in from `RoomView` rather than rendered by the sidebar, so a
+    // dismiss that only fired for the sidebar's own rows would miss it (which is
+    // what `room-rail.tsx`'s `dismiss` exists for). Picking one still closes the
+    // sheet behind it, which is the pattern under test.
+    await sheet.getByRole("button", { name: "general", exact: true }).click();
+    await expect(page).toHaveURL(/#\/chat\//);
     await expect(sheet).toBeHidden();
   });
 
@@ -192,7 +196,7 @@ test.describe("sidebar toggle reachability", () => {
 
     // Still reachable and still functional in its own right.
     await trigger.click();
-    await expect(page.getByText("Flows", { exact: true })).toBeVisible();
+    await expect(page.getByText("Automations", { exact: true })).toBeVisible();
   });
 
   test("the inline sidebar's collapse control is a named, keyboard-operable control on the seam", async ({
@@ -213,15 +217,15 @@ test.describe("sidebar toggle reachability", () => {
     // Not in the panel it hides — which is the whole of the move. It used to
     // live in the sidebar's own header, so collapsing the column took the
     // control with it and the rail had to keep a copy standing. It now renders
-    // from `app-shell.tsx` inside `SidebarInset`, on the content card's leading
-    // seam, and there is exactly one of it in either state.
+    // from `app-shell.tsx`'s `WindowTitleBar` (`sidebarToggle` slot), and there
+    // is exactly one of it in either state.
     await expect(
       sidebar.getByTestId("sidebar-collapse"),
       "the collapse control is not inside the panel it collapses",
     ).toHaveCount(0);
     await expect(
-      page.locator("[data-slot=sidebar-inset]").getByTestId("sidebar-collapse"),
-      "…it belongs to the content side of the seam",
+      page.getByTestId("window-title-bar").getByTestId("sidebar-collapse"),
+      "…it belongs to the title bar's chrome",
     ).toHaveCount(1);
     await expect(
       page.locator("[data-slot=sidebar-content]").getByTestId("sidebar-collapse"),
@@ -229,29 +233,36 @@ test.describe("sidebar toggle reachability", () => {
     ).toHaveCount(0);
     await expect(page.getByTestId("sidebar-collapse")).toHaveCount(1);
 
-    // It also left the utility bar it was gathered onto, which now holds the
-    // three controls that ARE destinations (Settings, Feedback, Discord) and
-    // nothing that only changes the chrome.
-    await expect(
-      page.getByTestId("sidebar-utilities").getByTestId("sidebar-collapse"),
-    ).toHaveCount(0);
+    // It also left the sidebar footer it used to be gathered onto with
+    // Settings, Feedback and Discord — that footer is gone entirely now
+    // (`app-shell.tsx`: "No footer."), and Settings/Discord are their own
+    // title-bar glyphs (`title-bar-utilities.tsx`), reachable independently of
+    // this control rather than bundled beside it in a shared container.
 
-    // Centred ON the card's leading border rather than sitting inside the card
-    // or inside the rail: `left-(--frame-inset)` puts it at that edge and
-    // `-translate-x-1/2` straddles it. This is the assertion that stops it
-    // drifting back into the page, where it read as part of the content.
-    const seam = async () => {
-      const card = await page.getByTestId("content-surface").boundingBox();
+    // Beside the switcher at the title row's leading end (`window-title-bar.tsx`)
+    // rather than tracking the content card's edge the way the old
+    // `SidebarInset`-anchored control did — chrome now, not part of the seam
+    // it operates on. What has to hold is that it is fixed there regardless of
+    // sidebar state, not that it moves with a seam it no longer sits on.
+    const position = async () => {
       const box = await page.getByTestId("sidebar-collapse").boundingBox();
-      expect(card, "the content card should have a box").not.toBeNull();
       expect(box, "the collapse control should have a box").not.toBeNull();
-      return { centre: box!.x + box!.width / 2, edge: card!.x };
+      return box!;
     };
-    const expanded = await seam();
+    const expandedBox = await position();
+    const titleBar = await page.getByTestId("window-title-bar").boundingBox();
+    expect(titleBar, "the title bar should have a box").not.toBeNull();
+    // Within the row's own vertical bounds on both edges, not merely above
+    // its bottom -- a control that started above the row's top would have
+    // passed a bottom-only check just as happily.
     expect(
-      Math.abs(expanded.centre - expanded.edge),
-      "the control straddles the content card's leading border",
-    ).toBeLessThanOrEqual(1);
+      expandedBox.y,
+      "the control does not start above the title row",
+    ).toBeGreaterThanOrEqual(titleBar!.y);
+    expect(
+      expandedBox.y + expandedBox.height,
+      "the control sits inside the title row's chrome, not below it",
+    ).toBeLessThanOrEqual(titleBar!.y + titleBar!.height);
 
     // Operable from the keyboard, not just under a pointer. An icon-only
     // button is exactly the kind that gets rebuilt as a `div` with an
@@ -277,22 +288,17 @@ test.describe("sidebar toggle reachability", () => {
       )
       .toBe(RAIL_WIDTH);
 
-    // The seam moved left with the column; the control moved with the seam and
-    // is still on it, still whole, and still on screen.
-    const collapsed = await seam();
+    // Fixed chrome, not part of the column it operates on: the rail settling
+    // at a different width must not move the control that toggles it.
+    const collapsedBox = await position();
     expect(
-      Math.abs(collapsed.centre - collapsed.edge),
-      "…and it is still on that border once the column is a rail",
+      Math.abs(collapsedBox.x - expandedBox.x),
+      "the control's position does not move when the column it toggles does",
     ).toBeLessThanOrEqual(1);
     expect(
-      collapsed.edge,
-      "the seam it rides tracks the rail rather than staying where the column was",
-    ).toBeLessThan(expanded.edge);
-    const railBox = await expand.boundingBox();
-    expect(railBox, "the collapsed control should have a box").not.toBeNull();
-    expect(railBox!.x, "…and no part of it hangs off the left of the window").toBeGreaterThanOrEqual(
-      0,
-    );
+      collapsedBox.x,
+      "…and no part of it hangs off the left of the window",
+    ).toBeGreaterThanOrEqual(0);
 
     // And back, from the keyboard, to where it started.
     await expand.focus();

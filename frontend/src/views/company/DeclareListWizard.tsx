@@ -169,7 +169,7 @@ export function DeclareListWizard({
             />
             <p className="text-xs text-muted-foreground">
               A sentence or two. This shows up wherever the list explains
-              itself — including to any teammate who reads it.
+              itself — including to any agent who reads it.
             </p>
           </div>
         )}

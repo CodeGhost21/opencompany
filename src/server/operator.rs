@@ -49,7 +49,7 @@ use crate::server::chat_history::{
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::ops::language::{self, DEFAULT_DESK};
-use crate::server::ops::{ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 use crate::server::platform_auth::{CompanyAuth, authorize_address, refuse_until_password_changed};
 use crate::server::provision::{emit_cycle_webhooks, emit_feedback_webhook};
 
@@ -71,14 +71,6 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_scoped),
         )
         .route("/api/v1/companies/{id}/approvals", get(list_approvals))
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}",
-            post(resolve_approval),
-        )
-        .route(
-            "/api/v1/companies/{id}/approvals/{aid}/extend",
-            post(extend_approval),
-        )
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
@@ -91,14 +83,12 @@ pub fn router() -> Router<AppState> {
             post(react_to_message_single),
         )
         .route("/api/v1/company/approvals", get(list_approvals_single))
-        .route(
-            "/api/v1/company/approvals/{aid}/extend",
-            post(extend_approval_single),
-        )
-        .route(
-            "/api/v1/company/approvals/{aid}",
-            post(resolve_approval_single),
-        )
+        // Deciding an approval, and extending the deadline that would otherwise
+        // decide it by default, settle an effect for the whole company, so both
+        // demand authority over it rather than membership in it. Registered
+        // through `scoped` so the two address forms cannot drift apart.
+        .merge(scoped("/approvals/{aid}", post(resolve_approval)))
+        .merge(scoped("/approvals/{aid}/extend", post(extend_approval)))
         // The company's desks (group chats), under both scope forms — the
         // console builds its chat threads from these (issue #53). `POST` creates
         // a desk through the operator overlay (the manifest is never rewritten).
@@ -112,6 +102,13 @@ pub fn router() -> Router<AppState> {
         .merge(scoped(
             "/desks/{desk_id}/members/{agent_id}",
             delete(remove_desk_member),
+        ))
+        // A desk's move grammar: read the table in force, install or replace it,
+        // or drop the override and fall back to the manifest's own block.
+        // Registered under both scope forms.
+        .merge(scoped(
+            "/desks/{desk_id}/hive",
+            get(desk_hive).put(set_desk_hive).delete(reset_desk_hive),
         ))
         // Desk member ordering / hierarchy (issue #131): set the operator's
         // explicit member order for a desk. Registered under both scope forms.
@@ -196,27 +193,40 @@ async fn list_desks(scope: ScopedCompany) -> Result<Json<Vec<DeskDto>>, crate::s
         .map(|record| {
             // Manifest (blueprint) desks first, then operator-created overlay
             // desks — the same order the harness `desk_lead` resolver searches.
-            let manifest_desks = record.manifest.group_chats.iter().map(|chat| {
-                let members = record.effective_desk_members(&chat.id);
-                // The overlay subset: effective members not declared in the
-                // manifest for this desk.
-                let overlay_members = members
-                    .iter()
-                    .filter(|m| !chat.members.contains(m))
-                    .cloned()
-                    .collect();
-                DeskDto {
-                    id: chat.id.clone(),
-                    name: chat.name.clone(),
-                    description: chat.description.clone(),
-                    members,
-                    overlay_members,
-                    // Manifest desks are always lead-routed — the blueprint
-                    // syntax carries no responder field (issue #1835).
-                    responder: ResponderMode::Lead,
-                    overlay_created: false,
-                }
-            });
+            // The general desk is not listed beside General — it IS General.
+            // `[company].general_desk` names the desk the company's own line
+            // resolves to, so projecting it as its own channel puts the same
+            // room in the sidebar twice: once as the main thread everybody
+            // already has, once under whatever id the manifest gave it. Same
+            // reasoning, and same `is_general_chat` shape, as the overlay-desk
+            // exclusion below.
+            let general_desk = record.manifest.company.general_desk.clone();
+            let manifest_desks = record
+                .manifest
+                .group_chats
+                .iter()
+                .filter(move |chat| general_desk.as_deref() != Some(chat.id.as_str()))
+                .map(|chat| {
+                    let members = record.effective_desk_members(&chat.id);
+                    // The overlay subset: effective members not declared in the
+                    // manifest for this desk.
+                    let overlay_members = members
+                        .iter()
+                        .filter(|m| !chat.members.contains(m))
+                        .cloned()
+                        .collect();
+                    DeskDto {
+                        id: chat.id.clone(),
+                        name: chat.name.clone(),
+                        description: chat.description.clone(),
+                        members,
+                        overlay_members,
+                        // Manifest desks are always lead-routed — the blueprint
+                        // syntax carries no responder field (issue #1835).
+                        responder: ResponderMode::Lead,
+                        overlay_created: false,
+                    }
+                });
             // An overlay desk whose own **id** is a General spelling is not
             // projected (issue #1781 review, Codex P2) — the grandfathered
             // shape `POST .../desks` accepted `general` / `main` ids under
@@ -449,11 +459,312 @@ async fn add_desk_member(
         ))));
     }
     record.overlay_desk_members.push(OverlayDeskMember {
-        desk_id,
-        agent_id: body.agent_id,
+        desk_id: desk_id.clone(),
+        agent_id: body.agent_id.clone(),
     });
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added: vec![body.agent_id],
+            removed: Vec::new(),
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Append a structural audit row, best-effort.
+///
+/// Best-effort on purpose, and it is the same posture the episode driver takes
+/// with its closing report: the change is already durable on the company record
+/// by the time this runs, so a journal that refuses the row must not turn a
+/// completed write into a failed request. The row is the audit trail, not the
+/// change itself.
+async fn journal_structural(scope: &ScopedCompany, event: CompanyEvent) {
+    if let Err(err) = scope.runtime.events().append(scope.id(), event).await {
+        tracing::warn!(error = %err, "structural audit row could not be journaled");
+    }
+}
+
+/// One desk's move grammar, as the console renders and edits it.
+///
+/// Two shapes in one payload, and the split is the point:
+///
+/// - `declared` is the block **as authored** — every field an `Option` whose
+///   `None` means "not said". It is what a `PUT` round-trips.
+/// - `effective` is what the runtime will actually use, with every default
+///   resolved against the current membership.
+///
+/// One number could not carry both. `turn_budget = 9` on a three-seat desk is
+/// either an operator's decision or the derived `3 x members`, and the two
+/// behave differently the moment somebody joins — so a console showing a single
+/// figure cannot say whether adding a seat will change it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeskHiveDto {
+    desk_id: String,
+    /// `"overlay"` when an operator installed this, `"manifest"` when the
+    /// blueprint declares it, `"default"` when neither does.
+    source: &'static str,
+    /// Whether an episode would actually open right now.
+    ///
+    /// A one-member desk with `enabled = true` is still `false`: the flag says
+    /// what the operator wants, not what the desk is able to do, and a console
+    /// that showed "deliberates" for a desk of one would be describing a room
+    /// that cannot exist.
+    deliberates: bool,
+    /// The block as authored. Snake_case, deliberately: this field **is** the
+    /// manifest block, the console's editor edits it directly, and a camelCase
+    /// twin would be a second shape to keep in step with the TOML.
+    declared: crate::hivemind::HiveConfig,
+    effective: EffectiveHiveDto,
+    /// Every move a table may name, and the three no table can take away.
+    move_kinds: &'static [&'static str],
+    ungated_kinds: &'static [&'static str],
+    seats: Vec<HiveSeatDto>,
+    /// How many seats may deposit a distinct supporter, and whether that clears
+    /// the effective quorum.
+    ///
+    /// `!propose` counts here, because in the fold a proposal is already its own
+    /// author's support. When `reaches_quorum` is false the desk answers with a
+    /// single responder however much the room agrees — `desk_episode` declines —
+    /// and the console has to be able to say so.
+    eligible_supporters: u32,
+    reaches_quorum: bool,
+}
+
+/// What the runtime will use, with every default resolved.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectiveHiveDto {
+    turn_budget: u32,
+    quorum: u32,
+    blind_round: bool,
+    dominance_cap: u32,
+    repetition_cap: u32,
+    require_grounded: bool,
+    require_evidential: bool,
+    refutation_cap: Option<u32>,
+}
+
+/// One seat, and the moves it may open a line with.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HiveSeatDto {
+    agent_id: String,
+    label: String,
+    role: String,
+    /// Already in `MOVE_KINDS` order and already unioned with the ungated three,
+    /// so the console renders this verbatim rather than re-deriving it.
+    moves: Vec<&'static str>,
+    /// Whether the table governs this seat at all.
+    ///
+    /// Invisible from `moves` alone — "named with every kind" and "not named"
+    /// produce the same list, and only one of them is a decision somebody made.
+    governed: bool,
+}
+
+/// Build the payload for one desk.
+fn desk_hive_dto(record: &crate::ports::CompanyRecord, desk_id: &str) -> DeskHiveDto {
+    let config = record.effective_desk_hive(desk_id);
+    let members: Vec<String> = record
+        .effective_desk_members(desk_id)
+        .into_iter()
+        .filter(|id| record.is_roster_agent(id))
+        .collect();
+    let policy = crate::hivemind::HivePolicy::from_config(&config, members.len()).episode;
+    let eligible = members
+        .iter()
+        .filter(|id| config.may(id, "support") || config.may(id, "propose"))
+        .count();
+    let seats = members
+        .iter()
+        .map(|id| {
+            let agent = record.effective_agents().into_iter().find(|a| &a.id == id);
+            HiveSeatDto {
+                agent_id: id.clone(),
+                label: agent
+                    .as_ref()
+                    .and_then(|a| a.name.clone())
+                    .unwrap_or_else(|| id.clone()),
+                role: agent.map(|a| a.role.clone()).unwrap_or_default(),
+                moves: config.moves_for(id),
+                governed: config.moves.get(id).is_some_and(|kinds| !kinds.is_empty()),
+            }
+        })
+        .collect();
+    let source = if record.desk_hive_is_installed(desk_id) {
+        "overlay"
+    } else if record
+        .manifest
+        .group_chats
+        .iter()
+        .any(|group| group.id == desk_id)
+    {
+        "manifest"
+    } else {
+        "default"
+    };
+    DeskHiveDto {
+        desk_id: desk_id.to_string(),
+        source,
+        deliberates: config.deliberates(members.len()),
+        effective: EffectiveHiveDto {
+            turn_budget: policy.turn_budget,
+            quorum: policy.quorum.threshold,
+            blind_round: policy.blind_round,
+            dominance_cap: policy.dominance_cap,
+            repetition_cap: policy.repetition_cap,
+            require_grounded: policy.quorum.require_grounded,
+            require_evidential: policy.quorum.require_evidential,
+            refutation_cap: policy.quorum.refutation_cap,
+        },
+        declared: config,
+        move_kinds: crate::hivemind::MOVE_KINDS,
+        ungated_kinds: crate::hivemind::UNGATED_KINDS,
+        eligible_supporters: u32::try_from(eligible).unwrap_or(u32::MAX),
+        reaches_quorum: u32::try_from(eligible)
+            .is_ok_and(|eligible| eligible >= policy.quorum.threshold),
+        seats,
+    }
+}
+
+/// `GET {scope}/desks/{desk_id}/hive` — the move grammar in force on a desk.
+async fn desk_hive(
+    scope: ScopedCompany,
+    Path(DeskPath { desk_id }): Path<DeskPath>,
+) -> Result<Json<DeskHiveDto>, ApiError> {
+    let record = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
+            "desk {desk_id}"
+        ))));
+    }
+    Ok(Json(desk_hive_dto(&record, &desk_id)))
+}
+
+/// `PUT {scope}/desks/{desk_id}/hive` — install or replace a desk's move
+/// grammar, without rewriting the version-controlled `[[group_chat]]` block.
+///
+/// The body is a bare `HiveConfig` — the manifest block verbatim. Unknown fields
+/// are ignored rather than refused, so a newer console against an older server
+/// degrades instead of 400-ing.
+///
+/// **Validated against the desk's *effective* roster**, not its declared one, so
+/// overlay additions and Team-API retirements are what the table is judged by.
+/// That can legitimately refuse a config the manifest would have accepted — a
+/// table valid when `company.toml` was written stops being valid once a seat
+/// retires — which is why the message names the desk.
+///
+/// An episode already running is unaffected: `EpisodeDriver` holds its
+/// `HiveDesk` as a snapshot for the episode's life, so a room cannot have its
+/// quorum moved underneath it mid-argument. The change takes effect on the next
+/// message that opens one.
+async fn set_desk_hive(
+    scope: ScopedCompany,
+    Path(DeskPath { desk_id }): Path<DeskPath>,
+    Json(body): Json<crate::hivemind::HiveConfig>,
+) -> Result<Json<DeskHiveDto>, ApiError> {
+    let _guard = scope.runtime.serial.lock().await;
+    // The same load-modify-save serialization every desk write takes; see
+    // `add_desk_member` for why `serial` alone is not enough.
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
+    let mut record = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    if is_general_channel(&record, &desk_id) {
+        return Err(ApiError(OpenCompanyError::Conflict(
+            language::GENERAL_CHANNEL_IMMUTABLE.to_string(),
+        )));
+    }
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
+            "desk {desk_id}"
+        ))));
+    }
+    let members: Vec<String> = record
+        .effective_desk_members(&desk_id)
+        .into_iter()
+        .filter(|id| record.is_roster_agent(id))
+        .collect();
+    // The manifest's own checks, on the manifest's own words — one
+    // implementation, so the runtime cannot accept what a `company.toml` with
+    // the same block would be refused for.
+    let problems = crate::company::hive_problems(&format!("desk `{desk_id}`"), &members, &body);
+    if !problems.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            problems.join(" "),
+        )));
+    }
+    record.upsert_desk_hive(crate::ports::types::DeskHiveOverride {
+        desk_id: desk_id.clone(),
+        hive: body,
+    });
+    scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskHiveConfigured {
+            desk_id: desk_id.clone(),
+            reset: false,
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
+    // The derived result of what was just installed, so the console renders the
+    // effective numbers without a second round trip.
+    Ok(Json(desk_hive_dto(&record, &desk_id)))
+}
+
+/// `DELETE {scope}/desks/{desk_id}/hive` — drop the installed grammar and fall
+/// back to whatever the manifest declares.
+///
+/// Because the override is a sibling collection rather than a merged field,
+/// "restore the blueprint's version" is a `retain` and nothing else.
+async fn reset_desk_hive(
+    scope: ScopedCompany,
+    Path(DeskPath { desk_id }): Path<DeskPath>,
+) -> Result<Json<DeskHiveDto>, ApiError> {
+    let _guard = scope.runtime.serial.lock().await;
+    let write_lock = company_write_lock(scope.id());
+    let _write_guard = write_lock.lock().await;
+    let mut record = scope
+        .runtime
+        .store()
+        .load(scope.id())
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
+            "desk {desk_id}"
+        ))));
+    }
+    // A reset with nothing installed is not an error: the caller asked for the
+    // manifest's grammar and the manifest's grammar is what they now have.
+    if record.clear_desk_hive(&desk_id) {
+        scope.runtime.store().save(&record).await?;
+        journal_structural(
+            &scope,
+            CompanyEvent::DeskHiveConfigured {
+                desk_id: desk_id.clone(),
+                reset: true,
+                by: scope.actor.clone(),
+            },
+        )
+        .await;
+    }
+    Ok(Json(desk_hive_dto(&record, &desk_id)))
 }
 
 /// `PUT {scope}/desks/{desk_id}/order` — set the operator's explicit member
@@ -616,6 +927,16 @@ async fn remove_desk_member(
         .overlay_desk_order
         .retain(|o| !(o.desk_id == desk_id && o.ordered.is_empty()));
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added: Vec::new(),
+            removed: vec![agent_id],
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -834,9 +1155,22 @@ async fn create_desk(
         description: description.clone(),
         members: members.clone(),
         responder: body.responder,
+        // A desk created here starts with no hive block of its own and takes
+        // the defaults, exactly as a manifest desk that declares none does.
+        hive: crate::hivemind::HiveConfig::default(),
     };
     record.overlay_desks.push(desk);
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskCreated {
+            desk_id: id.clone(),
+            name: name.clone(),
+            members: members.clone(),
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
 
     let effective = record.effective_desk_members(&id);
     Ok((
@@ -916,7 +1250,20 @@ async fn delete_desk(
     }
     // Drop any member-overlay rows that targeted the now-deleted desk.
     record.overlay_desk_members.retain(|m| m.desk_id != desk_id);
+    // And the installed move grammar, for the same reason. Left behind, an
+    // overlay desk re-created with the same id silently inherits a grammar
+    // nobody installed on it — a desk deliberating under a table its operator
+    // never wrote, which is the drift the overlay layer exists to prevent.
+    record.clear_desk_hive(&desk_id);
     scope.runtime.store().save(&record).await?;
+    journal_structural(
+        &scope,
+        CompanyEvent::DeskDeleted {
+            desk_id,
+            by: scope.actor.clone(),
+        },
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1541,6 +1888,63 @@ fn project_event_for_viewer(
             let mut o = envelope("workflow_deleted");
             o["workflowId"] = json!(workflow_id);
             o["name"] = json!(name);
+            o
+        }
+        // The structural changes a console draws its activity graph from: who
+        // created a teammate or a desk, who moved a seat, who changed how a desk
+        // deliberates. Before these the graph could only infer a spawn from a
+        // redacted tool-call frame that does not survive a reload.
+        //
+        // `by_agent_id` rides along and `by` does not — the same deny-by-default
+        // actor omission as every arm above. The agent is the company's own
+        // structure and is what the edge is drawn from; the human is not.
+        CompanyEvent::TeammateAdded {
+            agent_id,
+            role,
+            by_agent_id,
+            ..
+        } => {
+            let mut o = envelope("teammate_added");
+            o["agentId"] = json!(agent_id);
+            o["role"] = json!(role);
+            if let Some(by) = by_agent_id {
+                o["byAgentId"] = json!(by);
+            }
+            o
+        }
+        CompanyEvent::DeskCreated {
+            desk_id,
+            name,
+            members,
+            ..
+        } => {
+            let mut o = envelope("desk_created");
+            o["deskId"] = json!(desk_id);
+            o["name"] = json!(name);
+            o["members"] = json!(members);
+            o
+        }
+        CompanyEvent::DeskDeleted { desk_id, .. } => {
+            let mut o = envelope("desk_deleted");
+            o["deskId"] = json!(desk_id);
+            o
+        }
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added,
+            removed,
+            ..
+        } => {
+            let mut o = envelope("desk_members_changed");
+            o["deskId"] = json!(desk_id);
+            o["added"] = json!(added);
+            o["removed"] = json!(removed);
+            o
+        }
+        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => {
+            let mut o = envelope("desk_hive_configured");
+            o["deskId"] = json!(desk_id);
+            o["reset"] = json!(reset);
             o
         }
         // Issue #276: a workflow armed or paused, so a console holding the
@@ -2398,6 +2802,36 @@ async fn run_chat(
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
+            // CHAT-021: a card-open failure used to end here — logged
+            // server-side, and the chat turn otherwise proceeded to a normal
+            // 200. To the operator, the message they had just asked to be
+            // tracked simply never became a card, with no word anywhere in
+            // the product that it had tried and failed. Same shape and author
+            // as the turn-failure notice above: a direct `AgentReply` in the
+            // same desk this card would have opened in, so it round-trips
+            // through history like any other reply.
+            let notice = CompanyEvent::AgentReply {
+                audience: Vec::new(),
+                parent: reply_thread(accepted.thread_root(), accepted.message_seq),
+                chat_id: message
+                    .chat
+                    .clone()
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                text: "This should have opened a task card, but the card could not be saved. \
+                       Nothing else was lost — send the message again, or open the card by hand."
+                    .to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            };
+            if let Err(journal_err) = runtime.events().append(runtime.id(), notice).await {
+                tracing::warn!(
+                    error = %journal_err,
+                    "failed to journal the card-open failure notice itself"
+                );
+            }
         }
     }
     // Issue #983: the message is already in the journal — `accept_chat_turn`
@@ -2761,6 +3195,14 @@ async fn accept_chat_turn(
     // message that points at a file this company does not have.
     let attachments = resolve_attachments(runtime, id, &message.attachments).await?;
 
+    // Both halves of one resolution: who this message reached, and every
+    // `@name` that reached more than one thing and therefore reached nobody
+    // (B-101). The second half is reported below, after the message is
+    // journaled, so the notice can never precede the line it is about.
+    let resolved = runtime
+        .resolve_mentions_reporting(&message.text, message.mentions.clone(), by)
+        .await;
+
     let message_event = CompanyEvent::OperatorMessage {
         text: message.text.clone(),
         by: by.cloned(),
@@ -2780,14 +3222,19 @@ async fn accept_chat_turn(
         // routing decision that follows read the same list. The picker's answer
         // when it sent one, extraction from the text when it did not — and
         // either way re-validated against the live roster.
-        mentions: runtime
-            .resolve_mentions(&message.text, message.mentions.clone(), by)
-            .await,
+        mentions: resolved.mentions.clone(),
         // Issue #1682: the store-resolved references, so the durable record
         // carries the name/mime/size the store computed and never the client's
         // claim. Empty on a message with no attachment, which skips the field.
         attachments,
     };
+    // Asked again, immediately before the durable write. The check above sits
+    // two awaits back — attachment and mention resolution both yield — and a
+    // stop landing in that window would leave a message in the transcript that
+    // no turn will ever answer, on a company that has already reported itself
+    // stopped. The first check is still worth keeping: it refuses before the
+    // resolution work rather than after it.
+    runtime.ensure_accepting().map_err(ApiError)?;
     let message_seq = runtime
         .events()
         .append(id, message_event.clone())
@@ -2813,6 +3260,15 @@ async fn accept_chat_turn(
             .notify_mentions(id, mentions, &message_seq, by, desk)
             .await;
     }
+
+    // The other half of the same resolution (B-101): every `@name` that reached
+    // two things and therefore reached nobody. Posted after the message's own
+    // append so the notice can never sort above the line it is about, and on
+    // the same not-fatal terms as the notifications above — a message whose
+    // advisory could not be written is still a delivered message.
+    runtime
+        .post_mention_ambiguity_note(desk, parent, &resolved.ambiguous)
+        .await;
 
     let turn_id = crate::ports::generate_id();
     let turn_id = match runtime
@@ -3046,7 +3502,11 @@ async fn chat_and_emit(
                 let message_id = accepted.message_seq.value().to_string();
                 let turn_id = accepted.turn_id.clone();
                 let posted = runtime
-                    .post_blocker_prompt(&desk, &prompt)
+                    .post_blocker_prompt(
+                        &desk,
+                        reply_thread(accepted.thread_root(), accepted.message_seq),
+                        &prompt,
+                    )
                     .await
                     .map_err(ApiError);
                 settle_chat_turn(&runtime, id, turn_id.as_deref(), posted.as_ref().err()).await;
@@ -3149,7 +3609,7 @@ async fn chat_and_emit(
     }
 
     let (report, feedback_note) = join_chat_turn(turn).await?;
-    let responses = report.responses.clone();
+    let responses = readable_responses(report.responses.clone());
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
@@ -3492,9 +3952,200 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         };
         let reply_parent = reply_thread(parent, accepted.message_seq);
         journal_chat_replies(&runtime, &company, &desk, reply_parent, &mut report).await;
+        // SPIKE (tinyhivemind P15): a committed reply may refer work to another
+        // desk. AFTER journaling, never before — the referral is keyed on the
+        // reply's own sequence, so it has to exist first.
+        #[cfg(feature = "hivemind")]
+        refer_committed_replies(&runtime, &company, &desk, &report, None, None, 0).await;
         settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
+}
+
+/// Offer each committed agent reply to the referral decision (tinyhivemind P15).
+///
+/// The decision is pure and the queue is the only thing that acts, so this is
+/// safe to run over every reply: a message that refers nobody costs one
+/// in-memory decision and calls the queue zero times.
+///
+/// Policy is deliberately hard-coded here for the spike. In production it is an
+/// operator setting — `ReferralPolicy::DEFAULT` has every knob off, and that is
+// the shipping default the library intends.
+#[cfg(feature = "hivemind")]
+pub(crate) async fn refer_committed_replies(
+    runtime: &Arc<CompanyRuntime>,
+    company: &CompanyId,
+    desk: &str,
+    report: &CycleReport,
+    // The referral these replies are ANSWERING, when they are answering one.
+    //
+    // This is the back edge, and it is the host's to carry: "when a host runs
+    // a child turn that carried a `ReferralOrigin`, it must pass that origin
+    // back in the next `ReferralInput`, or the answer has no way home. Nothing
+    // in the library remembers it."
+    origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
+    // The forward these replies are answering, by its marker's journal
+    // sequence. Recorded on the return so the console pairs the two legs by
+    // identity rather than by looking for the nearest similar marker — two
+    // crossings between the same desks to the same agent are indistinguishable
+    // by shape.
+    answers: Option<u64>,
+    // Depth of the reply being offered — NOT of the child it might spawn.
+    //
+    // A reply to an operator message is 0, so every operator message starts a
+    // fresh chain. Otherwise it is the depth of the turn that produced this
+    // reply, which is what makes the count accumulate: the policy compares it
+    // against `max_hops` and hands the child `hop + 1`, and that child's own
+    // replies come back here at that number. Passing a constant here — as this
+    // did — makes every generation claim the same depth, and a bound that never
+    // advances bounds nothing.
+    hop: u32,
+) {
+    use tinyhivemind::referral::dispatch_referral;
+
+    let Ok(Some(record)) = runtime.store().load(company).await else {
+        return;
+    };
+    let members = crate::runtime::hivemind::roster_members(&record);
+    let people: Vec<tinyhivemind_core::roster::Person> = Vec::new();
+    let retired: Vec<String> = Vec::new();
+    let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
+    let desks = crate::runtime::hivemind::desk_snapshots(&record);
+    let gate = runtime.referral_gate();
+
+    // **The desk's own `[[group_chat]].hive.referral` block, not a constant.**
+    //
+    // Referral is opt-in per desk and off by default: crossing costs a full
+    // model turn on somebody else's desk, and tinyhivemind's own benchmark
+    // measured it changing no answer and costing twice the turns on desks that
+    // are individually unbiased. A company that says nothing therefore behaves
+    // exactly as it did before this existed, which is the direction a mechanism
+    // that spends other people's turns should fail in.
+    //
+    // This replaces a hardcoded `enabled: true` with `max_hops` fixed in the
+    // source — a policy no operator could see, let alone change.
+    let config = crate::runtime::hivemind::referral_config(&record, desk);
+    let policy = config.policy();
+    if !policy.enabled {
+        return;
+    }
+
+    // ONE queue for the whole report, which is what makes `peer_cap` mean
+    // anything: the cap counts crossing questions across every reply this turn
+    // produced, and a queue rebuilt per reply would start each count at zero.
+    let queue = crate::runtime::hivemind::JournalReferralQueue::new(
+        runtime.clone(),
+        gate.clone(),
+        config.peer_cap(),
+        policy.max_hops,
+        answers,
+    );
+
+    for response in &report.responses {
+        let (Some(agent), Some(id)) = (response.agent.as_deref(), response.message_id.as_deref())
+        else {
+            continue;
+        };
+        let Ok(sequence) = id.parse::<u64>() else {
+            continue;
+        };
+        let mentions = tinyhivemind_core::mention::resolve(
+            &response.text,
+            None,
+            &tinyhivemind_core::mention::MentionAuthor::Agent {
+                id: agent.to_string(),
+            },
+            &roster,
+            &desks.set(),
+        );
+        let input = tinyhivemind_core::referral::ReferralInput {
+            key: tinyhivemind_core::dispatch::DispatchKey {
+                trigger_sequence: sequence,
+            },
+            conversation: tinyhivemind_core::dispatch::DispatchConversation {
+                desk_id: desk.to_string(),
+                thread_root: None,
+            },
+            author_id: agent.to_string(),
+            content: response.text.clone(),
+            mentions,
+            hop,
+            origin: origin.clone(),
+        };
+        match dispatch_referral(&queue, policy, &input, &roster, &desks.set()).await {
+            Ok(outcome) => tracing::info!(
+                company = %company,
+                desk = %desk,
+                author = %agent,
+                ?outcome,
+                "[referral] decided"
+            ),
+            Err(err) => tracing::warn!(error = %err, "[referral] decision failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod readable_responses_test {
+    use super::readable_responses;
+    use crate::ports::types::OutboundMessage;
+
+    fn reply(text: &str) -> OutboundMessage {
+        OutboundMessage {
+            channel: "engineering".to_string(),
+            agent: Some("software_engineer".to_string()),
+            text: text.to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+            task_id: None,
+            message_id: None,
+            mentions: Vec::new(),
+        }
+    }
+
+    /// **A row must read the same live as it does after a reload.**
+    ///
+    /// The history projection cleaned deliberation grammar; the POST did not.
+    /// So a turn arriving live showed `!support #lazy-load ^3 agreed` and the
+    /// same turn after a refresh showed `agreed` — one message, two renderings,
+    /// separated by a page reload.
+    #[test]
+    fn a_live_reply_reads_as_the_reloaded_one_will() {
+        let cleaned = readable_responses(vec![
+            reply("!support #lazy-load ^3 agreed, and it is reversible"),
+            reply("here is the summary you asked for"),
+        ]);
+
+        assert_eq!(
+            cleaned[0].text, "agreed, and it is reversible",
+            "the grammar is gone on the live path too"
+        );
+        assert_eq!(
+            cleaned[1].text, "here is the summary you asked for",
+            "and an ordinary reply is untouched"
+        );
+    }
+}
+
+/// The same rendering `chat_history` applies, for replies going out on the POST
+/// rather than being read back.
+///
+/// A deliberation turn is journaled with its grammar and cleaned when the
+/// history is projected — but a reply returned to the caller never passes
+/// through that projection, so the console showed `!support #lazy-load ^3` on
+/// a row that arrived live and plain prose on the same row after a reload.
+/// Two readers of one message, disagreeing, with a page refresh between them.
+///
+/// The stored row keeps its markers either way; the fold reads them off the
+/// journal, not off this.
+fn readable_responses(
+    mut responses: Vec<crate::ports::types::OutboundMessage>,
+) -> Vec<crate::ports::types::OutboundMessage> {
+    for response in &mut responses {
+        response.text =
+            crate::server::chat_history::readable_moves(std::mem::take(&mut response.text));
+    }
+    responses
 }
 
 /// Awaits a spawned chat turn, turning a task that never finished into an error.
@@ -3764,6 +4415,77 @@ struct ChatHistoryQuery {
 
 /// One desk-history message, as the console renders it. Mirrors `ChatMessage`
 /// in `frontend/src/lib/chat.ts`.
+/// Where a crossing referral came from, when another desk caused this message
+/// (tinyhivemind P15).
+///
+/// Mirrors `ReferredFromDto` in `frontend/src/api/types.ts`.
+///
+/// The labels are **captured with the row** rather than resolved when the
+/// transcript is read, for the reason [`SessionAuthor`] captures its own: a
+/// desk renamed later must not rewrite what the conversation said at the time.
+///
+/// [`SessionAuthor`]: tinyhivemind::session::SessionAuthor
+/// One line of a crossing, as the console renders it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferralLineDto {
+    /// Who wrote it, by id.
+    author_id: String,
+    /// Their display label when the referral was made; empty for this desk's
+    /// own agent, whom the console already names.
+    author_label: String,
+    /// What they said.
+    text: String,
+    /// True for the question leaving this desk, false for the answer coming
+    /// back — which is what lets the console show the two sides differently.
+    outbound: bool,
+}
+
+/// A crossing folded onto the report that brought it home, so the console can
+/// render it as one collapsed line naming both parties and counting the
+/// messages.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferralConversationDto {
+    /// The agent on this desk that asked.
+    asker_id: String,
+    /// Who they asked.
+    other_id: String,
+    /// And where that person sits — id for the link, name for the label.
+    other_desk_id: String,
+    other_desk_name: String,
+    /// Whether a person was asked rather than a desk — `@name` vs `#desk`.
+    direct: bool,
+    /// The exchange, oldest first. Its length is the count in the label.
+    lines: Vec<ReferralLineDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReferredFromDto {
+    /// The desk that asked, by id — for the link, never for display.
+    desk_id: String,
+    /// The desk's display name as it stood when the referral was made.
+    desk_name: String,
+    /// The agent that asked, by id.
+    asker_id: String,
+    /// That agent's display label as it stood when the referral was made.
+    asker_label: String,
+    /// The asking message, so the chip links straight to it.
+    sequence: u64,
+    /// Whether a person was asked rather than a desk, so the chip can name
+    /// whoever was actually addressed.
+    direct: bool,
+    /// Which word the chip uses. `"asked"` on the outbound leg, `"answered"`
+    /// when the answer has come home.
+    ///
+    /// Sent as the word rather than a bool because the console renders it and
+    /// nothing else: a `returning: true` would have the render side translating
+    /// a host decision back into English, which is how it came to guess in the
+    /// first place.
+    direction: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatHistoryMessageDto {
@@ -3775,6 +4497,14 @@ struct ChatHistoryMessageDto {
     author: String,
     /// The message text.
     text: String,
+    /// Set only when another desk's referral caused this line. Absent on every
+    /// ordinary message, so the wire shape is unchanged for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referred_from: Option<ReferredFromDto>,
+    /// The crossing this report brought home, when it brought one. Absent on
+    /// every ordinary message, so the wire shape is unchanged for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referral_conversation: Option<ReferralConversationDto>,
     /// When it was journaled, epoch millis.
     at_millis: f64,
     /// Whether it is the operator's own message.
@@ -3913,6 +4643,38 @@ impl From<ReactionView> for ChatReactionDto {
 impl From<MessageView> for ChatHistoryMessageDto {
     fn from(view: MessageView) -> Self {
         Self {
+            referral_conversation: view.referral_conversation.map(|crossing| {
+                ReferralConversationDto {
+                    asker_id: crossing.asker_id,
+                    other_id: crossing.other_id,
+                    other_desk_id: crossing.other_desk_id,
+                    other_desk_name: crossing.other_desk_name,
+                    direct: crossing.direct,
+                    lines: crossing
+                        .lines
+                        .into_iter()
+                        .map(|line| ReferralLineDto {
+                            author_id: line.author_id,
+                            author_label: line.author_label,
+                            text: line.text,
+                            outbound: line.outbound,
+                        })
+                        .collect(),
+                }
+            }),
+            referred_from: view.referred_from.map(|origin| ReferredFromDto {
+                desk_id: origin.desk_id,
+                desk_name: origin.desk_name,
+                asker_id: origin.asker_id,
+                asker_label: origin.asker_label,
+                sequence: origin.sequence,
+                direct: origin.direct,
+                direction: if origin.returning {
+                    "answered"
+                } else {
+                    "asked"
+                },
+            }),
             id: view.id,
             channel: view.channel,
             author: view.author,
@@ -4722,17 +5484,29 @@ async fn list_grants(scope: ScopedCompany) -> Json<Vec<StandingGrantDto>> {
 /// Takes effect on the **next** policy check; a call already admitted is not
 /// aborted. 404 when there is nothing to revoke — already revoked, or expired —
 /// rather than reporting success over a no-op.
+///
+/// Admin, matching `DELETE {scope}/tools/grants` on the neighbouring plane
+/// (issue #2169). Both objects are a permission an operator granted, and a
+/// grant one person made should not be undone by anyone who happens to be in
+/// the company: a standing permission is often the thing keeping an unattended
+/// desk working, so revoking it is a change to how the company runs rather than
+/// a tidy-up. Revoking fails in the safe direction, which is why this was easy
+/// to leave at member level and worth correcting anyway.
+///
+/// `GET {scope}/grants` stays readable by any member, deliberately, for the
+/// same consistency: `GET {scope}/tools/grants` is member-readable and
+/// discloses the same shape of fact.
 async fn revoke_grant(
-    scope: ScopedCompany,
+    scope: AdminScopedCompany,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<StatusCode, ApiError> {
     let gid = params
         .get("gid")
         .cloned()
         .ok_or_else(|| ApiError(OpenCompanyError::InvalidRequest("missing grant id".into())))?;
-    // The machine credential has no person behind it, the same distinction every
-    // other operator write draws.
-    let by = scope.actor.clone().unwrap_or_else(platform_actor);
+    // Always identified — `AdminScopedCompany::actor` covers the machine
+    // principal as well, so this write is never anonymous.
+    let by = scope.actor();
     let revoked = scope
         .runtime
         .revoke_standing_grant(&GrantId::new(gid.clone()), by)
@@ -4947,7 +5721,7 @@ async fn run_resolve(
     emit_cycle_webhooks(state, company, &report).await;
     Ok(Json(ChatResponse {
         message_id: None,
-        responses: report.responses,
+        responses: readable_responses(report.responses),
         still_awaiting: Some(still_awaiting),
         outcome: Some(outcome),
         review_feedback_applied: None,
@@ -4959,20 +5733,28 @@ async fn run_resolve(
     .into_response())
 }
 
-/// `POST /api/v1/companies/{id}/approvals/{aid}`.
+/// The approval a resolve or an extend addresses, under either scope form.
+///
+/// Named rather than positional because the two forms carry different path
+/// tuples — `{id}` plus `{aid}`, or `{aid}` alone — and a named capture
+/// deserializes identically from both. The company is not read here:
+/// [`AdminScopedCompany`] has already resolved and authorized it.
+#[derive(Debug, Deserialize)]
+struct ApprovalPath {
+    aid: String,
+}
+
+/// `POST {scope}/approvals/{aid}` — decide a parked approval.
 async fn resolve_approval(
+    admin: AdminScopedCompany,
     CompanyAuth(auth): CompanyAuth,
     State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
+    Path(ApprovalPath { aid }): Path<ApprovalPath>,
     Json(body): Json<ResolveApproval>,
 ) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
+    let company = admin.id().clone();
     let actor = resolving_actor(auth);
-    run_resolve(&state, &company, runtime, aid, body, actor)
+    run_resolve(&state, &company, admin.runtime, aid, body, actor)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
 }
@@ -4994,27 +5776,6 @@ fn resolving_actor(auth: GqlAuth) -> Actor {
         },
         GqlAuth::Platform(_) => platform_actor(),
     }
-}
-
-/// `POST /api/v1/company/approvals/{aid}` (single-company alias).
-async fn resolve_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-    Json(body): Json<ResolveApproval>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_resolve(&state, &id, runtime, aid, body, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
 }
 
 /// The answer to an extend: the approval's new deadline, so the console can
@@ -5048,39 +5809,15 @@ async fn run_extend(
     .into_response())
 }
 
-/// `POST /api/v1/companies/{id}/approvals/{aid}/extend` (issue #1805).
+/// `POST {scope}/approvals/{aid}/extend` — push the default-deny deadline out
+/// (issue #1805).
 async fn extend_approval(
+    admin: AdminScopedCompany,
     CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path((id, aid)): Path<(String, String)>,
+    Path(ApprovalPath { aid }): Path<ApprovalPath>,
 ) -> Result<Response, crate::server::Rejection> {
-    let company = CompanyId::new(&id);
-    if let Some(resp) = authorize_address(&state, &auth, &company) {
-        return Err(resp.into());
-    }
-    let runtime = lookup(&state, &id)?;
     let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
-        .await
-        .map_err(|error| IntoResponse::into_response(error).into())
-}
-
-/// `POST /api/v1/company/approvals/{aid}/extend` (single-company alias).
-async fn extend_approval_single(
-    CompanyAuth(auth): CompanyAuth,
-    State(state): State<AppState>,
-    Path(aid): Path<String>,
-) -> Result<Response, crate::server::Rejection> {
-    let runtime = sole(&state)?;
-    let id = runtime.id().clone();
-    if let Some(resp) = authorize_address(&state, &auth, &id) {
-        return Err(resp.into());
-    }
-    if let Some(resp) = refuse_until_password_changed(&auth) {
-        return Err(resp.into());
-    }
-    let actor = resolving_actor(auth);
-    run_extend(runtime, aid, actor)
+    run_extend(admin.runtime, aid, actor)
         .await
         .map_err(|error| IntoResponse::into_response(error).into())
 }
@@ -5095,6 +5832,7 @@ mod test {
     use crate::company::CompanyManifest;
     use crate::ports::tasks::TaskTitle;
     use crate::ports::types::CompanyRecord;
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
     use crate::store::FsCompanyStore;
@@ -5146,6 +5884,7 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5248,6 +5987,7 @@ mod test {
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5477,6 +6217,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5587,6 +6328,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -5629,6 +6371,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -6056,6 +6799,140 @@ mode = "full"
         );
     }
 
+    /// A task store that lists cleanly but refuses every write — the board
+    /// persistence layer mid-outage, for CHAT-021.
+    struct FailingTaskUpsert;
+
+    #[async_trait::async_trait]
+    impl crate::ports::tasks::TaskStore for FailingTaskUpsert {
+        async fn list(
+            &self,
+            _company: &CompanyId,
+        ) -> crate::Result<Vec<crate::ports::tasks::TaskRecord>> {
+            Ok(Vec::new())
+        }
+        async fn upsert(
+            &self,
+            _company: &CompanyId,
+            _task: &crate::ports::tasks::TaskRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "task store offline".to_string(),
+            ))
+        }
+        async fn update_if_column(
+            &self,
+            _company: &CompanyId,
+            _task: &crate::ports::tasks::TaskRecord,
+            _observed: &crate::ports::tasks::TaskRecord,
+            _expected_column: &str,
+        ) -> crate::Result<bool> {
+            Err(OpenCompanyError::InvalidRequest(
+                "task store offline".to_string(),
+            ))
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// CHAT-021: a card-open failure must not vanish into a server log while
+    /// the operator sees an ordinary success. The chat turn itself still
+    /// returns 200 — it did nothing wrong — but a durable system note in the
+    /// same desk must say the card did not open, exactly as a turn that
+    /// aborts mid-answer already leaves a visible notice rather than silence.
+    #[tokio::test]
+    async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(home.clone());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home, manifest())
+            .with_id(id.clone())
+            .with_tasks(Arc::new(FailingTaskUpsert))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id.clone(), Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // `deliverable: "workflow"` opens a card deterministically, whatever
+        // the lexical triage would have made of the words (see the test
+        // above) — the fixture does not need to be a message the classifier
+        // happens to card.
+        let body = format!(
+            r#"{{"text":{},"deliverable":"workflow"}}"#,
+            serde_json::json!("automate the weekly report")
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the chat turn itself did nothing wrong and must still succeed"
+        );
+
+        let events = runtime
+            .events()
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        let notice = events.into_iter().find_map(|stored| match stored.event {
+            CompanyEvent::AgentReply { agent_id, text, .. }
+                if agent_id == crate::ports::SYSTEM_AUTHOR =>
+            {
+                Some(text)
+            }
+            _ => None,
+        });
+        assert!(
+            notice.is_some_and(|text| text.to_lowercase().contains("card")),
+            "a card-open failure must leave a visible system note in the channel, not just a \
+             server-side log line"
+        );
+    }
+
     /// Issue #1152: an explicit "Just chatting" **withholds** the card the
     /// triage would otherwise have opened.
     ///
@@ -6265,6 +7142,7 @@ mode = "full"
         .unwrap();
 
         let record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -6293,6 +7171,7 @@ mode = "full"
             .unwrap();
 
         let deps = HarnessDeps {
+            emergency_gate: None,
             notifications: None,
             ledgers: None,
             ledger_registry: Default::default(),
@@ -6414,6 +7293,7 @@ mode = "full"
         use crate::ports::CompanyStore;
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -6527,6 +7407,7 @@ mode = "full"
             description: None,
             members: vec!["ceo".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "main".to_string(),
@@ -6534,6 +7415,7 @@ mode = "full"
             description: None,
             members: vec!["eng".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -6661,6 +7543,7 @@ mode = "full"
             description: None,
             members: vec!["ceo".to_string()],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -6984,6 +7867,388 @@ mode = "full"
             .expect("delete_desk never resumed after the lock was released")
             .expect("delete_desk task panicked");
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// A desk that declares no `hive` block still reports the numbers the
+    /// runtime would derive, rather than blanks.
+    ///
+    /// This is the difference the whole DTO exists for: the manifest says
+    /// nothing, so `declared` is empty — but the desk would still run on a
+    /// budget and a quorum, and a console showing an empty form would be
+    /// describing a desk that does not exist.
+    #[tokio::test]
+    async fn desk_hive_reports_derived_numbers_for_an_undeclared_block() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["source"], "manifest");
+        assert_eq!(body["deliberates"], true);
+        // Three seats: 3 x members, and a majority that still leaves somebody out.
+        assert_eq!(body["effective"]["turnBudget"], 9);
+        assert_eq!(body["effective"]["quorum"], 2);
+        // Nothing was declared, so the authored block is empty — which is
+        // exactly what distinguishes it from an operator who wrote `9`.
+        assert_eq!(body["declared"], serde_json::json!({}));
+        // Every seat holds every move until a table narrows one.
+        assert_eq!(body["seats"].as_array().unwrap().len(), 3);
+        assert_eq!(body["seats"][0]["governed"], false);
+        assert_eq!(body["seats"][0]["moves"].as_array().unwrap().len(), 9);
+        assert_eq!(body["eligibleSupporters"], 3);
+        assert_eq!(body["reachesQuorum"], true);
+    }
+
+    /// Installing a grammar takes effect, is reported back derived, and is
+    /// undone by a reset — without the manifest ever being rewritten.
+    #[tokio::test]
+    async fn a_move_grammar_installs_and_resets() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let install = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"quorum":2,"moves":{"a":["propose","support"],"b":["object","evidence"],"c":["support"]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(install.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(install.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["source"], "overlay");
+        assert_eq!(body["effective"]["quorum"], 2);
+        // `b` was narrowed to object/evidence, and still keeps the three no
+        // table can take away.
+        let b = body["seats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|seat| seat["agentId"] == "b")
+            .unwrap()
+            .clone();
+        assert_eq!(b["governed"], true);
+        let b_moves: Vec<String> = serde_json::from_value(b["moves"].clone()).unwrap();
+        assert!(b_moves.contains(&"commit".to_string()));
+        assert!(b_moves.contains(&"question".to_string()));
+        assert!(b_moves.contains(&"defer".to_string()));
+        assert!(!b_moves.contains(&"propose".to_string()));
+        // a and c may support or propose; b may not. Two clears a quorum of two.
+        assert_eq!(body["eligibleSupporters"], 2);
+        assert_eq!(body["reachesQuorum"], true);
+
+        let reset = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(reset.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        // Back to the blueprint, which declared nothing.
+        assert_eq!(body["source"], "manifest");
+        assert_eq!(body["declared"], serde_json::json!({}));
+        assert_eq!(body["eligibleSupporters"], 3);
+    }
+
+    /// The runtime refuses exactly what a manifest carrying the same block
+    /// would be refused for — and in the same words.
+    #[tokio::test]
+    async fn installing_an_unreachable_quorum_is_refused() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"a\"\nrole = \"A\"\n\
+             [[agent]]\nid = \"b\"\nrole = \"B\"\n\
+             [[agent]]\nid = \"c\"\nrole = \"C\"\n\
+             [[group_chat]]\nid = \"solvers\"\nname = \"Solvers\"\nmembers = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        let state = state_with_manifest(&home, manifest).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // Only `a` may deposit a supporter, but the quorum asks for two — the
+        // room could never decide anything however much it agreed.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/solvers/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"quorum":2,"moves":{"a":["propose"],"b":["object"],"c":["object"]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // An unknown move kind, and an id that is not on the desk, are refused
+        // for the same reason: both fail *open* at runtime, handing the seat
+        // every move and letting the desk quietly go on voting.
+        for body in [
+            r#"{"moves":{"a":["shrug"]}}"#,
+            r#"{"moves":{"ghost":["propose"]}}"#,
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/company/desks/solvers/hive")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "body {body} was accepted"
+            );
+        }
+    }
+
+    /// The structural rows a console draws its activity graph from.
+    ///
+    /// Before these, "who created this desk" and "who moved this seat" were
+    /// answerable only from a live frame that does not survive a reload.
+    #[tokio::test]
+    async fn desk_lifecycle_is_journaled() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let events = runtime.events();
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        for (method, uri, body) in [
+            (
+                "POST",
+                "/api/v1/company/team",
+                Some(r#"{"name":"Dana","role":"Analyst"}"#),
+            ),
+            (
+                "POST",
+                "/api/v1/company/desks",
+                Some(r#"{"name":"Growth","members":["eng"]}"#),
+            ),
+            (
+                "POST",
+                "/api/v1/company/desks/growth/members",
+                Some(r#"{"agent_id":"ceo"}"#),
+            ),
+            (
+                "PUT",
+                "/api/v1/company/desks/growth/hive",
+                Some(r#"{"quorum":1}"#),
+            ),
+            ("DELETE", "/api/v1/company/desks/growth/hive", None),
+            ("DELETE", "/api/v1/company/desks/growth/members/ceo", None),
+            ("DELETE", "/api/v1/company/desks/growth", None),
+        ] {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &cookie);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let res = app
+                .clone()
+                .oneshot(req.body(body.map_or(Body::empty(), Body::from)).unwrap())
+                .await
+                .unwrap();
+            assert!(
+                res.status().is_success(),
+                "{method} {uri} answered {}",
+                res.status()
+            );
+        }
+
+        let rows = events
+            .read_from(&CompanyId::new("acme"), EventSeq::new(0), 500)
+            .await
+            .unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|row| row.event.kind()).collect();
+        assert!(kinds.contains(&"DeskCreated"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"DeskDeleted"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"TeammateAdded"), "kinds: {kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "DeskHiveConfigured").count(),
+            2,
+            "one row for install and one for reset: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "DeskMembersChanged").count(),
+            2,
+            "one row for the add and one for the remove: {kinds:?}"
+        );
+    }
+
+    /// Deleting a desk takes its installed grammar with it.
+    ///
+    /// Left behind, an overlay desk re-created with the same id silently
+    /// inherits a table nobody installed on it.
+    #[tokio::test]
+    async fn deleting_a_desk_drops_its_installed_grammar() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng","ceo"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let installed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/company/desks/growth/hive")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"moves":{"eng":["propose","support"]}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed.status(), StatusCode::OK);
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/desks/growth")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        // Re-create the same id; it must come back ungoverned.
+        let again = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Growth","members":["eng","ceo"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CREATED);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/desks/growth/hive")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["source"], "default");
+        for seat in body["seats"].as_array().unwrap() {
+            assert_eq!(
+                seat["governed"], false,
+                "a re-created desk inherited a grammar"
+            );
+        }
     }
 
     /// Removing an overlay member drops it from the merged view; a manifest
@@ -7530,6 +8795,7 @@ mode = "full"
             description: None,
             members: vec![],
             responder: ResponderMode::Lead,
+            hive: Default::default(),
         });
         runtime.store().save(&record).await.unwrap();
 
@@ -9574,6 +10840,117 @@ mode = "full"
         );
     }
 
+    /// The ask-which question lands in the thread that asked it.
+    ///
+    /// When two blocked things share a DM and the reply names neither, the
+    /// runtime asks which one was meant. That question is an answer to the
+    /// operator's message, so it threads off it the way every other reply in
+    /// this handler does — otherwise the operator reads their own line in a
+    /// thread and the teammate's follow-up at the channel root, which is the
+    /// split this tier exists to close.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_ask_which_question_threads_off_the_reply_that_was_ambiguous() {
+        use crate::company::blocker_sender::BlockerSenderSignals;
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = build_state_with_brain_and_manifest(
+            &home,
+            "running",
+            AppConfig::default(),
+            None,
+            roster_manifest(),
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        for (task, connection) in [("t-1", "connection:slack"), ("t-2", "connection:notion")] {
+            runtime
+                .park_blocker(
+                    &BlockerPayload {
+                        kind: BlockerKind::Infrastructure,
+                        source: BlockerSource::Provider,
+                        step: Some(BlockerStep::Task {
+                            task_id: task.to_string(),
+                        }),
+                        reason: format!("{connection} refused the call"),
+                        needed: "a working connection".to_string(),
+                        group_key: Some(connection.to_string()),
+                    },
+                    task,
+                    BlockerSenderSignals {
+                        started_by: None,
+                        owner_desk: None,
+                        assignee: Some("backend_engineer".to_string()),
+                    },
+                )
+                .await
+                .expect("parks the blocker into the teammate's DM");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/companies/acme/chat")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"chat":"dm:backend_engineer","text":"retry it"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = runtime
+            .events
+            .read_from(
+                runtime.id(),
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("read events");
+        let asked = stored
+            .iter()
+            .find_map(|s| match &s.event {
+                crate::ports::types::CompanyEvent::OperatorMessage { chat, text, .. }
+                    if chat.as_deref() == Some("dm:backend_engineer") && text == "retry it" =>
+                {
+                    Some(s.seq)
+                }
+                _ => None,
+            })
+            .expect("the operator's ambiguous reply is journalled");
+        let prompt = stored
+            .iter()
+            .find_map(|s| match &s.event {
+                crate::ports::types::CompanyEvent::AgentReply {
+                    chat_id,
+                    text,
+                    parent,
+                    ..
+                } if chat_id == "dm:backend_engineer" && text.contains("Which") => {
+                    Some((text.clone(), *parent))
+                }
+                _ => None,
+            })
+            .expect("the runtime asks which of the two was meant");
+        assert_eq!(
+            prompt.1,
+            Some(asked),
+            "the ask-which question must hang off the reply that was ambiguous, not the \
+             channel root; prompt was {:?}",
+            prompt.0
+        );
+    }
+
     #[tokio::test]
     async fn chat_by_id_matches_registered_company() {
         let home_dir = home();
@@ -10489,24 +11866,10 @@ mode = "full"
         assert!(banked_resolutions(&home, &company).await.is_empty());
     }
 
-    /// **A documented limitation, pinned rather than left incidental.**
-    ///
-    /// A blocker raised by `escalate_to_human` carries no
-    /// [`BlockerStep`](crate::ports::blockers::BlockerStep), and every resume
-    /// reads the verdict's step and nothing else — so its card is never
-    /// re-dispatched however it is answered, on this route and on the
-    /// two-value one that predates it. The resume posts a note into the
-    /// blocker's thread and stops there.
-    ///
-    /// The route lets the verdict through rather than refusing it: the answer
-    /// is banked durably and correctly, so the resume that reads the approval's
-    /// own task link inherits a right answer rather than a discarded one, and
-    /// refusing only `skip`/`amend` would leave `approve` no-opping in exactly
-    /// the same way while looking supported. Tracked as its own defect; when it
-    /// is fixed this test's final assertion is what changes.
+    /// A stepless blocker uses its task link to settle the card it paused.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn an_agent_question_banks_its_verdict_but_re_dispatches_no_card() {
+    async fn skipping_an_agent_question_settles_the_card_its_approval_is_linked_to() {
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
         use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
@@ -10532,14 +11895,22 @@ mode = "full"
                     origin: None,
                     origin_message_seq: None,
                     parent_task_id: None,
-                    output: None,
+                    output: Some(crate::ports::tasks::TaskOutput {
+                        source: crate::ports::tasks::TaskOutputSource::Run {
+                            run_id: "old-run".to_string(),
+                            attempt: Some(1),
+                        },
+                        at_millis: 1,
+                        artifacts: Vec::new(),
+                        workflows: Vec::new(),
+                    }),
                     plan: None,
                     planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
                     origin_workflow_id: None,
-                    bounced: None,
+                    bounced: Some("stale failure".to_string()),
                 },
             )
             .await
@@ -10605,7 +11976,7 @@ mode = "full"
         );
         assert!(
             banked[0]["resolution"].get("step").is_none(),
-            "an agent question is parked with no step, which is the defect: {}",
+            "the durable record keeps the stepless park the blocker carried: {}",
             banked[0]
         );
         let card = runtime
@@ -10618,8 +11989,140 @@ mode = "full"
             .expect("the card still exists");
         assert_eq!(
             card.column,
-            crate::ports::tasks::COLUMN_PAUSED,
-            "the stepless resume moves no card — the limitation this pins"
+            crate::ports::tasks::COLUMN_IN_REVIEW,
+            "the skipped card is ready for human review"
+        );
+        assert!(card.output.is_none(), "a skip produces no output");
+        assert!(card.bounced.is_none(), "a skip clears the old bounce chip");
+        assert_eq!(card.origin_chat_id(), Some("dm:eng"));
+        assert!(
+            card.note
+                .as_deref()
+                .is_some_and(|note| { note.contains("blocker question waived by the operator") })
+        );
+        assert!(
+            runtime
+                .runs()
+                .list_runs(
+                    runtime.id(),
+                    &crate::ports::runs::RunFilter::for_task("t-9"),
+                )
+                .await
+                .unwrap()
+                .is_empty(),
+            "a skip must not open another attempt"
+        );
+    }
+
+    /// The link is followed only to a card the board still holds.
+    ///
+    /// A stepless question's approval carries a task link because a card was in
+    /// hand when it was asked, not because the card is the thing to re-enter.
+    /// When that card is gone — deleted, or never on this board — reading the
+    /// link as a card resume answers the operator with *that card is no longer
+    /// on the board*, which is a report about a card in place of the answer to
+    /// the question they just gave. The answer goes back into the conversation
+    /// instead, exactly as it does for a question that was never linked.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn an_agent_question_linked_to_a_card_the_board_lost_still_answers_the_question() {
+        use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        let app = router(state);
+
+        let payload = BlockerPayload {
+            kind: BlockerKind::Information,
+            source: BlockerSource::AgentQuestion,
+            step: None,
+            reason: "which of the two briefs is current?".to_string(),
+            needed: "an answer from you".to_string(),
+            group_key: None,
+        };
+        let approval = ApprovalId::new("question-2");
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap(),
+            agent: None,
+            run_id: None,
+        };
+        let at = crate::ports::now_millis();
+        runtime
+            .approval_gate
+            .rehydrate(approval.clone(), effect.clone(), at);
+        // The link names a card that is not on the board, which is the whole
+        // case: nothing is seeded for `t-gone`.
+        runtime
+            .journal
+            .record_parked(
+                &approval,
+                &effect,
+                at,
+                TaskLink::from_task_id(Some("t-gone")),
+                ApprovalConversation {
+                    thread: Some("dm:eng".to_string()),
+                    parent: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (status, answer) = post_resolve(
+            &app,
+            &approval,
+            serde_json::json!({ "verdict": "approve", "blocker_verdict": "retry" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let banked = banked_resolutions(&home, &company).await;
+        assert_eq!(banked.len(), 1);
+        assert_eq!(
+            banked[0]["resolution"]["verdict"], "retry",
+            "the operator's answer is banked whatever the resume finds: {}",
+            banked[0]
+        );
+        let notes: Vec<String> = runtime
+            .events
+            .read_from(
+                runtime.id(),
+                crate::ports::types::EventSeq::new(0),
+                usize::MAX,
+            )
+            .await
+            .expect("read events")
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
+                    if chat_id == "dm:eng" =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.contains("no longer on the board")),
+            "answering a question must not report on a card the asker never mentioned; \
+             posted: {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note == "Got it — picking that back up now."),
+            "the answer must still reach the conversation it was asked in; posted: {notes:?}"
         );
     }
 
@@ -10763,23 +12266,285 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The route is guarded by the same company auth as resolve: a member — an
-    /// authenticated user of the company — may extend a deadline, exactly as
-    /// they may resolve. Keeping a stalled run alive is not an admin-only lever.
+    /// POL-011 (INPUT). `{aid}` is an opaque path segment carried straight
+    /// into `ApprovalId::new` with no format check of its own — the id space
+    /// is "whatever a park was given", so the whole of input-safety here is
+    /// that an adversarial or malformed segment resolves to the same ordinary
+    /// 404 an unknown id does, never a panic or a 500.
     #[tokio::test]
-    async fn a_member_may_extend_an_approval_deadline() {
+    async fn extending_a_malformed_approval_id_is_404_not_a_crash() {
+        fn percent_encode_path_segment(raw: &str) -> String {
+            let mut out = String::new();
+            for byte in raw.bytes() {
+                match byte {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(byte as char);
+                    }
+                    _ => out.push_str(&format!("%{byte:02X}")),
+                }
+            }
+            out
+        }
+
         let home_dir = home();
         let state = state_with_company(home_dir.path(), "running").await;
-        crate::server::test_support::seed_fixed_member(&state, "acme").await;
-        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
-
         let app = router(state);
-        let response = app
-            .oneshot(extend_request_with_cookie(
-                &id,
-                crate::server::test_support::member_cookie("acme"),
+
+        let hostile_ids = [
+            "../../../etc/passwd".to_string(),
+            "🎉💥-not-an-approval".to_string(),
+            "a".repeat(10_000),
+            "'; DROP TABLE approvals; --".to_string(),
+            "appr\u{0}-null-byte".to_string(),
+        ];
+        for raw in hostile_ids {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/v1/company/approvals/{}/extend",
+                            percent_encode_path_segment(&raw)
+                        ))
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "a malformed id ({raw:?}) must answer the same 404 an unknown id does, not crash"
+            );
+        }
+    }
+
+    /// APPR-004: extend must be able to win a race the sweep has not yet run —
+    /// an approval whose deadline has already passed but that is still
+    /// physically parked (nothing has swept it out of the gate) must still be
+    /// extendable, and the extension must genuinely move the deadline rather
+    /// than just answer as if it had.
+    ///
+    /// `resolve`'s own past-deadline check (`gate.rs`'s TTL math) and
+    /// `extend`'s (`ParkedApprovals::extend`, existence-only) are two
+    /// different tests over the same map — that gap is exactly the window
+    /// `/extend` exists to rescue something in, per issue #1805.
+    #[tokio::test]
+    async fn extending_beats_a_pending_sweep_on_an_already_past_deadline_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        // Parked at the epoch: this host's TTL has long since passed, and
+        // nothing has swept either entry out of the gate yet.
+        let control = park_for_extend(&runtime, "appr-control", 1).await;
+        let target = park_for_extend(&runtime, "appr-target", 1).await;
+
+        let app = router(state.clone());
+
+        // The control proves the premise: resolving an untouched twin of the
+        // same stale park reports `expired`.
+        let resolved = app
+            .clone()
+            .oneshot(resolve_request(
+                &control,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
             ))
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let body = body_json(resolved).await;
+        assert_eq!(
+            body["outcome"], "expired",
+            "premise: a park this old is already past this host's TTL, got {body}"
+        );
+
+        // Extending the other twin, before anything else touches it, must
+        // still succeed — this is the whole reason `/extend` exists.
+        let extended = app.clone().oneshot(extend_request(&target)).await.unwrap();
+        assert_eq!(
+            extended.status(),
+            StatusCode::OK,
+            "extend must be able to rescue a park the sweep has not yet reclaimed"
+        );
+
+        // And now resolving it must NOT report `expired` — the deadline
+        // genuinely moved, not just the extend receipt's word for it.
+        let resolved = app
+            .oneshot(resolve_request(
+                &target,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let body = body_json(resolved).await;
+        assert_ne!(
+            body["outcome"], "expired",
+            "extend must genuinely push the deadline out, not just answer as if it did: {body}"
+        );
+    }
+
+    /// PLAT-014 (Member ⇒ approve): the sharpest of the auth-matrix's four
+    /// rows. A Member sees a money-bearing approval exists (issue #468's
+    /// "waiting on approval" indicator has to survive for them) but not what
+    /// it is about (issue #618) — and cannot act on it at all: both
+    /// `POST {scope}/approvals/{aid}` and `/extend` are `AdminScopedCompany`.
+    /// All three properties are asserted against the same parked approval, so
+    /// the redaction and the auth gate cannot silently disagree about which
+    /// one is doing the protecting.
+    #[tokio::test]
+    async fn a_member_cannot_read_or_act_on_a_money_bearing_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-member", crate::ports::now_millis()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        // Sees it exists, but not what it costs.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/approvals")
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        let listed = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == approval.to_string())
+            .expect("the approval is visible to a member");
+        assert_eq!(
+            listed["contents_hidden"], true,
+            "a member must be told the contents were withheld: {listed}"
+        );
+        assert!(
+            listed["amount_usd"].is_null(),
+            "a member must not receive the dollar amount: {listed}"
+        );
+        assert!(
+            listed["payload"].is_null(),
+            "a member must not receive the payload either: {listed}"
+        );
+
+        // Cannot resolve it.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/company/approvals/{approval}"))
+                    .header("cookie", &member_cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "verdict": "approve" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a member must not be able to approve a parked effect"
+        );
+
+        // Cannot extend it either.
+        let response = app
+            .oneshot(extend_request_with_cookie(&approval, member_cookie))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a member must not be able to extend a parked effect's deadline"
+        );
+    }
+
+    /// POL-011: `extend_approval` is one handler mounted under both scope
+    /// forms (`scoped("/approvals/{aid}/extend", ...)`), so the platform
+    /// `/companies/{id}/...` form must carry the exact same admin gate the
+    /// `/company/...` alias does — and must not become a side channel that
+    /// resolves against the wrong company merely because its id rode in the
+    /// path instead of the alias.
+    #[tokio::test]
+    async fn extend_on_the_scoped_route_form_enforces_admin_and_the_right_company() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-scoped", crate::ports::now_millis()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let admin_cookie = crate::server::test_support::fixed_cookie("acme");
+        let app = router(state);
+
+        // AUTH: a member is refused on the scoped form exactly as on the alias.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/companies/acme/approvals/{approval}/extend"
+                    ))
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // FAIL: addressing a *different* company id on the scoped form must
+        // 404 rather than reach into `acme`'s gate — the path segment is the
+        // only thing naming the company here, unlike the alias.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/companies/globex/approvals/{approval}/extend"
+                    ))
+                    .header("cookie", &admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "a company id that does not exist must not extend acme's approval"
+        );
+        assert!(
+            runtime.pending_approvals().iter().any(|a| a.id == approval),
+            "the approval must still be sitting under its real company, untouched"
+        );
+
+        // And the scoped form works for the right admin and the right company.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/companies/acme/approvals/{approval}/extend"
+                    ))
+                    .header("cookie", &admin_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -13339,6 +15104,357 @@ mode = "full"
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// GRANT-012 (AUTH): `GET {scope}/grants` stays readable by any member —
+    /// the same consistency `GET {scope}/tools/grants` holds — but revoking one
+    /// is an admin action (issue #2169). A Member must see the list and be
+    /// refused the delete.
+    #[tokio::test]
+    async fn a_member_may_list_standing_grants_but_not_revoke_one() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        runtime
+            .grants
+            .grant_standing(crate::runtime::grants::StandingGrant {
+                id: crate::runtime::grants::GrantId::new("g-member"),
+                agent: "ops".into(),
+                workflow: None,
+                tool: "workspace_write".into(),
+                verdict: Verdict::Approve,
+                granted_by: Actor {
+                    kind: ActorKind::User,
+                    id: "user-7".into(),
+                },
+                approval_id: ApprovalId::new("appr-1"),
+                at_millis: 1_000,
+                expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+                scope: None,
+            });
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member_cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/grants")
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a member may read the standing-grants list"
+        );
+        let body = body_json(response).await;
+        assert_eq!(body[0]["id"], "g-member");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/grants/g-member")
+                    .header("cookie", &member_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "revoking a standing grant is an admin action, matching the tools/grants plane"
+        );
+    }
+
+    /// GRANT-012 (FAIL): `revoke_standing` is a plain map removal with no
+    /// expiry check of its own — a grant past its deadline that nothing has
+    /// *swept* yet is still found and revoked normally (204), exactly as
+    /// `/extend` can still rescue a not-yet-swept approval. Only once
+    /// `sweep_standing` has actually removed it does revoke correctly answer
+    /// the "nothing to revoke" 404 the route's own doc promises — the same
+    /// distinction as an already-revoked id, never a 500.
+    #[tokio::test]
+    async fn revoking_a_grant_is_404_only_once_it_is_actually_swept() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let stale_grant = |id: &str| crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: "ops".into(),
+            workflow: None,
+            tool: "workspace_write".into(),
+            verdict: Verdict::Approve,
+            granted_by: Actor {
+                kind: ActorKind::User,
+                id: "user-7".into(),
+            },
+            approval_id: ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            // Already in the past either way; only sweeping tells the two apart.
+            expires_at_millis: 1_001,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: None,
+        };
+        runtime.grants.grant_standing(stale_grant("g-unswept"));
+        runtime.grants.grant_standing(stale_grant("g-swept"));
+
+        let app = router(state.clone());
+        let delete = |id: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/company/grants/{id}"))
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Past-deadline but not yet swept: still a normal, successful revoke.
+        let response = delete("g-unswept").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "an expired-but-unswept grant is still physically present, so revoking it is an \
+             ordinary success — exactly as extend can still rescue an unswept approval"
+        );
+
+        // Now actually sweep the other one out from under the route.
+        let swept = runtime.grants.sweep_standing(crate::ports::now_millis());
+        assert_eq!(swept.len(), 1, "premise: the grant was in fact swept");
+
+        let response = delete("g-swept").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "once actually swept, revoke must report the same 'nothing to revoke' answer an \
+             already-revoked id does"
+        );
+    }
+
+    fn racing_standing_grant(id: &str) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new(id),
+            agent: "ops".into(),
+            workflow: None,
+            tool: "workspace_write".into(),
+            verdict: Verdict::Approve,
+            granted_by: Actor {
+                kind: ActorKind::User,
+                id: "user-7".into(),
+            },
+            approval_id: ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: None,
+        }
+    }
+
+    /// GRANT-012 (CONC). Two browsers — or one double-click — racing a
+    /// `DELETE` on the same grant id must not both report success:
+    /// `revoke_standing` is a plain `HashMap::remove`, so exactly one caller
+    /// takes the grant and every other must see the ordinary "already gone"
+    /// 404 a second revoke gets, not a duplicate 204 or a panic on a double
+    /// free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_simultaneous_revokes_of_the_same_grant_settle_once() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        runtime
+            .grants
+            .grant_standing(racing_standing_grant("g-race"));
+
+        let app = router(state);
+        let racers: Vec<_> = (0..8)
+            .map(|_| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.oneshot(
+                        Request::builder()
+                            .method("DELETE")
+                            .uri("/api/v1/company/grants/g-race")
+                            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                })
+            })
+            .collect();
+
+        let mut statuses = Vec::new();
+        for racer in racers {
+            statuses.push(
+                racer
+                    .await
+                    .expect("the request task did not panic")
+                    .status(),
+            );
+        }
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::NO_CONTENT)
+                .count(),
+            1,
+            "exactly one simultaneous revoke may take the grant, got {statuses:?}"
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|s| **s == StatusCode::NOT_FOUND)
+                .count(),
+            7,
+            "every loser must see the ordinary already-gone 404, got {statuses:?}"
+        );
+        assert_eq!(runtime.grants.standing().len(), 0);
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every `StandingGrantRevoked` line and passes everything else through.
+    /// Targets the **direct** `DELETE {scope}/grants/{gid}` append —
+    /// distinct from `runtime::cycle::test::FailStandingRevokeStore`, which
+    /// pins the mint/revoke *reconcile* path's own (oppositely ordered)
+    /// append.
+    struct RefusingGrantRevokeStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingGrantRevokeStore {
+        async fn append_journal(
+            &self,
+            id: &CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if line.contains("StandingGrantRevoked") {
+                return Err(OpenCompanyError::Store(
+                    "RefusingGrantRevokeStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(&self, id: &CompanyId) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(&self, id: &CompanyId) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// GRANT-012 (FAIL). `revoke_standing_grant` takes the grant out of the
+    /// live set **before** its durable journal append — the opposite order
+    /// from minting, and on purpose (see the function's own doc): a crash
+    /// here must fail toward no-permission, never toward a permission nobody
+    /// can see is still live. When the append then fails, the caller is told
+    /// the revoke failed, but the grant must already be gone from the live
+    /// set that actually governs future calls.
+    #[tokio::test]
+    async fn a_failed_revoke_append_still_removes_the_grant_from_the_live_set() {
+        let home_dir = home();
+        let store = std::sync::Arc::new(RefusingGrantRevokeStore {
+            inner: crate::ports::journal::MemoryJournalStore::default(),
+        });
+        let m = manifest();
+        let id = CompanyId::new("acme");
+        let fs_store = FsCompanyStore::new(home_dir.path().to_path_buf());
+        {
+            use crate::ports::store::CompanyStore;
+            fs_store
+                .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: m.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                    created_at_millis: None,
+                })
+                .await
+                .unwrap();
+        }
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), m)
+            .with_id(id.clone())
+            .with_journal_store(store)
+            .build()
+            .await
+            .unwrap();
+        let runtime = Arc::new(runtime);
+        runtime
+            .grants
+            .grant_standing(racing_standing_grant("g-append-fail"));
+
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id.clone(), runtime.clone());
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/company/grants/g-append-fail")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the forced append failure must surface"
+        );
+        assert_eq!(
+            runtime.grants.standing().len(),
+            0,
+            "the live-set removal must land even though the durable record of it failed — \
+             fail toward no permission, never toward one nobody can see is still granted"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // Issue #469 — a turn that parks several approvals.
     //
@@ -15314,5 +17430,743 @@ mode = "full"
         assert_eq!(after.column, crate::ports::tasks::COLUMN_IN_PROGRESS);
         let note = after.note.expect("note");
         assert!(note.contains("send it back"), "{note}");
+    }
+
+    // -- Approval authority: deciding for the company, not addressing it -----
+
+    /// Both address forms. Every ops route is registered under two, and this
+    /// pair had already drifted apart: only the alias carried the
+    /// temporary-password refusal, so every assertion below runs against both.
+    const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
+
+    fn resolve_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}"))
+            .header("content-type", "application/json");
+        let builder = match cookie {
+            Some(cookie) => builder.header("cookie", cookie),
+            None => builder,
+        };
+        builder
+            .body(Body::from(
+                serde_json::json!({ "verdict": "deny" }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    fn extend_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(format!("{scope}/approvals/{approval_id}/extend"));
+        let builder = match cookie {
+            Some(cookie) => builder.header("cookie", cookie),
+            None => builder,
+        };
+        builder.body(Body::empty()).unwrap()
+    }
+
+    /// The sharpest case in this file. `may_read_approval_contents` already
+    /// refuses a member the payload and the amount an approval carries, so
+    /// before this guard a member could approve a payment they were forbidden
+    /// to look at.
+    ///
+    /// The approval id is deliberately one that does not exist: authority is
+    /// settled before the approval is resolved, so the answer must be `403` and
+    /// not the `404` a permitted caller would get.
+    #[tokio::test]
+    async fn a_member_may_not_resolve_an_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            let denied = app
+                .clone()
+                .oneshot(resolve_as(scope, "appr-nobody-parked", Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{scope} let a member decide an approval"
+            );
+        }
+    }
+
+    /// Extending is the deadline's other side: an approval nobody decides
+    /// default-denies when its window runs out, so being able to push that
+    /// window out indefinitely is a decision about the effect, made for the
+    /// company. It is held to the same authority as deciding it outright.
+    #[tokio::test]
+    async fn a_member_may_not_extend_an_approval_deadline() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-member-ext", 1_000).await;
+        let cookie = crate::server::test_support::member_cookie("acme");
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            let denied = app
+                .clone()
+                .oneshot(extend_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{scope} let a member extend an approval deadline"
+            );
+        }
+    }
+
+    /// The other half of the guard: refusing a member must not also refuse the
+    /// admin the routes exist for, under either address form.
+    #[tokio::test]
+    async fn an_admin_may_still_resolve_an_approval() {
+        for scope in APPROVAL_SCOPES {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+            let id = park_for_extend(&runtime, "appr-admin-resolve", 1_000).await;
+            let cookie = crate::server::test_support::fixed_cookie("acme");
+            let app = router(state);
+
+            let allowed = app
+                .oneshot(resolve_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                allowed.status(),
+                StatusCode::OK,
+                "{scope} refused an admin the decision"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_admin_may_still_extend_an_approval_deadline() {
+        for scope in APPROVAL_SCOPES {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+            let id = park_for_extend(&runtime, "appr-admin-ext", 1_000).await;
+            let cookie = crate::server::test_support::fixed_cookie("acme");
+            let app = router(state);
+
+            let allowed = app
+                .oneshot(extend_as(scope, id.as_ref(), Some(&cookie)))
+                .await
+                .unwrap();
+            assert_eq!(
+                allowed.status(),
+                StatusCode::OK,
+                "{scope} refused an admin the extension"
+            );
+        }
+    }
+
+    /// No credential at all is `401`, not `403` — the authority guard must not
+    /// turn an anonymous request into a role decision.
+    #[tokio::test]
+    async fn an_unauthenticated_caller_cannot_decide_or_extend_an_approval() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            for request in [
+                resolve_as(scope, "appr-anon", None),
+                extend_as(scope, "appr-anon", None),
+            ] {
+                let uri = request.uri().to_string();
+                let denied = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    denied.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{uri} answered an anonymous caller with {}",
+                    denied.status()
+                );
+            }
+        }
+    }
+
+    /// The second defect these routes carried: the temporary-password boundary
+    /// lived only on the single-company alias, so an admin who had never set a
+    /// password could decide and extend every approval through the `{id}` form.
+    ///
+    /// An admin is the right principal to prove it with — the role check passes,
+    /// so a refusal here can only be the password boundary.
+    #[tokio::test]
+    async fn an_admin_on_a_temporary_password_may_not_decide_or_extend() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let cookie = crate::server::test_support::seed_temp_password_admin(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = park_for_extend(&runtime, "appr-temp-pass", 1_000).await;
+        let app = router(state);
+
+        for scope in APPROVAL_SCOPES {
+            for request in [
+                resolve_as(scope, id.as_ref(), Some(&cookie)),
+                extend_as(scope, id.as_ref(), Some(&cookie)),
+            ] {
+                let uri = request.uri().to_string();
+                let denied = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    denied.status(),
+                    StatusCode::FORBIDDEN,
+                    "{uri} served an admin who has not set a password"
+                );
+                assert_eq!(
+                    body_json(denied).await["code"],
+                    "password_change_required",
+                    "{uri} refused for the wrong reason"
+                );
+            }
+        }
+    }
+
+    // -- Deciding an approval: which states admit it, and what a failure costs --
+
+    /// STATE. `run_resolve` asks `ensure_running` before it touches the gate,
+    /// and the ordering is the guarantee: a company that has stopped accepting
+    /// work must refuse the decision *and leave the approval parked*, so the
+    /// operator still has a card to decide once it is running again.
+    ///
+    /// A refusal that consumed the park would be worse than no refusal at all —
+    /// the effect would be neither approved nor decidable.
+    #[tokio::test]
+    async fn resolving_on_a_paused_company_is_refused_and_leaves_the_approval_parked() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let approval = park_for_extend(&runtime, "appr-paused", crate::ports::now_millis()).await;
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+        let app = router(state);
+
+        let lifecycle = |verb: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/companies/acme/{verb}"))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let paused = app.clone().oneshot(lifecycle("pause")).await.unwrap();
+        assert_eq!(paused.status(), StatusCode::OK, "the company is now paused");
+
+        for verdict in ["approve", "deny"] {
+            let refused = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/company/approvals/{approval}"))
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "verdict": verdict }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                refused.status(),
+                StatusCode::CONFLICT,
+                "a paused company answered a {verdict} instead of refusing it"
+            );
+        }
+
+        assert!(
+            runtime.pending_approvals().iter().any(|p| p.id == approval),
+            "the refusal must leave the approval decidable, not spend it"
+        );
+        assert_eq!(
+            runtime.grants.live_count(),
+            0,
+            "and it must mint nothing on the way out"
+        );
+
+        let resumed = app.clone().oneshot(lifecycle("resume")).await.unwrap();
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let allowed = app
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed.status(),
+            StatusCode::OK,
+            "the same decision lands once the company is running again"
+        );
+    }
+
+    /// CONC. Two operators on the same card — or one on a double click — reach
+    /// this route at the same time. The approval may settle once and buy one
+    /// permission; the loser must be told it was already decided rather than
+    /// minting a second grant against the same effect.
+    ///
+    /// Distinct from [`a_second_resolve_reports_already_resolved_and_mints_nothing`],
+    /// which sends its second request only after the first has fully settled:
+    /// that one passes even if the parked-set take is a non-atomic
+    /// check-then-remove, because there is no window for the two to overlap in.
+    /// These two are in flight together.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_simultaneous_resolves_settle_once_and_mint_one_permission() {
+        let home_dir = home();
+        let c = stalled_company(home_dir.path()).await;
+        c.release.notify_one();
+
+        let approve = || {
+            resolve_request(
+                &c.approval_id,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            )
+        };
+        // Spawned onto a multi-threaded runtime, so these genuinely overlap
+        // rather than being polled to completion one at a time. Eight rather
+        // than two because the window a lost take opens is narrow: one pair can
+        // miss it by scheduling luck, and a race this test cannot lose is worth
+        // more than a tidier number.
+        let racers: Vec<_> = (0..8)
+            .map(|_| tokio::spawn(c.app.clone().oneshot(approve())))
+            .collect();
+
+        let mut settled = Vec::new();
+        for racer in racers {
+            let response = racer
+                .await
+                .expect("the request task did not panic")
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body_json(response).await;
+            settled.push(
+                body["alreadyResolved"]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("a receipt says whether it settled: {body}")),
+            );
+        }
+        assert_eq!(
+            settled.iter().filter(|already| !**already).count(),
+            1,
+            "exactly one simultaneous resolve may settle the approval, got {settled:?}"
+        );
+
+        assert!(await_continuation(&c.runtime).await);
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "simultaneous approves must not buy more than one permission"
+        );
+    }
+
+    /// FAIL. On the synchronous shape the operator waits for the follow-up
+    /// cycle, so a cycle that falls over is theirs to hear about: the request
+    /// answers an error rather than a success over nothing.
+    ///
+    /// And the verdict is durable regardless — it is settled inline, before the
+    /// cycle is ever spawned. The pairing is the point. An error that also lost
+    /// the decision would leave the operator re-approving something already
+    /// approved; an error swallowed into a `200` would leave them believing work
+    /// resumed that never did.
+    #[tokio::test]
+    async fn a_synchronous_resolve_reports_a_failed_follow_up_and_keeps_the_verdict() {
+        let home_dir = home();
+        let c = multi_park_company(home_dir.path(), 1, Some("sales"), true).await;
+        let approval = c.approvals[0].clone();
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a continuation that fell over must reach the operator waiting on it"
+        );
+
+        assert!(
+            !c.runtime
+                .pending_approvals()
+                .iter()
+                .any(|p| p.id == approval),
+            "the verdict is settled before the cycle runs, so a failed cycle cannot un-decide it"
+        );
+        assert_eq!(c.runtime.grants.live_count(), 1);
+
+        let again = c
+            .app
+            .clone()
+            .oneshot(resolve_request(
+                &approval,
+                serde_json::json!({ "verdict": "approve", "detach": true }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(again).await["alreadyResolved"],
+            true,
+            "re-deciding after the failure must say it was already decided"
+        );
+        assert_eq!(
+            c.runtime.grants.live_count(),
+            1,
+            "and must not buy a second permission"
+        );
+    }
+
+    // -- resolve_attachments: IDOR-safe re-resolution, the attachment cap, --
+    // -- bad-id/folder refusal, and dedup (issue #1682) ----------------------
+
+    fn attachment_binary_node(id: &str, name: &str, mime: &str) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1_700_000_000_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: Some(mime.to_string()),
+            size: None,
+            sha256: None,
+            adopted: false,
+        }
+    }
+
+    fn attachment_folder_node(id: &str, name: &str) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: NodeKind::Folder,
+            parent_id: None,
+            updated_at_millis: 1_700_000_000_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        }
+    }
+
+    fn attachment_note_node(id: &str, name: &str) -> WorkspaceNode {
+        WorkspaceNode {
+            kind: NodeKind::File,
+            ..attachment_folder_node(id, name)
+        }
+    }
+
+    /// Two companies on one host, each with its own signed-in admin — the
+    /// shape a cross-company (IDOR) question needs, since a single-company
+    /// host cannot tell "refused for crossing a boundary" from "there was
+    /// nothing else to reach". Mirrors
+    /// `graphql::bridge_scope_test::state_with_two_companies`.
+    async fn state_with_two_companies(home: &std::path::Path) -> AppState {
+        use crate::ports::store::CompanyStore;
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let state = AppState::new(AppConfig::default());
+        for name in ["acme", "globex"] {
+            let id = CompanyId::new(name);
+            let m = manifest();
+            store
+                .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
+                    overlay_retired_agents: Vec::new(),
+                    overlay_agent_edits: Vec::new(),
+                    id: id.clone(),
+                    manifest: m.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_tool_grants: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: None,
+                    name_confirmed: false,
+                    activation_completed_at: None,
+                    created_at_millis: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), m)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            state.registry().insert(id, Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, name).await;
+        }
+        state
+    }
+
+    fn chat_with_attachments(company: &str, attachments: Vec<String>) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/companies/{company}/chat"))
+            .header("cookie", crate::server::test_support::fixed_cookie(company))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "text": "see attached", "attachments": attachments })
+                    .to_string(),
+            ))
+            .unwrap()
+    }
+
+    async fn last_operator_message_attachments(
+        runtime: &Arc<CompanyRuntime>,
+        company: &CompanyId,
+    ) -> Vec<Attachment> {
+        let events = runtime
+            .events()
+            .read_from(company, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        events
+            .into_iter()
+            .rev()
+            .find_map(|stored| match stored.event {
+                CompanyEvent::OperatorMessage { attachments, .. } => Some(attachments),
+                _ => None,
+            })
+            .expect("an operator message was journaled")
+    }
+
+    /// AUTH (IDOR). The client sends a `node_id` only; the host re-resolves it
+    /// within the *addressed* company's own tree rather than trusting the
+    /// caller. A real node minted under the exact same id in a different
+    /// company must not resolve through this one — proving the lookup is
+    /// scoped per company, not a global id space a guessable ULID could walk.
+    #[tokio::test]
+    async fn a_chat_attachment_cannot_cross_a_company_boundary() {
+        let home_dir = home();
+        let state = state_with_two_companies(home_dir.path()).await;
+        let acme = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let globex = state.registry().get(&CompanyId::new("globex")).unwrap();
+
+        // The exact same node id, minted for real, but only in globex.
+        let shared_id = "n-cross-company";
+        globex
+            .workspace()
+            .create_binary(
+                &CompanyId::new("globex"),
+                &attachment_binary_node(shared_id, "globex-only.png", "image/png"),
+                b"globex bytes",
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(chat_with_attachments("acme", vec![shared_id.to_string()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a node real in another company must not resolve through this one's chat"
+        );
+        assert!(
+            acme.events()
+                .read_from(&CompanyId::new("acme"), EventSeq::new(0), usize::MAX)
+                .await
+                .unwrap()
+                .iter()
+                .all(|stored| !matches!(stored.event, CompanyEvent::OperatorMessage { .. })),
+            "a refused attachment must not journal a message with the wrong list"
+        );
+    }
+
+    /// INPUT. An id naming nothing in this company's tree, and an id naming a
+    /// folder rather than a file, are both `400`s — but a genuine non-binary
+    /// **file** (a text note) is not: only the shape actually rejected is
+    /// rejected.
+    #[tokio::test]
+    async fn a_chat_attachment_refuses_an_unknown_id_and_a_folder_but_admits_a_note() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = CompanyId::new("acme");
+        runtime
+            .workspace()
+            .create(&id, &attachment_folder_node("f-1", "reports"), None)
+            .await
+            .unwrap();
+        runtime
+            .workspace()
+            .create(
+                &id,
+                &attachment_note_node("n-1", "notes.md"),
+                Some("just a note"),
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        let unknown = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", vec!["does-not-exist".into()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            unknown.status(),
+            StatusCode::BAD_REQUEST,
+            "an id naming nothing in the tree must be refused"
+        );
+
+        let folder = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", vec!["f-1".into()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            folder.status(),
+            StatusCode::BAD_REQUEST,
+            "a folder id must be refused — it is not a file"
+        );
+
+        let admitted = app
+            .oneshot(chat_with_attachments("acme", vec!["n-1".into()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            admitted.status(),
+            StatusCode::OK,
+            "a genuine non-binary file (a note) must still resolve"
+        );
+        let attachments = last_operator_message_attachments(&runtime, &id).await;
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].node_id, "n-1");
+    }
+
+    /// LIMIT. `MAX_CHAT_ATTACHMENTS` (20) is a hard cap on one message: one
+    /// over is refused before any tree scan or extraction runs, and exactly
+    /// at the cap is still ordinary, successful traffic.
+    #[tokio::test]
+    async fn a_chat_message_may_carry_at_most_twenty_attachments() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = CompanyId::new("acme");
+        let mut ids = Vec::new();
+        for n in 0..21 {
+            let node_id = format!("n-{n}");
+            runtime
+                .workspace()
+                .create_binary(
+                    &id,
+                    &attachment_binary_node(
+                        &node_id,
+                        &format!("f{n}.bin"),
+                        "application/octet-stream",
+                    ),
+                    b"x",
+                )
+                .await
+                .unwrap();
+            ids.push(node_id);
+        }
+
+        let app = router(state);
+
+        let over_cap = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", ids.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            over_cap.status(),
+            StatusCode::BAD_REQUEST,
+            "21 attachments must be refused before any of them are resolved"
+        );
+
+        let at_cap = ids[..20].to_vec();
+        let ok = app
+            .oneshot(chat_with_attachments("acme", at_cap))
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "exactly 20 attachments is still ordinary traffic, not the refused shape"
+        );
+        let attachments = last_operator_message_attachments(&runtime, &id).await;
+        assert_eq!(attachments.len(), 20);
+    }
+
+    /// BOUND. A repeated id collapses to exactly one resolved attachment — and
+    /// the cap is measured against the *raw* list the client sent, before
+    /// dedup, so a client cannot smuggle an over-cap request by repeating one
+    /// id past the limit and relying on dedup to shrink it back down.
+    #[tokio::test]
+    async fn a_chat_attachment_id_repeated_resolves_once_and_the_cap_counts_raw_entries() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let id = CompanyId::new("acme");
+        runtime
+            .workspace()
+            .create_binary(
+                &id,
+                &attachment_binary_node("n-dup", "one.png", "image/png"),
+                b"one",
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        // 21 copies of the same id: one unique attachment after dedup, but the
+        // raw count is still over MAX_CHAT_ATTACHMENTS.
+        let over_cap_by_repetition = vec!["n-dup".to_string(); 21];
+        let refused = app
+            .clone()
+            .oneshot(chat_with_attachments("acme", over_cap_by_repetition))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::BAD_REQUEST,
+            "the cap must count the raw list the client sent, not the deduplicated one"
+        );
+
+        // Comfortably under the cap, repeated three times: dedup must collapse
+        // it to exactly one resolved attachment.
+        let repeated = vec!["n-dup".to_string(); 3];
+        let ok = app
+            .oneshot(chat_with_attachments("acme", repeated))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let attachments = last_operator_message_attachments(&runtime, &id).await;
+        assert_eq!(
+            attachments.len(),
+            1,
+            "a repeated id must resolve to exactly one attachment, not one per repetition"
+        );
+        assert_eq!(attachments[0].node_id, "n-dup");
     }
 }

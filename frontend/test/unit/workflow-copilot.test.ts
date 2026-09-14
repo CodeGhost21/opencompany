@@ -65,7 +65,7 @@ describe("loadCopilotHistory", () => {
 });
 
 describe("composeCopilotMessage", () => {
-  it("carries the workflow's own graph as the grounding", () => {
+  it("carries the automation's own graph as the grounding", () => {
     const message = composeCopilotMessage(context, "why is it slow?");
     expect(message).toContain("weekly_report");
     expect(message).toContain("collect");
@@ -110,7 +110,7 @@ describe("composeCopilotMessage", () => {
    * one could only ever produce a diff whose Apply is refused. The protocol is
    * withheld entirely rather than offered and then blocked.
    */
-  it("does not offer the protocol for a workflow the console cannot write", () => {
+  it("does not offer the protocol for an automation the console cannot write", () => {
     const message = composeCopilotMessage(
       { ...context, graph: { ...graph, editable: false } },
       "add a retry",

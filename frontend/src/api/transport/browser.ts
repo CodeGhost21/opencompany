@@ -17,6 +17,9 @@ import type {
 } from "./types";
 
 export class BrowserTransport implements Transport {
+  /** `fetch` cancels the socket, so the host sees the disconnect and stops. */
+  readonly cancelsInFlight = true;
+
   async request(req: TransportRequest): Promise<TransportResponse> {
     const res = await fetch(req.url, {
       method: req.method,

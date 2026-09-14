@@ -23,7 +23,7 @@ import { ApiError } from "@/api/types";
  * exists precisely to split those two, so re-merging them here would undo it.
  * `lifecycle_conflict` (issue B-037) is also deliberately absent, for the
  * opposite reason to `not_wired`: it IS a `409` pre-execution refusal, but it
- * is not cleared from Settings → Inference, and this set exists to raise a
+ * is not cleared from Connections → Inference, and this set exists to raise a
  * banner that points there. It classifies as `other`, which opens the failure
  * panel — and `failureDisposition` gives it a `refusal-lifecycle` arm so the
  * panel says the run never started and names the real fix.

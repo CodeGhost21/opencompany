@@ -17,8 +17,8 @@ import {
   isTaskWorking,
   MessageRow,
   taskElapsedLabel,
-} from "@/views/chat/MessageRow";
-import type { TimelineEntry } from "@/views/chat/model";
+} from "@/views/room/MessageRow";
+import type { TimelineEntry } from "@/views/room/model";
 
 const NOW = 1_700_000_300_000;
 const here = dirname(fileURLToPath(import.meta.url));

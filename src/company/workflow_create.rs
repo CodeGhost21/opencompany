@@ -2661,6 +2661,7 @@ to = "done"
 
     fn record(id: &CompanyId, manifest: CompanyManifest) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -5022,7 +5023,7 @@ to = "done"
         assert!(
             problems[0]
                 .message
-                .contains("is not a workflow delivery channel"),
+                .contains("is not an automation delivery channel"),
             "{:?}",
             problems[0]
         );
@@ -5167,7 +5168,7 @@ to = "done"
         .expect_err("the courtesy pass must refuse what apply would refuse");
         assert!(
             err.to_string()
-                .contains("is not a workflow delivery channel"),
+                .contains("is not an automation delivery channel"),
             "{err}"
         );
 
@@ -7239,6 +7240,7 @@ to = "done"
             description: None,
             members: vec!["assistant".to_string()],
             responder: ResponderMode::default(),
+            hive: Default::default(),
         }];
         store.save(&stale_record).await.unwrap();
 
@@ -7347,6 +7349,7 @@ to = "done"
                 description: None,
                 members: vec!["assistant".to_string()],
                 responder: ResponderMode::default(),
+                hive: Default::default(),
             },
             OverlayDesk {
                 id: "sales_eu".to_string(),
@@ -7354,6 +7357,7 @@ to = "done"
                 description: None,
                 members: vec!["assistant".to_string()],
                 responder: ResponderMode::default(),
+                hive: Default::default(),
             },
         ];
         let store = store_of(MemStore::seeded(seed));

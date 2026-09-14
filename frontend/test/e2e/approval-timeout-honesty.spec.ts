@@ -393,7 +393,7 @@ test("an unparseable body on the document reader falls back to the status line",
     });
   });
 
-  await page.goto(`/#/tasks/${task.id}`);
+  await page.goto(`/#/company/tasks/${task.id}`);
   await page.getByRole("button", { name: "Export" }).click({ timeout: 15_000 });
 
   const message = toasts(page).first();

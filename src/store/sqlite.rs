@@ -816,6 +816,12 @@ impl CompanyStore for SqliteStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_agent_edits: overlay.agent_edits,
+            // Read back off the blob, not defaulted: the write side already
+            // serializes it through `OverlayBlob::from_record_gated`, so
+            // defaulting here would silently drop an installed move grammar on
+            // every load — a desk would deliberate under the manifest's table
+            // while the console showed the operator's.
+            overlay_desk_hive: overlay.desk_hive,
             overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_tool_grants: overlay.tool_grants,
@@ -1638,6 +1644,49 @@ impl crate::ports::tasks::TaskStore for SqliteStore {
         )
         .map_err(sql_err)?;
         Ok(())
+    }
+
+    async fn update_if_column(
+        &self,
+        company: &CompanyId,
+        task: &crate::ports::tasks::TaskRecord,
+        observed: &crate::ports::tasks::TaskRecord,
+        expected_column: &str,
+    ) -> Result<bool> {
+        if observed.id != task.id || observed.column != expected_column {
+            return Ok(false);
+        }
+        let conn = self.conn();
+        let current = conn
+            .query_row(
+                "SELECT task_json FROM tasks WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), task.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(current_json) = current else {
+            return Ok(false);
+        };
+        let current: crate::ports::tasks::TaskRecord = serde_json::from_str(&current_json)?;
+        if current != *observed {
+            return Ok(false);
+        }
+        let task_json = serde_json::to_string(task)?;
+        let changed = conn
+            .execute(
+                "UPDATE tasks SET task_json = ?1, updated_ms = ?2
+                 WHERE company_id = ?3 AND id = ?4 AND task_json = ?5",
+                params![
+                    task_json,
+                    task.updated_at_millis as i64,
+                    company.as_ref(),
+                    task.id,
+                    current_json
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(changed == 1)
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -3579,16 +3628,20 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         }
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: crate::ports::workspace::WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
-        let conn = self.conn();
-        let node_json: Option<String> = conn
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let node_json: Option<String> = tx
             .query_row(
                 "SELECT node_json FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
                 params![company.as_ref(), id],
@@ -3612,11 +3665,12 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 crate::ports::workspace::binary_write_refusal(&node.name, mime),
             ));
         }
-        node.updated_at_millis = now_millis();
-        // Authorship rides the same stamp as the timestamp. The node is stored
-        // as opaque JSON, so this needs no column and no migration.
+        node.updated_at_millis = crate::ports::workspace::next_write_revision(
+            node.updated_at_millis,
+            expected_updated_at,
+        )?;
         node.updated_by = author;
-        conn.execute(
+        tx.execute(
             "UPDATE workspace_nodes SET node_json = ?1, content = ?2, updated_ms = ?3 \
              WHERE company_id = ?4 AND id = ?5",
             params![
@@ -3628,6 +3682,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(node)
     }
 
@@ -3934,8 +3989,11 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         parent: Option<Option<&str>>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
-        let conn = self.conn();
-        let nodes = self.workspace_nodes(&conn, company)?;
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
         if !nodes.contains_key(id) {
             return Err(OpenCompanyError::CompanyNotFound(format!(
                 "workspace node {id}"
@@ -3961,8 +4019,9 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         if let Some(parent) = parent {
             node.parent_id = parent.map(str::to_string);
         }
-        node.updated_at_millis = now_millis();
-        conn.execute(
+        node.updated_at_millis =
+            crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+        tx.execute(
             "UPDATE workspace_nodes SET node_json = ?1, updated_ms = ?2 \
              WHERE company_id = ?3 AND id = ?4",
             params![
@@ -3973,6 +4032,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(node)
     }
 
@@ -4034,7 +4094,8 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
 
         let mut promoted = replacement;
         promoted.name = name.to_string();
-        promoted.updated_at_millis = now_millis();
+        promoted.updated_at_millis =
+            crate::ports::workspace::next_write_revision(promoted.updated_at_millis, None)?;
         // Nothing to retire on a first publish: the name was free, which is
         // exactly what the guard above established.
         if let Some(id) = expected_id {
@@ -4798,6 +4859,28 @@ mod test {
         conformance::assert_workspace_store(store()).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("conditional.db");
+        conformance::assert_workspace_conditional_write(
+            Arc::new(SqliteStore::open(&path).unwrap()),
+            Arc::new(SqliteStore::open(&path).unwrap()),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_revision_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("revisions.db");
+        conformance::assert_workspace_revision_mutations(
+            Arc::new(SqliteStore::open(&path).unwrap()),
+            Arc::new(SqliteStore::open(&path).unwrap()),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn conformance_workspace_binary_store() {
         conformance::assert_workspace_binary_store(store()).await;
@@ -4813,6 +4896,11 @@ mod test {
     #[tokio::test]
     async fn conformance_workspace_folder_claims() {
         conformance::assert_workspace_folder_claims(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_create_rejects_an_absent_or_foreign_parent() {
+        conformance::assert_workspace_create_rejects_an_absent_or_foreign_parent(store()).await;
     }
 
     #[tokio::test]
@@ -5087,6 +5175,7 @@ mod test {
         let id = CompanyId::new("acme");
         company
             .save(&CompanyRecord {
+                       overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: toml::from_str(

@@ -102,7 +102,7 @@ pub fn undeliverable_channel_message(target: &str, deliverable: &[&str]) -> Stri
     } else {
         deliverable.join(", ")
     };
-    format!("`{target}` is not a workflow delivery channel — this runtime has: {has}")
+    format!("`{target}` is not an automation delivery channel — this runtime has: {has}")
 }
 
 /// A desk-backed [`ChannelAdapter`]. Sending appends an agent reply to the
@@ -389,7 +389,7 @@ mod test {
     #[test]
     fn the_refusal_sentence_names_the_live_set() {
         let message = undeliverable_channel_message("operator", &["engineering", "product"]);
-        assert!(message.contains("`operator` is not a workflow delivery channel"));
+        assert!(message.contains("`operator` is not an automation delivery channel"));
         assert!(message.ends_with("this runtime has: engineering, product"));
 
         let empty = undeliverable_channel_message("engineering", &[]);
@@ -410,9 +410,9 @@ mod test {
     fn the_consoles_pre_flight_says_the_same_thing() {
         const CONSOLE_DIALOG: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/frontend/src/views/WorkflowCreateDialog.tsx"
+            "/../../frontend/src/views/WorkflowCreateDialog.tsx"
         ));
-        const TAIL: &str = "is not a workflow delivery channel — this runtime has:";
+        const TAIL: &str = "is not an automation delivery channel — this runtime has:";
 
         assert!(undeliverable_channel_message("operator", &["engineering"]).contains(TAIL));
         assert!(

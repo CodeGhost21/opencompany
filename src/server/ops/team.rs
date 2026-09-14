@@ -74,6 +74,18 @@ pub fn router() -> Router<AppState> {
             "/team/draft",
             post(super::team_agent::draft_new_profile),
         ))
+        // Issue #1989: designs a WHOLE teammate from a name and a sentence, for
+        // the reduced Add-teammate dialog. A static segment beside `/team/draft`
+        // and for the same reason — nothing serves `POST` on `/team/{agent_id}`,
+        // so this cannot be confused with a teammate whose id is `design`.
+        //
+        // Deliberately id-less: this is the only pass that may write a `role`,
+        // and taking no agent id is what makes it structurally unable to rewrite
+        // an existing teammate's. See `design_teammate`.
+        .merge(scoped(
+            "/team/design",
+            post(super::team_agent::design_teammate),
+        ))
         // Issue #1776: drafting a mandate or persona for one teammate. Its own
         // path rather than another method on `/team/{agent_id}`, because it is
         // not a write to that teammate — it reads the record and returns text,
@@ -146,6 +158,21 @@ struct TeamMemberDto {
     /// detail read uses (issue #601). Desks are the company's real grouping —
     /// the overview graph draws its department pillars from these.
     desks: Vec<super::team_agent::AgentDeskDto>,
+    /// The desks this teammate may hand work to (`[[agent]].delegates_to`), as
+    /// declared — `["*"]` meaning every desk.
+    ///
+    /// This is the company's **delegation address space**: the edge set a
+    /// teammate could traverse, as opposed to the ones it has. Carried on the
+    /// roster read for the same reason `desks` and `tier` are — the console's
+    /// graph is built from this list, and a field the list omits is a field the
+    /// graph has to invent. Without it a comms graph can only draw traffic that
+    /// has already happened, so a company that has not run yet draws as a set of
+    /// unconnected agents, which is not what its manifest says.
+    ///
+    /// Omitted when empty: a teammate that delegates to nothing is the default,
+    /// and an empty array on every row is noise on the wire.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    delegates_to: Vec<String>,
     /// Whether this teammate has an enabled inbox, so the Team page's toggle
     /// renders the host's real state instead of a client-side guess.
     inbox_enabled: bool,
@@ -412,6 +439,14 @@ fn member_row(
         is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
         tools: super::team_agent::agent_tools(record, agent_id),
         desks: super::team_agent::desks_for(record, agent_id),
+        // Read off the effective agent, so an overlay teammate and a manifest
+        // one answer the same way.
+        delegates_to: record
+            .effective_agents()
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .map(|agent| agent.delegates_to)
+            .unwrap_or_default(),
         inbox_enabled,
         budget_usd_daily: cap,
         // Paired with the cap: no cap, no spend row.
@@ -487,6 +522,32 @@ async fn add_member(
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
 ) -> Result<Json<TeamMemberDto>, crate::server::Rejection> {
+    // The blank-field gap, closed (issue #1989). This was the ONE write path in
+    // the repository that stored a teammate's `name` and `role` exactly as they
+    // arrived: `PATCH {scope}/team/{agent_id}` refuses a blank one through
+    // `trimmed_field`, the orchestrator's `add_agent` tool refuses one,
+    // `company.toml` refuses one and `agents/<id>.toml` refuses one — and this
+    // route accepted `{"name": "", "role": ""}` with a `200`.
+    //
+    // What that produced is not a tidiness complaint. `persona_prompt`
+    // (`src/company/prompt.rs`) interpolates the role UNGUARDED while the
+    // description and instructions blocks beside it are blank-guarded, so a
+    // blank role ships the teammate a system prompt reading "You are Dana, the
+    //  at Acme."; the orchestrator's Team block and the auto-responder's
+    // channel-member block both render `id — role`, so delegation is grounded
+    // on a dash; and the detail page's copilot disables itself on a blank role,
+    // which is the page the console's create flow lands on. A console-side
+    // check is not a substitute for this one — the wire is open to anything
+    // holding a session, and the invariant belongs where the record is written.
+    //
+    // Before the authority check below rather than after, unlike
+    // `edit_agent`'s deliberate existence-then-authority ordering: there is no
+    // resource to confirm or deny the existence of here, so nothing is
+    // disclosed by answering "this request is malformed" first, and a
+    // request that cannot be stored should not first cost a permission lookup.
+    let name = required_field(&body.name, "name").map_err(|e| e.into_response())?;
+    let role = required_field(&body.role, "role").map_err(|e| e.into_response())?;
+
     // Setting a cap is admin-only, so an add that carries one is too — but an
     // add that does not keeps working for any member, exactly as before. The
     // check is deliberately conditional: adding this field must not quietly
@@ -610,9 +671,9 @@ async fn add_member(
         // stamps every artifact it authors, so it has to be right on the first
         // save. The surrounding write lock is what makes the uniqueness check
         // and the save below one atomic step.
-        id: record.mint_agent_id(&body.name),
-        name: body.name,
-        role: body.role,
+        id: record.mint_agent_id(&name),
+        name,
+        role,
         description: body.description,
         // Issue #661 / L5: the teammate's own grant, intersected with the
         // company allow-list by the shared reads/roster build. A teammate created
@@ -669,6 +730,31 @@ async fn add_member(
         });
     }
     company.runtime.store().save(&record).await?;
+    // The audit row for a teammate coming into existence.
+    //
+    // The orchestrator's `add_agent` tool journals the identical variant, and
+    // that symmetry is the point: two creation paths that answer "was a teammate
+    // added" differently is how the gap this closes opened in the first place.
+    //
+    // Best-effort — the teammate is already durable, and a journal that refuses
+    // the row must not turn a completed mint into a failed request.
+    if let Err(err) = company
+        .runtime
+        .events()
+        .append(
+            company.id(),
+            crate::ports::types::CompanyEvent::TeammateAdded {
+                agent_id: agent.id.clone(),
+                role: agent.role.clone(),
+                // An operator did this from the console, so no agent authored it.
+                by_agent_id: None,
+                by: company.actor.clone(),
+            },
+        )
+        .await
+    {
+        tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+    }
     // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
     // no tier, holds the company's standard grant, and sits on no desk until
     // somebody adds it to one. Resolved through the shared helpers rather than
@@ -687,6 +773,9 @@ async fn add_member(
         is_orchestrator,
         tools,
         desks,
+        // A console-created teammate delegates nowhere until somebody says so:
+        // `delegates_to` is a manifest field and the overlay carries none.
+        delegates_to: Vec::new(),
         // A brand-new teammate has no inbox until the toggle writes one.
         inbox_enabled: false,
         budget_usd_daily: body.budget_usd_daily,
@@ -1042,6 +1131,26 @@ async fn load_domain(company: &ScopedCompany) -> Result<Option<String>, ApiError
     Ok(Some(status.domain))
 }
 
+/// A required create-time field, trimmed, refusing a blank one (issue #1989).
+///
+/// Deliberately the same refusal and the same wording as `trimmed_field` in
+/// `team_agent.rs`, which is what `PATCH {scope}/team/{agent_id}` applies to the
+/// same two fields — a teammate that cannot be *edited* into a blank name or
+/// role must not be *born* with one, and an operator who meets both routes
+/// should meet one sentence. It is a separate function rather than a shared one
+/// because the shapes differ: `PATCH` takes `Option<&str>` where absent means
+/// leave-alone, and at creation there is nothing to leave alone — these fields
+/// are required by `AddMember` itself, so only their emptiness is in question.
+fn required_field(value: &str, field: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "a teammate's {field} can't be empty."
+        ))));
+    }
+    Ok(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::{Body, to_bytes};
@@ -1086,6 +1195,7 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -1512,6 +1622,89 @@ mod tests {
             "the cap and the teammate landed in one save: {row}"
         );
         assert!(row["budgetSetBy"].is_string(), "{row}");
+    }
+
+    /// Issue #1989: `POST {scope}/team` refuses a blank name or role, which it
+    /// used to store.
+    ///
+    /// This was the only write path in the repository that did not. `PATCH
+    /// {scope}/team/{agent_id}`, the orchestrator's `add_agent`, `company.toml`
+    /// and `agents/<id>.toml` all refuse one, so a teammate with an empty role
+    /// was unreachable by every route except this one — and reachable by this
+    /// one with a plain `200`.
+    ///
+    /// Asserted through the wire and then read back off the roster, because the
+    /// failure this closes is a *stored* record: a blank role interpolates into
+    /// `persona_prompt` unguarded ("You are Dana, the  at Acme.") and renders as
+    /// `id — ` in the orchestrator's Team block, neither of which errors and
+    /// neither of which anyone is told about.
+    #[tokio::test]
+    async fn add_member_refuses_a_blank_name_or_role() {
+        use crate::ports::UserRole;
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let member =
+            crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+
+        // Whitespace as well as empty: `"   "` is what a form sends when
+        // somebody tabs through a field, and it stores just as blank.
+        for body in [
+            json!({"name": "", "role": "Growth"}),
+            json!({"name": "   ", "role": "Growth"}),
+            json!({"name": "Jamie", "role": ""}),
+            json!({"name": "Jamie", "role": "  \t "}),
+        ] {
+            let (status, answer) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team",
+                Some(body.clone()),
+                Some(&member),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{body} must be refused, not stored: {answer}"
+            );
+            assert!(
+                answer.to_string().contains("can't be empty"),
+                "and refused in the same words `PATCH` uses: {answer}"
+            );
+        }
+
+        // Nothing landed. The roster is still exactly the manifest's.
+        let (status, roster) = send(
+            &state,
+            "GET",
+            "/api/v1/company/team",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{roster}");
+        assert!(
+            roster.as_array().unwrap().iter().all(|row| !row["role"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()),
+            "no teammate may exist with a blank role: {roster}"
+        );
+
+        // And the surrounding whitespace is trimmed off a good one rather than
+        // stored, so `" Jamie "` and `"Jamie"` are not two different teammates.
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "  Jamie  ", "role": "  Growth  "})),
+            Some(&member),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["name"], "Jamie", "{created}");
+        assert_eq!(created["role"], "Growth", "{created}");
     }
 
     /// Issue #1530: a teammate can be born with a persona override — the

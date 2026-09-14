@@ -14,6 +14,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ConnectTinyHumansButton } from "@/views/connections/ConnectTinyHumansButton";
+import { HubAccountLinks } from "@/views/connections/HubAccountLinks";
 
 interface Props {
   client: OpenCompanyClient;
@@ -47,7 +49,12 @@ interface Props {
  * on load and "set" is reported by a flag, never by a masked value we would have
  * had to receive.
  */
-export function CompanyCredentialCard({ client, company, canManage, onChanged }: Props) {
+export function CompanyCredentialCard({
+  client,
+  company,
+  canManage,
+  onChanged,
+}: Props) {
   const [load, setLoad] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<CompanyCredentialStatus | null>(null);
@@ -147,8 +154,22 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Company credential
         </h2>
+        {/* "for connecting providers — not the model key" overshot, and
+            "pays for thinking" then overshot the other way. The distinction is
+            real and kept: this is not a model *provider's* key, and pasting an
+            OpenRouter key here is exactly the mistake the
+            `tinyhumans/key`-vs-provider-key split exists to prevent. What was
+            false is the compression into "nothing to do with models" — a
+            managed turn resolves through this very key (#2266), so this
+            credential is very often what the agents think on.
+
+            But only *where the models are TinyHumans'*. On a company pointed at
+            OpenRouter or its own endpoint this key pays for no thinking at all,
+            and an unconditional "pays for thinking" would send someone chasing
+            spend to the wrong account — the same defect as the row on the
+            Account page, one card over. The condition is three words. */}
         <span className="text-xs text-muted-foreground">
-          for connecting providers — not the model key
+          connects your apps, and pays for TinyHumans models — not an OpenRouter key
         </span>
       </div>
 
@@ -190,6 +211,24 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
                 {status.notice}
               </p>
             )}
+
+            {/* The short path first. The field below it stays for a host with
+                no hub wired, and for anyone who would rather paste. */}
+            <ConnectTinyHumansButton
+              client={client}
+              company={company}
+              available={status?.hubLink ?? false}
+              canManage={canManage}
+              configured={configured}
+              onConnected={() => {
+                void refresh();
+                onChanged?.();
+              }}
+            />
+
+            {/* The two things the button cannot do: revoke what it minted, and
+                pay for what it spends. Both on the hub the host is pointed at. */}
+            <HubAccountLinks account={status?.account} configured={configured} />
 
             {canManage && (
               <>

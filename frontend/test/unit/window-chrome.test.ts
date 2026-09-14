@@ -7,18 +7,23 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WindowControlsInset, WindowDragBar } from "@/components/window-chrome";
 
 /**
- * The desktop window's own chrome, and — mostly — its absence.
+ * The desktop window's own chrome, and — now entirely — its absence.
  *
- * `tauri.conf.json` runs the main window with `titleBarStyle: "Overlay"`, so
- * macOS stops drawing a title bar and floats the traffic lights over the web
- * content. Two things have to be put back by hand: a band that opts back into
- * dragging, and reserved space so the lights are not sitting on the company
- * switcher.
+ * `tauri.conf.json` used to run the main window with `titleBarStyle: "Overlay"`:
+ * macOS drew no title bar and floated the traffic lights over the web content,
+ * so the console put back a band that opts into dragging and reserved 72px so
+ * the lights were not sitting on the company switcher.
  *
- * Both are conditional on a runtime this suite is not, which is the whole point
- * of testing them: a band that renders in a browser is a 28px strip across the
- * top of every page that silently swallows clicks, with nothing on screen to
- * explain it. The guard is one `if` and exactly the kind that gets "simplified".
+ * The window is `decorations: true` with no `titleBarStyle` now — an ordinary
+ * macOS title bar, with the lights in it — so **neither piece renders anywhere**,
+ * and that is what these tests assert.
+ *
+ * They are kept rather than deleted because the components are kept: flipping
+ * `SHELL_DRAWS_ITS_OWN_TITLE_BAR` back in `window-chrome.tsx` restores the whole
+ * arrangement, and the last case below is what says that switch still works. A
+ * band that renders when the shell is NOT drawing its own chrome is a 28px strip
+ * across the top of every page that silently swallows clicks, with nothing on
+ * screen to explain it.
  */
 
 let host: HTMLDivElement;
@@ -67,18 +72,13 @@ describe("the window drag band", () => {
     expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
   });
 
-  it("draws a draggable, non-announced band on the macOS desktop", () => {
+  it("renders nothing on macOS either, now that the title bar is native", () => {
+    // The case that used to assert the band. macOS draws the title bar again,
+    // so there is a real one to grab and a band over the content would only
+    // swallow the clicks of whatever it covers.
     asDesktop("MacIntel");
     render(createElement(WindowDragBar));
-
-    const bar = host.querySelector("[data-tauri-drag-region]");
-    expect(bar).not.toBeNull();
-    // Window chrome, not content: there is nothing here to read.
-    expect(bar?.getAttribute("aria-hidden")).toBe("true");
-    // Positioned over the top of its container rather than reserving a row, so
-    // it adds no inherited inset to the page below it.
-    expect(bar?.className).toContain("absolute");
-    expect(bar?.className).toContain("top-0");
+    expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
   });
 });
 
@@ -92,20 +92,12 @@ describe("the traffic-light inset", () => {
     expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
   });
 
-  it("reserves a draggable strip at the left of the title row on macOS", () => {
+  it("reserves nothing on macOS either, now that the lights are in the title bar", () => {
+    // The 72px this used to hold is the whole point of the change: reserved
+    // while the shell drew its own chrome, it is a hole in the title row the
+    // moment macOS draws the lights somewhere else.
     asDesktop("MacIntel");
     render(createElement(WindowControlsInset));
-
-    const inset = host.querySelector("[data-tauri-drag-region]") as HTMLElement | null;
-    expect(inset).not.toBeNull();
-    // In flow, unlike the band: this one's job is to take up the space the
-    // lights are drawn in, so the switcher beside it starts clear of them.
-    expect(inset?.className).not.toContain("absolute");
-    expect(inset?.className).toContain("flex-none");
-    // Horizontal, not vertical. The switcher moved out of the sidebar's top-left
-    // corner and into a full-width title row, so the lights now collide with it
-    // along the x axis and the reservation follows.
-    expect(inset?.style.width).toBe("72px");
-    expect(inset?.style.height).toBe("");
+    expect(host.querySelector("[data-tauri-drag-region]")).toBeNull();
   });
 });

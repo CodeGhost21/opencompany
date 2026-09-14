@@ -29,6 +29,9 @@ import { McpServersSection } from "@/views/connections/McpServersSection";
 
 /** A transport that accepts every request and answers none. */
 class StallingTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   request(_req: TransportRequest): Promise<TransportResponse> {
     return new Promise<TransportResponse>(() => {});
   }

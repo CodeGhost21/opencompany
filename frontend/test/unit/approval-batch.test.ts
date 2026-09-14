@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, Verdict } from "@/api/types";
-import { buildTimelineItems, type TimelineItem } from "@/views/chat/model";
+import { buildTimelineItems, type TimelineItem } from "@/views/room/model";
 
 /**
  * One turn asks once (issue #842).

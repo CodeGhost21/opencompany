@@ -4,8 +4,8 @@ import { act, createElement, Fragment, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ChannelRail } from "@/views/chat/ChannelRail";
-import type { ChannelSection } from "@/views/chat/model";
+import { ChannelRail } from "@/views/room/ChannelRail";
+import type { ChannelSection } from "@/views/room/model";
 
 /**
  * The compact rail keeps an unread channel's count in its accessible name
@@ -173,7 +173,7 @@ describe("section folds survive a rail collapse/expand (P2 review)", () => {
   });
 
   it("shares one fold set across the desktop and sub-lg rail instances", () => {
-    // `ChatView` renders two `ChannelRail`s (sub-`lg` and desktop) and hands
+    // `RoomView` renders two `ChannelRail`s (sub-`lg` and desktop) and hands
     // both the same controlled disclosure state so crossing the breakpoint
     // keeps the operator's folds (codex P2 review). This harness mirrors that
     // wiring; folding on one rail must fold the same section on the other.
@@ -238,7 +238,7 @@ const OPERATOR_SECTIONS: ChannelSection[] = [
         id: "operator",
         name: "Operator",
         kind: "channel",
-        purpose: "Workflow reports.",
+        purpose: "Automation reports.",
         system: true,
       },
     ],

@@ -67,6 +67,13 @@ const MAX_LINK_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "documents")]
 const LINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How long one host may take to resolve before the link is refused.
+///
+/// Separate from [`LINK_TIMEOUT`], which bounds the fetch and starts only once
+/// the guard has answered. Well under it, because a name that has not resolved
+/// in five seconds is not going to be fetched inside the remaining ten.
+const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Builds the ingest route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/memory/ingest", post(ingest))
@@ -275,10 +282,13 @@ struct ForgottenDto {
 }
 
 /// Classifies a multipart failure the way the workspace upload does: a body
-/// that overran the limit is a 413, anything else a malformed request.
+/// that overran the limit is a 413, anything else a malformed request. The
+/// 413 is raised as [`OpenCompanyError::WorkspaceQuota`] on purpose — the
+/// shared "too big" vocabulary `server::ops::workspace`'s own
+/// `multipart_error` documents, rather than a second one for this route.
 fn multipart_error(error: MultipartError, context: &str) -> ApiError {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        return ApiError(OpenCompanyError::InvalidRequest(format!(
+        return ApiError(OpenCompanyError::WorkspaceQuota(format!(
             "this drop is larger than the {} MiB one request may carry, so it was cut off before \
              anything could be read. Nothing was stored — drop it in smaller batches.",
             INGEST_BODY_LIMIT / (1024 * 1024)
@@ -359,7 +369,7 @@ async fn ingest_links(
     let mut items = Vec::new();
     for url in request.urls {
         let url = url.trim().to_string();
-        if let Err(refusal) = guard_link(&url) {
+        if let Err(refusal) = guard_link(&url).await {
             items.push(IngestedItem::failed(url, refusal));
             continue;
         }
@@ -414,15 +424,89 @@ async fn fetch_link(
     item
 }
 
+/// Whether an address belongs to the deployment rather than the internet.
+///
+/// The set the fetch below must never reach: loopback, RFC1918, link-local
+/// (which is where a cloud metadata service lives), unspecified, and their
+/// IPv6 equivalents including unique-local and the v4-mapped forms, since
+/// `::ffff:127.0.0.1` is a loopback address written the long way.
+#[cfg(feature = "documents")]
+fn is_internal_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])
+        }
+        std::net::IpAddr::V6(v6) => {
+            // `::1` and `::` are judged as themselves before any v4 reading of
+            // them: `to_ipv4` maps `::1` to `0.0.0.1`, which is not internal by
+            // v4 rules, so testing that first would admit loopback.
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.segments()[0] & 0xfe00 == 0xfc00
+                || v6.segments()[0] & 0xffc0 == 0xfe80
+            {
+                return true;
+            }
+            // `to_ipv4`, not `to_ipv4_mapped`: the mapped form (`::ffff:a.b.c.d`)
+            // is only half of it. The deprecated IPv4-compatible form
+            // (`::a.b.c.d`) carries the same address, is not `is_loopback`, and
+            // `to_ipv4_mapped` answers `None` for it — so reading only the
+            // mapped form admits `::127.0.0.1`.
+            v6.to_ipv4()
+                .is_some_and(|v4| is_internal_address(std::net::IpAddr::V4(v4)))
+        }
+    }
+}
+
 /// Refuses a URL this host must not fetch on an operator's behalf.
 ///
-/// Scheme and host only: DNS is resolved by the client at request time and
-/// re-resolving here to check the address would be a different lookup than the
-/// one that happens (a TOCTOU no host-level check closes). What this stops is
-/// the direct form — `http://localhost:8080/admin`, `http://169.254.169.254/`
-/// — which is the shape of every accidental and most deliberate attempts.
+/// Two checks, and the second is the one that matters. A literal address is
+/// judged directly. A **hostname** is resolved, and refused when any address
+/// it answers with belongs to this deployment — without that step
+/// `http://anything.example/` pointing at `169.254.169.254` reads as an
+/// ordinary public URL, and the fetch below reaches the metadata service.
+/// Refusing the literal form alone stops the accident and none of the intent.
+///
+/// The residual TOCTOU is real and is not what this closes: a name that
+/// resolves publicly here can answer differently for the client a moment
+/// later. Narrowing that means having the connector pin the address this
+/// validated, which is a change to the client rather than to this check.
+///
+/// The agent runtime carries the same rule for the tools it exposes
+/// (`validate_url_with_dns_check`), but it is not reachable from every build
+/// this route ships in — `documents` is a default feature and `openhuman` is
+/// not — and pulling the whole runtime into the default build to borrow forty
+/// lines of URL guard costs more than it saves. The lasting fix is to lift
+/// this rule somewhere both can depend on; until then the two are deliberate
+/// copies rather than an oversight.
 #[cfg(feature = "documents")]
-fn guard_link(url: &str) -> Result<(), String> {
+async fn guard_link(url: &str) -> Result<(), String> {
+    guard_link_resolving_with(url, |host, port| async move {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map(|addrs| addrs.map(|socket| socket.ip()).collect())
+    })
+    .await
+}
+
+/// [`guard_link`], against a resolver the caller supplies.
+///
+/// The split exists so the resolving arm can be tested without a lookup. A
+/// case that reaches real DNS to prove this fails on a runner without it, and
+/// that failure says nothing about the product — the wrong way round for a
+/// check that sits in the default feature set. The runtime's own guard is
+/// split the same way and for the same reason.
+#[cfg(feature = "documents")]
+async fn guard_link_resolving_with<F, Fut>(url: &str, resolve: F) -> Result<(), String>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::IpAddr>>>,
+{
     let parsed = url
         .parse::<axum::http::Uri>()
         .map_err(|_| "not a URL".to_string())?;
@@ -433,21 +517,37 @@ fn guard_link(url: &str) -> Result<(), String> {
     let host = parsed
         .host()
         .ok_or_else(|| "no host in the URL".to_string())?;
+    // A bracketed IPv6 literal keeps its brackets in `Uri::host`.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
     let lowered = host.to_ascii_lowercase();
     if lowered == "localhost" || lowered.ends_with(".localhost") || lowered.ends_with(".internal") {
         return Err("that host is internal to this deployment".to_string());
     }
+
     if let Ok(address) = lowered.parse::<std::net::IpAddr>() {
-        let private = match address {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || v6.segments()[0] & 0xfe00 == 0xfc00
-            }
+        return if is_internal_address(address) {
+            Err("that address is inside this deployment's own network".to_string())
+        } else {
+            Ok(())
         };
-        if private {
-            return Err("that address is inside this deployment's own network".to_string());
+    }
+
+    let port = parsed.port_u16().unwrap_or(match parsed.scheme_str() {
+        Some("https") => 443,
+        _ => 80,
+    });
+    let resolved = tokio::time::timeout(DNS_TIMEOUT, resolve(lowered.clone(), port))
+        .await
+        .map_err(|_| format!("`{lowered}` took too long to resolve"))?
+        .map_err(|e| format!("that host could not be resolved: {e}"))?;
+    if resolved.is_empty() {
+        return Err(format!("`{lowered}` resolved to no addresses"));
+    }
+    for address in resolved {
+        if is_internal_address(address) {
+            return Err(format!(
+                "`{lowered}` resolves to {address}, which is inside this deployment's own network"
+            ));
         }
     }
     Ok(())

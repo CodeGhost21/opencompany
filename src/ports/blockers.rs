@@ -354,12 +354,11 @@ impl BlockerVerdict {
         })
     }
 
-    /// Whether this verdict **re-enters** the stopped step.
+    /// Whether this verdict permits a follow-up after the stopped step.
     ///
-    /// Every verdict but [`Cancel`](Self::Cancel) resumes: a retry runs the step
-    /// again, an amend runs it with the answer, a skip proceeds past it. Cancel
-    /// abandons the work and starts nothing — the one place the resume fork
-    /// short-circuits before any cycle.
+    /// This does not decide whether a task card dispatches: a task skip settles
+    /// without another run, while a node skip re-enters its workflow past the
+    /// node. Cancel abandons either kind and starts nothing.
     pub fn resumes(self) -> bool {
         !matches!(self, Self::Cancel)
     }
@@ -452,8 +451,8 @@ impl BlockerResolution {
         self
     }
 
-    /// Whether resolving with this re-enters the stopped step — a shorthand for
-    /// [`BlockerVerdict::resumes`].
+    /// Whether resolving permits a follow-up — a shorthand for
+    /// [`BlockerVerdict::resumes`]. Task routing may settle without dispatch.
     pub fn resumes(&self) -> bool {
         self.verdict.resumes()
     }
@@ -733,5 +732,41 @@ mod test {
             let back: BlockerStep = serde_json::from_str(&json).expect("step parses");
             assert_eq!(back, step);
         }
+    }
+
+    fn effect_of_kind(kind: &str) -> crate::ports::types::Effect {
+        crate::ports::types::Effect {
+            kind: kind.to_string(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        }
+    }
+
+    /// `is_blocker_effect` is a **lexical** prefix match, not a check against
+    /// the closed [`BlockerKind`]/[`BlockerSource`] vocabulary — an effect kind
+    /// that merely *starts with* `blocker.` is treated as inert and skipped at
+    /// execution (`CycleRunner`'s never-execute guard) whether or not it is one
+    /// of this module's own recognised classes. Pinned so the "blocker."
+    /// prefix is understood as a reserved namespace no other effect kind may
+    /// ever begin with, rather than a semantic check that happens to be
+    /// implemented as a prefix match.
+    #[test]
+    fn the_guard_is_a_bare_prefix_match_not_a_vocabulary_check() {
+        assert!(is_blocker_effect(&effect_of_kind("blocker.information")));
+        // A kind starting with the reserved prefix but naming no recognised
+        // class is matched all the same — the guard cannot tell "a real
+        // blocker" from "anything spelled with this prefix".
+        assert!(is_blocker_effect(&effect_of_kind(
+            "blocker.nobody_declared_this_class"
+        )));
+        // The boundary that actually matters: a kind that merely contains the
+        // word, rather than starting with `blocker.`, is correctly NOT matched.
+        assert!(!is_blocker_effect(&effect_of_kind("payment.blocker_fee")));
+        assert!(!is_blocker_effect(&effect_of_kind("blocker")));
     }
 }

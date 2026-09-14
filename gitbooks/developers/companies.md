@@ -37,8 +37,8 @@ A `company.toml` seeds the whole company:
 ## Author, validate, launch
 
 ```sh
-opencompany check companies/agentic_marketing_agency        # validate
-opencompany serve --company companies/agentic_marketing_agency   # launch
+opencompany check companies/marketing_agency        # validate
+opencompany serve --company companies/marketing_agency   # launch
 ```
 
 `opencompany check` reports any problems in plain language. Lint rules enforce:

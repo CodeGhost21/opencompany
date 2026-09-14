@@ -89,6 +89,7 @@ mod test {
     /// come from the TOML; nothing else matters to sender resolution.
     fn record(manifest_toml: &str) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             id: CompanyId::new("acme"),
             manifest: toml::from_str(manifest_toml).expect("parse manifest"),
             ledger: Vec::new(),

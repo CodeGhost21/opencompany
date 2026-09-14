@@ -146,7 +146,7 @@ export function AnalyticsLens({ runs }: { runs: ObservatoryRun[] }) {
         </CardHeader>
         <CardContent>
           {nodes.length === 0 ? (
-            <Empty>No workflow nodes have run yet.</Empty>
+            <Empty>No automation nodes have run yet.</Empty>
           ) : (
             <ChartContainer config={config} className="h-64 w-full">
               <BarChart data={nodes} layout="vertical" margin={{ left: 8, right: 8 }}>

@@ -38,7 +38,7 @@
 //!
 //! It is a **last line of defence**, not the first. The first is not putting a
 //! credential in a message: `SecretValue` (`ports::types`) exists so a
-//! credential is not `Display`, and `analytics::config::ProjectToken` and
+//! credential is not `Display`, and `analytics::config::ClientCredentials` and
 //! [`super::config::Dsn`] both refuse to `Debug` themselves. A scrubber is
 //! heuristic by construction — it cannot recognise a secret that looks like a
 //! word — so a call site that relies on it is one release away from leaking.

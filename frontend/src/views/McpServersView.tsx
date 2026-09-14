@@ -5,7 +5,8 @@ import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { McpServersSection } from "@/views/connections/McpServersSection";
 import { McpJsonEditor } from "@/views/mcp/McpJsonEditor";
 
@@ -37,6 +38,17 @@ interface Props {
  * That is still one surface rather than two — this page is its only caller
  * (issue #414).
  */
+/**
+ * The two notations this page reads its configuration in. `id` is what `?tab=`
+ * carries, so `#/connections/mcp?tab=json` opens the file directly.
+ */
+const MCP_TABS = [
+  { id: "connections", label: "Connections", icon: Server },
+  { id: "json", label: "mcp.json", icon: FileJson },
+] as const satisfies readonly PageTab<string>[];
+
+type McpTab = (typeof MCP_TABS)[number]["id"];
+
 export function McpServersView({ client, company }: Props) {
   // Adding or removing a server changes what tools the company's agents can
   // call, so it is an admin's (issue #403). Courtesy only: the host answers 403
@@ -46,6 +58,11 @@ export function McpServersView({ client, company }: Props) {
   // adds or removes servers re-reads the list instead of leaving the other tab
   // describing the configuration as it was before the file was written.
   const [written, setWritten] = useState(0);
+  // In the address, so a link can open the file and Back returns to the rows.
+  const [tab, setTab] = useHashTab<McpTab>(
+    MCP_TABS.map((t) => t.id),
+    "connections",
+  );
 
   useEffect(() => {
     let live = true;
@@ -67,53 +84,52 @@ export function McpServersView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="MCP Servers"
-        width="5xl"
+        width="full"
         description={
           <>
-            The tool servers this company&apos;s teammates can call, from its manifest and the
+            The tool servers this company&apos;s agents can call, from its manifest and the
             ones you add here.
           </>
         }
+        tabs={
+          <PageTabs
+            tabs={MCP_TABS}
+            value={tab}
+            onChange={setTab}
+            idBase="mcp"
+            aria-label="MCP views"
+          />
+        }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {!canManage && (
           <Alert data-testid="mcp-read-only">
             <Info className="size-4" />
             <AlertTitle>Only an admin can change this company&apos;s tool servers</AlertTitle>
             <AlertDescription>
-              A server here hands every teammate a new set of tools, so an admin adds and removes
+              A server here hands every agent a new set of tools, so an admin adds and removes
               them. You can see what is installed.
             </AlertDescription>
           </Alert>
         )}
 
-        <Tabs defaultValue="connections">
-          <TabsList>
-            <TabsTrigger value="connections" data-testid="mcp-tab-connections">
-              <Server /> Connections
-            </TabsTrigger>
-            <TabsTrigger value="json" data-testid="mcp-tab-json">
-              <FileJson /> mcp.json
-            </TabsTrigger>
-          </TabsList>
-          <TabsContent value="connections" className="pt-4">
-            <McpServersSection
-              key={written}
-              client={client}
-              company={company}
-              canManage={canManage}
-              chrome="standalone"
-            />
-          </TabsContent>
-          <TabsContent value="json" className="pt-4">
-            <McpJsonEditor
-              client={client}
-              company={company}
-              canManage={canManage}
-              onSaved={() => setWritten((n) => n + 1)}
-            />
-          </TabsContent>
-        </Tabs>
+        <PageTabPanel idBase="mcp" id="connections" value={tab}>
+          <McpServersSection
+            key={written}
+            client={client}
+            company={company}
+            canManage={canManage}
+            chrome="standalone"
+          />
+        </PageTabPanel>
+        <PageTabPanel idBase="mcp" id="json" value={tab}>
+          <McpJsonEditor
+            client={client}
+            company={company}
+            canManage={canManage}
+            onSaved={() => setWritten((n) => n + 1)}
+          />
+        </PageTabPanel>
       </div>
     </div>
   );

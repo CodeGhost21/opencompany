@@ -138,7 +138,7 @@ describe("the desk selector", () => {
   it("explains a loaded empty overview and sends the operator to create a desk", () => {
     render([], null, () => {}, true);
 
-    expect(host.textContent).toContain("This graph shows how your company's desks, teammates, work, and workflows connect.");
+    expect(host.textContent).toContain("This graph shows how your company's desks, agents, work, and automations connect.");
     const createDesk = host.querySelector('a[href="#/company/desks"]');
     expect(createDesk?.textContent).toBe("Create a desk");
     expect(host.querySelector('[aria-label="Previous department"]')).toBeNull();

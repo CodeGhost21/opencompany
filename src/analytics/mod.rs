@@ -1,5 +1,5 @@
 //! Product analytics: the [`Tracker`] port, its silent default, and the opt-in
-//! Mixpanel transport.
+//! OpenPanel transport.
 //!
 //! Issue #1739. The three decisions this module implements were taken before it
 //! and are not re-litigated here; they are restated because every line below is
@@ -23,7 +23,7 @@
 //!
 //! | Always compiled | Behind `--features analytics` |
 //! |---|---|
-//! | [`Tracker`], [`Event`], [`Envelope`], [`NullTracker`], [`RecordingTracker`], [`TrackingUsageMeter`], the whole enable/disable decision, and the JSON body builder | `HttpMixpanelTracker` — one `reqwest` POST |
+//! | [`Tracker`], [`Event`], [`Envelope`], [`NullTracker`], [`RecordingTracker`], [`TrackingUsageMeter`], the whole enable/disable decision, and the JSON body builder | `HttpOpenPanelTracker` — one `reqwest` POST |
 //!
 //! So a default build **cannot** make an analytics request: the only type that
 //! owns an HTTP client does not exist in it. That is not a policy the code
@@ -46,7 +46,18 @@
 //! Analytics never delays a turn, never surfaces an error to an operator, and
 //! never prevents boot. [`Tracker::track`] is synchronous, infallible and
 //! returns nothing: a call site cannot handle an analytics error because it is
-//! not given one. A dead Mixpanel is a no-op.
+//! not given one. A dead collector is a no-op.
+//!
+//! # The collector is one the operator runs
+//!
+//! Events go to **OpenPanel** (`https://github.com/Openpanel-dev/openpanel`),
+//! which is AGPL-3.0 and self-hostable, at whatever address
+//! `OPENCOMPANY_ANALYTICS_ENDPOINT` names. There is no default address and no
+//! third party in the path. That is the point of the change away from Mixpanel:
+//! a GPL-3.0, self-hostable product whose one outbound telemetry call went to a
+//! SaaS vendor was asking its users to take the licence more seriously than it
+//! did itself, and it left self-hosters with a channel they could read the code
+//! for but never actually operate.
 
 use std::sync::{Arc, Mutex};
 
@@ -55,7 +66,7 @@ use async_trait::async_trait;
 pub mod boot;
 pub mod config;
 pub mod meter;
-pub mod mixpanel;
+pub mod openpanel;
 pub mod types;
 
 pub use boot::install as install_analytics;
@@ -292,30 +303,85 @@ impl Tracker for DeferredTracker {
     }
 }
 
-/// Renders one event as the flat property map a JSON transport sends.
+/// Renders one event as the body OpenPanel's `POST /track` takes.
 ///
 /// Un-gated deliberately. The body builder is where a leak would actually
 /// happen, so it must be testable in the build that every lane runs, not only
 /// in the one lane that compiles the network client.
 ///
-/// The identity goes in as `distinct_id`; everything else comes from
+/// The shape is OpenPanel's discriminated union: a `type` naming the operation
+/// and a `payload` carrying it. The identity goes in as `profileId` — a sibling
+/// of the properties rather than one of them, which is the visible difference
+/// from the `distinct_id` property this replaced. Everything else comes from
 /// [`Envelope::props`] and [`Event::props`], which yield [`PropValue`]s and can
 /// therefore hold nothing but literals, counts, quantities and flags.
+///
+/// **The credential is not here and cannot be.** It travels in two request
+/// headers, which is a straightforward improvement on the token Mixpanel wanted
+/// stamped into every event's property bag: there is no longer a path by which a
+/// captured body, a recorded event or a test fixture could carry it, so the one
+/// place the transport used to reach into a rendered payload is gone.
+///
+/// Rendered at the moment the event happens, not at the moment it is sent — see
+/// [`payload_at`] for why that distinction is load-bearing.
 pub fn payload(envelope: &Envelope, event: &Event) -> serde_json::Value {
+    payload_at(envelope, event, crate::ports::now_millis())
+}
+
+/// [`payload`] with the event time supplied, so a test can pin it.
+///
+/// # Why the event carries a time at all
+///
+/// OpenPanel stamps **arrival** time unless the body says otherwise, and this
+/// transport queues events for up to thirty seconds before it drains — longer
+/// after an outage, since a full queue drains only when the collector comes
+/// back. Arrival time would therefore report a burst of turns as having
+/// happened at the moment the drain succeeded, which is wrong in exactly the
+/// direction that matters: the durations and orderings `turn_finished` exists to
+/// measure would be flattened against the flush schedule.
+///
+/// `properties.__timestamp` is the one field OpenPanel reads for this
+/// (`apps/api/src/controllers/track.controller.ts`, `getTimestamp`). Two clamps
+/// it applies are worth knowing and neither is a problem here:
+///
+/// * more than **60 seconds in the future** is discarded for arrival time. This
+///   process stamps at `track` time and can only ever be in the past.
+/// * more than **15 minutes in the past** marks the event as a backfill, which
+///   makes it session-less on the server. That costs nothing: this is a
+///   server-side client with no browser session, and the events are attributed
+///   by `profileId`.
+///
+/// The value is second-precision RFC-3339 UTC, from the crate's one formatter
+/// (`server::graphql::iso8601`) rather than a second copy of the civil-date
+/// arithmetic.
+///
+/// It is also the only string in a payload that is neither a compiled literal
+/// nor the opaque id — so `analytics::test` asserts its **shape** rather than
+/// listing it in the vocabulary, which is what keeps "every string here is
+/// either an id, a platform constant or a hand-written word" a claim with no
+/// quiet exception in it.
+pub fn payload_at(envelope: &Envelope, event: &Event, at_millis: u64) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
-    properties.insert(
-        "distinct_id".to_string(),
-        serde_json::Value::from(envelope.id.as_str()),
-    );
     for (key, value) in envelope.props() {
         properties.insert(key.to_string(), value.to_json());
     }
     for (key, value) in event.props() {
         properties.insert(key.to_string(), value.to_json());
     }
+    // Last, so no present or future property name could displace it. OpenPanel
+    // reserves the `__` prefix for its own fields and strips them before
+    // storage; nothing else this module emits uses one.
+    properties.insert(
+        "__timestamp".to_string(),
+        serde_json::Value::from(crate::server::graphql::iso8601(at_millis)),
+    );
     serde_json::json!({
-        "event": event.name(),
-        "properties": serde_json::Value::Object(properties),
+        "type": "track",
+        "payload": {
+            "name": event.name(),
+            "profileId": envelope.id.as_str(),
+            "properties": serde_json::Value::Object(properties),
+        },
     })
 }
 

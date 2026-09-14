@@ -9,7 +9,7 @@ import { hasOtherOpenTurns, turnStateKey, type OpenTurn } from "@/lib/live-reply
  * `hasOtherOpenTurns` is the guard on a thread-wide clear: it answers "is there
  * still work here?", and the caller erases that thread's live rows when it says
  * no. Since #2042 the map it reads is keyed per thread (`engineering#41`), and
- * `ChatView` hands `onSendStart` that same key — so `liveStepsByThread` and
+ * `RoomView` hands `onSendStart` that same key — so `liveStepsByThread` and
  * `receiptByThread` are keyed by it too.
  *
  * Look the **desk** up in that map and the guard answers about a different

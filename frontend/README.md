@@ -23,7 +23,7 @@ and survives a refresh.
 | View | What it does |
 |---|---|
 | **Overview** | The company's knowledge graph, full-bleed — see [`src/views/overview/README.md`](src/views/overview/README.md) |
-| **Chat** | A channel-and-DM workspace: channel rail, threaded timeline, composer, thread panel, and the roster in a side pane — see [`src/views/chat/README.md`](src/views/chat/README.md) |
+| **Room** | A channel-and-DM workspace: channel rail, threaded timeline, composer, thread panel, and the roster in a side pane — see [`src/views/room/README.md`](src/views/room/README.md) |
 | **Tasks** | A built-in Kanban board (drag cards between columns) |
 | **Approvals** | The inbox of things parked for your decision, with approve/decline |
 | **Workflows** | A read-only [React Flow](https://reactflow.dev) canvas of how work is routed (lazy-loaded) |
@@ -48,7 +48,7 @@ CORS in dev):
 
 ```sh
 # 1. From the repo root — a company on 127.0.0.1:8080
-cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --bin opencompany -- serve --company companies/marketing_agency
 
 # 2. From frontend/ — the console on http://localhost:5173
 npm install
@@ -324,7 +324,7 @@ turn, closed every card and reached a confidently wrong conclusion is green
 everywhere else here.
 
 `euler-live.spec.ts` closes that. It serves
-[`companies/agentic_math_lab`](../companies/agentic_math_lab) — a roster split
+[`companies/math_lab`](../companies/math_lab) — a roster split
 into decide / program / break, with no `web` and no `search` grant — states a
 Project Euler problem in the main line, dispatches whatever the orchestrator
 opens, keeps asking until the work settles, and then compares the integer the

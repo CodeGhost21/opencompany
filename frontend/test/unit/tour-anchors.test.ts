@@ -95,16 +95,19 @@ describe("every guided-tour stop can actually anchor", () => {
     expect(anchors).not.toContain("nav-observatory");
   });
 
-  it("says Flows and Room where the sidebar does", () => {
+  it("says Automations and Room where the sidebar does", () => {
     // The tour's prose is the other half of a rename. The anchors follow view
     // ids and so survive one silently — which is exactly how a step titled
     // "Workflows" would have gone on spotlighting a row labelled "Flows".
-    const flows = TOUR.find((stop) => stop.view === "workflows")!;
-    expect(flows.title).toBe("Flows");
+    const automations = TOUR.find((stop) => stop.view === "workflows")!;
+    expect(automations.title).toBe("Automations");
+    // Both earlier spellings, so a half-finished rename fails here rather than
+    // shipping a step that spotlights a row by another name.
     expect(TOUR.some((stop) => stop.title === "Workflows")).toBe(false);
+    expect(TOUR.some((stop) => stop.title === "Flows")).toBe(false);
 
     const labels = new Set(NAV_SECTIONS.map((section) => section.label));
-    expect(labels.has(flows.title)).toBe(true);
+    expect(labels.has(automations.title)).toBe(true);
   });
 
   it("still opens on the welcome and closes on the composer", () => {

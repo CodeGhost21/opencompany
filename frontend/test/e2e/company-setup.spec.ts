@@ -96,12 +96,12 @@ function staffed(roster: RosterRow[]): RosterRow[] {
  */
 async function sourceOf(request: APIRequestContext, id: string): Promise<string> {
   const res = await request.get(`${COMPANY_SCOPE}/team/${id}`);
-  expect(res.ok(), `could not read teammate '${id}' to find out where it came from`).toBeTruthy();
+  expect(res.ok(), `could not read agent '${id}' to find out where it came from`).toBeTruthy();
   const source = ((await res.json()) as { source?: string }).source;
   expect(
     source,
-    `the host did not say where teammate '${id}' came from, so this helper cannot tell a ` +
-      "blueprint teammate it must leave alone from an operator-added one it may remove",
+    `the host did not say where agent '${id}' came from, so this helper cannot tell a ` +
+      "blueprint agent it must leave alone from an operator-added one it may remove",
   ).toBeDefined();
   return source as string;
 }
@@ -152,7 +152,7 @@ test.beforeEach(async ({ request }) => {
   const left = staffed(await hostRoster(request));
   expect(
     left.map((member) => member.role),
-    `this host serves a company that ships with ${left.length} teammate(s) of its ` +
+    `this host serves a company that ships with ${left.length} agent(s) of its ` +
       "own, so first-run setup cannot open against it. Run this spec with " +
       `\`npm run e2e:first-run\`, which serves ${FIRST_RUN_COMPANY}.`,
   ).toEqual([]);
@@ -230,7 +230,7 @@ test("first-run setup builds a real team from three answers", async ({ page, req
   const designed = staffed(await hostRoster(request));
   expect(
     designed.length,
-    "the teammates setup created, over and above the baseline every company gets",
+    "the agents setup created, over and above the baseline every company gets",
   ).toBeGreaterThanOrEqual(4);
 
   // 6. The arrival page shows that roster, refreshed without a reload.

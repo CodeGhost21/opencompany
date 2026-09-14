@@ -231,6 +231,94 @@ export interface DeskDto {
 }
 
 /**
+ * `GET/PUT/DELETE {scope}/desks/{deskId}/hive` — a desk's move grammar.
+ *
+ * Mirrors `DeskHiveDto` in `src/server/operator.rs`.
+ *
+ * The `declared` / `effective` split is the reason this is its own payload
+ * rather than a field on {@link DeskDto}. A single `turnBudget: 9` on a
+ * three-seat desk is either an operator's decision or the derived `3 x members`,
+ * and the two behave differently the moment somebody joins — so one number
+ * cannot tell the editor whether adding a seat will change it.
+ */
+export interface DeskHiveDto {
+  deskId: string;
+  /** Where the block in force came from. */
+  source: "overlay" | "manifest" | "default";
+  /**
+   * Whether an episode would actually open right now.
+   *
+   * A one-member desk with `enabled: true` is still `false` — the flag says what
+   * the operator wants, not what the desk can do.
+   */
+  deliberates: boolean;
+  /** The block as authored. Snake_case: this field **is** the manifest block. */
+  declared: DeskHiveDeclared;
+  /** What the runtime will use, every default resolved against membership. */
+  effective: {
+    turnBudget: number;
+    quorum: number;
+    blindRound: boolean;
+    dominanceCap: number;
+    repetitionCap: number;
+    requireGrounded: boolean;
+    requireEvidential: boolean;
+    refutationCap?: number | null;
+  };
+  /** Every move a table may name, and the three no table can take away. */
+  moveKinds: string[];
+  ungatedKinds: string[];
+  seats: DeskHiveSeatDto[];
+  /**
+   * How many seats may deposit a distinct supporter, and whether that clears
+   * the effective quorum. `propose` counts — in the fold a proposal is already
+   * its own author's support.
+   */
+  eligibleSupporters: number;
+  reachesQuorum: boolean;
+}
+
+/**
+ * The `[[group_chat]].hive` block as authored — snake_case, because it is the
+ * TOML block verbatim and a camelCase twin would be a second shape to keep in
+ * step with it. Every key absent means "not said", which is distinct from any
+ * value it could hold.
+ */
+export interface DeskHiveDeclared {
+  enabled?: boolean;
+  turn_budget?: number;
+  quorum?: number;
+  blind_round?: boolean;
+  moves?: Record<string, string[]>;
+  require_evidential?: boolean;
+  refutation_cap?: number;
+  dominance_cap?: number;
+  repetition_cap?: number;
+  referral?: {
+    enabled?: boolean;
+    max_hops?: number;
+    reach?: string;
+    returns?: boolean;
+    peer_cap?: number;
+  };
+}
+
+/** One seat, and the moves it may open a line with. */
+export interface DeskHiveSeatDto {
+  agentId: string;
+  label: string;
+  role: string;
+  /** Already ordered and already unioned with the ungated three. */
+  moves: string[];
+  /**
+   * Whether the table governs this seat at all — invisible from `moves` alone,
+   * since "named with every kind" and "not named" produce the same list and
+   * only one of them is a decision somebody made.
+   */
+  governed: boolean;
+}
+
+/**
  * `GET {scope}/operator-channel` — the identity of the company's
  * always-present, durable Operator feed (issue #1757 rework): a read-only
  * "what happened" feed aggregating workflow-run reports and the owner/
@@ -271,11 +359,77 @@ export interface CreateDeskInput {
  * projection logic with the GraphQL `Chat.history` resolver, so the two can
  * never disagree about a desk's history (issue #65).
  */
+/**
+ * Where a message came from when another desk caused it (tinyhivemind P15).
+ *
+ * A crossing referral runs a turn on a desk the asker is not a member of, so
+ * the message needs to say so on its face — otherwise a turn that exists only
+ * because engineering asked reads as design's own idea.
+ *
+ * The labels are **captured with the row**, never resolved at render, for the
+ * reason `SessionAuthor` captures its own: a desk renamed later must not
+ * rewrite what the transcript said at the time.
+ */
+/** One line of a crossing between a desk and somebody who does not work on it. */
+export interface ReferralLineDto {
+  authorId: string;
+  /** Empty for this desk's own agent, whom the console already names. */
+  authorLabel: string;
+  text: string;
+  /** True for the question going out, false for the answer coming back. */
+  outbound: boolean;
+}
+
+/**
+ * A crossing folded onto the report that brought it home.
+ *
+ * The relayed rows are dropped from the transcript — an agent who does not work
+ * on this desk did not speak on it — so without this the operator could see that
+ * a question crossed and never what was said either way. `lines.length` is the
+ * count the collapsed label shows.
+ */
+export interface ReferralConversationDto {
+  askerId: string;
+  otherId: string;
+  otherDeskId: string;
+  otherDeskName: string;
+  /** Whether a person was asked rather than a desk — `@name` vs `#desk`. */
+  direct: boolean;
+  lines: ReferralLineDto[];
+}
+
+export interface ReferredFromDto {
+  deskId: string;
+  deskName: string;
+  askerId: string;
+  askerLabel: string;
+  /** The asking message, so the chip can link straight to it. */
+  sequence: number;
+  /** Whether a person was asked rather than a desk. */
+  direct?: boolean;
+  /**
+   * Which leg of the referral this message is: the outbound ask, or the answer
+   * arriving home.
+   *
+   * The host says it because only the host can. Both legs are agent-authored
+   * lines on a desk, so `from`, `byPerson` and the author all read identically
+   * on each — a console that guesses from those gets every return wrong, which
+   * is exactly what it did before this field existed.
+   *
+   * Optional: a host that predates it says nothing, and the chip then falls
+   * back to "asked", which is what every marker written before the return leg
+   * shipped actually was.
+   */
+  direction?: "asked" | "answered";
+}
+
 export interface ChatHistoryMessageDto {
   id: string;
   channel: string;
   author: string;
   text: string;
+  referredFrom?: ReferredFromDto;
+  referralConversation?: ReferralConversationDto;
   atMillis: number;
   mine: boolean;
   /**
@@ -1127,6 +1281,19 @@ export interface TeamMemberDto {
    */
   isOrchestrator?: boolean;
   /**
+   * The desks this teammate may hand work to (`[[agent]].delegates_to`), as
+   * declared — `["*"]` meaning every desk.
+   *
+   * The company's **delegation address space**: the edges a teammate *could*
+   * traverse, as opposed to the ones it has. The comms graph draws it so a
+   * company that has not run yet still shows its wiring rather than a set of
+   * unconnected dots.
+   *
+   * Absent when the teammate delegates nowhere, and on a host that predates the
+   * field — in which case the graph draws observed traffic only.
+   */
+  delegatesTo?: string[];
+  /**
    * This teammate's tool grants (issue #601) — the **same** three lists, from
    * the same host-side constructor, that `GET .../team/{agentId}` serves.
    *
@@ -1737,7 +1904,7 @@ export interface CapabilityStatusDto {
   /**
    * Which provider the company's searches actually reach: `managed` (the
    * platform's own account, metered and daily-capped) or the slug it configured
-   * in Settings → Search.
+   * in Connections → Search.
    *
    * Read beside `searchCredentialConfigured` rather than instead of it: the two
    * disagree in both directions. A host with no platform credential still
@@ -1792,7 +1959,7 @@ export interface CapabilityStatusDto {
    * * `unconfigured` — a harness pool is attached to this company's runtime,
    *   but it resolved no inference source at boot, so it is running the offline
    *   echo brain and replying `"You said: …"` to everything. **Fixable in the
-   *   app**, at Settings → Inference. This is the state a fresh instance starts
+   *   app**, at Connections → Inference. This is the state a fresh instance starts
    *   in.
    * * `unavailable` — no agent harness is reachable on this host, so no
    *   configuration reaches a model. Only a different build or host wiring

@@ -62,7 +62,7 @@ describe("run drawer — board rows", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("Draft");
     // The card link is the canonical hash route the whole console uses.
-    const link = document.querySelector('a[href="#/tasks/t_1"]');
+    const link = document.querySelector('a[href="#/company/tasks/t_1"]');
     expect(link).not.toBeNull();
     expect(link?.textContent ?? "").toContain("Draft");
   });

@@ -71,8 +71,29 @@ pub fn usd_spent_by_agent(samples: &[UsageSample], agent: &str) -> f64 {
     samples
         .iter()
         .filter(|sample| sample.agent == agent)
-        .map(|sample| sample.cost_usd)
+        .filter_map(|sample| {
+            let counted = spend_contribution(sample.cost_usd);
+            if counted.is_none() {
+                tracing::warn!(
+                    agent,
+                    cost_usd = sample.cost_usd,
+                    "[usage] a cost sample that is negative or not finite was left out of the \
+                     daily spend sum; a cap cannot be judged against it"
+                );
+            }
+            counted
+        })
         .fold(0.0, |total, cost| total + cost)
+}
+
+/// `cost` when it can be added to a spend total, `None` when it cannot.
+///
+/// A cap is a floor under how much a teammate may spend, so a sample that would
+/// lower the total (negative) or erase it (`NaN` poisons every later `+`, and an
+/// infinity saturates it) is not a cheaper turn — it is a malformed sample, and
+/// folding it in would let one bad row lift a teammate over their cap unnoticed.
+fn spend_contribution(cost: f64) -> Option<f64> {
+    (cost.is_finite() && cost >= 0.0).then_some(cost)
 }
 
 /// The epoch-millis start (`00:00Z`) of the UTC calendar day `now` falls in —
@@ -209,6 +230,39 @@ mod tests {
         // Midnight maps to itself.
         let midnight = utc_day_start_millis(noon);
         assert_eq!(utc_day_start_millis(midnight), midnight);
+    }
+
+    /// A negative `cost_usd` must not fold into the total: one such sample would
+    /// lower a teammate's measured spend below what they actually spent, and a
+    /// cap judged against it lets them keep spending.
+    #[test]
+    fn a_negative_cost_sample_does_not_lower_measured_spend() {
+        let samples = vec![
+            sample("analyst", 5.0, SampleKind::Inference),
+            sample("analyst", -3.0, SampleKind::Inference),
+        ];
+        assert!(
+            (usd_spent_by_agent(&samples, "analyst") - 5.0).abs() < f64::EPSILON,
+            "a negative cost_usd sample must not silently lower measured spend, got {}",
+            usd_spent_by_agent(&samples, "analyst")
+        );
+    }
+
+    /// The non-finite case: `NaN` propagates through `+` (`x + NaN == NaN`), so a
+    /// single malformed sample would erase the whole daily total and leave every
+    /// cap comparison false.
+    #[test]
+    fn a_non_finite_cost_sample_does_not_poison_the_total() {
+        let samples = vec![
+            sample("analyst", 5.0, SampleKind::Inference),
+            sample("analyst", f64::NAN, SampleKind::Inference),
+            sample("analyst", 2.0, SampleKind::Inference),
+        ];
+        let spent = usd_spent_by_agent(&samples, "analyst");
+        assert!(
+            spent.is_finite(),
+            "a NaN sample must not poison the running total, got {spent}"
+        );
     }
 
     /// The console row: remaining floors at zero and `exhausted` trips on `>=`,

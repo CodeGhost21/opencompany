@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { ApiError } from "@/api/types";
 import {
   fetchRecentRuns,
   fetchRun,
@@ -59,7 +60,7 @@ type Load =
   | { phase: "loading" }
   | { phase: "ready"; runs: ObservatoryRun[] }
   | { phase: "unavailable" }
-  | { phase: "error"; message: string };
+  | { phase: "error"; message: string; retryable: boolean };
 
 export function ObservatoryView({ client, company, runId, eventTick }: Props) {
   const [load, setLoad] = useState<Load>({ phase: "loading" });
@@ -121,15 +122,17 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
       setLoad({ phase: "ready", runs });
     } catch (err) {
       if (generation !== reloadGeneration.current) return;
-      // A host that predates the GraphQL surface answers 404. That is
-      // "unavailable", not "broken", and it gets its own honest empty state
-      // rather than an error the operator cannot act on.
+      // A host that predates the GraphQL surface answers 404, and one built
+      // without it says so in its code. Both are "unavailable", not "broken",
+      // and get the honest empty state rather than an error with a retry the
+      // operator can only watch fail.
       setLoad(
-        classifyLoadFailure(err) === "unavailable"
+        classifyLoadFailure(err) !== "error"
           ? { phase: "unavailable" }
           : {
               phase: "error",
               message: err instanceof Error ? err.message : "the read failed",
+              retryable: !(err instanceof ApiError && err.code === "graphql_refused"),
             },
       );
     }
@@ -237,9 +240,11 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
         <PageHeader title={runId ? "Run" : "Observatory"} />
         <div className="flex flex-col items-start gap-2 p-4">
           <p className="text-[var(--status-failed-text)] text-sm">{load.message}</p>
-          <Button variant="outline" size="sm" onClick={() => void reload()}>
-            Try again
-          </Button>
+          {load.retryable ? (
+            <Button variant="outline" size="sm" onClick={() => void reload()}>
+              Try again
+            </Button>
+          ) : null}
         </div>
       </div>
     );
@@ -292,7 +297,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
         <p className="text-muted-foreground text-sm">
           {runId
             ? "This run recorded no agent attempts."
-            : "No agent attempts recorded yet. Run a workflow and they will appear here."}
+            : "No agent attempts recorded yet. Run an automation and they will appear here."}
         </p>
       ) : tab === "analytics" ? (
         <AnalyticsLens runs={runs} />
@@ -409,7 +414,7 @@ function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
   return (
     <section className="flex flex-col gap-1">
       <h3 className="text-muted-foreground text-xs uppercase tracking-wide">
-        Workflow runs
+        Automation runs
       </h3>
       <ul className="flex flex-col gap-1">
         {grouped.map(([workflowRunId, own]) => {

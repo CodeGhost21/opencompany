@@ -47,6 +47,19 @@ export interface TransportRequest {
    * that cannot honour the signal still stops the caller waiting.
    */
   signal?: AbortSignal;
+  /**
+   * How long this request may take, in milliseconds, for a transport that
+   * imposes a deadline of its own. `undefined` means "the transport's default".
+   *
+   * `BrowserTransport` ignores it — the client already races its own timer and
+   * `fetch` has no deadline to set. `ProxyTransport` needs it, because the
+   * desktop core applies a fixed 30-second `reqwest` timeout that the console
+   * cannot see: a route the host deliberately allows longer than that (the
+   * teammate design pass runs to 90s, `PERSONA_TIMEOUT`) failed on the desktop
+   * app after 30 seconds and read to the operator as a refusal. The deadline
+   * has to cross the bridge, because only the caller knows which route it is.
+   */
+  timeoutMs?: number;
 }
 
 export interface TransportResponse {
@@ -78,6 +91,38 @@ export interface StreamHandlers {
 }
 
 export interface Transport {
+  /**
+   * Whether aborting a request through {@link TransportRequest.signal} actually
+   * stops the work at the other end, rather than only stopping the caller
+   * waiting for it.
+   *
+   * `true` on `BrowserTransport`: `fetch` drops the socket, the host sees the
+   * disconnect, and an axum handler's future is dropped with it. `false` on
+   * `ProxyTransport`: an in-flight Tauri `invoke` cannot be cancelled, so the
+   * request runs to completion inside the app's Rust core no matter what the
+   * caller does.
+   *
+   * **`true` means the host stops early, not that nothing was spent.** A
+   * provider call already in flight when the disconnect arrives may have been
+   * billed for what it had generated, and the host's metering runs *after* that
+   * call returns — so a cancelled design pass leaves work the company is not
+   * charged for in its own ledger. That gap is logged host-side
+   * (`DesignSeam` in `server::ops::team_agent`) rather than papered over, and
+   * what a cancelled pass should cost is an open decision. Read this flag as
+   * "cancelling does something" and never as "cancelling is free".
+   *
+   * Exposed because for most callers the difference is invisible — the promise
+   * rejects either way — but for one it is the whole point. `POST
+   * {scope}/team/design` runs a model for up to ninety seconds and is metered
+   * against the company's plan, so the Add-teammate dialog lets the operator
+   * walk away from it *because* closing tears it down. On a transport where it
+   * does not, the same gesture spends the tokens and discards the answer, which
+   * is the behaviour the abort was added to remove. The dialog reads this and
+   * holds itself open instead: an honest wait beats a cancel that only looks
+   * like one.
+   */
+  readonly cancelsInFlight: boolean;
+
   /**
    * Performs one request.
    *

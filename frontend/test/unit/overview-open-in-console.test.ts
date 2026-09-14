@@ -16,10 +16,10 @@ import { destinationFor, MEMORY_DESTINATION } from "@/views/overview/kg/open-in-
  * has to be built from *that* id rather than from anything re-derived.
  */
 describe("where a graph node lives in the console", () => {
-  it("sends a teammate to their own page", () => {
+  it("sends an agent to their own page", () => {
     expect(destinationFor("emp:frontend_engineer")).toEqual({
       hash: "#/team/frontend_engineer",
-      label: "Open teammate",
+      label: "Open agent",
     });
   });
 
@@ -30,10 +30,10 @@ describe("where a graph node lives in the console", () => {
     });
   });
 
-  it("sends a workflow to the flow it names", () => {
+  it("sends an automation to the flow it names", () => {
     expect(destinationFor("flow:nightly-digest")).toEqual({
       hash: "#/workflows/nightly-digest",
-      label: "Open workflow",
+      label: "Open automation",
     });
   });
 
@@ -81,7 +81,7 @@ describe("where a graph node lives in the console", () => {
       ["tool:slack@desk:eng", "a tool split per desk"],
       // A stage is a node inside a saved graph; the flow has an address, the
       // node within it does not.
-      ["step:nightly-digest:2", "a workflow stage"],
+      ["step:nightly-digest:2", "an automation stage"],
       // The company core is the page you are already on.
       ["self", "the company itself"],
     ])("answers null for %s (%s)", (nodeId) => {

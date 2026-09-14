@@ -47,8 +47,10 @@ import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
  */
 
 const SCOPE = "/api/v1/company";
-/** The DM the questions are asked in, and where the resume notes land. */
-const THREAD = "dm:writer";
+/** The DM the questions are asked in, and where the resume notes land — one
+ * channel per verdict, each seeing exactly one message (see `askAndParkAll`
+ * for why a shared channel does not work here). */
+const threadFor = (verdict: Verdict) => `dm:writer-${verdict}`;
 
 /**
  * What the host writes back into the blocker's thread for each verdict —
@@ -87,53 +89,62 @@ test.beforeEach(async ({ page }) => {
  * Parks one real blocker per verdict by asking the agent four questions it
  * cannot answer, and returns their approval ids keyed by verdict.
  *
- * **One turn, four calls**, through the mock brain's `__MOCK_PLAN__` directive
- * — an array of steps, each step a set of calls to emit together, with an empty
- * step to end the turn. Four separate messages would not work: a directive
- * fires for the first request that carries it and never again, and the host's
- * own thread-index annotation quotes earlier messages back into later prompts,
- * so a second `__MOCK_TOOL_CALL__` in the same channel is a coin flip. One plan
- * has one identity and is served once, which is the property this needs.
+ * **Four turns, one call each.** `escalate_to_human` now establishes the same
+ * turn boundary `request_approval` always has (issue #2231): once a turn has
+ * asked the operator something, every later sibling call in that turn is
+ * refused rather than parked — "stop and wait for the decision" — even a
+ * second, different question. Four calls bundled into one `__MOCK_PLAN__`
+ * step, the way this used to work, now parks only the first and refuses the
+ * other three, so each question needs its own turn.
  *
- * `detach: true` so the post returns before the turn finishes; the parks happen
- * inside that turn, so the queue is polled for them. Each question carries a
- * per-run stamp because this suite shares one host and one data root — an
- * approval another spec legitimately parked must not be mistaken for one of
- * these.
+ * **One thread per verdict**, not one shared thread four times over: the host
+ * quotes a channel's own prior messages back into the next prompt sent for
+ * it, so a second `__MOCK_TOOL_CALL__` directive posted to the same channel is
+ * a coin flip on which directive the mock brain actually serves. Four
+ * channels that each see exactly one message sidesteps that outright, and
+ * `noteCounts` below reads each verdict's resume note back off its own
+ * channel to match.
+ *
+ * `detach: true` so each post returns before its turn finishes; the parks
+ * happen inside that turn, so the queue is polled for them before moving on
+ * to the next verdict. Each question carries a per-run stamp because this
+ * suite shares one host and one data root — an approval another spec
+ * legitimately parked must not be mistaken for one of these.
  */
 async function askAndParkAll(
   request: APIRequestContext,
   stamp: number,
 ): Promise<Record<Verdict, string>> {
   const question = (verdict: Verdict) => `which cluster for ${verdict}-${stamp}?`;
-  const calls = VERDICTS.map((verdict) => ({
-    name: "escalate_to_human",
-    arguments: { question: question(verdict) },
-  }));
-  // The marker goes AFTER the payload, so two runs with identical steps stay
-  // two plans rather than sharing one cursor.
-  const directive = `__MOCK_PLAN__ ${JSON.stringify([calls, []])} blockers-${stamp}`;
-  const posted = await request.post(`${SCOPE}/chat`, {
-    data: { text: directive, chat: THREAD, detach: true },
-  });
-  expect(
-    posted.ok(),
-    `asking the questions failed: ${posted.status()} ${await posted.text()}`,
-  ).toBeTruthy();
 
-  let ids: Partial<Record<Verdict, string>> = {};
-  await expect
-    .poll(
-      async () => {
-        ids = await parkedIds(request, question);
-        return VERDICTS.filter((verdict) => ids[verdict]).length;
-      },
-      {
-        timeout: 180_000,
-        message: `the agent's questions never parked as blockers (stamp ${stamp})`,
-      },
-    )
-    .toBe(VERDICTS.length);
+  const ids: Partial<Record<Verdict, string>> = {};
+  for (const verdict of VERDICTS) {
+    const call = { name: "escalate_to_human", arguments: { question: question(verdict) } };
+    // The marker goes AFTER the payload, so two runs with identical steps stay
+    // two plans rather than sharing one cursor.
+    const directive = `__MOCK_PLAN__ ${JSON.stringify([[call], []])} blockers-${stamp}-${verdict}`;
+    const posted = await request.post(`${SCOPE}/chat`, {
+      data: { text: directive, chat: threadFor(verdict), detach: true },
+    });
+    expect(
+      posted.ok(),
+      `asking the ${verdict} question failed: ${posted.status()} ${await posted.text()}`,
+    ).toBeTruthy();
+
+    await expect
+      .poll(
+        async () => {
+          const found = await parkedIds(request, question);
+          if (found[verdict]) ids[verdict] = found[verdict];
+          return Boolean(ids[verdict]);
+        },
+        {
+          timeout: 180_000,
+          message: `the ${verdict} question never parked as a blocker (stamp ${stamp})`,
+        },
+      )
+      .toBe(true);
+  }
   return ids as Record<Verdict, string>;
 }
 
@@ -159,16 +170,18 @@ async function parkedIds(
   return found;
 }
 
-/** How many of each verdict's resume note the blocker's thread currently holds. */
+/** How many of each verdict's resume note that verdict's own thread currently
+ * holds — one thread per verdict now (see `askAndParkAll`), so each is read
+ * back separately rather than filtered out of one shared history. */
 async function noteCounts(request: APIRequestContext): Promise<Record<Verdict, number>> {
-  const history = await request.get(
-    `${SCOPE}/chat/history?desk=${encodeURIComponent(THREAD)}&limit=500`,
-  );
-  const lines = history.ok()
-    ? ((await history.json()) as { text?: string }[]).map((m) => m.text ?? "")
-    : [];
   const counts = {} as Record<Verdict, number>;
   for (const verdict of VERDICTS) {
+    const history = await request.get(
+      `${SCOPE}/chat/history?desk=${encodeURIComponent(threadFor(verdict))}&limit=500`,
+    );
+    const lines = history.ok()
+      ? ((await history.json()) as { text?: string }[]).map((m) => m.text ?? "")
+      : [];
     counts[verdict] = lines.filter((line) => line.includes(RESUME_NOTE[verdict])).length;
   }
   return counts;

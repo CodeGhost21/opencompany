@@ -282,13 +282,26 @@ An unreadable store or a directory that will not answer resolves to "no
 installs", and `GET …/mcp/servers` still returns the declared list. The declared
 half is what governs what the agents reach, so it is the half that must survive.
 
-### Per-agent scoping does not apply to installs
+### Per-agent scoping applies to installs, gated by an explicit grant
 
-`harness::built_in::build` pushes the registry bridge tools onto **every**
-agent's belt with no grant check, so every teammate can call every installed
-server. Issue #1270 leaves that in place deliberately and makes it visible: a
-registry row's `reachableBy` lists the whole roster (and nobody when the install
-is disabled) rather than claiming a scope the harness does not apply.
+`harness::built_in::build` wires the registry bridge tools
+(`mcp_registry_list_tools` / `mcp_registry_tool_call`) onto an agent's belt only
+when its effective grants explicitly include `mcp_registry` (or a
+`mcp_registry.<sub>` grant) — see
+[`grants_mcp_registry_explicit`](../../src/company/types.rs). A catch-all `*`
+does **not** confer it, the same rule as `composio`/`media`/`search`: the
+registry pair reaches any server the company has installed and connected,
+addressed at call time by a bare `server_id`, with none of the declared
+bridge's per-server scoping. Granted but no registry home configured wires
+nothing (fail-closed) rather than erroring.
+
+A registry row's `reachableBy` has not caught up to this gate yet: it still
+lists the whole roster (and nobody when the install is disabled), the shape it
+had when the tools were wired unconditionally. An agent without the
+`mcp_registry` grant can therefore appear as a reacher on the Connections
+screen even though the harness will not wire it the tools — narrowing
+`reachableBy` to agents holding the grant is a tracked follow-up, not done
+here.
 
 ## Which builds can honour a server (issue #567)
 

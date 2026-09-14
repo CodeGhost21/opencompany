@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,6 +16,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useLocalScope } from "@/connections/ConnectionContext";
+import {
+  clearUnresolvedForceNew,
+  readUnresolvedForceNew,
+  writeUnresolvedForceNew,
+} from "@/views/finance/forceNewNonceStore";
+import { deriveInvoiceIdempotencyKey } from "@/views/finance/invoiceKey";
 import { fromMinorUnits, toMinorUnits } from "@/views/finance/money";
 
 interface Props {
@@ -74,11 +81,25 @@ function parseDueDays(raw: string): number | null | undefined {
  *
  * # Idempotency
  *
- * The key is minted **once when the dialog opens** and reused for every attempt
- * from it. A double-clicked Send is therefore one invoice. Chargebee replays
- * the original for a repeated key and the reply is byte-identical to a fresh
- * one, so `replayed_earlier_invoice` is the only way to tell — and the toast
- * says "already sent" rather than "sent" when it is set.
+ * The key is derived from the invoice's own content — see
+ * `deriveInvoiceIdempotencyKey` — not from when the dialog opened. A
+ * double-clicked Send is one invoice, and so is a failed send followed by a
+ * close-reopen-resend of the *same* invoice, because the fields that identify
+ * it hash the same either way. Chargebee replays the original for a repeated
+ * key and the reply is byte-identical to a fresh one, so
+ * `replayed_earlier_invoice` is the only way to tell — and the toast says
+ * "already sent" rather than "sent" when it is set. `invoice-force-new`
+ * mints a nonce into the hash for the rare deliberate duplicate — once, when
+ * the box is checked, not per send, and it survives a retry of that same
+ * forced send, close-reopen included, until it succeeds or the operator
+ * unchecks the box to start a separate deliberate resend. An
+ * attempted-and-unresolved nonce is latched (`forceNewNonceStore`) against
+ * the invoice it was minted for, so retyping that same invoice after a
+ * reload re-adopts it while a different invoice gets its own. Otherwise a
+ * second ambiguous timeout on the forced path would mint a second real
+ * invoice — the exact failure this dialog exists to prevent. The box is
+ * frozen while a send is in flight, so a mid-flight toggle cannot replace
+ * the nonce the pending request already carries.
  *
  * # Naming the money
  *
@@ -101,14 +122,22 @@ export function SendInvoiceDialog({
   const [amount, setAmount] = useState("");
   const [dueDays, setDueDays] = useState("");
   const [busy, setBusy] = useState(false);
+  const scope = useLocalScope();
+  const [forceNewNonce, setForceNewNonce] = useState<string>();
+  const [forceNew, setForceNew] = useState(false);
+  const [forceNewAttempted, setForceNewAttempted] = useState(false);
 
-  // One key per opening of the dialog — not per click, which would bill twice,
-  // and not per mount, which would survive a close and silently replay an
-  // earlier invoice the next time the dialog was used.
-  const idempotencyKey = useMemo(
-    () => (open ? `console-${crypto.randomUUID()}` : ""),
-    [open],
-  );
+  // Reset on open — but only when the last checked box never reached an
+  // attempted send. An attempted-and-unresolved forced send (ambiguous
+  // failure) must survive a close/reopen of the same invoice so a retry
+  // reuses its nonce instead of raising a second real one; only a box that
+  // was checked and abandoned (cancelled, never sent) resets.
+  useEffect(() => {
+    if (open && !forceNewAttempted) {
+      setForceNew(false);
+      setForceNewNonce(undefined);
+    }
+  }, [open, forceNewAttempted]);
 
   const minor = toMinorUnits(amount, currency);
   const live = looksLive(site);
@@ -120,10 +149,51 @@ export function SendInvoiceDialog({
     minor > 0 &&
     due !== null;
 
+  // The invoice's own identity, independent of any nonce. This is what a
+  // held nonce is matched against, so a nonce minted for one invoice can
+  // never be folded into another's key.
+  const invoiceKey =
+    minor !== null && due !== null
+      ? deriveInvoiceIdempotencyKey({
+          customerEmail: email,
+          currencyCode: currency,
+          dueDays: due,
+          lineItems: [{ description, amountInMinorUnits: minor }],
+        })
+      : undefined;
+
+  // Re-adopt an unresolved forced send only once the operator has retyped
+  // the same invoice it was minted for. A remount restores nothing on its
+  // own: the form is blank, and a blank form is not that invoice.
+  useEffect(() => {
+    if (!open || !invoiceKey) return;
+    const held = readUnresolvedForceNew(scope, invoiceKey);
+    if (held && forceNewNonce !== held) {
+      setForceNewNonce(held);
+      setForceNew(true);
+      setForceNewAttempted(true);
+    }
+  }, [open, invoiceKey, scope, forceNewNonce]);
+
   async function onSubmit() {
     if (minor === null || minor <= 0 || due === null) return;
     setBusy(true);
+    if (forceNew) {
+      setForceNewAttempted(true);
+      if (forceNewNonce && invoiceKey) {
+        writeUnresolvedForceNew(scope, invoiceKey, forceNewNonce);
+      }
+    }
     try {
+      const idempotencyKey = deriveInvoiceIdempotencyKey(
+        {
+          customerEmail: email,
+          currencyCode: currency,
+          dueDays: due,
+          lineItems: [{ description, amountInMinorUnits: minor }],
+        },
+        forceNew ? forceNewNonce : undefined,
+      );
       const invoice = await sendInvoice(client, company, {
         customer_email: email.trim(),
         customer_name: name.trim() || undefined,
@@ -146,6 +216,10 @@ export function SendInvoiceDialog({
       setDescription("");
       setAmount("");
       setDueDays("");
+      setForceNew(false);
+      setForceNewNonce(undefined);
+      setForceNewAttempted(false);
+      if (invoiceKey) clearUnresolvedForceNew(scope, invoiceKey);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not raise the invoice.");
     } finally {
@@ -243,6 +317,27 @@ export function SendInvoiceDialog({
               onChange={(e) => setDueDays(e.target.value)}
             />
           </div>
+
+          <label className="flex items-start gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              data-testid="invoice-force-new"
+              checked={forceNew}
+              disabled={busy}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setForceNew(checked);
+                setForceNewNonce(checked ? crypto.randomUUID() : undefined);
+                setForceNewAttempted(false);
+                if (!checked && invoiceKey) clearUnresolvedForceNew(scope, invoiceKey);
+              }}
+            />
+            <span>
+              This is a deliberate duplicate — send it as a new invoice, not a retry of an earlier
+              one for the same customer and amount.
+            </span>
+          </label>
 
           {live ? (
             <Alert variant="destructive" data-testid="invoice-live-warning">

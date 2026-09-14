@@ -884,7 +884,7 @@ async fn a_members_failed_turn_does_not_end_the_episode() {
     let replies = log.replies("eng");
     let note = replies
         .iter()
-        .find(|(author, text)| author == HIVE_REPORT_AUTHOR && text.contains("did not finish"))
+        .find(|(author, text)| author == HIVE_FAILURE_AUTHOR && text.contains("did not finish"))
         .expect("the miss is journaled");
     assert!(note.1.contains("@scout's turn did not finish"), "{note:?}");
     assert!(note.1.contains("wall-clock ceiling"), "{note:?}");
@@ -927,7 +927,7 @@ async fn a_room_where_every_seat_fails_twice_over_stops() {
     assert_eq!(
         log.replies("eng")
             .iter()
-            .filter(|(author, _)| author == HIVE_REPORT_AUTHOR)
+            .filter(|(author, _)| author == HIVE_FAILURE_AUTHOR)
             .count(),
         6,
         "the cap is members x 2"

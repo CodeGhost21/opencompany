@@ -29,6 +29,7 @@
 //! requests); this module does not hash bodies itself.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Mutex;
 
 use crate::Result;
@@ -142,7 +143,7 @@ pub fn verify(
 ) -> Result<String> {
     let parsed = parse_header(header)?;
 
-    if (now - parsed.timestamp).abs() > SKEW_SECS {
+    if now.abs_diff(parsed.timestamp) > SKEW_SECS as u64 {
         return Err(OpenCompanyError::InvalidRequest(format!(
             "authorization timestamp is outside the ±{SKEW_SECS}s window"
         )));
@@ -160,7 +161,7 @@ pub fn verify(
         &parsed.signature_b58,
     )?;
 
-    if !seen.check_and_insert(&parsed.signature_b58, now) {
+    if !seen.check_and_insert(&parsed.signature_b58, now, parsed.timestamp)? {
         return Err(OpenCompanyError::InvalidRequest(
             "authorization signature has already been used (replay)".into(),
         ));
@@ -169,34 +170,89 @@ pub fn verify(
     Ok(parsed.agent_id)
 }
 
-/// A process-local record of accepted signatures for replay protection.
+/// A process-local record of spent single-use values, for replay protection.
 ///
-/// Entries older than [`SKEW_SECS`] are pruned on insert, bounding memory to the
-/// skew window. In-memory only; cross-restart persistence is a documented
-/// follow-up.
-#[derive(Debug, Default)]
+/// Entries older than the cache's TTL are pruned on insert, bounding memory to
+/// the window in which a value can still be accepted. In-memory only;
+/// cross-restart persistence is a documented follow-up.
+///
+/// Two callers keep separate instances with separate windows: SIWX signatures
+/// live for [`SKEW_SECS`], x402 authorization nonces for
+/// [`x402::MAX_AGE_SECS`](crate::economy::x402::MAX_AGE_SECS). Sharing one set
+/// across both would let either keyspace evict the other's record.
+#[derive(Debug)]
 pub struct NonceCache {
     seen: Mutex<HashMap<String, i64>>,
+    ttl_secs: i64,
+}
+
+impl Default for NonceCache {
+    fn default() -> Self {
+        Self::with_ttl(SKEW_SECS)
+    }
 }
 
 impl NonceCache {
-    /// Creates an empty cache.
+    /// Creates an empty cache remembering a value for [`SKEW_SECS`].
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Records `signature` as used at `now`, pruning stale entries first.
+    /// Creates an empty cache remembering a value for `ttl_secs`.
     ///
-    /// Returns `true` if the signature was previously unseen (accept), `false`
-    /// if it is a replay (reject).
-    pub fn check_and_insert(&self, signature: &str, now: i64) -> bool {
-        let mut guard = self.seen.lock().expect("nonce cache poisoned");
-        guard.retain(|_, ts| (now - *ts).abs() <= SKEW_SECS);
-        if guard.contains_key(signature) {
-            return false;
+    /// The TTL must be at least as long as the window in which the caller will
+    /// still accept the value it guards, or a replay outlives the memory of it.
+    pub fn with_ttl(ttl_secs: i64) -> Self {
+        Self {
+            seen: Mutex::new(HashMap::new()),
+            ttl_secs,
         }
-        guard.insert(signature.to_string(), now);
-        true
+    }
+
+    /// Records `key` as spent, pruning stale entries first.
+    ///
+    /// `now` is the verifier's current clock, used only to decide which
+    /// existing entries have aged out. `record_ts` is the timestamp the entry
+    /// is remembered under — the claimed timestamp of the thing being spent
+    /// (an authorization's `timestamp`, a SIWX header's signing time), not
+    /// `now`. Storing `record_ts` rather than `now` matters because a caller's
+    /// own freshness check already tolerates skew between the two: if the
+    /// entry were stamped with `now`, a replay landing just past the caller's
+    /// freshness window could still land inside the prune window, since the
+    /// two windows would be measured from different origins. Stamping with
+    /// `record_ts` instead ties both checks to the same origin, so the entry
+    /// is forgotten at the same moment the freshness check would refuse it
+    /// again — never before, never after.
+    ///
+    /// `Ok(true)` if it was previously unseen (accept), `Ok(false)` on a replay
+    /// (reject), `Err` if the cache cannot answer (reject). The guarded section
+    /// touches only a `HashMap` and an `i64`, so a poisoned lock means a panic
+    /// unwound through it and the record of what has been spent can no longer
+    /// be trusted — the caller must refuse rather than recover, because a cache
+    /// that cannot answer admits every replay.
+    pub fn check_and_insert(&self, key: &str, now: i64, record_ts: i64) -> Result<bool> {
+        let mut guard = self
+            .seen
+            .lock()
+            .map_err(|_| OpenCompanyError::Store("replay-protection cache is unusable".into()))?;
+        guard.retain(|_, ts| now.abs_diff(*ts) <= self.ttl_secs as u64);
+        match guard.entry(key.to_string()) {
+            Entry::Occupied(_) => Ok(false),
+            Entry::Vacant(slot) => {
+                slot.insert(record_ts);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Poisons the lock so a caller's fail-closed path can be exercised. The
+    /// panic it raises is caught here and is expected in test output.
+    #[cfg(test)]
+    pub(crate) fn poison_for_tests(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.seen.lock().expect("cache is not already poisoned");
+            panic!("deliberately poisoning the replay-protection cache");
+        }));
     }
 }
 
@@ -251,6 +307,30 @@ mod test {
     }
 
     #[test]
+    fn an_extreme_timestamp_is_rejected_rather_than_wrapping() {
+        let signer = LocalSigner::generate();
+        let header = header_value(&build_header(&signer, &payload(i64::MIN)));
+        let cache = NonceCache::new();
+
+        let err = verify(&header, "POST", "/a2a/acme", "abc123", 0, &cache);
+        assert!(
+            err.is_err(),
+            "a timestamp whose distance from now cannot be held in an i64 must be refused"
+        );
+    }
+
+    #[test]
+    fn the_cache_prunes_an_entry_whose_distance_from_now_overflows() {
+        let cache = NonceCache::with_ttl(SKEW_SECS);
+        assert!(cache.check_and_insert("sig-a", 0, i64::MIN).unwrap());
+
+        assert!(
+            cache.check_and_insert("sig-a", 0, 0).unwrap(),
+            "an entry that far outside the window must expire rather than live forever"
+        );
+    }
+
+    #[test]
     fn replayed_signature_is_rejected() {
         let signer = LocalSigner::generate();
         let now = 1_700_000_000;
@@ -283,8 +363,73 @@ mod test {
     #[test]
     fn nonce_cache_prunes_stale_entries() {
         let cache = NonceCache::new();
-        assert!(cache.check_and_insert("sig-a", 1_000));
+        assert!(cache.check_and_insert("sig-a", 1_000, 1_000).unwrap());
         // Far in the future: the stale entry is pruned, so re-inserting is fine.
-        assert!(cache.check_and_insert("sig-a", 1_000 + SKEW_SECS * 4));
+        assert!(
+            cache
+                .check_and_insert("sig-a", 1_000 + SKEW_SECS * 4, 1_000 + SKEW_SECS * 4)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn nonce_cache_honours_a_custom_ttl() {
+        let cache = NonceCache::with_ttl(SKEW_SECS * 4);
+        assert!(cache.check_and_insert("sig-a", 1_000, 1_000).unwrap());
+        // Still inside the wider window, so still remembered as spent.
+        assert!(
+            !cache
+                .check_and_insert("sig-a", 1_000 + SKEW_SECS * 3, 1_000 + SKEW_SECS * 3)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn nonce_cache_prunes_by_record_timestamp_not_insertion_time() {
+        // A signature stamped at the far edge of tolerated skew (future-dated,
+        // but still within the freshness window when first checked) must stay
+        // remembered for as long as *its own claimed timestamp* would still
+        // pass a freshness check — not merely for `ttl_secs` past the moment
+        // it happened to be verified. Keying the stored entry off the
+        // verifier's clock instead of the claimed timestamp would prune it
+        // early, reopening the slot for a replay of the same signature while
+        // the claimed timestamp is still "fresh" by the caller's own check.
+        let cache = NonceCache::with_ttl(SKEW_SECS);
+        let claimed_ts = 1_000 + SKEW_SECS; // maximally future-dated, still fresh at now=1_000
+        assert!(cache.check_and_insert("sig-a", 1_000, claimed_ts).unwrap());
+        // Past the point at which keying off insertion time (1_000) would have
+        // pruned the entry, but still within `ttl_secs` of `claimed_ts`.
+        let replay_now = 1_000 + SKEW_SECS + 1;
+        assert!(
+            !cache
+                .check_and_insert("sig-a", replay_now, claimed_ts)
+                .unwrap(),
+            "entry must still be remembered because its claimed timestamp is \
+             still within the freshness window, even though insertion time is not"
+        );
+    }
+
+    #[test]
+    fn an_unusable_cache_refuses_rather_than_admits() {
+        let cache = NonceCache::new();
+        cache.poison_for_tests();
+        assert!(
+            cache.check_and_insert("sig-a", 1_000, 1_000).is_err(),
+            "a cache that cannot answer must not report a value as fresh"
+        );
+    }
+
+    #[test]
+    fn an_unusable_cache_refuses_the_siwx_signature() {
+        let signer = LocalSigner::generate();
+        let now = 1_700_000_000;
+        let header = header_value(&build_header(&signer, &payload(now)));
+        let cache = NonceCache::new();
+        cache.poison_for_tests();
+
+        assert!(
+            verify(&header, "POST", "/a2a/acme", "abc123", now, &cache).is_err(),
+            "a correctly signed header must not pass when replay protection is down"
+        );
     }
 }

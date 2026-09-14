@@ -11,14 +11,14 @@ import { GENERAL_CHANNEL } from "@/lib/desks";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
 import { threadsFromDesks } from "@/lib/threads";
-import { buildChannels } from "@/views/chat/model";
+import { buildChannels } from "@/views/room/model";
 
 /**
  * A company with no desks is shown as a company with no desks.
  *
  * The console used to answer an empty `/desks` list with `defaultDesks()` — a
  * fabricated Strategy desk, Creative studio and Front desk. Three surfaces did
- * it (`ChatView`, `AppShell`, `approval-card`), so a company that had never
+ * it (`RoomView`, `AppShell`, `approval-card`), so a company that had never
  * declared a `[[group_chat]]` showed three channels it did not have, could not
  * open, and whose ids a real channel could later collide with. The overview
  * graph has no such fallback and correctly drew "No desks yet" — the two
@@ -87,7 +87,7 @@ describe("a company with no desks (empty /desks answer)", () => {
 
   it("withholds the link when the desks read failed rather than answered", () => {
     // `null`, not `[]` — an unknown topology must not be guessed at, because
-    // `ChatView` renders no rail behind a failed read and the link would land
+    // `RoomView` renders no rail behind a failed read and the link would land
     // nowhere.
     const approval = {
       id: "a1",
@@ -103,8 +103,8 @@ describe("a company with no desks (empty /desks answer)", () => {
 });
 
 describe("no surface fabricates desks over an answered read", () => {
-  it("ChatView keeps the host's list, and falls back only on a 404", () => {
-    const src = read("views/ChatView.tsx");
+  it("RoomView keeps the host's list, and falls back only on a 404", () => {
+    const src = read("views/RoomView.tsx");
 
     expect(src).toContain("setDesks(dtos.map(deskFromDto));");
     expect(src).not.toContain("dtos.length ? dtos.map(deskFromDto) : defaultDesks()");
@@ -139,7 +139,10 @@ describe("no surface fabricates desks over an answered read", () => {
   });
 
   it("buildChannels defaults to no desks rather than to the trio", () => {
-    const src = read("views/chat/model.ts");
+    // `channels.ts`, not `model.ts`: the model was split into three focused
+    // modules and `model.ts` is now only a barrel re-exporting them, so the
+    // declaration this asserts on lives with the rest of the channel code.
+    const src = read("views/room/channels.ts");
 
     expect(src).not.toContain("desks: Desk[] = defaultDesks()");
     expect(src).toContain("desks: Desk[] = []");
@@ -156,8 +159,8 @@ describe("defaultDesks itself", () => {
     const imports = (src: string) =>
       /import \{[^}]*\bdefaultDesks\b[^}]*\} from "@\/lib\/desks"/.test(src) ||
       /^\s*defaultDesks,$/m.test(src);
-    const callers = ["views/ChatView.tsx", "components/app-shell.tsx"];
-    const others = ["components/approval-card.tsx", "views/chat/model.ts"];
+    const callers = ["views/RoomView.tsx", "components/app-shell.tsx"];
+    const others = ["components/approval-card.tsx", "views/room/channels.ts"];
 
     for (const file of callers) expect(imports(read(file)), file).toBe(true);
     for (const file of others) expect(imports(read(file)), file).toBe(false);

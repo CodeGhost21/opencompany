@@ -186,15 +186,16 @@ export function PeopleView({ client, company }: Props) {
     it is never offered before the role is known, which is the part that
     matters.
 
-    The width is the one thing `loading` does decide. It stays `4xl` while the
-    skeletons show so the common path — an admin who came here to manage
-    access — has no reflow when the rows arrive; a non-admin sees the column
-    narrow once, at the same moment the content replaces the skeletons.
+    The width used to be the one thing `loading` decided — `4xl` while the
+    skeletons showed and for an admin, `3xl` for everyone else — so that the
+    common path had no reflow when the rows arrived. Issue #2131 takes every
+    settings page full width, which removes that reflow outright rather than
+    timing it: there is no longer a narrower state to arrive at.
   */
   const header = (
     <PageHeader
       title="People"
-      width={loading || isAdmin ? "4xl" : "3xl"}
+      width="full"
       description={
         isAdmin
           ? "The humans who can sign in. Access is invite-only."
@@ -215,7 +216,7 @@ export function PeopleView({ client, company }: Props) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
-        <div className="mx-auto w-full max-w-4xl space-y-3 px-4 py-6">
+        <div className="w-full space-y-3 px-4 py-6">
           <Skeleton className="h-8 w-48" />
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-24 w-full" />
@@ -228,7 +229,7 @@ export function PeopleView({ client, company }: Props) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
-        <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 overflow-y-auto px-4 py-6">
+        <div className="min-h-0 w-full flex-1 overflow-y-auto px-4 py-6">
         <Alert>
           <ShieldCheck className="size-4" />
           <AlertDescription>
@@ -244,7 +245,7 @@ export function PeopleView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {header}
-      <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
       {error ? (
         <Alert variant="destructive">

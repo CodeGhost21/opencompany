@@ -54,7 +54,7 @@ test("a run refused for a missing inference provider shows a persistent, linked 
       contentType: "application/json",
       body: JSON.stringify({
         error:
-          "workflow execution needs an inference source, and none is configured " +
+          "automation execution needs an inference source, and none is configured " +
           "for this company. Set a provider in Settings → Inference, then run again.",
         code: "inference_required",
       }),
@@ -76,5 +76,5 @@ test("a run refused for a missing inference provider shows a persistent, linked 
   // …and it links the operator to where they fix it.
   const cta = page.getByTestId("workflow-run-inference-cta");
   await expect(cta).toBeVisible();
-  await expect(cta).toHaveAttribute("href", "#/settings/inference");
+  await expect(cta).toHaveAttribute("href", "#/connections/inference");
 });

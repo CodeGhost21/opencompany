@@ -160,7 +160,7 @@ async function selectWorkflow(page: Page, name: string) {
   await openWorkflow(page, name);
 }
 
-test("a workflow authored elsewhere reaches the list, with no reload", async ({
+test("an automation authored elsewhere reaches the list, with no reload", async ({
   page,
   request,
 }) => {
@@ -194,7 +194,7 @@ test("a workflow authored elsewhere reaches the list, with no reload", async ({
   }
 });
 
-test("a workflow renamed elsewhere renames on screen, with no reload", async ({
+test("an automation renamed elsewhere renames on screen, with no reload", async ({
   page,
   request,
 }) => {
@@ -216,7 +216,7 @@ test("a workflow renamed elsewhere renames on screen, with no reload", async ({
     // the workflow the operator is looking at, not merely somewhere in a list.
     await expect(
       workflowDetailName(page),
-      "a rename elsewhere must reach the open workflow live",
+      "a rename elsewhere must reach the open automation live",
     ).toHaveText(after, { timeout: 20_000 });
 
     // …and then off the index, which is the other surface the same `workflows`
@@ -234,7 +234,7 @@ test("a workflow renamed elsewhere renames on screen, with no reload", async ({
   }
 });
 
-test("deleting the workflow on screen elsewhere returns to the list, and takes it out of the list", async ({
+test("deleting the automation on screen elsewhere returns to the list, and takes it out of the list", async ({
   page,
   request,
 }) => {
@@ -266,7 +266,7 @@ test("deleting the workflow on screen elsewhere returns to the list, and takes i
     // …and it is GONE from the list, not merely closed or greyed out.
     await expect(
       workflowCard(page, name),
-      "a deleted workflow must leave the list, not sit in it greyed out",
+      "a deleted automation must leave the list, not sit in it greyed out",
     ).toHaveCount(0, { timeout: 20_000 });
   } finally {
     await removeWorkflow(request, id);

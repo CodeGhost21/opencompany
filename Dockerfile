@@ -39,23 +39,35 @@ RUN apt-get update \
 # their changes reuse the compiled Cargo cache.
 #
 # `build.rs` embeds the shipped company agents and `src/desktop.rs` embeds each
-# preset manifest, so the complete companies tree remains a real build input.
+# preset manifest, so the complete companies tree remains a real build input;
+# it also embeds the global baseline (`globals/`) and the shared skills library
+# (`skills/`), which a hosted tenant has no checkout to read from disk.
 # `vendor/` backs the path dependencies and Cargo patch table.
+#
+# The root `Cargo.toml` is a virtual workspace whose members are the manifests
+# under `crates/`. Cargo refuses to load a workspace with a listed member
+# missing, so the tui crate is copied even though only the host binary is
+# built; the host's own sources still live at the root and its member manifest
+# points at them.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY crates/opencompany-core/Cargo.toml ./crates/opencompany-core/Cargo.toml
+COPY crates/opencompany-tui ./crates/opencompany-tui
 COPY src ./src
 COPY benches ./benches
 COPY tests ./tests
 COPY examples ./examples
 COPY vendor ./vendor
 COPY companies ./companies
+COPY globals ./globals
+COPY skills ./skills
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     set -eux; \
     if [ -n "$FEATURES" ]; then \
-      cargo build --release --bin opencompany --features "$FEATURES"; \
+      cargo build --release -p opencompany-core --bin opencompany --features "$FEATURES"; \
     else \
-      cargo build --release --bin opencompany; \
+      cargo build --release -p opencompany-core --bin opencompany; \
     fi; \
     install -Dm755 target/release/opencompany /out/opencompany
 
@@ -145,8 +157,9 @@ FROM debian:bookworm-slim AS runtime
 # files must be present to load the binary). No-ops for the small builds.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl libssl3 \
+       ca-certificates curl git libssl3 \
        libx11-6 libxi6 libxtst6 libxrandr2 libxcb1 libxkbcommon0 \
+    && git --version \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
@@ -168,7 +181,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /data
 # The switch: which example company this container runs. Override at deploy time.
 # `OPENCOMPANY_CONSOLE_DIR` points the host at the baked console bundle so a
 # hosted tenant serves its own UI at `/` instead of 404ing.
-ENV OPENCOMPANY_COMPANY=agentic_marketing_agency \
+ENV OPENCOMPANY_COMPANY=marketing_agency \
     OPENCOMPANY_BIND=0.0.0.0:8080 \
     OPENCOMPANY_DATA_DIR=/data \
     OPENCOMPANY_DISCOVERABLE=false \

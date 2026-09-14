@@ -245,6 +245,7 @@ fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
             description: Some("Customer mail triage.".to_string()),
             members: vec!["ceo".to_string(), "aria_stone".to_string()],
             responder: ResponderMode::default(),
+            hive: Default::default(),
         },
         OverlayDesk {
             id: "launch".to_string(),
@@ -252,6 +253,7 @@ fn sample_overlay_desks() -> Vec<crate::ports::types::OverlayDesk> {
             description: None,
             members: vec!["ceo".to_string(), "aria_stone".to_string()],
             responder: ResponderMode::Auto,
+            hive: Default::default(),
         },
     ]
 }
@@ -302,6 +304,7 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
 /// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_agent_edits: sample_agent_overrides(),
         // Non-empty so a backend that drops the field is caught: without the
         // tombstone the manifest is re-read on load and the removed teammate
@@ -2185,6 +2188,34 @@ pub async fn assert_login_code_store(codes: Arc<dyn LoginCodeStore>) {
 
     // An unknown hash is indistinguishable from a spent one.
     assert!(codes.consume(&alpha, "nope", 10).await.unwrap().is_none());
+
+    // CONC: the SINGLE USE assertion above is sequential — it cannot tell an
+    // atomic check-and-mark from a check-then-mark race, because nothing makes
+    // the two redemptions overlap. This drives two requests genuinely racing
+    // the same code, the way two tabs opening the same magic link would.
+    //
+    // Expiry is set well past every `purge_expired` cutoff this function later
+    // asserts against (the highest is 100), so this fixture cannot silently
+    // change an unrelated purge count.
+    codes
+        .create(
+            &alpha,
+            &code("racer", "hash-race", "racer@example.com", 100_000),
+        )
+        .await
+        .unwrap();
+    let (first, second) = tokio::join!(
+        codes.consume(&alpha, "hash-race", 10),
+        codes.consume(&alpha, "hash-race", 10)
+    );
+    let winners = [first.unwrap(), second.unwrap()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(
+        winners, 1,
+        "exactly one of two concurrent redemptions of the same code may mint a session"
+    );
 
     // --- latest_for_email: what the resend throttle asks ---
     // Isolation holds here too.
@@ -4387,6 +4418,227 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     assert!(!ws.delete(&alpha, "root").await.unwrap());
 }
 
+pub async fn assert_workspace_conditional_write(
+    first: Arc<dyn WorkspaceStore>,
+    second: Arc<dyn WorkspaceStore>,
+) {
+    let company = CompanyId::new("conditional-write");
+    let revision = i64::MAX as u64 / 2;
+    let original = WorkspaceNode {
+        id: "note".to_string(),
+        name: "shared.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: revision,
+        created_by: WorkspaceOrigin::Seed,
+        updated_by: WorkspaceOrigin::Seed,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    first
+        .create(&company, &original, Some("original"))
+        .await
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let mut writers = Vec::new();
+    for (store, body) in [(first.clone(), "first"), (second, "second")] {
+        let gate = gate.clone();
+        let company = company.clone();
+        writers.push(tokio::spawn(async move {
+            gate.wait().await;
+            let result = store
+                .write_with_revision(
+                    &company,
+                    "note",
+                    body,
+                    WorkspaceOrigin::Agent {
+                        id: body.to_string(),
+                    },
+                    Some(revision),
+                )
+                .await;
+            (body, result)
+        }));
+    }
+    let mut winners = Vec::new();
+    let mut refused = 0;
+    for writer in writers {
+        let (body, result) = writer.await.unwrap();
+        match result {
+            Ok(node) => {
+                winners.push((body, node));
+            }
+            Err(crate::error::OpenCompanyError::Conflict(message)) => {
+                assert!(message.contains("changed since you read it"), "{message}");
+                refused += 1;
+            }
+            Err(error) => panic!("unexpected conditional-write failure: {error}"),
+        }
+    }
+    assert_eq!(winners.len(), 1, "both writers at one revision succeeded");
+    assert_eq!(refused, 1, "exactly one racing writer must be refused");
+    let (body, node) = winners.pop().unwrap();
+    assert_eq!(node.updated_at_millis, revision + 1);
+    assert_eq!(node.created_by, WorkspaceOrigin::Seed);
+    assert_eq!(
+        node.updated_by,
+        WorkspaceOrigin::Agent {
+            id: body.to_string()
+        }
+    );
+    let stored = first.read(&company, "note").await.unwrap().unwrap();
+    assert_eq!(stored, (node.clone(), body.to_string()));
+    let err = first
+        .write_with_revision(
+            &company,
+            "note",
+            "stale retry",
+            WorkspaceOrigin::Operator,
+            Some(revision),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::OpenCompanyError::Conflict(_)));
+    assert_eq!(first.read(&company, "note").await.unwrap().unwrap(), stored);
+    let unconditional = first
+        .write(&company, "note", "operator edit", WorkspaceOrigin::Operator)
+        .await
+        .unwrap();
+    assert_eq!(unconditional.updated_at_millis, revision + 2);
+    let fresh = first
+        .write_with_revision(
+            &company,
+            "note",
+            "rebased edit",
+            WorkspaceOrigin::Operator,
+            Some(unconditional.updated_at_millis),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.updated_at_millis, revision + 3);
+    assert_eq!(
+        first.read(&company, "note").await.unwrap().unwrap().1,
+        "rebased edit"
+    );
+}
+
+pub async fn assert_workspace_revision_mutations(
+    first: Arc<dyn WorkspaceStore>,
+    second: Arc<dyn WorkspaceStore>,
+) {
+    let company = CompanyId::new("revision-mutations");
+    let original = WorkspaceNode {
+        id: "note".to_string(),
+        name: "staged.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: i64::MAX as u64 / 2,
+        created_by: WorkspaceOrigin::Seed,
+        updated_by: WorkspaceOrigin::Seed,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    first
+        .create(&company, &original, Some("original"))
+        .await
+        .unwrap();
+    let written = first
+        .write(&company, "note", "first edit", WorkspaceOrigin::Operator)
+        .await
+        .unwrap();
+    let renamed = second
+        .rename_move(&company, "note", Some("renamed.md"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        renamed.updated_at_millis,
+        written.updated_at_millis + 1,
+        "a rename must advance the current revision, not reset it to wall-clock time"
+    );
+    let stale = first
+        .write_with_revision(
+            &company,
+            "note",
+            "stale edit",
+            WorkspaceOrigin::Operator,
+            Some(written.updated_at_millis),
+        )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(crate::error::OpenCompanyError::Conflict(_))
+    ));
+    assert_eq!(
+        first.read(&company, "note").await.unwrap().unwrap().1,
+        "first edit"
+    );
+    let promoted = first
+        .swap_files(&company, None, "note", "published.md")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        promoted.updated_at_millis,
+        renamed.updated_at_millis + 1,
+        "promotion must not resurrect an old revision"
+    );
+    for iteration in 0..32 {
+        let before = first.read(&company, "note").await.unwrap().unwrap().0;
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let writer = first.clone();
+        let writer_company = company.clone();
+        let writer_gate = gate.clone();
+        let body = format!("edit {iteration}");
+        let expected_body = body.clone();
+        let write = tokio::spawn(async move {
+            writer_gate.wait().await;
+            writer
+                .write(
+                    &writer_company,
+                    "note",
+                    &body,
+                    WorkspaceOrigin::Agent {
+                        id: "writer".to_string(),
+                    },
+                )
+                .await
+                .unwrap()
+        });
+        let renamer = second.clone();
+        let renamer_company = company.clone();
+        let name = format!("renamed-{iteration}.md");
+        let expected_name = name.clone();
+        let rename = tokio::spawn(async move {
+            gate.wait().await;
+            renamer
+                .rename_move(&renamer_company, "note", Some(&name), None)
+                .await
+                .unwrap()
+        });
+        let (written, renamed) = tokio::join!(write, rename);
+        let (written, renamed) = (written.unwrap(), renamed.unwrap());
+        assert_ne!(
+            written.updated_at_millis, renamed.updated_at_millis,
+            "concurrent writes and renames must receive distinct revisions"
+        );
+        let (stored, body) = first.read(&company, "note").await.unwrap().unwrap();
+        assert_eq!(stored.updated_at_millis, before.updated_at_millis + 2);
+        assert_eq!(stored.name, expected_name);
+        assert_eq!(body, expected_body);
+        assert_eq!(stored.created_by, WorkspaceOrigin::Seed);
+        assert_eq!(
+            stored.updated_by,
+            WorkspaceOrigin::Agent {
+                id: "writer".to_string()
+            }
+        );
+    }
+}
+
 /// Collects a [`BlobStream`](crate::ports::workspace::BlobStream) into bytes.
 ///
 /// Only the suite buffers: the port streams so a production download never has
@@ -5233,6 +5485,86 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
         .expect("the contested path must still resolve");
     assert!(!after.was_created());
     assert_eq!(&after.node().id, &ids[0]);
+}
+
+/// [`WorkspaceStore::create`]'s own contract, not [`adopt_or_create_folder`]'s:
+/// "the `parent_id`, when set, must name an existing folder" (the trait doc on
+/// `create`) is asserted directly against `create` on all three backends, for
+/// both a `parent_id` that names nothing and one that names a real folder in a
+/// *different* company.
+///
+/// [`assert_workspace_folder_claims`] already proves the analogous refusal for
+/// the folder-claim primitive; `create` is a separate code path on every
+/// backend (a plain `INSERT`/`insert_one`/file write, not the claim's
+/// transaction-guarded read-or-adopt), so passing there says nothing about
+/// this one.
+///
+/// [`adopt_or_create_folder`]: WorkspaceStore::adopt_or_create_folder
+pub async fn assert_workspace_create_rejects_an_absent_or_foreign_parent(
+    ws: Arc<dyn WorkspaceStore>,
+) {
+    let alpha = CompanyId::new("parent-guard-alpha");
+    let beta = CompanyId::new("parent-guard-beta");
+
+    let child_of_nothing = WorkspaceNode {
+        id: "orphan".to_string(),
+        name: "orphan.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: Some("no-such-folder".to_string()),
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    assert!(
+        ws.create(&alpha, &child_of_nothing, Some("body"))
+            .await
+            .is_err(),
+        "a parent_id naming no node anywhere must be refused"
+    );
+    assert!(
+        ws.tree(&alpha).await.unwrap().is_empty(),
+        "a refused create must not leave the orphan behind"
+    );
+
+    // beta's real folder — reachable, just not from alpha.
+    let beta_root = folder_node("beta-root", "Beta Root");
+    ws.create(&beta, &beta_root, None)
+        .await
+        .expect("a root folder in beta");
+
+    let cross_company_child = WorkspaceNode {
+        id: "cross-company-child".to_string(),
+        name: "cross.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: Some(beta_root.id.clone()),
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+        adopted: false,
+    };
+    assert!(
+        ws.create(&alpha, &cross_company_child, Some("body"))
+            .await
+            .is_err(),
+        "alpha must not be able to parent a node under beta's folder id, \
+         even though that id is real"
+    );
+    assert!(
+        ws.tree(&alpha).await.unwrap().is_empty(),
+        "the cross-company create must not have landed in alpha either"
+    );
+    assert_eq!(
+        ws.tree(&beta).await.unwrap().len(),
+        1,
+        "beta's own tree is unaffected by alpha's rejected attempt"
+    );
 }
 
 /// The adoption lease every backend must honour (issue #1839).

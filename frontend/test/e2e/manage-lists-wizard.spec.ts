@@ -13,7 +13,7 @@ import { expect, test, type Page } from "@playwright/test";
  * and that retiring it asks first, the same confirm-before-destroy
  * assertion `ledger-retire-confirm.test.ts` makes at unit level.
  *
- * Manage Lists lives in Work now, not Company (`#/ledgers/manage`) — an
+ * Manage Lists lives in Work now, not Company (`#/company/work/manage`) — an
  * earlier cut put it under Company, "parallel to Manage Desks", and that
  * placement meant every visit crossed a section boundary (Work → Company →
  * Work) since the switcher is the only real entry point. See
@@ -46,7 +46,7 @@ async function openManageLists(page: Page) {
   await dismissTour(page);
   await page.getByTestId("list-switcher-trigger").click();
   await page.getByTestId("list-switcher-manage").click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/manage");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/manage");
   await expect(page.getByRole("heading", { name: "Manage lists" })).toBeVisible({
     timeout: 15_000,
   });
@@ -193,7 +193,7 @@ test("a managed list row opens that list", async ({ page }) => {
 
   await page.getByTestId("managed-ledger-goals").click();
 
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/goals");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/goals");
   await expect(page.getByRole("heading", { name: "Goals" })).toBeVisible({
     timeout: 15_000,
   });

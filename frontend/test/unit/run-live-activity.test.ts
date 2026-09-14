@@ -56,7 +56,7 @@ function fold(frames: CompanyStreamEvent[], run = RUN): LiveActivityState {
   );
 }
 
-describe("folding a workflow node's live tool frames (issue #1702)", () => {
+describe("folding an automation node's live tool frames (issue #1702)", () => {
   it("groups a running tool call under its node", () => {
     const nodes = liveNodes(fold([toolCall({})]));
     expect(nodes).toHaveLength(1);

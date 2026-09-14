@@ -108,6 +108,25 @@ async function click(testId: string) {
   });
 }
 
+/**
+ * Answers the model step with "No model".
+ *
+ * The escape used to be a link under the step (`setup-skip-model`); it is the
+ * provider picker's last option now, and the picker is a base-ui `Select`
+ * whose popup portals onto `document.body` and does not exist until the
+ * trigger opens it.
+ */
+async function skipModel() {
+  await click("setup-provider-select");
+  const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
+    | HTMLElement
+    | null;
+  expect(none, "no No-model option").toBeTruthy();
+  await act(async () => {
+    none!.click();
+  });
+}
+
 const next = async () =>
   act(async () => {
     const match = Array.from(container.querySelectorAll("button")).find((b) =>
@@ -140,7 +159,7 @@ const settle = async () =>
 
 /** Walks the whole flow and presses the finish button. */
 async function finish() {
-  await click("setup-skip-model");
+  await skipModel();
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in
@@ -155,7 +174,7 @@ async function finish() {
 describe("the sign-in step, on a host that cannot send mail", () => {
   it("says the link is handed over here when the host echoes the code", async () => {
     await show(clientWith(status({ mail: { wired: false, echoes_code: true } })));
-    await click("setup-skip-model");
+    await skipModel();
     await next();
     await fill("setup-field-industry", "Homeware");
     await next(); // -> sign-in
@@ -169,7 +188,7 @@ describe("the sign-in step, on a host that cannot send mail", () => {
 
   it("says a link would arrive nowhere on a routable host with no transport", async () => {
     await show(clientWith(status({ mail: { wired: false, echoes_code: false } })));
-    await click("setup-skip-model");
+    await skipModel();
     await next();
     await fill("setup-field-industry", "Homeware");
     await next(); // -> sign-in
@@ -185,7 +204,7 @@ describe("the sign-in step, on a host that cannot send mail", () => {
 
   it("says nothing when the host has a mail transport", async () => {
     await show(clientWith(status({ mail: { wired: true, echoes_code: false } })));
-    await click("setup-skip-model");
+    await skipModel();
     await next();
     await fill("setup-field-industry", "Homeware");
     await next(); // -> sign-in

@@ -83,9 +83,9 @@ export function chargebeeHealth(status: BillingStatus): Health {
   if (status.apiKeyConfigured && status.site && !status.granted)
     return {
       state: "not_granted",
-      label: `Connected to ${status.site} — but no teammate can use it`,
+      label: `Connected to ${status.site} — but no agent can use it`,
       remedy:
-        "This company does not grant `chargebee`, so billing tools reach no teammate even with the key stored.",
+        "This company does not grant `chargebee`, so billing tools reach no agent even with the key stored.",
       fixableHere: false,
       grantNamespace: "chargebee",
     };
@@ -128,9 +128,9 @@ export function paypalHealth(status: PaypalStatus): Health {
   )
     return {
       state: "not_granted",
-      label: "Connected — but no teammate can use it",
+      label: "Connected — but no agent can use it",
       remedy:
-        "This company does not grant `paypal`, so wallet tools reach no teammate.",
+        "This company does not grant `paypal`, so wallet tools reach no agent.",
       fixableHere: false,
       grantNamespace: "paypal",
     };

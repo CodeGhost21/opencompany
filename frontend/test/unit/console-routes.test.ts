@@ -59,7 +59,7 @@ describe("sidebar navigation", () => {
     expect(isNavigationActive("chat", "workflows")).toBe(false);
   });
 
-  it("keeps a card under Work and a teammate under Agents", () => {
+  it("keeps a card under Work and an agent under Agents", () => {
     // Both are Rule-6 deep-link destinations with no row of their own. Without
     // this the whole section collapses the moment one is opened.
     expect(isNavigationActive("ledgers", "tasks")).toBe(true);
@@ -193,17 +193,21 @@ describe("resolving an address", () => {
     },
   );
 
-  it("sends the Settings rail's Observatory row to the Observatory's own address", async () => {
-    // The row is a doorway, not a page. The Observatory reads four query keys
-    // of its own straight off `window.location`, keyed on the hash's head being
-    // `observatory` (`views/observatory/hash.ts`), so rendering it under
-    // `#/settings/…` would silently take its analytics tab and its agent/turn
-    // selection out of the address bar. A surface with its own address grammar
-    // keeps its own address.
+  it("keeps the Observatory index on the Settings rail, and does not rewrite it away", async () => {
+    // It used to be a doorway: `#/settings/observatory` rewrote to
+    // `#/observatory`, on the argument that a surface reading four query keys
+    // of its own off `window.location` must keep its own head.
+    //
+    // The index is embedded in Settings now, and `views/observatory/hash.ts`
+    // reads BOTH heads deliberately — `#/settings/observatory` for the index,
+    // `#/observatory/<runId>` for one run, which cannot move because
+    // `useHashView` carries only two segments. So the rewrite would now undo
+    // the embedding on arrival, and the address it produced would render the
+    // index outside the rail it belongs to.
     rewrite = REWRITE_RETIRED;
     await visit("#/settings/observatory");
-    expect(seen).toEqual(["observatory", null]);
-    expect(window.location.hash).toBe("#/observatory");
+    expect(seen).toEqual(["settings", "observatory"]);
+    expect(window.location.hash).toBe("#/settings/observatory");
   });
 
   // The two addresses that rewrite onto the *section* rather than one of its
@@ -240,6 +244,33 @@ describe("resolving an address", () => {
     expect(seen).toEqual(["connections", null]);
     expect(window.location.hash).toBe("#/connections");
   });
+
+  // The one retired address on this rail that differs from a live one by its
+  // QUERY rather than its path (issue #2259, Codex review on PR #2263). Apps
+  // carried a linkable Credentials tab until Composio became a page of its own;
+  // `readSegments` drops the query, so `#/connections/apps?tab=credentials` and
+  // a plain visit to Apps are the same two segments. Without the rewrite the
+  // bookmark renders the provider grid — a link that looks like it worked,
+  // which is the failure `#/settings/connections` above exists to prevent.
+  it("rewrites the retired Credentials tab onto the Composio page", async () => {
+    rewrite = REWRITE_RETIRED;
+    await visit("#/connections/apps?tab=credentials");
+    expect(seen).toEqual(["connections", "composio"]);
+    // And the query goes with it: the tab it named does not exist on the
+    // destination, so leaving it on the bar would hand out a dead address again.
+    expect(window.location.hash).toBe("#/connections/composio");
+  });
+
+  // The other side of that branch: Apps' own default tab was never a separate
+  // place, so neither address may be moved off the page they have always shown.
+  it.each(["#/connections/apps", "#/connections/apps?tab=providers"])(
+    "leaves %s on the Apps page",
+    async (hash) => {
+      rewrite = REWRITE_RETIRED;
+      await visit(hash);
+      expect(seen).toEqual(["connections", "apps"]);
+    },
+  );
 
   // #1867 review: `#/work` is a bare-only alias onto the ledgers board — the
   // Work surface's real sub-pages are addressed under `#/ledgers/...` (for

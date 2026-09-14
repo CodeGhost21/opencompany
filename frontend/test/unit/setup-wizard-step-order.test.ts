@@ -89,6 +89,25 @@ async function click(testId: string) {
   });
 }
 
+/**
+ * Answers the model step with "No model".
+ *
+ * The escape used to be a link under the step (`setup-skip-model`); it is the
+ * provider picker's last option now, and the picker is a base-ui `Select`
+ * whose popup portals onto `document.body` and does not exist until the
+ * trigger opens it.
+ */
+async function skipModel() {
+  await click("setup-provider-select");
+  const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
+    | HTMLElement
+    | null;
+  expect(none, "no No-model option").toBeTruthy();
+  await act(async () => {
+    none!.click();
+  });
+}
+
 function labelled(...wanted: string[]): HTMLButtonElement {
   const match = Array.from(container.querySelectorAll("button")).find((b) =>
     wanted.includes(b.textContent?.trim() ?? ""),
@@ -131,7 +150,7 @@ async function fill(testId: string, value: string) {
 
 /** model (skipped) -> business (answered) -> sign-in. */
 async function goToSignIn() {
-  await click("setup-skip-model");
+  await skipModel();
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in
@@ -246,5 +265,192 @@ describe("the position survives the list changing under it", () => {
 
     expect(find("setup-field-email")).toBeTruthy();
     expect(find("setup-advanced")).toBeNull();
+  });
+});
+
+/**
+ * What the Business step asks for depends on whether anything will read it.
+ *
+ * `automate` and `teamHint` are the design brief: the first becomes a numbered
+ * job list the roster is designed against and checked for coverage, the second
+ * a request added on top. Neither is acted on without a model — the host falls
+ * back to a curated team matched on keywords, where the two score one point
+ * each against `industry`'s three.
+ *
+ * So a run with no model asks neither, rather than collecting a description of
+ * somebody's business under copy promising their team is built around it and
+ * then staffing them from a keyword match.
+ */
+describe("the questions a modelless run does not ask", () => {
+  it("asks only what kind of company it is when there is no model", async () => {
+    await show(clientWith(status()));
+    await skipModel();
+    await next(); // -> business
+
+    expect(find("setup-field-industry"), "the one question that still counts").toBeTruthy();
+    expect(find("setup-field-automate")).toBeNull();
+    expect(find("setup-field-teamHint")).toBeNull();
+  });
+
+  it("asks all three once a model answers for them", async () => {
+    // A passing test on the model step is what makes the design brief real, so
+    // this client has to answer the probe rather than the apply.
+    const client = {
+      scopeFor: () => "/api/v1/company",
+      get: async () => status(),
+      post: async (path: string) =>
+        path.endsWith("/inference/test")
+          ? { ok: true, baseUrl: "https://api.example/v1", model: "m" }
+          : { complete: true, config_path: "/data/config.toml", restart_required: [] },
+    } as unknown as OpenCompanyClient;
+    await show(client);
+    await fill("setup-field-key", "sk-works");
+    await click("setup-test-connection");
+    await next(); // -> business
+
+    expect(find("setup-field-industry")).toBeTruthy();
+    expect(find("setup-field-automate")).toBeTruthy();
+    expect(find("setup-field-teamHint")).toBeTruthy();
+  });
+});
+
+/**
+ * What "No model" is worth against a host that has one anyway.
+ *
+ * Sending no credential does not mean "no model": the host reads an absent one
+ * as "use whatever you have", and `RosterBuilder::for_setup` falls through to
+ * `harness_inference_from_env` — so a hosted tenant with an injected key would
+ * design a roster with the model its operator had just declined, and now
+ * without the design brief this step stops asking for. `forceCurated` is what
+ * makes the promise on screen true on that host too.
+ */
+describe("what a modelless run asks the host for", () => {
+  /** The roster request the wizard actually sent. */
+  async function rosterRequestFrom(walk: () => Promise<void>): Promise<Record<string, unknown>> {
+    const sent: Record<string, unknown>[] = [];
+    const client = {
+      scopeFor: () => "/api/v1/company",
+      get: async () => status(),
+      post: async (path: string, body: unknown) => {
+        if (path.endsWith("/setup/roster")) {
+          sent.push(body as Record<string, unknown>);
+          return {
+            agents: [{ name: "Ada", role: "Operations", description: "Runs the desk." }],
+            template: "ecommerce",
+            source: "fallback",
+          };
+        }
+        if (path.endsWith("/inference/test")) {
+          return { ok: true, baseUrl: "https://api.example/v1", model: "m" };
+        }
+        return { complete: true, config_path: "/data/config.toml", restart_required: [] };
+      },
+    } as unknown as OpenCompanyClient;
+    await show(client);
+    await walk();
+    expect(sent.length, "the wizard should have asked for a roster").toBeGreaterThan(0);
+    return sent[sent.length - 1];
+  }
+
+  it("asks for the curated team outright, rather than by saying nothing", async () => {
+    const body = await rosterRequestFrom(async () => {
+      await skipModel();
+      await next(); // -> business
+      await fill("setup-field-industry", "E-commerce — homeware");
+      await next(); // -> sign-in
+      await click("auth-mode-none");
+      await next(); // -> review, designing on the way in
+    });
+
+    expect(body.forceCurated, "no model means no model").toBe(true);
+  });
+
+  it("sends neither half of the design brief once there is no model to read it", async () => {
+    const body = await rosterRequestFrom(async () => {
+      // Answered first, then taken back: the drafts survive in state, and must
+      // not steer the curated pick they are no longer an answer to.
+      await fill("setup-field-key", "sk-works");
+      await click("setup-test-connection");
+      await next(); // -> business, with a model
+      await fill("setup-field-industry", "E-commerce — homeware");
+      await fill("setup-field-automate", "Meta ads, order dispatch");
+      await fill("setup-field-teamHint", "someone chasing invoices");
+      await back(); // -> model
+      await skipModel();
+      await next(); // -> business
+      await next(); // -> sign-in
+      await click("auth-mode-none");
+      await next(); // -> review
+    });
+
+    expect(body.automate).toBe("");
+    expect(body.teamHint).toBe("");
+    expect(body.forceCurated).toBe(true);
+  });
+
+  it("does not submit a roster designed under an answer that has since changed", async () => {
+    // A model designed one, the operator went back and chose No model. The
+    // wizard designs only when it holds none, so the old one would otherwise
+    // ride through Review under copy promising a standard team.
+    const body = await rosterRequestFrom(async () => {
+      await fill("setup-field-key", "sk-works");
+      await click("setup-test-connection");
+      await next(); // -> business
+      await fill("setup-field-industry", "E-commerce — homeware");
+      await next(); // -> sign-in
+      await click("auth-mode-none");
+      await next(); // -> review, designs with the model
+      await back(); // -> sign-in
+      await back(); // -> business
+      await back(); // -> model
+      await skipModel();
+      await next(); // -> business
+      await next(); // -> sign-in
+      await next(); // -> review, must design again
+    });
+
+    expect(body.forceCurated, "the second design is the modelless one").toBe(true);
+  });
+});
+
+/**
+ * A verdict is only true of the answers it was asked with.
+ *
+ * The picker stays live while a test is in flight, so an answer can land after
+ * the operator has moved on. Selecting "No model" mid-test is the case that
+ * bites: the settled `skipped` would be overwritten by an `ok`, putting the
+ * design questions back and submitting the previous provider's connection data
+ * under the pseudo-provider `none`, which the host does not know.
+ */
+describe("a connection verdict that arrives after the question changed", () => {
+  it("is discarded when the operator has since chosen No model", async () => {
+    let release!: (value: unknown) => void;
+    const inFlight = new Promise((resolve) => {
+      release = resolve;
+    });
+    const client = {
+      scopeFor: () => "/api/v1/company",
+      get: async () => status(),
+      post: async (path: string) =>
+        path.endsWith("/inference/test")
+          ? inFlight
+          : { complete: true, config_path: "/data/config.toml", restart_required: [] },
+    } as unknown as OpenCompanyClient;
+
+    await show(client);
+    await fill("setup-field-key", "sk-works");
+    await click("setup-test-connection"); // in flight, unresolved
+    await skipModel();
+
+    // The late answer, for a provider that is no longer selected.
+    await act(async () => {
+      release({ ok: true, baseUrl: "https://api.example/v1", model: "m" });
+      await inFlight;
+    });
+
+    // Still modelless: no key field came back, and the step still says so.
+    expect(find("setup-skipped"), "the No-model state should have survived").toBeTruthy();
+    expect(find("setup-field-key")).toBeNull();
+    expect(find("setup-test-connection")).toBeNull();
   });
 });

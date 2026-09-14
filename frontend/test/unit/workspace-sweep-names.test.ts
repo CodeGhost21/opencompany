@@ -78,7 +78,7 @@ async function openSweep(team: TeamMemberDto[]) {
   return Array.from(list.querySelectorAll("li")).map((li) => li.textContent?.trim() ?? "");
 }
 
-describe("the tidy names the teammate, not the id (issue #1479)", () => {
+describe("the tidy names the agent, not the id (issue #1479)", () => {
   it("resolves each folder through the roster the tree behind it already uses", async () => {
     const rows = await openSweep([
       member("01JQZY8T7K", "Nadia"),

@@ -55,7 +55,7 @@ import {
 } from "@/api/runs";
 import { listTasks, type Task } from "@/api/tasks";
 import type { DeskDto } from "@/api/types";
-import { deskFromDto } from "@/views/chat/model";
+import { deskFromDto } from "@/views/room/model";
 import { listWorkflows } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -385,7 +385,7 @@ export function AgentRuns({
             <h3 className="font-medium">Runs</h3>
             <p className="text-xs text-muted-foreground">
               Every attempt {agentName} has made, newest first — cards it was
-              dispatched, messages it answered, and workflow steps it ran.
+              dispatched, messages it answered, and automation steps it ran.
             </p>
           </div>
           {/* Visible while a filter is active even if its fetch came back empty —
@@ -421,7 +421,7 @@ export function AgentRuns({
 
         {failed && (
           <Note>
-            The company host didn't answer for this teammate's runs. It may not
+            The company host didn't answer for this agent's runs. It may not
             record them yet, or the read may have failed — either way nothing
             here has been lost.
           </Note>
@@ -432,7 +432,7 @@ export function AgentRuns({
             {wanted
               ? "No attempt in this history matches that filter."
               : `${agentName} hasn't run yet. An attempt is recorded the first time a card is ` +
-                `dispatched to this teammate, or the first time it answers a message.`}
+                `dispatched to this agent, or the first time it answers a message.`}
           </Note>
         )}
 
@@ -513,7 +513,7 @@ function RunTotals({ runs }: { runs: RunSummary[] }) {
           than "$0.00" when the whole page is unsettled, because a zero here
           would read as free work rather than as unbilled-so-far.
 
-          The label names the page because this is not the teammate's spend:
+          The label names the page because this is not the agent's spend:
           it counts only attempts listed here, and only ones that ran as a
           tracked attempt. The daily cap is enforced against a different, wider
           total — see the Budget section. */}

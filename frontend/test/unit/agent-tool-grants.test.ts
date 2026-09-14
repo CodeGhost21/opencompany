@@ -102,9 +102,25 @@ describe("companyCovers", () => {
     expect(companyCovers(["*"], "hosting.deploy")).toBe(false);
     expect(companyCovers(["*"], "paypal")).toBe(false);
     expect(companyCovers(["*"], "paypal.wallet")).toBe(false);
+    expect(companyCovers(["*"], "mcp_registry")).toBe(false);
+    expect(companyCovers(["*"], "mcp_registry.notion")).toBe(false);
     expect(companyCovers(["*"], "mcp:*")).toBe(false);
     expect(companyCovers(["*"], "mcp:notion")).toBe(false);
     expect(companyCovers(["*"], "mcp*")).toBe(false);
+  });
+
+it("covers the MCP registry only on an explicit grant", () => {
+    // The host gates `mcp_registry_list_tools` / `mcp_registry_tool_call` on
+    // `grants_mcp_registry_explicit`, so a catch-all must not preview them as
+    // covered — the card would render the saved grant effective while the
+    // tools stay unwired.
+    expect(companyCovers(["mcp_registry"], "mcp_registry")).toBe(true);
+    expect(companyCovers(["mcp_registry"], "mcp_registry.notion")).toBe(true);
+    expect(companyCovers(["mcp_registry.notion"], "mcp_registry.notion")).toBe(true);
+    // A glued star is not a spelling the wiring predicate accepts.
+    expect(companyCovers(["mcp_registry"], "mcp_registry*")).toBe(false);
+    // The per-server `mcp:` bridge is a different namespace and confers nothing here.
+    expect(companyCovers(["mcp:*"], "mcp_registry")).toBe(false);
   });
 
   it("treats the bare workspace grant as explicit-only, not a catch-all read", () => {

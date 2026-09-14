@@ -119,7 +119,7 @@ test("a card raised from a channel line links back to the channel", async ({
   // `planning`, `in_progress`, `paused` and `in_review` all render the one
   // word "Working" (`board-columns.ts`), so a page-wide match on it could not
   // tell a planned card from a dispatched one.
-  await page.goto(`/#/tasks/${card!.id}`);
+  await page.goto(`/#/company/tasks/${card!.id}`);
   await dismissWelcome(page);
   // On the request text, which the card keeps in its **note**, not on the
   // heading. Since #2055 a titling pass names the card, so the heading is a
@@ -151,7 +151,7 @@ test("a card raised from a channel line links back to the channel", async ({
   // And Back returns to the card, because the jump went through the address
   // rather than through shell state the history knows nothing about.
   await page.goBack();
-  await expect(page).toHaveURL(/#\/tasks\/.+/);
+  await expect(page).toHaveURL(/#\/company\/tasks\/.+/);
   await expect(origin).toBeVisible();
 });
 
@@ -205,7 +205,7 @@ test("a card raised inside a thread opens that thread on the jump back, not just
   const card = tasks.find((t) => (t.note ?? "").includes(String(marker)));
   expect(card, `no card opened from "${replyText}": ${JSON.stringify(tasks)}`).toBeTruthy();
 
-  await page.goto(`/#/tasks/${card!.id}`);
+  await page.goto(`/#/company/tasks/${card!.id}`);
   await dismissWelcome(page);
   const origin = page.getByRole("button", { name: /Opened from chat/ });
   await expect(origin).toBeVisible({ timeout: 15_000 });
@@ -242,7 +242,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   const chip = page.getByRole("link", { name: /Card opened/ }).last();
   await expect(chip).toBeVisible({ timeout: 60_000 });
   const href = await chip.getAttribute("href");
-  expect(href).toMatch(/^#\/tasks\/.+/);
+  expect(href).toMatch(/^#\/company\/tasks\/.+/);
 
   // After a reload the transcript is rehydrated from `chat/history`, so a chip
   // that only existed on the live POST response would vanish here.
@@ -290,8 +290,8 @@ test("a dismissed card's chip goes away and does not come back on reload", async
   const chip = page.getByRole("link", { name: /Card opened/ }).last();
   await expect(chip).toBeVisible({ timeout: 60_000 });
   const href = await chip.getAttribute("href");
-  expect(href).toMatch(/^#\/tasks\/.+/);
-  const taskId = decodeURIComponent(href!.replace("#/tasks/", ""));
+  expect(href).toMatch(/^#\/company\/tasks\/.+/);
+  const taskId = decodeURIComponent(href!.replace("#/company/tasks/", ""));
 
   // The turn that opened this card also dispatched it, and the host refuses to
   // delete a card with a run registered against it — `tasks.rs` answers 409

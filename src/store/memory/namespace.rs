@@ -266,8 +266,8 @@ mod test {
     fn tenant_prefixed_ids_stay_distinct() {
         // Shared-single-DB mode prefixes ids with `<tenant>--`. Two tenants
         // booting the same company template must not share a namespace.
-        let a = Namespace::company_root(&id("acme--agentic_software_company"));
-        let b = Namespace::company_root(&id("globex--agentic_software_company"));
+        let a = Namespace::company_root(&id("acme--software_company"));
+        let b = Namespace::company_root(&id("globex--software_company"));
         assert_ne!(a, b);
     }
 

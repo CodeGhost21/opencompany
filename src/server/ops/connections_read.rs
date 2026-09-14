@@ -474,6 +474,7 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -890,7 +891,7 @@ mod tests {
 
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/frontend/src/lib/connections.ts"
+            "/../../frontend/src/lib/connections.ts"
         );
         let source = std::fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("read the console connection catalog at {path}: {err}"));

@@ -29,11 +29,16 @@ test("operator adds a Brain memory that persists across reload and can be delete
   await expect(page.getByRole("heading", { name: "Brain", level: 1 })).toBeVisible();
 
   const title = `e2e memory ${Date.now()}`;
+  // Adding lives on the Upload tab; the card it produces lists on Overview
+  // (`MemoryView`'s own `BRAIN_PAGES` split) — two different tabs on the page
+  // this bare arrival opens to its default (Overview).
+  await page.getByRole("tab", { name: "Upload" }).click();
   await page.getByTestId("memory-add").click();
   await page.getByTestId("memory-title").fill(title);
   await page.getByTestId("memory-body").fill("recall me on the next turn");
   await page.getByTestId("memory-save").click();
 
+  await page.getByRole("tab", { name: "Overview" }).click();
   const card = page.getByTestId("memory-card").filter({ hasText: title });
   await expect(card).toBeVisible({ timeout: 30_000 });
 

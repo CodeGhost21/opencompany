@@ -120,7 +120,7 @@ for (const viewport of WITH_DETAIL) {
 
     // Any node with a detail card will do; a teammate is present in every
     // company the harness can boot.
-    await page.getByRole("button", { name: /^AI teammates: / }).first().click({ force: true });
+    await page.getByRole("button", { name: /^AI agents: / }).first().click({ force: true });
     const panel = page.locator("aside").first();
     await expect(panel).toBeVisible();
 

@@ -87,9 +87,11 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
       setFailed(false);
     } catch (err) {
       if (generation !== requestGeneration.current) return;
-      // A 404 (or no credential) is genuinely "nothing to choose between", and
-      // the sections above say why. Any other failure means the host could not
-      // answer — don't render that as an empty choice (issue #1470).
+      // A host with no Composio surface, and a company with no credential, both
+      // have nothing to choose between — and the sections above already say
+      // which of the two it is, so a second notice here would only be a second
+      // voice on the same fact. Any other failure means the host could not
+      // answer, and an unknown list must not render as an empty one (#1470).
       if (classifyLoadFailure(err) === "error") {
         setFailed(true);
       } else {
@@ -154,7 +156,7 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
         <div className="flex items-center gap-2">
           <Users className="size-4 text-muted-foreground" />
           <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Which account teammates act as
+            Which account agents act as
           </h2>
         </div>
         <SectionUnreachable label="Couldn't read this company's connected accounts" />
@@ -168,13 +170,13 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
       <div className="flex items-center gap-2">
         <Users className="size-4 text-muted-foreground" />
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          Which account teammates act as
+          Which account agents act as
         </h2>
       </div>
       <p className="text-sm text-muted-foreground">
         {canManage
-          ? "This company holds more than one account for these providers. Choose which one your teammates act as — the choice applies to every teammate, and takes effect on their next turn. The other accounts stay connected."
-          : "This company holds more than one account for these providers. Which one teammates act as is an admin's choice."}
+          ? "This company holds more than one account for these providers. Choose which one your agents act as — the choice applies to every agent, and takes effect on their next turn. The other accounts stay connected."
+          : "This company holds more than one account for these providers. Which one agents act as is an admin's choice."}
       </p>
 
       <Card>
@@ -222,7 +224,7 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
                     {account.isDefault ? (
                       <>
                         <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
-                          <CircleCheck className="size-3" /> teammates act as this
+                          <CircleCheck className="size-3" /> agents act as this
                         </span>
                         {canManage && (
                           <Button
@@ -251,7 +253,7 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
                           title={
                             account.connected
                               ? undefined
-                              : `This account is ${account.status.toLowerCase()} — re-authorize it before teammates can act as it.`
+                              : `This account is ${account.status.toLowerCase()} — re-authorize it before agents can act as it.`
                           }
                           onClick={() => void choose(row.toolkit, account)}
                         >

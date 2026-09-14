@@ -79,7 +79,7 @@ describe("the note preview on a card", () => {
 });
 
 describe("the avatar's initials", () => {
-  it("tells snake_case teammates apart", () => {
+  it("tells snake_case agents apart", () => {
     // Splitting on whitespace alone returned one letter for every agent on the
     // board, so these three shared a glyph.
     expect(initials("docs_writer")).toBe("DW");

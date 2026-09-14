@@ -57,6 +57,7 @@ import {
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { consoleHref } from "@/lib/console-paths";
 import { MAIN_THREAD_ID } from "@/lib/chat";
 import { GENERAL_CHANNEL, type Desk } from "@/lib/desks";
 import {
@@ -80,7 +81,7 @@ import {
   deskFromDto,
   dmChannelId,
   memberForThread,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
   "payment.send": CreditCard,
@@ -536,7 +537,7 @@ export function ApprovalMeta({
               // that does not exist. Every channel id is a slug or `dm:<uuid>`,
               // which the hash already allows unescaped.
               href={`#/chat/${thread.channelId}`}
-              className="font-medium text-foreground underline-offset-2 hover:underline"
+              className="font-medium text-foreground transition-opacity hover:opacity-80"
             >
               {thread.label}
             </a>
@@ -547,7 +548,7 @@ export function ApprovalMeta({
       {taskId && (
         <>
           <a
-            href={`#/tasks/${encodeURIComponent(taskId)}`}
+            href={consoleHref("tasks", taskId)}
             className="flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 font-medium text-accent-foreground transition-opacity hover:opacity-80"
           >
             <SquareKanban className="size-3 shrink-0" />
@@ -820,7 +821,7 @@ export function approvalThreadLink(
   // it its own thread.
   //
   // Guarded on the topology being *known* rather than on the list being
-  // non-empty. A failed read must not be guessed at — `ChatView` surfaces the
+  // non-empty. A failed read must not be guessed at — `RoomView` surfaces the
   // error and renders no rail, so a link into it would land nowhere — but a
   // company that genuinely declares no desks still has `#general`, and that is
   // the one channel every company has. While an empty answer was overwritten
@@ -896,7 +897,7 @@ export function useApprovalThreadLinks(
     }
     let live = true;
     void Promise.all([
-      // The host's answer, taken as given — the same rule ChatView and
+      // The host's answer, taken as given — the same rule RoomView and
       // AppShell now follow. An empty list is a company with no desks, and an
       // approval raised on its `main` thread still resolves to `#general`. It
       // used to be swapped for `defaultDesks()`, which resolved approvals to
@@ -1147,8 +1148,8 @@ function askerLabel(
   // A native `workflow.approve` gate carries no agent — the grant's subject is
   // the workflow itself (issue #1098), so naming a "teammate" would tell the
   // operator the wrong grantee right as they pick the broader scope.
-  if (a.workflow_id != null && a.workflow_id !== "") return "this workflow";
-  if (!a.agent) return "this teammate";
+  if (a.workflow_id != null && a.workflow_id !== "") return "this automation";
+  if (!a.agent) return "this agent";
   return askerNames.get(a.agent) ?? a.agent;
 }
 

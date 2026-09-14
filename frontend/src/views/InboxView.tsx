@@ -190,11 +190,11 @@ export function InboxView({ client, company }: Props) {
           <div className="space-y-1">
             <p className="font-medium text-foreground">No inboxes yet</p>
             <p className="max-w-sm text-sm">
-              Give a teammate its own inbox from the{" "}
-              <a className="font-medium text-foreground underline-offset-4 hover:underline" href="#/company">
+              Give an agent its own inbox from the{" "}
+              <a className="font-medium text-foreground transition-opacity hover:opacity-80" href="#/company">
                 Company page
               </a>{" "}
-              — open a teammate to flip on the inbox toggle for anyone who needs to receive email.
+              — open an agent to flip on the inbox toggle for anyone who needs to receive email.
               Mail sent to that address shows up here.
             </p>
           </div>
@@ -370,7 +370,7 @@ function Reading({
         </Badge>
       </div>
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-6 py-6">
+        <div className="w-full px-6 py-6">
           <div className="mb-4 flex items-center gap-3">
             <Avatar name={sender(message)} />
             <div className="min-w-0">

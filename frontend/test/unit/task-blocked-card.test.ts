@@ -8,7 +8,7 @@ import type { Task } from "@/api/tasks";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { taskApprovalRows } from "@/lib/task-approvals";
 import { TaskItem } from "@/views/TaskCard";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 
 /**
  * The paused card says what it is waiting on, and does not offer Resume as the

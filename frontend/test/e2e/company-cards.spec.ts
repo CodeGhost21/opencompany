@@ -6,7 +6,7 @@ import { expect, test, type Page } from "@playwright/test";
  * # The failure this reproduces
  *
  * Everything here already existed and none of it was reachable. `#/team`
- * rendered the teammate card grid and `#/team/<agentId>` opened a full detail
+ * rendered the teammate card grid and `#/company/agent/<agentId>` opened a full detail
  * sub-page, but `team` was routable *without a nav entry* — so the only way to
  * either was to type a URL nobody knew. The one nav entry that leads here,
  * Company, opened the org chart: the desks, not the people.
@@ -123,7 +123,7 @@ async function mockApi(page: Page) {
     const agent = path.match(/\/team\/([^/]+)$/);
     if (agent) {
       const found = ROSTER.find((m) => m.id === agent[1]);
-      if (!found) return json({ error: "no such teammate" }, 404);
+      if (!found) return json({ error: "no such agent" }, 404);
       return json({
         ...found,
         source: "overlay",
@@ -158,7 +158,7 @@ async function mockApi(page: Page) {
 const card = (page: Page, name: string) =>
   page.getByTestId("team-card").filter({ hasText: name }).first();
 
-test("#1141 the Company nav lands on the teammates, not on the desks", async ({ page }) => {
+test("#1141 the Company nav lands on the agents, not on the desks", async ({ page }) => {
   await mockApi(page);
 
   // Start elsewhere, so arriving is a real navigation rather than the page the
@@ -208,7 +208,7 @@ test("#1141 a card carries the description, the status and the open count", asyn
   await expect(priya.getByTestId("team-card-tasks")).toHaveText("0 open tasks");
 });
 
-test("#1436 the roster can search names, show working teammates, and identify the baseline", async ({
+test("#1436 the roster can search names, show working agents, and identify the baseline", async ({
   page,
 }) => {
   await mockApi(page);
@@ -369,7 +369,7 @@ test("#1193 desk management survives — a desk can still be created and reached
     timeout: 30_000,
   });
   await expect(page.getByRole("button", { name: "New desk" })).toBeEnabled({ timeout: 30_000 });
-  await expect(page.getByRole("button", { name: "Add teammate" }).first()).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Add agent" }).first()).toBeEnabled();
 });
 
 test("#485 a desk address still opens the chart at that desk", async ({ page }) => {
@@ -428,7 +428,7 @@ test("#1181 the card and the detail header wear the same mascot", async ({ page 
   await expect(onDetail).toHaveAttribute("src", cardSrc ?? "");
 });
 
-test("#1190 the card carries no switch; the inbox lives on the teammate", async ({ page }) => {
+test("#1190 the card carries no switch; the inbox lives on the agent", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
   await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
@@ -447,6 +447,47 @@ test("#1190 the card carries no switch; the inbox lives on the teammate", async 
   await expect(page.getByTestId("agent-inbox-toggle")).toBeVisible({ timeout: 30_000 });
 });
 
+test("#2252 a card opens a direct conversation with that agent", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // On the card face, visible without hovering or opening anything, and named
+  // for the agent rather than a bare "Message" repeated down the grid.
+  const message = maya.getByRole("link", { name: "Message Maya" });
+  await expect(message).toBeVisible();
+
+  // The address is the DM *channel* id (`dm:maya`), which is what the hash
+  // router resolves — not the bare host thread id. The two are the same string
+  // for an ordinary agent and differ for a teammate whose id spells General, so
+  // `test/unit/team-agent-dm-href.test.ts` pins that half; this pins that the
+  // control on the card actually lands in the room.
+  await expect(message).toHaveAttribute("href", "#/chat/dm%3Amaya");
+  await message.click();
+  await expect.poll(() => page.url()).toContain("#/chat/dm%3Amaya");
+});
+
+test("#2252 Message is on the card face only, never also in the overflow", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // One affordance per action. Message moved out of this menu when it landed on
+  // the face; leaving it in both places is the regression this guards, and it
+  // is the kind that reads as harmless until an operator wonders which of the
+  // two does something different.
+  await maya.getByRole("button", { name: "Agent actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Remove" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Message" })).toHaveCount(0);
+
+  // Opening the overflow must still not trigger the title's stretched target.
+  await expect(page).toHaveURL(/#\/company$/);
+});
+
 test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await mockApi(page);
 
@@ -458,13 +499,13 @@ test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await expect.poll(() => page.url()).not.toContain("#/team");
 });
 
-test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }) => {
+test("#1141 a card opens an agent, breadcrumbed and editable", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
   await card(page, "Maya").getByTestId("team-card-open").click();
 
   // Still a linkable page rather than a modal (issue #264).
-  await expect.poll(() => page.url()).toContain("#/team/maya");
+  await expect.poll(() => page.url()).toContain("#/company/agent/maya");
   await expect(page.getByTestId("agent-name")).toHaveText("Maya", { timeout: 30_000 });
 
   // The breadcrumb says where the operator *is* — this page is linked into
@@ -486,13 +527,14 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await expect(desk).toContainText("(lead)");
   await expect(desk).toHaveAttribute("href", "#/company/research");
   await expect(page.getByTestId("agent-open-task-t1")).toHaveText("Scan competitor pricing");
-  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/tasks/t1");
+  await expect(page.getByTestId("agent-open-task-t1")).toHaveAttribute("href", "#/company/tasks/t1");
   await expect(page.getByTestId("agent-open-task-t2")).toHaveText("Draft the weekly brief");
-  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/tasks/t2");
+  await expect(page.getByTestId("agent-open-task-t2")).toHaveAttribute("href", "#/company/tasks/t2");
   await expect(page.getByTestId("agent-open-task-t3")).toHaveCount(0);
 
-  // Edit is on the header row, not buried in a card halfway down, and this
-  // teammate is an overlay so it is live.
+  // Edit lives on the Instructions tab, not the Overview tab this arrival
+  // opens on; this teammate is an overlay so it is live once there.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   const edit = page.getByTestId("agent-edit");
   await expect(edit).toBeEnabled();
   await edit.click();
@@ -504,7 +546,7 @@ test("#1141 a card opens a teammate, breadcrumbed and editable", async ({ page }
   await expect.poll(() => page.url()).toContain("#/company");
 });
 
-test("#1433 switching teammates drops the previous one's open tasks", async ({ page }) => {
+test("#1433 switching agents drops the previous one's open tasks", async ({ page }) => {
   await mockApi(page);
 
   // The board read, under the test's control. `AgentDetailView` stays mounted
@@ -527,14 +569,14 @@ test("#1433 switching teammates drops the previous one's open tasks", async ({ p
     });
   });
 
-  await page.goto("/#/team/maya");
+  await page.goto("/#/company/agent/maya");
   await expect(page.getByTestId("agent-open-task-t1")).toBeVisible({ timeout: 30_000 });
 
   // Same-document navigation, which is what the operator's click does and what
   // keeps the view mounted. A full `goto` would remount it and prove nothing.
   stall = true;
   await page.evaluate(() => {
-    window.location.hash = "#/team/ravi";
+    window.location.hash = "#/company/agent/ravi";
   });
 
   // Ravi's page is ready…

@@ -428,13 +428,13 @@ export function CopilotPanel({
   function blockedReason(messageId: string, review: Review): string | undefined {
     if (!review.proposal || !review.diff) return undefined;
     if (sourceDefined) {
-      return "This workflow is defined by a file in the company source tree, so a change has to be made in the repository.";
+      return "This automation is defined by a file in the company source tree, so a change has to be made in the repository.";
     }
     if (!thisSession.has(messageId)) {
-      return "This was proposed in an earlier session, so it can't be applied to the workflow as it stands now. Ask again for a fresh proposal.";
+      return "This was proposed in an earlier session, so it can't be applied to the automation as it stands now. Ask again for a fresh proposal.";
     }
     if (proposalIsStale(review.proposal, graph)) {
-      return "The workflow changed after this was proposed, so it no longer describes the graph on screen. Ask again for a fresh proposal.";
+      return "The automation changed after this was proposed, so it no longer describes the graph on screen. Ask again for a fresh proposal.";
     }
     if (isEmptyDiff(review.diff)) {
       return "This proposal would change nothing, so there is nothing to apply.";
@@ -543,8 +543,8 @@ export function CopilotPanel({
   const placeholder = useMemo(
     () =>
       runs.length > 0
-        ? "Ask about this workflow — what it does, or why a run failed."
-        : "Ask about this workflow — what it does, or what it needs to run.",
+        ? "Ask about this automation — what it does, or why a run failed."
+        : "Ask about this automation — what it does, or what it needs to run.",
     [runs.length],
   );
 
@@ -579,7 +579,7 @@ export function CopilotPanel({
             This block is a claim about the host, so it changes only when the
             host does. #405 had to *withdraw* a confinement claim: the thread
             bought transcript isolation, not a confined responder, and the
-            teammate answering held the company's whole context and tool
+            agent answering held the company's whole context and tool
             surface. #416 built the confinement, so the claim is back — and it
             is now the narrower, checkable one: no tools, no company context,
             and a turn that says which part of a question it could not answer
@@ -604,8 +604,8 @@ export function CopilotPanel({
               </p>
               <p className="mt-1.5">
                 That is also all the answer is drawn from. This turn runs{" "}
-                <span className="font-medium text-foreground">confined to this workflow</span>:
-                no tools, no company memory, and no reach into the board, your teammates or
+                <span className="font-medium text-foreground">confined to this automation</span>:
+                no tools, no company memory, and no reach into the board, your agents or
                 another workflow. Ask something that needs the wider company and it will say so
                 rather than guess.
               </p>
@@ -628,7 +628,7 @@ export function CopilotPanel({
                     Ask for a change and it{" "}
                     <span className="font-medium text-foreground">proposes one you review</span>:
                     you see the diff and decide. Nothing is written until you press Apply, and it
-                    goes through the same save the editor uses, which refuses a workflow that
+                    goes through the same save the editor uses, which refuses an automation that
                     moved while you were reading.
                   </>
                 )}
@@ -642,14 +642,14 @@ export function CopilotPanel({
             <AlertDescription className="text-2xs leading-snug">
               This company has no inference configured, so it can't answer
               questions — it would just repeat them back. Set a provider in
-              Settings → Inference, then reopen the copilot.
+              Connections → Inference, then reopen the copilot.
             </AlertDescription>
           </Alert>
         )}
 
         {messages.length === 0 && !echoing && (
           <p className="text-2xs text-muted-foreground">
-            No questions yet. Try “what does this workflow do?” or “why did the
+            No questions yet. Try “what does this automation do?” or “why did the
             last run fail?”.
           </p>
         )}

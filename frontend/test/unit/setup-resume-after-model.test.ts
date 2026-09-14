@@ -150,6 +150,11 @@ async function leaveForModelSettings() {
     await new Promise((r) => setTimeout(r, 0));
   });
   // jsdom does not follow the anchor's href, so drive the navigation it implies.
+  // Deliberately the LEGACY address. Inference is `#/connections/inference`
+  // now, and `console-route-rewrites.ts` resolves this one onto it without
+  // rewriting the address bar — so a bookmark parks an operator on the model
+  // page under a hash `onModelSettings` has to recognise or setup reopens on
+  // top of them. Driving the gate from the old address is what covers that.
   // `#/settings/inference` since the model links were corrected off the dead
   // `#/settings/connections`, which named no settings page at all.
   await goTo("#/settings/inference");
@@ -445,7 +450,7 @@ describe("leaving the completion screen to wire a model", () => {
     await runFlow();
 
     expect(removed, "the fallback team should be replaced").toEqual(["ada", "cara"]);
-    expect(removed, "a teammate staffed while settings were open must survive").not.toContain("bob");
+    expect(removed, "an agent staffed while settings were open must survive").not.toContain("bob");
   });
 
   it("does not reopen a redesign whose fallback team another operator already replaced", async () => {

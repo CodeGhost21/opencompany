@@ -45,7 +45,7 @@ describe("makeMessage with mentions", () => {
 
   it("renders a quiet mention through", () => {
     const quiet: Mention[] = [
-      { text: "@former", offset: 0, label: "Former Teammate", mine: false, quiet: true },
+      { text: "@former", offset: 0, label: "Former Agent", mine: false, quiet: true },
     ];
     const msg = makeMessage("company", "@former", { mentions: quiet });
     expect(msg.mentions?.[0].quiet).toBe(true);

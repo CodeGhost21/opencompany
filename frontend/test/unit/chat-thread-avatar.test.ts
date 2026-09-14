@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashedFlavour, tinySrc } from "@/lib/avatar";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import type { Channel } from "@/views/chat/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import type { Channel } from "@/views/room/model";
 
 /**
  * Issue #1729: the thread panel drew the agent's mascot for the current user.

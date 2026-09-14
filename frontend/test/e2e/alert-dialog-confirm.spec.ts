@@ -96,7 +96,7 @@ async function holdNextRequest(
 test("confirming a task delete dismisses the dialog before the request lands", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
 
   // Create a card of our own so the test never deletes somebody else's row.
   const title = `e2e confirm-closes ${Date.now()}`;
@@ -141,7 +141,7 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   // Let the delete through and confirm the handler really did run: closing the
   // dialog must not have cost us the action.
   release("continue");
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await expect(page.locator("[draggable=true]").filter({ hasText: title })).toHaveCount(
     0,
     { timeout: 30_000 },

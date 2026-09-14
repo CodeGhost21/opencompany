@@ -348,11 +348,11 @@ describe("the mock inference backend", () => {
       [{ name: "spawn_task", arguments: { title: "gather" } }],
     ]);
 
-    const teammate = await chat([{ role: "user", content: `The operator asked: ${directive}` }], [
+    const agent = await chat([{ role: "user", content: `The operator asked: ${directive}` }], [
       "workspace_read",
     ]);
-    expect(teammate.choices[0].message.tool_calls).toBeUndefined();
-    expect(teammate.choices[0].message.content).toContain("__MOCK_LLM__");
+    expect(agent.choices[0].message.tool_calls).toBeUndefined();
+    expect(agent.choices[0].message.content).toContain("__MOCK_LLM__");
 
     // …and the step is still there for the agent that can.
     const orchestrator = await chat([{ role: "user", content: directive }], ["spawn_task"]);

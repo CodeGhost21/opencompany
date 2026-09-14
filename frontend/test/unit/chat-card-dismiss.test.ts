@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { clearTaskCard, type ChatMessage } from "@/lib/chat";
-import { clearTaskCardEverywhere } from "@/views/chat/model";
+import { clearTaskCardEverywhere } from "@/views/room/model";
 
 /**
  * Dropping a dismissed card's chip from a transcript (issue #984).

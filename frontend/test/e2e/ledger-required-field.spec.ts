@@ -97,7 +97,7 @@ test("a row missing a required field is refused, and a complete one reads back c
     });
     expect(amended.ok()).toBeTruthy();
 
-    await page.goto(`/#/ledgers/${slug}`);
+    await page.goto(`/#/company/work/${slug}`);
     await expect(page.getByTestId("ledger-entry-complete")).toBeVisible({
       timeout: 15_000,
     });
@@ -152,7 +152,7 @@ test("the board names the row that could not be read and why", async ({
     });
     expect(redeclared.ok()).toBeTruthy();
 
-    await page.goto(`/#/ledgers/${slug}`);
+    await page.goto(`/#/company/work/${slug}`);
     const faults = page.getByTestId("ledger-faults");
     await expect(faults).toBeVisible({ timeout: 15_000 });
     await expect(faults).toContainText("1 row could not be read");
@@ -196,7 +196,7 @@ test("the open count follows a row recorded after the screen was opened", async 
   expect(declared.ok()).toBeTruthy();
 
   try {
-    await page.goto(`/#/ledgers/${slug}`);
+    await page.goto(`/#/company/work/${slug}`);
     const count = page.getByTestId("ledger-open-count");
     await expect(count).toHaveText("0", { timeout: 15_000 });
 
@@ -269,7 +269,7 @@ test("the open count agrees with the rows the screen actually shows", async ({
     expect((await recordRow("r1", "first")).ok()).toBeTruthy();
     expect((await recordRow("r2", "second")).ok()).toBeTruthy();
 
-    await page.goto(`/#/ledgers/${slug}`);
+    await page.goto(`/#/company/work/${slug}`);
     // A company that has not yet cleared the first-run activation funnel
     // gates the whole shell behind it (`OnboardingGate`); dismiss the same
     // way an operator would, if it is showing.

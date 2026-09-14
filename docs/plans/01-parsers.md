@@ -41,7 +41,7 @@ pub fn load_company_workflows(dir: &Path, enabled: &[String]) -> Result<Vec<Work
 ```
 
 TOML shape (already shipped in
-`companies/agentic_marketing_agency/workflows/campaign_pipeline.toml`):
+`companies/marketing_agency/workflows/campaign_pipeline.toml`):
 top-level `id`/`name`/`description`, repeated `[[node]]` and `[[edge]]`.
 
 Validation (prosumer messages, matching `manifest.rs` style):
@@ -106,6 +106,6 @@ None. Unblocks WS2a/b, WS3 (seeding, skill install), WS8 (format freeze).
 
 Unit tests per [09-verification.md §1](09-verification.md): parser happy
 paths, validation failures, round-trips against the real
-`agentic_marketing_agency` files and both repo skills, wikilink alias
+`marketing_agency` files and both repo skills, wikilink alias
 handling, path-traversal rejection. Exit: content-validation walk green over
 every `companies/*` directory; `cargo test` green.

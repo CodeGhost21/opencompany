@@ -97,8 +97,8 @@ describe("rosterGapNotice", () => {
     // whenever either failed would tell the operator the desks are missing from
     // a list that is showing every one of them.
     expect(rosterGapNotice({ desks: true, team: false })).toContain("desks");
-    expect(rosterGapNotice({ desks: true, team: false })).not.toContain("teammates");
-    expect(rosterGapNotice({ desks: false, team: true })).toContain("teammates");
+    expect(rosterGapNotice({ desks: true, team: false })).not.toContain("agents");
+    expect(rosterGapNotice({ desks: false, team: true })).toContain("agents");
     expect(rosterGapNotice({ desks: false, team: true })).not.toContain("desks");
     for (const failed of [
       { desks: true, team: false },
@@ -127,12 +127,12 @@ describe("the picker for a roster it could not read", () => {
     expect(gap?.textContent).toContain("incomplete, not empty");
   });
 
-  it("says so when only the teammates read failed, though desks arrived", async () => {
+  it("says so when only the agents read failed, though desks arrived", async () => {
     await open(fakeClient({ desks: async () => DESKS, team: fails }));
 
     expect(popupText()).toContain("Engineering");
     const gap = document.querySelector('[data-testid="assignee-roster-gap"]')?.textContent ?? "";
-    expect(gap).toContain("teammates");
+    expect(gap).toContain("agents");
     // The desks are right there in the list; saying they are missing too would
     // be a second wrong answer on top of the one this fixes.
     expect(gap).not.toContain("desks");

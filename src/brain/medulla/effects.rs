@@ -255,6 +255,19 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("extended approval {approval_id}"),
             "approval.extended",
         ),
+        // Structural only, like the approval arms above — which desks and who,
+        // never the referred content.
+        CompanyEvent::ReferralEnqueued {
+            from_desk,
+            to_desk,
+            target,
+            ..
+        } => (
+            Role::System,
+            "referral".to_string(),
+            format!("referred {from_desk} → {to_desk} ({target})"),
+            "referral.enqueued",
+        ),
         CompanyEvent::FeedbackFiled { note } => (
             Role::User,
             "operator".to_string(),
@@ -462,6 +475,74 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             "workflow".to_string(),
             format!("Updated workflow {name} ({workflow_id})"),
             "workflow.updated",
+        ),
+        // The structural audit rows. Each is one sentence: what changed, and
+        // enough identity to act on it. No configuration body — the same rule
+        // the workflow rows follow, since a brain reasoning about a company's
+        // shape does not need its prompts or its move tables to do so.
+        CompanyEvent::TeammateAdded {
+            agent_id,
+            role,
+            by_agent_id,
+            ..
+        } => (
+            Role::System,
+            "company".to_string(),
+            match by_agent_id {
+                Some(by) => format!("@{by} added teammate {agent_id} ({role})"),
+                None => format!("Added teammate {agent_id} ({role})"),
+            },
+            "teammate.added",
+        ),
+        CompanyEvent::DeskCreated {
+            desk_id,
+            name,
+            members,
+            ..
+        } => (
+            Role::System,
+            "company".to_string(),
+            format!(
+                "Created desk {name} ({desk_id}) with {}",
+                members.join(", ")
+            ),
+            "desk.created",
+        ),
+        CompanyEvent::DeskDeleted { desk_id, .. } => (
+            Role::System,
+            "company".to_string(),
+            format!("Deleted desk {desk_id}"),
+            "desk.deleted",
+        ),
+        CompanyEvent::DeskMembersChanged {
+            desk_id,
+            added,
+            removed,
+            ..
+        } => (
+            Role::System,
+            "company".to_string(),
+            {
+                let mut parts = Vec::new();
+                if !added.is_empty() {
+                    parts.push(format!("added {}", added.join(", ")));
+                }
+                if !removed.is_empty() {
+                    parts.push(format!("removed {}", removed.join(", ")));
+                }
+                format!("Desk {desk_id}: {}", parts.join("; "))
+            },
+            "desk.members_changed",
+        ),
+        CompanyEvent::DeskHiveConfigured { desk_id, reset, .. } => (
+            Role::System,
+            "company".to_string(),
+            if *reset {
+                format!("Restored desk {desk_id}'s declared move grammar")
+            } else {
+                format!("Installed a move grammar on desk {desk_id}")
+            },
+            "desk.hive_configured",
         ),
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..

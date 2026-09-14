@@ -461,6 +461,63 @@ async fn agent_partitions_do_not_leak_into_each_other() {
     );
 }
 
+/// The sibling of [`agent_partitions_do_not_leak_into_each_other`]: two
+/// desks, not two agents. `desk_context` had never been driven through an
+/// isolation assertion — only through the cache-bound tests, which never put
+/// anything into the stores they open.
+#[tokio::test]
+async fn desk_partitions_do_not_leak_into_each_other() {
+    let mem = engine();
+    let id = acme_id();
+    mem.desk_context("engineering")
+        .put(
+            &id,
+            ContextChunk {
+                label: "l".into(),
+                body: "engineering private note".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        mem.desk_context("sales")
+            .list(&id, "")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// `agent_context` and `desk_context` key their cache off `format!("agent:{id}")`
+/// / `format!("desk:{id}")` — a prefix, not a separate map. An agent and a
+/// desk that happen to share the same raw id string must still land in
+/// different stores; a regression that dropped the prefix (or collapsed both
+/// into one key space) would pass every existing test here, since none of
+/// them use the same id for both an agent and a desk.
+#[tokio::test]
+async fn an_agent_and_a_desk_sharing_the_same_raw_id_do_not_share_a_partition() {
+    let mem = engine();
+    let id = acme_id();
+    mem.agent_context("ops")
+        .put(
+            &id,
+            ContextChunk {
+                label: "l".into(),
+                body: "the ops agent's note".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        mem.desk_context("ops")
+            .list(&id, "")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the ops desk must not see the ops agent's partition"
+    );
+}
+
 #[tokio::test]
 async fn inbound_writes_are_stamped_external_and_internal_writes_are_not() {
     // Laundering external content into internal-trust content is the failure

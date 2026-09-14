@@ -46,6 +46,7 @@ use crate::ports::types::OverlayAgent;
 mod calendar;
 pub mod capability;
 pub mod daily_budget;
+pub mod extract;
 mod finances;
 pub mod inference;
 /// Issue #1866: semantic workflow sufficiency calls, charged to the company.
@@ -63,6 +64,9 @@ pub mod planning;
 /// Issue #1776: what one drafted teammate mandate or persona costs, charged to
 /// the company rather than to the teammate it describes. See [`profile_draft`].
 pub mod profile_draft;
+/// Promises against the total token ceiling, held while priced work is in
+/// flight. One map for every kind of priced work — see the module docs.
+pub mod reservation;
 pub mod roster_build;
 pub mod search;
 pub mod selector;
@@ -77,6 +81,7 @@ pub mod workflow_build;
 
 pub use capability::{BudgetPeriod, CapabilityPlan, TierBudgetStatus, plan_named, tokens_in};
 pub use daily_budget::{AgentBudgetStatus, usd_spent_by_agent, utc_day_start_millis};
+pub use extract::{extraction_sample, record_extraction_usage};
 pub use finances::{category_label, finances_from};
 pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
@@ -91,6 +96,7 @@ pub use planning::{planning_sample, record_planning_usage};
 pub use profile_draft::{
     DraftBudget, profile_draft_sample, record_profile_draft_usage, reserve_draft,
 };
+pub use reservation::{TokenReservation, reserve};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };

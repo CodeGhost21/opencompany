@@ -30,7 +30,7 @@ import {
 import { cn } from "@/lib/utils";
 import { initials, toneFor } from "@/lib/team";
 import { TEAM_TONES } from "@/lib/team";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 
 /**
  * How long each created agent stays on screen before the next write starts.
@@ -822,7 +822,7 @@ function InferenceNotice({
       </AlertTitle>
       <AlertDescription>
         {restart
-          ? "A model is set up for this company, but the running brain predates it — teammates keep echoing until the company is restarted. "
+          ? "A model is set up for this company, but the running brain predates it — agents keep echoing until the company is restarted. "
           : noModel
             ? "Your answers will create a standard team for your industry — this deployment can't use a model to design one. "
             : unavailable
@@ -841,7 +841,7 @@ function InferenceNotice({
                 This said `#/settings/connections`, which named no settings
                 page and was repaired onto General, where neither action is. */}
             <a
-              href={settingsHref("inference")}
+              href={connectionsHref("inference")}
               onClick={onLeave}
               className="font-medium underline underline-offset-4"
             >
@@ -997,7 +997,7 @@ function BuildOut({
           */}
           {fallback === "no_model" && harnessReachable && canManage === true && (
             <a
-              href={settingsHref("inference")}
+              href={connectionsHref("inference")}
               onClick={onRedesign}
               data-testid="setup-add-model"
               className={buttonVariants({ variant: "outline" })}
@@ -1035,7 +1035,7 @@ function BuildOut({
               </Button>
               {canManage === true && (
                 <a
-                  href={settingsHref("inference")}
+                  href={connectionsHref("inference")}
                   onClick={onRedesign}
                   data-testid="setup-check-connection"
                   className={buttonVariants({ variant: "outline" })}

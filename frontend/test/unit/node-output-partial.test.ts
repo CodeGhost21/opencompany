@@ -90,7 +90,7 @@ describe("OutputSection partial badge (issue #1008)", () => {
       '[data-testid="node-output-artifact"]',
     );
     expect(artifact?.textContent).toContain("partial.md");
-    expect(artifact?.getAttribute("href")).toBe("#/workspace/node-42");
+    expect(artifact?.getAttribute("href")).toBe("#/company/workspace/node-42");
     expect(container.querySelector('[data-testid="node-output-none"]')).toBeNull();
   });
 });

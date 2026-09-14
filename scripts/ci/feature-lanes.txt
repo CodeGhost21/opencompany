@@ -55,6 +55,7 @@ tinyplace      | tested       | tinyplace                       | Runs the whole
 # --- Partial: a lane exists, but filtered ----------------------------------
 
 sqlite         | partial      | sqlite                          | store::sqlite
+hivemind       | partial      | hivemind                        | runtime::hivemind
 mongodb        | partial      | mongodb                         | store::mongodb store::select
 acp            | partial      | acp,runner,tinymemory | server::acp harness::acp::run_turn
 runner         | partial      | acp,runner,tinymemory | runner
@@ -69,6 +70,10 @@ paypal         | partial      | openhuman,chargebee,paypal,composio | paypal ser
 sidecar        | partial      | sidecar                         | brain::sidecar
 analytics      | partial      | analytics                       | analytics
 crash-reporting | partial     | crash-reporting                 | observability
+webhooks       | partial      | webhooks                        | server::webhook
+opencompany-tui/default | tested | (default) | The `rust` lane's bare cargo test runs the TUI's reducer tests.
+opencompany-tui/harness | tested | harness | The `rust` lane runs the TUI with its embedded OpenHuman boot registrations.
+opencompany-tui/sqlite  | tested | sqlite  | The `rust` lane runs the TUI against the desktop's SQLite-backed host.
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
 #
@@ -92,7 +97,7 @@ crash-reporting | partial     | crash-reporting                 | observability
 
 # --- Compile-only, by design ------------------------------------------------
 #
-# The shape shared by the six below: the PORT (a trait), its offline mock, and
+# The shape shared by the five below: the PORT (a trait), its offline mock, and
 # the whole decision flow around it live in the default build and are tested
 # there. Only a thin real-network implementation sits behind the feature, and it
 # carries no test of its own — there is nothing to run without the network it
@@ -104,7 +109,6 @@ openhuman-rpc  | compile-only | - | Only `HttpOpenHumanRpc` is gated. The trait 
 github         | compile-only | - | Only `HttpGitHubClient` is gated. `GitHubClient`, its mock and the whole issue-filing flow test at default features (src/feedback/github.rs tests sit outside the gated `mod http`).
 tinyhumans     | compile-only | - | Only `HttpTinyHumansClient` / `HttpHubIdentityExchange` are gated. The trait, mock and routing decision test at default features.
 medulla        | compile-only | - | Only the HTTP/Socket.IO transport is gated. Wire types + `MockTransport` test at default features; the gated `http` module carries no test.
-webhooks       | compile-only | - | Only `HttpWebhookSink` / `HmacSha256Signer` are gated. The `WebhookSink` trait, `RecordingWebhookSink` and the deterministic default signer test at default features.
 dns            | compile-only | - | Only `HickoryDnsResolver` is gated. The `DnsResolver` trait, `StaticDnsResolver` and the pure record generation test at default features.
 
 # --- Compile-only, no gated test exists yet ---------------------------------

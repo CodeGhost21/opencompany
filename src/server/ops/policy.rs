@@ -78,6 +78,21 @@ use crate::server::users::admin::require_admin;
 pub(crate) const TAKES_EFFECT: &str =
     "on the next turn — a turn already running finishes under the previous tier";
 
+/// The largest `alwaysApprove` list `PUT {scope}/policy` accepts.
+///
+/// Well past any real always-ask list — this build declares a few dozen tools
+/// (`known_tools` above) — so it bounds the write without narrowing what an
+/// operator can actually express. The list is stored verbatim and re-served on
+/// every `GET`, so an unbounded one is a standing cost on every read, not just
+/// the write that set it.
+const MAX_ALWAYS_APPROVE_ENTRIES: usize = 200;
+
+/// The largest single `alwaysApprove` entry `PUT {scope}/policy` accepts, in
+/// bytes. A gateable tool name is a short identifier (`payment.send`); this
+/// leaves ample room for one still unknown to this build while refusing an
+/// entry that could not be a tool name by any stretch.
+const MAX_ALWAYS_APPROVE_ENTRY_LEN: usize = 200;
+
 /// Builds the policy route fragment.
 pub fn router() -> Router<AppState> {
     scoped(
@@ -241,6 +256,17 @@ pub(crate) struct PolicyDto {
     /// When a change bites. Stated because "stop the flood now" is what an
     /// operator comes here to do, and this is not quite that.
     pub(crate) takes_effect: &'static str,
+    /// Whether the live gate currently turns policy — the tier,
+    /// `always_approve`, the spend cap — into approval requests, as opposed to
+    /// allowing everything the hard denials (`readonly`, the emergency stop)
+    /// do not already refuse.
+    ///
+    /// Read from [`ManifestApprovalGate::policy_hitl_enabled`]
+    /// (`crate::policy::gate`) rather than assumed, so the console's claim
+    /// about its own always-ask list tracks the gate it describes instead of
+    /// a copy of today's build state — see this module's own doc comment for
+    /// why a copy in TypeScript drifts.
+    pub(crate) policy_hitl_enabled: bool,
     /// Every tool name this build's approval gate can match, for the console's
     /// "is this a real tool?" note (issue #1423).
     ///
@@ -256,7 +282,7 @@ pub(crate) struct PolicyDto {
 }
 
 impl PolicyDto {
-    pub(crate) fn build(record: &CompanyRecord) -> Self {
+    pub(crate) fn build(record: &CompanyRecord, policy_hitl_enabled: bool) -> Self {
         let effective: Policy = record.effective_policy();
         let manifest = &record.manifest.policy;
         Self {
@@ -275,6 +301,7 @@ impl PolicyDto {
             set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
             tiers: selectable_tiers(),
             takes_effect: TAKES_EFFECT,
+            policy_hitl_enabled,
             known_tools: {
                 let mut tools: Vec<String> = crate::policy::consequence::declared_tools()
                     .map(str::to_owned)
@@ -322,7 +349,10 @@ struct SetPolicy {
 /// and the selectable tiers with their consequences.
 async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, crate::server::Rejection> {
     let record = load_record(&company).await?;
-    Ok(Json(PolicyDto::build(&record)))
+    Ok(Json(PolicyDto::build(
+        &record,
+        company.runtime.approval_gate.policy_hitl_enabled(),
+    )))
 }
 
 /// `PUT {scope}/policy` — set the tier and/or the always-ask list. Admin-only,
@@ -371,6 +401,28 @@ async fn set_policy(
         && !(1..=8_760).contains(&hours)
     {
         return Err(refusal("`approvalTtlHours` must be between 1 hour and 1 year.").into());
+    }
+    if let Some(Some(list)) = &body.always_approve {
+        if list.len() > MAX_ALWAYS_APPROVE_ENTRIES {
+            return Err(refusal(&format!(
+                "`alwaysApprove` may hold at most {MAX_ALWAYS_APPROVE_ENTRIES} entries — you \
+                 sent {}.",
+                list.len()
+            ))
+            .into());
+        }
+        if let Some((index, entry)) = list
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.len() > MAX_ALWAYS_APPROVE_ENTRY_LEN)
+        {
+            return Err(refusal(&format!(
+                "`alwaysApprove[{index}]` is {} characters, over the \
+                 {MAX_ALWAYS_APPROVE_ENTRY_LEN} limit.",
+                entry.len()
+            ))
+            .into());
+        }
     }
 
     let write_lock = company_write_lock(company.id());
@@ -435,7 +487,10 @@ async fn set_policy(
             .approval_gate
             .apply_effective_ttl(&record.effective_policy());
     }
-    Ok(Json(PolicyDto::build(&record)))
+    Ok(Json(PolicyDto::build(
+        &record,
+        company.runtime.approval_gate.policy_hitl_enabled(),
+    )))
 }
 
 /// `DELETE {scope}/policy` — drop the override so the manifest's `[policy]`
@@ -470,7 +525,10 @@ async fn clear_policy(
             .approval_gate
             .apply_effective_ttl(&record.effective_policy());
     }
-    Ok(Json(PolicyDto::build(&record)))
+    Ok(Json(PolicyDto::build(
+        &record,
+        company.runtime.approval_gate.policy_hitl_enabled(),
+    )))
 }
 
 fn refusal(message: &str) -> Response {
@@ -539,6 +597,7 @@ mod tests {
         let id = CompanyId::new("acme");
         store
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),
@@ -574,12 +633,81 @@ mod tests {
         state
     }
 
+    /// Same fixture as [`state`], but with an injected gate that has NOT been
+    /// built through the production path's `.with_policy_hitl_disabled()` —
+    /// the only way this suite can exercise `PolicyDto.policyHitlEnabled: true`
+    /// before any code path sets it live.
+    async fn state_with_policy_hitl_enabled(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(MANIFEST).unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                overlay_desk_hive: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let gate = std::sync::Arc::new(crate::policy::gate::ManifestApprovalGate::new(
+            manifest.policy.clone(),
+        ));
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_approvals(gate)
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
     async fn call(state: &AppState, method: &str, body: Option<Value>) -> (StatusCode, Value) {
-        let request = Request::builder()
+        call_as(
+            state,
+            method,
+            body,
+            Some(crate::server::test_support::fixed_cookie("acme")),
+        )
+        .await
+    }
+
+    /// [`call`], with the caller's cookie under the test's own control —
+    /// `None` for no session at all — instead of always the fixed admin.
+    async fn call_as(
+        state: &AppState,
+        method: &str,
+        body: Option<Value>,
+        cookie: Option<String>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder()
             .method(method)
             .uri("/api/v1/company/policy")
-            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
             .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
         let request = match body {
             Some(value) => request.body(Body::from(value.to_string())).unwrap(),
             None => request.body(Body::empty()).unwrap(),
@@ -632,6 +760,30 @@ mod tests {
             known_tools.iter().any(|tool| tool == "shell"),
             "the registry still carries the workflow tools"
         );
+    }
+
+    /// `policyHitlEnabled` reports the live gate's own state, and every
+    /// production build reports it `false` — the console's honest "disabled"
+    /// copy must be reading a real fact, not a hardcoded one.
+    #[tokio::test]
+    async fn get_reports_policy_hitl_as_disabled_on_the_production_path() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["policyHitlEnabled"], false);
+    }
+
+    /// The other half of the same fact: a gate that has NOT been built through
+    /// `.with_policy_hitl_disabled()` must report `true`, so the field really
+    /// does track the gate rather than always answering `false`.
+    #[tokio::test]
+    async fn get_reports_policy_hitl_as_enabled_when_the_gate_has_it_on() {
+        let dir = home();
+        let state = state_with_policy_hitl_enabled(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["policyHitlEnabled"], true);
     }
 
     /// A tier `PUT` moves the tier and leaves the always-ask list on the
@@ -740,6 +892,71 @@ mod tests {
         );
     }
 
+    /// The test above proves the cap reaches the live policy snapshot "for
+    /// reporting", per its own comment. This proves the other half: on the
+    /// gate this route's `state()` fixture actually builds — through
+    /// `RuntimeBuilder`, exactly as production does, policy HITL disabled —
+    /// setting `autoApproveUnderUsd` and applying it does not make a spend
+    /// over that cap require approval. `PUT {scope}/policy` is admin-gated,
+    /// validates the value as non-negative and finite, persists it, and
+    /// carries it to the next turn's snapshot — every one of those steps
+    /// works — but nothing in the currently-shipped evaluation path ever
+    /// reads the snapshot's `auto_approve_under_usd` to decide anything,
+    /// because the disabled-HITL arm of `evaluate` returns before reaching the
+    /// mode dispatch that would consult it (`policy::gate`). A console
+    /// showing "capped at $50" is not currently describing an enforced limit.
+    #[tokio::test]
+    async fn the_persisted_cap_does_not_gate_a_spend_on_the_production_gate() {
+        use crate::ports::ApprovalGate;
+        use crate::ports::types::{CompanyEvent, Effect, EffectGroup};
+
+        let dir = home();
+        let state = state(dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("registered").clone();
+        assert!(
+            !runtime.approval_gate.policy_hitl_enabled(),
+            "this fixture must build the gate the way production does"
+        );
+
+        let (status, _) = call(&state, "PUT", Some(json!({ "autoApproveUnderUsd": 1.0 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        runtime
+            .run_cycle(vec![CompanyEvent::ScheduleFired {
+                cron: "* * * * *".to_string(),
+                prompt: "status".to_string(),
+            }])
+            .await
+            .expect("the next turn applies the snapshot");
+        assert_eq!(
+            runtime.approval_gate.policy().auto_approve_under_usd,
+            Some(1.0),
+            "the cap did reach the live snapshot"
+        );
+
+        let over_cap = Effect {
+            kind: "payment.send".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(1_000_000.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let decision = runtime
+            .approval_gate
+            .evaluate(&id, &over_cap)
+            .await
+            .unwrap();
+        assert_eq!(
+            decision,
+            crate::ports::types::PolicyDecision::Allow,
+            "a $1,000,000 spend against a $1 cap is allowed on the production gate today — \
+             the persisted cap is not currently enforced"
+        );
+    }
+
     /// A deadline `null` releases that one override while preserving the cap,
     /// just as `mode: null` releases only the tier override.
     #[tokio::test]
@@ -787,6 +1004,53 @@ mod tests {
         }
 
         // Neither refusal stored anything.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+    }
+
+    /// `alwaysApprove` is admin-gated and attributed like every other field
+    /// here, but nothing bounded its size: an operator (or a script acting as
+    /// one) could grow the stored list without limit, a standing cost on every
+    /// `GET` from then on. A refusal here, not silent truncation, matching how
+    /// every other invalid field on this route is handled.
+    #[tokio::test]
+    async fn an_oversized_always_approve_list_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let too_many: Vec<String> = (0..=MAX_ALWAYS_APPROVE_ENTRIES)
+            .map(|i| format!("tool.{i}"))
+            .collect();
+        let (status, _) = call(&state, "PUT", Some(json!({ "alwaysApprove": too_many }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Refused, not truncated and stored.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+
+        // Exactly at the cap is accepted.
+        let at_cap: Vec<String> = (0..MAX_ALWAYS_APPROVE_ENTRIES)
+            .map(|i| format!("tool.{i}"))
+            .collect();
+        let (status, body) = call(&state, "PUT", Some(json!({ "alwaysApprove": at_cap }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["alwaysApprove"].as_array().unwrap().len(),
+            MAX_ALWAYS_APPROVE_ENTRIES
+        );
+    }
+
+    /// Same bound, per entry: one absurdly long string is refused rather than
+    /// stored and re-served on every subsequent read.
+    #[tokio::test]
+    async fn an_oversized_always_approve_entry_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let huge = "x".repeat(MAX_ALWAYS_APPROVE_ENTRY_LEN + 1);
+        let (status, _) = call(&state, "PUT", Some(json!({ "alwaysApprove": [huge] }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
         let (_, body) = call(&state, "GET", None).await;
         assert_eq!(body["overridden"], false);
     }
@@ -894,5 +1158,231 @@ mod tests {
         // blank; `every_runtime_tier_has_console_text` is what stops that state
         // reaching a release.
         assert!(tiers_for(&["not_a_tier"]).is_empty());
+    }
+
+    /// The privilege boundary this whole route family rests on: a signed-in
+    /// member cannot move the tier, cap, deadline or always-ask list, and an
+    /// unauthenticated caller cannot reach the route at all. Every write field
+    /// on `SetPolicy` is gated by the same `require_admin` call at the top of
+    /// `set_policy`/`clear_policy`, so one assertion against each method covers
+    /// every field this route accepts.
+    #[tokio::test]
+    async fn a_non_admin_cannot_change_or_clear_the_policy() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let member = crate::server::test_support::member_cookie("acme");
+
+        for (method, body) in [("PUT", Some(json!({ "mode": "full" }))), ("DELETE", None)] {
+            let (status, _) = call_as(&state, method, body.clone(), Some(member.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{method} as a member must be refused"
+            );
+
+            let (status, _) = call_as(&state, method, body, None).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} with no session must be refused"
+            );
+        }
+
+        // Neither denied write moved anything — the admin-only fixture's
+        // manifest tier is still what it was seeded with.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(body["overridden"], false);
+    }
+
+    /// `autoApproveUnderUsd` is validated non-negative (line 395-399 above),
+    /// but nothing exercised that check — every existing cap test sends a
+    /// small positive number. A negative cap must be refused before
+    /// persistence, the same way an unknown tier is.
+    ///
+    /// The companion `!cap.is_finite()` half of the same `if` is not
+    /// exercised here: `1e400` is valid JSON syntax but this crate's
+    /// `serde_json` errors deserializing it to `f64` ("number out of range")
+    /// rather than saturating to `INFINITY`, so the request never reaches
+    /// [`set_policy`] at all — axum's `Json` extractor rejects it upstream
+    /// with a plain `400`. `NaN` has no JSON token to begin with. There is no
+    /// value a real HTTP client can put on the wire that reaches the
+    /// `is_finite()` branch as anything other than `true`.
+    #[tokio::test]
+    async fn a_negative_auto_approve_cap_is_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let (status, _) = call(&state, "PUT", Some(json!({ "autoApproveUnderUsd": -0.01 }))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a negative cap must be refused"
+        );
+
+        // Not stored.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+    }
+
+    /// The cap test above (`the_persisted_cap_does_not_gate_a_spend_on_the_
+    /// production_gate`) proves `autoApproveUnderUsd` is inert on the shipped
+    /// gate. `alwaysApprove` reaches a *different* arm of `evaluate`
+    /// (`always_approve::matches`, ahead of the mode dispatch) and is inert for
+    /// the same root cause but by a separate code path: both are read only
+    /// after the `policy_hitl_enabled` check, which every production fixture
+    /// fails. An operator who adds `payment.send` to the always-ask list today
+    /// sees it persist and echo back on every `GET`, and it still does not park
+    /// a matching effect.
+    #[tokio::test]
+    async fn always_approve_does_not_gate_on_the_production_gate() {
+        use crate::ports::ApprovalGate;
+        use crate::ports::types::{CompanyEvent, Effect, EffectGroup};
+
+        let dir = home();
+        let state = state(dir.path()).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("registered").clone();
+        assert!(
+            !runtime.approval_gate.policy_hitl_enabled(),
+            "this fixture must build the gate the way production does"
+        );
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            Some(json!({ "alwaysApprove": ["payment.send"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        runtime
+            .run_cycle(vec![CompanyEvent::ScheduleFired {
+                cron: "* * * * *".to_string(),
+                prompt: "status".to_string(),
+            }])
+            .await
+            .expect("the next turn applies the snapshot");
+        assert_eq!(
+            runtime.approval_gate.policy().always_approve,
+            vec!["payment.send".to_string()],
+            "the always-ask list did reach the live snapshot"
+        );
+
+        let fenced = Effect {
+            kind: "payment.send".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(1.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let decision = runtime.approval_gate.evaluate(&id, &fenced).await.unwrap();
+        assert_eq!(
+            decision,
+            crate::ports::types::PolicyDecision::Allow,
+            "an effect on the always-ask list is allowed on the production gate today — \
+             the persisted always-ask list is not currently enforced"
+        );
+
+        // Control: the same effect against the same always-ask list DOES park
+        // once HITL is enabled — proving the `Allow` above is caused
+        // specifically by `policy_hitl_enabled`, not by a broken match on
+        // `payment.send` that would read `Allow` for any input.
+        // `ManifestApprovalGate::new` defaults to HITL enabled.
+        let hitl_enabled_gate =
+            crate::policy::gate::ManifestApprovalGate::new(runtime.approval_gate.policy());
+        let control_decision = hitl_enabled_gate.evaluate(&id, &fenced).await.unwrap();
+        assert_eq!(
+            control_decision,
+            crate::ports::types::PolicyDecision::RequireApproval,
+            "the same always-ask list DOES park this effect once HITL is enabled — the \
+             gate this route talks to is not enforcing it purely because production \
+             ships with HITL disabled, not because the list or the match is broken"
+        );
+    }
+
+    /// `mode: "auto"` is a real `POLICY_MODES` entry — the write route must
+    /// accept it, not just the three tiers every other test in this file uses.
+    /// On the live gate `evaluate_auto` is a direct call-through to
+    /// `evaluate_supervised_with_policy`, so a decision for `auto` and the same
+    /// decision for `supervised` must agree on every effect: proof that
+    /// selecting `auto` over `supervised` changes nothing about what gets
+    /// gated, even though the console renders them as two distinct choices.
+    ///
+    /// Built off the persisted record rather than the running company's own
+    /// `approval_gate`: the production fixture's gate never dispatches on mode
+    /// at all (HITL disabled, see `the_persisted_cap_does_not_gate_a_spend_on_
+    /// the_production_gate`), and an injected HITL-enabled gate is pinned by
+    /// the test that built it rather than rebuilt from the record on
+    /// `run_cycle`. Two fresh gates built straight from the effective policy
+    /// isolate exactly the one thing this test is about — `evaluate_auto`
+    /// versus `evaluate_supervised` — from both of those unrelated seams.
+    #[tokio::test]
+    async fn mode_auto_is_accepted_and_decides_identically_to_supervised() {
+        use crate::ports::ApprovalGate;
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let (status, body) = call(&state, "PUT", Some(json!({ "mode": "auto" }))).await;
+        assert_eq!(status, StatusCode::OK, "`auto` is a valid tier");
+        assert_eq!(body["mode"], "auto");
+
+        let store = FsCompanyStore::new(dir.path().to_path_buf());
+        let id = CompanyId::new("acme");
+        let record = store.load(&id).await.unwrap().expect("company record");
+        let auto_policy = record.effective_policy();
+        assert_eq!(auto_policy.mode, "auto");
+
+        let spend = Effect {
+            kind: "vendor.pay".to_string(),
+            group: EffectGroup::Spend,
+            amount_usd: Some(1_000.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+
+        let under_auto = crate::policy::gate::ManifestApprovalGate::new(auto_policy.clone());
+        let under_auto_decision = under_auto.evaluate(&id, &spend).await.unwrap();
+
+        let mut supervised_policy = auto_policy;
+        supervised_policy.mode = "supervised".to_string();
+        let under_supervised = crate::policy::gate::ManifestApprovalGate::new(supervised_policy);
+        let under_supervised_decision = under_supervised.evaluate(&id, &spend).await.unwrap();
+
+        assert_eq!(
+            under_auto_decision, under_supervised_decision,
+            "`auto` must decide identically to `supervised` — it has no arm of its own"
+        );
+    }
+
+    /// `mode` has no `MAX_ALWAYS_APPROVE_ENTRY_LEN`-style length bound, unlike
+    /// `alwaysApprove` entries — the check is a linear membership test against
+    /// four short strings, so nothing stops a caller from sending an arbitrarily
+    /// large string. It must still come back a plain `422`, not a timeout, a
+    /// panic, or a body large enough to be a standing cost on this route.
+    #[tokio::test]
+    async fn an_oversized_mode_string_is_refused_promptly() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let junk = "x".repeat(1_000_000);
+        let started = std::time::Instant::now();
+        let (status, _) = call(&state, "PUT", Some(json!({ "mode": junk }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "an oversized `mode` value must be refused promptly, not hang"
+        );
+
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
     }
 }

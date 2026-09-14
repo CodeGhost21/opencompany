@@ -137,7 +137,7 @@ afterEach(async () => {
 
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(PolicySettings, { client, company: "acme" }));
+    root.render(createElement(PolicySettings, { client, company: "acme", canManage: true }));
   });
 }
 
@@ -247,7 +247,7 @@ describe("what the always-ask field suggests", () => {
     // now it speaks — scoped to what the served set can prove, not a blanket
     // "not a tool" claim.
     expect(container.textContent).toContain(
-      "shell doesn't match any of the workflow tools wired here.",
+      "shell doesn't match any of the automation tools wired here.",
     );
   });
 
@@ -329,7 +329,7 @@ describe("what the always-ask field suggests", () => {
     expect(container.textContent).not.toContain("match any");
   });
 
-  it("flags a typo against the complete registry, not just the workflow set", async () => {
+  it("flags a typo against the complete registry, not just the automation set", async () => {
     // `shel` gates nothing in `knownTools` (a case-insensitive, segment-bound
     // match), so the note speaks — with the confident wording the full registry
     // earns.
@@ -414,7 +414,7 @@ describe("policy tier changes", () => {
       full?.click();
     });
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(document.body.textContent).toContain("Acts without asking.");
 
     const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find(
@@ -487,7 +487,7 @@ describe("policy tier changes", () => {
         new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
       );
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
@@ -578,7 +578,7 @@ describe("policy tier changes", () => {
       );
     });
     expect(document.body.textContent).toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
     expect(document.body.textContent).toContain("Acts without asking.");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
@@ -635,7 +635,7 @@ describe("policy tier changes", () => {
     await act(async () => {
       full?.click();
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
 
     const confirm = Array.from(
       document.body.querySelectorAll<HTMLButtonElement>("button"),
@@ -648,8 +648,51 @@ describe("policy tier changes", () => {
     expect(failingPut).toHaveBeenCalledWith("/api/v1/acme/policy", {
       mode: "full",
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(toasts.error).toHaveBeenCalled();
+  });
+
+  it("disables every tier control for a member and states why", async () => {
+    const client = makeClient();
+    await act(async () => {
+      root.render(
+        createElement(PolicySettings, { client, company: "acme", canManage: false }),
+      );
+    });
+
+    expect(container.textContent).toContain(
+      "Only an admin can change this company's approval policy",
+    );
+
+    const radios = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    );
+    expect(radios.length).toBeGreaterThan(0);
+    expect(radios.every((radio) => radio.disabled)).toBe(true);
+
+    const full = radios.find((radio) => radio.textContent?.includes("Full"));
+    await act(async () => {
+      full?.click();
+    });
+    expect(document.body.textContent).not.toContain("Give agents more autonomy?");
+    expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("withholds the deadline save control from a member", async () => {
+    const client = makeClient();
+    await act(async () => {
+      root.render(
+        createElement(PolicySettings, { client, company: "acme", canManage: false }),
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll("button")).map(
+      (button) => button.textContent,
+    );
+    expect(buttons).not.toContain("Save deadline");
+    expect(
+      container.querySelector<HTMLInputElement>("#approval-deadline")?.disabled,
+    ).toBe(true);
   });
 });
 
@@ -724,7 +767,7 @@ describe("manifest resets", () => {
     });
     // Nothing persisted yet; the escalation confirmation is up instead.
     expect((client.del as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(document.body.textContent).toContain("manifest's Full setting");
 
     const confirm = Array.from(
@@ -766,7 +809,7 @@ describe("manifest resets", () => {
       "/api/v1/acme/policy",
     );
     expect(document.body.textContent).not.toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
   });
 });

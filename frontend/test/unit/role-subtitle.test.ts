@@ -66,7 +66,7 @@ describe("roleSubtitle", () => {
   });
 
   /** A teammate the operator named keeps both lines, which is the whole point. */
-  it("keeps both lines for a teammate the host does name", () => {
+  it("keeps both lines for an agent the host does name", () => {
     const dto = {
       id: "growth_analyst",
       name: "Ada",

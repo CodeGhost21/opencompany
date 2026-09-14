@@ -102,8 +102,8 @@ function graph(id: string, name: string): WorkflowGraph {
 }
 
 const GRAPHS: Record<string, WorkflowGraph> = {
-  [WF_A]: graph(WF_A, "Workflow A"),
-  [WF_B]: graph(WF_B, "Workflow B"),
+  [WF_A]: graph(WF_A, "Automation A"),
+  [WF_B]: graph(WF_B, "Automation B"),
 };
 
 /** A failed run — `error` is what puts the Fix affordance on the row.
@@ -179,7 +179,7 @@ function makeClient(script: {
         const late = script.listFailsAfter === undefined || listReads > script.listFailsAfter;
         const named = script.listFailsFor === undefined || script.listFailsFor.includes(forCompany);
         if (script.listFailsAfter !== undefined && late && named) {
-          throw new Error("could not load workflows");
+          throw new Error("could not load automations");
         }
         return [
           { id: WF_A, name: GRAPHS[WF_A].name },
@@ -278,8 +278,8 @@ function fixButton(): HTMLButtonElement | null {
   return inView<HTMLButtonElement>("workflow-run-fix-with-copilot");
 }
 
-describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
-  it("clears an in-flight copilot fix when the workflow changes", async () => {
+describe("WorkflowsView leaves per-automation state behind on a switch", () => {
+  it("clears an in-flight copilot fix when the automation changes", async () => {
     const fix = deferred<WorkflowFixFromRun>();
     const client = makeClient({ fix: fix.promise });
 
@@ -327,7 +327,7 @@ describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
     });
   });
 
-  it("never lands the verdict for the workflow left behind on the new one", async () => {
+  it("never lands the verdict for the automation left behind on the new one", async () => {
     const fix = deferred<WorkflowFixFromRun>();
     const client = makeClient({ fix: fix.promise });
 
@@ -398,8 +398,8 @@ describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
     expect(fixButton()?.disabled).toBe(false);
   });
 
-  it("does not carry a version-conflict banner onto the next workflow", async () => {
-    const conflict = new ApiError(409, "conflict", "This workflow changed since you loaded it.");
+  it("does not carry a version-conflict banner onto the next automation", async () => {
+    const conflict = new ApiError(409, "conflict", "This automation changed since you loaded it.");
     // Workflow B's graph read fails, so nothing incidentally clears the banner:
     // only a successful read does, and that is precisely the case where an
     // operator would never see the leak.
@@ -433,7 +433,7 @@ describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
     expect(inView("workflow-graph-error")).toBeNull();
   });
 
-  it("keeps a workflow-LIST failure visible when the operator returns to the index", async () => {
+  it("keeps an automation-LIST failure visible when the operator returns to the index", async () => {
     // Review of PR #1744. `error` was one slot for two unrelated failures, and
     // clearing it on every selection change threw the company-wide one away at
     // the exact moment the operator went back to the list it is about: a stale
@@ -444,16 +444,16 @@ describe("WorkflowsView leaves per-workflow state behind on a switch", () => {
     // changed (issue #384's `listEventTick`) and the refresh fails under it.
     await show(client, "acme", WF_A);
     await show(client, "acme", WF_A, 1);
-    expect(inView("workflow-list-error")?.textContent).toContain("could not load workflows");
+    expect(inView("workflow-list-error")?.textContent).toContain("could not load automations");
 
     await click(inView("workflow-back-to-index"));
 
     // Pre-fix: the selection change cleared the single shared `error` slot, so
     // the index rendered a stale list with nothing saying the refresh failed.
-    expect(inView("workflow-list-error")?.textContent).toContain("could not load workflows");
+    expect(inView("workflow-list-error")?.textContent).toContain("could not load automations");
   });
 
-  it("does not carry a workflow-LIST failure onto the next company", async () => {
+  it("does not carry an automation-LIST failure onto the next company", async () => {
     // The other half of the same rule: the list read is keyed on the company,
     // so its failure has to end at a company change. Splitting the two slots
     // must not lose the axis the shared slot got right.

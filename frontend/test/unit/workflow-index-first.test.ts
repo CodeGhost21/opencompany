@@ -163,8 +163,8 @@ const named = (label: string) =>
     (b) => b.textContent?.trim() === label,
   ) ?? null;
 
-describe("the Workflows tab opens on the index", () => {
-  it("selects nothing, and puts no per-workflow control on screen", async () => {
+describe("the Automations tab opens on the index", () => {
+  it("selects nothing, and puts no per-automation control on screen", async () => {
     const { client, graphGets } = makeClient();
     await mountAt("#/workflows", client);
 
@@ -180,13 +180,13 @@ describe("the Workflows tab opens on the index", () => {
     expect(named("Delete")).toBeNull();
     expect(container.querySelector('[role="combobox"]')).toBeNull();
     // The one control that is not about a single workflow stays.
-    expect(named("New workflow")).not.toBeNull();
+    expect(named("New automation")).not.toBeNull();
     // …and nothing was written to the address bar, so the tab is still
     // shareable as "the workflows list".
     expect(window.location.hash).toBe("#/workflows");
   });
 
-  it("opens a workflow when one is picked, and pushes its own URL", async () => {
+  it("opens an automation when one is picked, and pushes its own URL", async () => {
     const { client, graphGets } = makeClient();
     await mountAt("#/workflows", client);
 
@@ -220,7 +220,7 @@ describe("the Workflows tab opens on the index", () => {
   });
 });
 
-describe("a URL naming a workflow opens it", () => {
+describe("a URL naming an automation opens it", () => {
   it("renders the detail view for the id in the hash, with no index in the way", async () => {
     const { client, graphGets } = makeClient();
     await mountAt("#/workflows/alpha", client);
@@ -251,7 +251,7 @@ describe("a URL naming a workflow opens it", () => {
   });
 });
 
-describe("leaving a workflow behind", () => {
+describe("leaving an automation behind", () => {
   // Both routes back to the index, because the rule lives on the selection
   // rather than on the back button: the one nobody remembers to update is the
   // delete, and it is the one that leaves the drawer open the longest.

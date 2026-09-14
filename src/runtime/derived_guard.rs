@@ -156,19 +156,22 @@ impl WorkspaceStore for DerivedGuardWorkspace {
         self.inner.read_capped(company, id, max_bytes).await
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         if author != WorkspaceOrigin::Seed
             && let Some(path) = self.guarded_node(company, id).await?
         {
             return Err(self.refuse(company, &path).await);
         }
-        self.inner.write(company, id, content, author).await
+        self.inner
+            .write_with_revision(company, id, content, author, expected_updated_at)
+            .await
     }
 
     async fn create(

@@ -92,7 +92,7 @@ export function FeedbackView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Feedback"
-        width="3xl"
+        width="full"
         description={
           <>
             Flag a wrong result, a missing capability, or anything that felt off
@@ -100,7 +100,7 @@ export function FeedbackView({ client, company }: Props) {
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-3xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Flag something</CardTitle>

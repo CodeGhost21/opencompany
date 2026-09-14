@@ -138,7 +138,7 @@ describe("useApprovalThreadLinks", () => {
 
   it("falls back to the default desks when /desks comes back empty", async () => {
     // A company with no declared `[[group_chat]]` entries gets `[]` from
-    // /desks, yet ChatView and AppShell still show the default desks, and
+    // /desks, yet RoomView and AppShell still show the default desks, and
     // `#general` above them. An approval raised on the main line must resolve
     // here too, or its "Asked in" link would silently disappear — and this is
     // the case that tells an empty *response* apart from a failed read below.
@@ -152,7 +152,7 @@ describe("useApprovalThreadLinks", () => {
   });
 
   it("does not guess desks when the desks read fails", async () => {
-    // A failed read is not an empty response: ChatView surfaces the error rather
+    // A failed read is not an empty response: RoomView surfaces the error rather
     // than inventing desks, and the hook's contract is that an unresolved thread
     // must not be guessed. The `main` thread stays unlinked.
     const client = {

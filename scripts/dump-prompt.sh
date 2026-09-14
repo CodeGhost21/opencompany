@@ -9,8 +9,8 @@
 # failure this surface exists to prevent.
 #
 # Usage:
-#   ./scripts/dump-prompt.sh --company companies/agentic_product_team
-#   ./scripts/dump-prompt.sh --company companies/agentic_product_team --agent bug_triager
+#   ./scripts/dump-prompt.sh --company companies/product_team
+#   ./scripts/dump-prompt.sh --company companies/product_team --agent bug_triager
 #   ./scripts/dump-prompt.sh --company <dir> --agent <id> --raw     # bytes only
 #   ./scripts/dump-prompt.sh --company <dir> --out /tmp/prompts     # one file per agent
 #   ./scripts/dump-prompt.sh --company <dir> --json
@@ -24,4 +24,4 @@ REPO_ROOT=$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd)
 FEATURES=${OPENCOMPANY_DUMP_FEATURES:-openhuman}
 
 cd "$REPO_ROOT"
-exec cargo run --quiet --features "$FEATURES" --bin opencompany -- prompt "$@"
+exec cargo run --quiet -p opencompany-core --features "$FEATURES" --bin opencompany -- prompt "$@"

@@ -29,7 +29,7 @@ function agent(over: Partial<AgentDetailDto> = {}): AgentDetailDto {
   };
 }
 
-describe("what the panel says a teammate is", () => {
+describe("what the panel says an agent is", () => {
   it("shows the instructions in force, not the blueprint they mask", () => {
     const profile = agentProfile(
       agent({
@@ -42,11 +42,11 @@ describe("what the panel says a teammate is", () => {
     expect(profile.about).toBe("Confirm the budget before launching anything.");
   });
 
-  it("falls back to the description for a teammate with no instructions", () => {
+  it("falls back to the description for an agent with no instructions", () => {
     expect(agentProfile(agent({ instructions: null })).about).toBe("Runs paid acquisition.");
   });
 
-  it("has nothing to say about a teammate defined with neither", () => {
+  it("has nothing to say about an agent defined with neither", () => {
     const profile = agentProfile(agent({ description: undefined, instructions: null }));
     expect(profile.about).toBeNull();
     expect(profile.aboutTruncated).toBe(false);
@@ -66,7 +66,7 @@ describe("what the panel says a teammate is", () => {
     expect(profile.aboutTruncated).toBe(false);
   });
 
-  it("shows a manifest teammate by its role, and says so once", () => {
+  it("shows a manifest agent by its role, and says so once", () => {
     const profile = agentProfile(
       agent({ name: undefined, role: "Chief Executive", source: "manifest" }),
     );
@@ -113,17 +113,17 @@ describe("what the panel says a teammate is", () => {
 });
 
 describe("where the panel's buttons go", () => {
-  it("links to the teammate's page", () => {
-    expect(agentHref("jamie")).toBe("#/team/jamie");
+  it("links to the agent's page", () => {
+    expect(agentHref("jamie")).toBe("#/company/agent/jamie");
   });
 
   it("asks for the edit form with the flag the page opens on", () => {
-    expect(agentHref("jamie", { edit: true })).toBe("#/team/jamie?edit");
+    expect(agentHref("jamie", { edit: true })).toBe("#/company/agent/jamie?edit");
   });
 
   it("escapes an id that would otherwise change the address", () => {
     // A tenant-namespaced id carries characters the hash reads structurally;
     // an unescaped `/` would name a teammate of some other view entirely.
-    expect(agentHref("acme/ceo")).toBe("#/team/acme%2Fceo");
+    expect(agentHref("acme/ceo")).toBe("#/company/agent/acme%2Fceo");
   });
 });

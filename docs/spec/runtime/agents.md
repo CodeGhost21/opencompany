@@ -212,6 +212,15 @@ is an addressing handle, not an identity to build a character around, and it nev
 replaces the role. A name that is blank, or that only restates the role, falls
 back to the role-only wording (issue #1105).
 
+**`role` is required on every path that can create an agent**, including the
+console's (issue #1989). The line above interpolates it **unguarded**, unlike
+the description and instructions blocks beside it, so a blank one ships the
+teammate a persona reading *"You are Dana, the  at Acme."* and gives the
+orchestrator's Team block `id — ` to delegate on — neither of which errors and
+neither of which anybody is told about. `company.toml`, `agents/<id>.toml`,
+the orchestrator's `add_agent` tool and both console write routes all refuse a
+blank or whitespace-only role; `POST …/team` was the last one that did not.
+
 **`prompt` is appended, never substituted.** The generated line is what binds the
 agent to *this* role at *this* company; a prompt that replaced it would silently
 cost the agent its identity and hand it back the runtime's own assistant
@@ -248,7 +257,7 @@ reading a provider trace. `opencompany prompt` renders the same composition from
 a manifest alone.
 
 ```sh
-./scripts/dump-prompt.sh --company companies/agentic_product_team
+./scripts/dump-prompt.sh --company companies/product_team
 ./scripts/dump-prompt.sh --company <dir> --agent bug_triager       # one teammate
 ./scripts/dump-prompt.sh --company <dir> --agent bug_triager --raw # bytes only
 ./scripts/dump-prompt.sh --company <dir> --out /tmp/prompts        # a file each

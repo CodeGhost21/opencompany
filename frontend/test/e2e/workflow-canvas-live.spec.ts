@@ -26,7 +26,7 @@ const COMPANY_SCOPE = "/api/v1/company";
 /** Each agent node holds this long, so a run of N of them takes N × this. */
 const NODE_MS = 1_200;
 
-test.describe("workflow canvas during a live run", () => {
+test.describe("automation canvas during a live run", () => {
   // Agent nodes have to actually execute for the host to bracket them with
   // per-node frames, which is the whole subject here.
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);

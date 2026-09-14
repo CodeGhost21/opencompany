@@ -67,8 +67,8 @@ describe("a run that worked a card", () => {
   });
 });
 
-describe("a run whose card was opened by a workflow", () => {
-  it("is filed under the workflow, with the card on the second line", () => {
+describe("a run whose card was opened by an automation", () => {
+  it("is filed under the automation, with the card on the second line", () => {
     // The ordering that matters: the workflow decided the work and the card is
     // the mechanism. Filing these under the card title would bury the schedule
     // that is actually generating them behind thirty cards nobody wrote.
@@ -87,7 +87,7 @@ describe("a run whose card was opened by a workflow", () => {
     expect(source.href).toBe("#/workflows/wf-nightly?run=wfrun-9");
   });
 
-  it("still says 'workflow' when the workflow list could not be read", () => {
+  it("still says 'automation' when the automation list could not be read", () => {
     const source = runSource(
       run({ taskId: "card-7" }),
       index([task({ originWorkflowId: "wf-nightly" })]),
@@ -120,7 +120,7 @@ describe("a run that answered a message", () => {
     // `agentId === chatId` here is a *desk* coincidence, not a DM: the desk's
     // channel id is its thread id, so a turn in #engineering is addressed to
     // the very desk whose id the thread carries. Stamp `dm:` on that and the
-    // link is `#/chat/dm:engineering`, which ChatView cannot resolve as the
+    // link is `#/chat/dm:engineering`, which RoomView cannot resolve as the
     // desk and drops as an unknown channel — the bug this PR fixed.
     const source = runSource(
       run({ chatId: "engineering", agentId: "engineering" }),
@@ -133,7 +133,7 @@ describe("a run that answered a message", () => {
   it("links a DM run to the member's DM, which no desk claims", () => {
     // A DM's thread id is the roster member's id, and no desk's id is also a
     // member's id — so "not in the desk index" is the DM signal, and the link
-    // needs the `dm:` prefix ChatView resolves those channel ids by.
+    // needs the `dm:` prefix RoomView resolves those channel ids by.
     const source = runSource(
       run({ chatId: "ada-1f3k", agentId: "ada-1f3k" }),
       { chats: new Map([["engineering", "#engineering"]]) },

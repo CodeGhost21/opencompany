@@ -139,7 +139,9 @@ locally:
   narrow thing: **shape and outcome only** — counts, durations, enum-valued
   fields — never message text, prompts, file names, ledger values, tool
   arguments or addresses, under an opaque id rather than a company name, and
-  **only** for tenants the hosting platform provisions and operates. A desktop
+  **only** for tenants the hosting platform provisions and operates, to an
+  [OpenPanel](https://github.com/Openpanel-dev/openpanel) collector that
+  platform self-hosts rather than to any third party. A desktop
   or self-hosted **default** build sends nothing and *cannot*: the network
   client is behind a cargo feature that build does not compile, and leaving that
   state takes a recompile plus an explicit `OPENCOMPANY_ANALYTICS=on` rather

@@ -89,7 +89,7 @@ function console_(page: Page): Locator {
  *
  * By **view id**, not by lowercasing a label. The two are deliberately allowed
  * to differ — the `chat` view's row says "Room", the `workflows` view's says
- * "Flows", the `ledgers` view's has said "Work" since #1284 — and `data-tour`
+ * "Automations", the `ledgers` view has said "Work" since #1284 — and `data-tour`
  * follows the id so an anchor does not move when a word does. Deriving the
  * selector from the label made that a silent break rather than a rename.
  */

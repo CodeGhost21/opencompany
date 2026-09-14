@@ -40,29 +40,29 @@ macro_rules! preset {
 
 /// The product company templates shipped with the desktop app.
 pub const PRESETS: &[DesktopPreset] = &[
-    preset!("agentic_accounting_firm", "Agentic Accounting Firm"),
-    preset!("agentic_consultation_firm", "Agentic Consultation Firm"),
-    preset!("agentic_customer_support", "Agentic Customer Support"),
-    preset!("agentic_design_studio", "Agentic Design Studio"),
-    preset!("agentic_enterprise_sales", "Agentic Enterprise Sales"),
-    preset!("agentic_game_business", "Agentic Game Business"),
-    preset!("agentic_game_studio", "Agentic Game Studio"),
-    preset!("agentic_influencer_business", "Agentic Influencer Business"),
-    preset!("agentic_law_firm", "Agentic Law Firm"),
-    preset!("agentic_marketing_agency", "Agentic Marketing Agency"),
-    preset!("agentic_media_company", "Agentic Media Company"),
-    preset!("agentic_pharma_startup", "Agentic Pharma Startup"),
-    preset!("agentic_realestate_company", "Agentic Real Estate Company"),
-    preset!("agentic_recruiting_company", "Agentic Recruiting Company"),
-    preset!("agentic_software_company", "Agentic Software Company"),
-    preset!("agentic_venture_capital", "Agentic Venture Capital"),
-    preset!("agentic_venture_studio", "Agentic Venture Studio"),
+    preset!("accounting_firm", "Agentic Accounting Firm"),
+    preset!("consultation_firm", "Agentic Consultation Firm"),
+    preset!("customer_support", "Agentic Customer Support"),
+    preset!("design_studio", "Agentic Design Studio"),
+    preset!("enterprise_sales", "Agentic Enterprise Sales"),
+    preset!("game_business", "Agentic Game Business"),
+    preset!("game_studio", "Agentic Game Studio"),
+    preset!("influencer_business", "Agentic Influencer Business"),
+    preset!("law_firm", "Agentic Law Firm"),
+    preset!("marketing_agency", "Agentic Marketing Agency"),
+    preset!("media_company", "Agentic Media Company"),
+    preset!("pharma_startup", "Agentic Pharma Startup"),
+    preset!("realestate_company", "Agentic Real Estate Company"),
+    preset!("recruiting_company", "Agentic Recruiting Company"),
+    preset!("software_company", "Agentic Software Company"),
+    preset!("venture_capital", "Agentic Venture Capital"),
+    preset!("venture_studio", "Agentic Venture Studio"),
     preset!("signals_opportunity_studio", "Signals Opportunity Studio"),
     preset!("startup_accelerator", "Startup Accelerator"),
 ];
 
 /// The preset a first-run desktop install uses.
-pub const DEFAULT_PRESET_ID: &str = "agentic_marketing_agency";
+pub const DEFAULT_PRESET_ID: &str = "marketing_agency";
 /// The origin used by Tauri v2's desktop webview.
 pub const TAURI_WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
 
@@ -654,7 +654,7 @@ mod tests {
     /// is where the embedded path does the most work that disk gets for free.
     #[test]
     fn the_embedded_roster_matches_the_bundle_on_disk() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("companies");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../companies");
 
         for preset in PRESETS {
             let bundle = root.join(preset.id);
@@ -724,7 +724,7 @@ mod tests {
     /// so declaring one here caps both the agent belt and the Connections tab at
     /// whatever was typed, for every operator who starts from that template.
     ///
-    /// `agentic_software_company` briefly carried such a list, added to work
+    /// `software_company` briefly carried such a list, added to work
     /// around a console that rendered zero provider rows for an empty one
     /// (#397). That root cause is fixed, so a list added here now buys nothing
     /// and silently restores the cap. Narrowing a template is a legitimate
@@ -974,7 +974,7 @@ mod tests {
             .unwrap();
         // A second company, so the archived one is skipped rather than merely
         // replaced by the first-run seed.
-        let kept = first_run_manifest("agentic_law_firm").unwrap();
+        let kept = first_run_manifest("law_firm").unwrap();
         let kept_id = company_id_from_name(&kept.company.name);
         register(&state, kept_id.clone(), kept, None).await.unwrap();
 
@@ -1017,7 +1017,7 @@ mod tests {
 
         // Now put one there, the way setup does.
         let seeded = state_over(directory.path());
-        let id = seed_company(&seeded, "agentic_law_firm").await.unwrap();
+        let id = seed_company(&seeded, "law_firm").await.unwrap();
 
         // A later boot finds it.
         let relaunched = state_over(directory.path());
@@ -1046,7 +1046,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
 
         let seeding = state_over(directory.path());
-        let id = seed_company(&seeding, "agentic_law_firm").await.unwrap();
+        let id = seed_company(&seeding, "law_firm").await.unwrap();
         assert_eq!(
             seeding.registry().get(&id).unwrap().auth_mode(),
             crate::app::config::AuthMode::Email,

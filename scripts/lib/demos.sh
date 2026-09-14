@@ -3,15 +3,15 @@
 # Shared demo-name resolution for the local Docker Compose helpers.
 resolve_demo_company() {
     case "$1" in
-        fund | vc | venture-capital) echo "agentic_venture_capital" ;;
-        marketing | agency) echo "agentic_marketing_agency" ;;
-        software | saas | dev) echo "agentic_software_company" ;;
-        product | product-team) echo "agentic_product_team" ;;
-        studio | venture-studio) echo "agentic_venture_studio" ;;
+        fund | vc | venture-capital) echo "venture_capital" ;;
+        marketing | agency) echo "marketing_agency" ;;
+        software | saas | dev) echo "software_company" ;;
+        product | product-team) echo "product_team" ;;
+        studio | venture-studio) echo "venture_studio" ;;
         accelerator) echo "startup_accelerator" ;;
-        law | legal) echo "agentic_law_firm" ;;
-        accounting | finance) echo "agentic_accounting_firm" ;;
-        support) echo "agentic_customer_support" ;;
+        law | legal) echo "law_firm" ;;
+        accounting | finance) echo "accounting_firm" ;;
+        support) echo "customer_support" ;;
         signals | opportunity) echo "signals_opportunity_studio" ;;
         *) echo "$1" ;;
     esac

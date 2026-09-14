@@ -75,7 +75,7 @@ import type { Agent, Department, Person, SopTask, Workflow, WorkflowStage } from
  * placement it was never declared to be.
  */
 export const DERIVED_NOTICE =
-  "A workflow is drawn on the desk of the first teammate it runs through — the company scopes flows to itself, not to a desk. Everything else on this graph is declared.";
+  "An automation is drawn on the desk of the first agent it runs through — the company scopes automations to itself, not to a desk. Everything else on this graph is declared.";
 
 /**
  * The department a worker gets when the company declares no desk for them.

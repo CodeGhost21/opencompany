@@ -64,7 +64,7 @@ function item(selector: string, name: string): HTMLElement {
   return result as HTMLElement;
 }
 
-describe("workflow index summary facts", () => {
+describe("automation index summary facts", () => {
   for (const [mode, selector] of [
     ["cards", '[data-testid="workflow-card"]'],
     ["list", '[data-testid="workflow-list-row"]'],
@@ -85,7 +85,7 @@ describe("workflow index summary facts", () => {
     });
   }
 
-  it("orders list rows by the latest run and puts workflows without runs last", () => {
+  it("orders list rows by the latest run and puts automations without runs last", () => {
     const run = (workflowId: string, atMillis: number): WorkflowRunOutcome => ({
       seq: atMillis,
       atMillis,

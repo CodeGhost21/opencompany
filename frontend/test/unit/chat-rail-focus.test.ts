@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
  * and was removed. The seam button is what survives the switch, and it is what
  * catches the focus.
  *
- * A jsdom render of `ChatView` cannot prove this — it needs the whole client
+ * A jsdom render of `RoomView` cannot prove this — it needs the whole client
  * and every hook. So this guards the *wiring contract* the fix rests on, the
  * same source-contract idiom as `responsive-two-rail-band.test.ts`: the rail
  * fires `onExpand`, and the view hands focus to the one collapse control that
@@ -30,9 +30,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("expanding the compact rail preserves focus (issue #1340)", () => {
-  const rail = read("views/chat/ChannelRail.tsx");
-  const chatView = read("views/ChatView.tsx");
-  const chatHeader = read("views/chat/ChatHeader.tsx");
+  const rail = read("views/room/ChannelRail.tsx");
+  const chatView = read("views/RoomView.tsx");
+  const chatHeader = read("views/room/ChatHeader.tsx");
   const controls = read("components/sidebar-controls.tsx");
 
   it("keeps the compact rail's expand button the only expand affordance in the collapsed branch", () => {

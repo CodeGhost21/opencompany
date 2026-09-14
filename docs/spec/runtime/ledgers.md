@@ -241,7 +241,7 @@ The file is TOML, the filename is the slug, and everything else mirrors the
 declaration a `define_ledger` call sends:
 
 ```toml
-# companies/agentic_law_firm/ledgers/matters.toml
+# companies/law_firm/ledgers/matters.toml
 title = "Matters"
 purpose = "Every matter this firm has open, whose it is, and how each one ended."
 written_by = "`record_entry` to open or update a matter, `close_entry` to close one"

@@ -35,7 +35,7 @@ export const SCOPE = "/api/v1/company";
 export const MAIN_LINE = "main";
 
 /** The board, now that it is the `tasks` ledger rather than a screen of its own. */
-export const BOARD = "/#/ledgers/tasks";
+export const BOARD = "/#/company/work/tasks";
 
 /** The board's phases, in board order (issue #1512). */
 export const PENDING = 0;
@@ -251,8 +251,8 @@ export async function openCard(page: Page, title: string): Promise<string> {
   // a card with a note and an assignee falls below the button, so a click there
   // opens nothing and the URL assertion below would time out.
   await card(page, title).getByTestId("task-card-open").click();
-  await expect(page).toHaveURL(/#\/tasks\/[^/]+$/, { timeout: 30_000 });
-  const id = page.url().split("#/tasks/")[1];
+  await expect(page).toHaveURL(/#\/company\/tasks\/[^/]+$/, { timeout: 30_000 });
+  const id = page.url().split("#/company/tasks/")[1];
   await expect(page.getByText(title).first()).toBeVisible({ timeout: 30_000 });
   return id;
 }

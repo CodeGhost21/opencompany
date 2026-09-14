@@ -40,6 +40,9 @@ import { hostSwitcherInteractive } from "@/components/host-switcher";
 
 /** Records what it was handed, and answers with whatever the test staged. */
 class StubTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   readonly seen: TransportRequest[] = [];
   readonly streams: Array<{ url: string; headers?: Record<string, string> }> = [];
 

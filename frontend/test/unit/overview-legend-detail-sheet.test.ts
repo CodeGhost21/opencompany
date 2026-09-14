@@ -38,7 +38,7 @@ function render(detail: boolean) {
         currentDept: DESKS[0],
         toolWiki: null,
         extraDetail: detail ? createElement("div", { "data-testid": "card" }, "a card") : undefined,
-        legendSlot: createElement("div", null, "Notes Human AI teammate Tool Workflow Stage SOP task"),
+        legendSlot: createElement("div", null, "Notes Human AI agent Tool Automation Stage SOP task"),
         onNavDept: () => {},
         onBack: () => {},
         children: createElement("svg"),

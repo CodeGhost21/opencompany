@@ -27,7 +27,7 @@ describe("settledRunNotice", () => {
   it("never tells an operator a run that failed ran", () => {
     expect(settledRunNotice("failed")).toEqual({
       tone: "error",
-      message: "The workflow run failed.",
+      message: "The automation run failed.",
     });
   });
 
@@ -46,7 +46,7 @@ describe("settledRunNotice", () => {
     // fault, not something waiting on the operator.
     expect(settledRunNotice("undelivered")).toEqual({
       tone: "error",
-      message: "The workflow ran, but a report did not go out.",
+      message: "The automation ran, but a report did not go out.",
     });
   });
 
@@ -57,22 +57,22 @@ describe("settledRunNotice", () => {
     });
     expect(settledRunNotice("degraded")).toEqual({
       tone: "info",
-      message: "The workflow ran, with a step in error.",
+      message: "The automation ran, with a step in error.",
     });
     expect(settledRunNotice("running")).toEqual({
       tone: "info",
-      message: "The workflow is still running.",
+      message: "The automation is still running.",
     });
   });
 
   it("keeps the plain sentence only for a clean run", () => {
-    expect(settledRunNotice("ok")).toEqual({ tone: "success", message: "Workflow ran." });
+    expect(settledRunNotice("ok")).toEqual({ tone: "success", message: "Automation ran." });
   });
 
   it("keeps it for a host that sends no verdict at all, rather than inventing one", () => {
     // A host predating issue #981 ships no `verdict` key. Guessing a reading
     // for it is the habit this whole change removes.
-    expect(settledRunNotice(undefined).message).toBe("Workflow ran.");
+    expect(settledRunNotice(undefined).message).toBe("Automation ran.");
   });
 
   /**

@@ -6,7 +6,7 @@ import { expect, test, type Page } from "@playwright/test";
  * The complaint is that an avatar was inert everywhere it appeared. You could
  * be three hundred lines into a channel, wonder what the agent answering you is
  * actually allowed to do, and have no way to find out that did not mean leaving
- * the conversation for `#/team/<id>` and navigating back.
+ * the conversation for `#/company/agent/<id>` and navigating back.
  *
  * So the evidence is the click that used to do nothing: open a DM, click the
  * teammate's face in the header, and read their persona, tier, desks and
@@ -36,7 +36,7 @@ async function openDm(page: Page, agentId: string) {
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
-test("a teammate's face opens who they are, without leaving the channel", async ({ page }) => {
+test("an agent's face opens who they are, without leaving the channel", async ({ page }) => {
   await openDm(page, "engineer");
 
   await page.getByRole("button", { name: /Open .*'s profile/ }).first().click();
@@ -56,7 +56,7 @@ test("a teammate's face opens who they are, without leaving the channel", async 
   await expect(page).toHaveURL(/#\/chat\/dm:engineer$/);
 });
 
-test("the panel hands off to the teammate's own page, with the form open", async ({ page }) => {
+test("the panel hands off to the agent's own page, with the form open", async ({ page }) => {
   await openDm(page, "engineer");
   await page.getByRole("button", { name: /Open .*'s profile/ }).first().click();
   await expect(page.getByTestId("agent-profile-panel")).toBeVisible();
@@ -66,22 +66,25 @@ test("the panel hands off to the teammate's own page, with the form open", async
   // The flag is what makes this a hand-off rather than a second dead end: the
   // page opens *editing*, so the operator is not asked to find the Edit button
   // again on arrival.
-  await expect(page).toHaveURL(/#\/team\/engineer\?edit$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?edit$/);
   await expect(page.getByTestId("agent-save")).toBeVisible({ timeout: 30_000 });
 
   // And the panel got out of the way of the page it sent them to.
   await expect(page.getByTestId("agent-profile-panel")).toHaveCount(0);
 });
 
-test("Back closes the editor and leaves the teammate's page standing", async ({ page }) => {
-  await page.goto("/#/team/engineer");
+test("Back closes the editor and leaves the agent's page standing", async ({ page }) => {
+  // Edit lives on the Instructions tab, not the Overview tab a plain
+  // (non-`?edit`) arrival opens on — named in the address up front so the
+  // click below is the one history entry this test means to undo.
+  await page.goto("/#/company/agent/engineer?tab=instructions");
   await page.getByTestId("agent-edit").click();
-  await expect(page).toHaveURL(/#\/team\/engineer\?edit$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?tab=instructions&edit$/);
   await expect(page.getByTestId("agent-save")).toBeVisible({ timeout: 30_000 });
 
   await page.goBack();
 
-  await expect(page).toHaveURL(/#\/team\/engineer$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/engineer\?tab=instructions$/);
   await expect(page.getByTestId("agent-save")).toHaveCount(0);
   await expect(page.getByTestId("agent-edit")).toBeVisible();
 });

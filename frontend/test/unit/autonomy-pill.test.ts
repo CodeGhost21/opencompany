@@ -9,7 +9,6 @@ import type { OpenCompanyClient } from "@/api/client";
 import type { PolicyStatus } from "@/api/policy";
 import {
   AutonomyPill,
-  leadSentence,
   tierDescription,
   tierIcon,
   tierLabel,
@@ -143,29 +142,26 @@ describe("reading the tier from the host", () => {
   });
 });
 
-describe("the lead sentence", () => {
-  it("cuts the host's description at its first sentence, keeping the full stop", () => {
-    expect(leadSentence(TIERS[2].description)).toBe("Balanced execution autonomy.");
-  });
-
-  // B-023: read-only's description is deliberately two sentences — the
-  // authority claim, then the billing caveat — because the pill can only carry
-  // the first. What the pill shows must therefore be true standing alone, and
-  // must not be the caveat's other half.
-  it("shows read-only's authority on the pill and leaves the billing caveat to the menu", () => {
-    const lead = leadSentence(TIERS[0].description);
-    expect(lead).toBe(
+describe("the tier descriptions", () => {
+  // B-023, kept after the clipping went away.
+  //
+  // `leadSentence` used to cut the host's description at its first sentence for
+  // a pill that printed it beside the tier name, and this asserted that
+  // read-only's first sentence was the authority claim rather than the billing
+  // caveat's other half. The pill prints the tier name alone now and the full
+  // description is on the trigger's `title`, so nothing clips it.
+  //
+  // The content rule survives the mechanism: read-only's description is
+  // deliberately two sentences, and the authority claim has to be the one that
+  // leads. Anything that reads only the opening of it — a tooltip that
+  // truncates, a screen reader stopping at the first period, a future pill that
+  // clips again — must land on what the agents may do, not on how it is billed.
+  it("leads read-only with the authority claim, not the billing caveat", () => {
+    const [first] = TIERS[0].description.split(/(?<=\.)\s+/);
+    expect(first).toBe(
       "The agents can look at things but change nothing, contact nobody, and use no connected account.",
     );
-    expect(lead).not.toContain("billed");
-  });
-
-  it("uses a single-sentence description whole", () => {
-    expect(leadSentence("Only one sentence.")).toBe("Only one sentence.");
-  });
-
-  it("uses a description with no sentence break whole", () => {
-    expect(leadSentence("No full stop here")).toBe("No full stop here");
+    expect(first).not.toContain("billed");
   });
 });
 
@@ -205,10 +201,14 @@ describe("the pill", () => {
     expect(host.textContent).toBe("");
   });
 
-  it("shows the tier's name and the host's lead sentence", () => {
+  it("shows the tier's name and nothing else", () => {
+    // It printed the host's lead sentence beside the name. A sentence inside a
+    // chrome pill made it the widest thing in the row, and the dropdown it
+    // opened inherited the same width — so the pill states the tier and the
+    // sentence moved to the tooltip, in full, asserted directly below.
     render(createElement(AutonomyPill, { status: policy({ mode: "auto" }) }));
     expect(pill()!.textContent).toContain("Auto");
-    expect(pill()!.textContent).toContain("Balanced execution autonomy.");
+    expect(pill()!.textContent).not.toContain("Balanced execution autonomy.");
   });
 
   it("carries the host's FULL description in its tooltip, not the cut one", () => {
@@ -258,18 +258,15 @@ describe("the pill", () => {
     expect(pill()!.className).not.toContain("py-0.5");
   });
 
-  it("drops the sentence below the ladder's first step and keeps the tier's name", () => {
-    // The degradation the 880px minimum window forces, made explicit: the
-    // sentence is hidden, the tier is not. A pill that had silently dropped
-    // the tier would look identical to a company with no policy at all.
+  it("draws no sentence element at any width", () => {
+    // This used to assert the degradation the 880px minimum window forced: the
+    // sentence hidden below `xl` by `TITLE_BAR_LADDER.autonomySentence`, the
+    // tier name never hidden. There is no sentence at any width now, so the
+    // rung was retired and this asserts its absence instead — a pill that grew
+    // one back would be the regression, and it would look correct until the
+    // window narrowed.
     render(createElement(AutonomyPill, { status: policy({ mode: "auto" }) }));
-    const sentence = pill()!.querySelector(
-      "[data-testid=autonomy-consequence]",
-    ) as HTMLElement;
-    expect(sentence.className).toContain("hidden");
-    // The rung `TITLE_BAR_LADDER.autonomySentence` hands it: gone below 1280,
-    // which is the ladder's first step. Not chosen here — see that constant.
-    expect(sentence.className).toContain("xl:inline");
+    expect(pill()!.querySelector("[data-testid=autonomy-consequence]")).toBeNull();
     // The label carries no responsive visibility class of its own.
     const label = Array.from(pill()!.children).find(
       (c) => c.textContent === "Auto",
@@ -362,7 +359,7 @@ async function openMenu() {
 }
 
 describe("changing the tier from the title bar", () => {
-  it("offers every tier the host returned, in the host's own words", async () => {
+  it("offers every tier the host returned, by name", async () => {
     const api = client({});
     await mount(api);
     await openMenu();
@@ -370,9 +367,11 @@ describe("changing the tier from the title bar", () => {
       const item = row(tier.value);
       expect(item, `no row for ${tier.value}`).not.toBeNull();
       expect(item!.textContent).toContain(tier.label);
-      // The FULL description, not `leadSentence`: an open menu has the room,
-      // and this is the moment the words actually matter.
-      expect(item!.textContent).toContain(tier.description);
+      // Titles only. The menu printed each tier's full description, which made
+      // every row a paragraph and the dropdown as wide as the longest one —
+      // the sentence rides each row's own `title` instead.
+      expect(item!.textContent).not.toContain(tier.description);
+      expect(item!.getAttribute("title")).toBe(tier.description);
     }
   });
 
@@ -566,7 +565,7 @@ describe("widening the tier from the title bar", () => {
     await pick("full");
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("Give teammates more autonomy?");
+    expect(text).toContain("Give agents more autonomy?");
     // Both sides of the move, in the host's own prose.
     expect(text).toContain("Instead of: Conservative execution restrictions.");
     expect(text).toContain("With Full: Broadest execution autonomy.");
@@ -742,15 +741,22 @@ describe("the policy as read-only", () => {
     ["an operator whose role has not been read yet", null],
   ] as [string, boolean | null][]) {
     describe(who, () => {
-      it("still states the tier and the host's sentence", async () => {
+      it("still states the tier, and still carries the host's sentence", async () => {
         // The half that must NOT be lost. A member who cannot see the standing
         // policy cannot know what the agents around them are allowed to do.
+        //
+        // The pill prints the tier name alone now, so the sentence is asserted
+        // where it actually is — the tooltip — rather than dropped from this
+        // test: "a member can still find out what the agents may do" is the
+        // guarantee, and it would pass vacuously if only the name were checked.
         const api = client({ get: () => Promise.resolve(policy({ mode: "supervised" })) });
         await mount(api, canManage);
         expect(pill()).not.toBeNull();
         expect(pill()!.textContent).toContain("Supervised");
-        expect(pill()!.textContent).toContain("Conservative execution restrictions.");
         expect(pill()!.getAttribute("title")).toBe(TIERS[1].description);
+        expect(pill()!.getAttribute("title")).toContain(
+          "Conservative execution restrictions.",
+        );
       });
 
       it("is not offered as a control", async () => {

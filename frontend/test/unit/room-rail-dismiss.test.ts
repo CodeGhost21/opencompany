@@ -31,7 +31,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 let container: HTMLDivElement;
 let root: Root;
@@ -105,7 +105,7 @@ describe("the Room slot's mobile sheet controls", () => {
     act(() => slot?.reveal?.());
     expect(slot?.covering, "the sheet is over the transcript once revealed").toBe(true);
 
-    // Then pick a channel, which is what `ChatView.selectChannel` does.
+    // Then pick a channel, which is what `RoomView.selectChannel` does.
     act(() => slot?.dismiss?.());
     expect(slot?.covering, "the sheet is gone, so the transcript is on screen").toBe(false);
   });
@@ -120,7 +120,7 @@ describe("the Room slot's mobile sheet controls", () => {
   });
 });
 
-describe("ChatView hands channel selection to that control", () => {
+describe("RoomView hands channel selection to that control", () => {
   /**
    * The body of `selectChannel`, with comments stripped.
    *
@@ -131,7 +131,7 @@ describe("ChatView hands channel selection to that control", () => {
    */
   const body = (() => {
     const start = chatView.indexOf("function selectChannel(");
-    expect(start, "ChatView still has a selectChannel").toBeGreaterThan(-1);
+    expect(start, "RoomView still has a selectChannel").toBeGreaterThan(-1);
     const open = chatView.indexOf("{", start);
     const end = chatView.indexOf("\n  }", open);
     return chatView

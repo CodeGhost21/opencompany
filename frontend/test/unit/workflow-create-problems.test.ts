@@ -191,7 +191,7 @@ describe("the dialog consuming the host's structured workflow_invalid 400", () =
     const err = new ApiError(
       400,
       "workflow_invalid",
-      "the workflow could not be validated",
+      "the automation could not be validated",
       true,
     );
     (err as unknown as { problems: unknown }).problems = problems;

@@ -70,7 +70,7 @@ afterEach(() => {
   container.remove();
 });
 
-describe("the teammate copilot converses; the operator keeps or discards", () => {
+describe("the agent copilot converses; the operator keeps or discards", () => {
   /// Opening asks for nothing. An earlier version drafted on this click, which
   /// spent a model call — and the operator's first seconds — on a guess made
   /// before they had said the one thing they opened the copilot to say.
@@ -356,20 +356,20 @@ describe("the teammate copilot converses; the operator keeps or discards", () =>
         onTurn: async () => ({ field: "description" as const, source: "model" as const }),
         onAccept: () => {},
         disabled: true,
-        disabledNotice: "Give this teammate a role first — the copilot drafts from it.",
+        disabledNotice: "Give this agent a role first — the copilot drafts from it.",
       }),
     );
 
     const open = testid("agent-copilot-open-description") as HTMLButtonElement | null;
     expect(open?.disabled).toBe(true);
-    expect(container.textContent).toContain("Give this teammate a role first");
+    expect(container.textContent).toContain("Give this agent a role first");
   });
 
   it("names a different next move for each reason", () => {
-    expect(refusalNotice("no_model")).toContain("Settings → Inference");
+    expect(refusalNotice("no_model")).toContain("Connections → Inference");
     expect(refusalNotice("model_unreachable")).toContain("Try again");
     expect(refusalNotice("unreadable")).toContain("add a note");
-    expect(refusalNotice(undefined)).not.toContain("Settings → Inference");
+    expect(refusalNotice(undefined)).not.toContain("Connections → Inference");
   });
 
   /// A spent budget is the one reason with nothing to retry — the ceiling is a

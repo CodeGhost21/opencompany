@@ -127,8 +127,8 @@ export function GrantNamespace({
           catch-all <span className="font-mono">*</span> deliberately does not
           confer it.
           {canManage
-            ? " Granting it here widens what this company's teammates can do."
-            : " An admin has to grant it before teammates receive the tools."}
+            ? " Granting it here widens what this company's agents can do."
+            : " An admin has to grant it before agents receive the tools."}
         </span>
       </span>
       {canManage ? (

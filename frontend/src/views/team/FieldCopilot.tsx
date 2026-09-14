@@ -71,8 +71,8 @@ const SHRINK_NOTICE_RATIO = 0.75;
  * that did not exist yet.
  */
 const FIRST_PLACEHOLDER: Record<DraftableField, string> = {
-  description: "What does this teammate own? e.g. “paid social and the ad budget, not the newsletter”",
-  instructions: "How should this teammate work? e.g. “never launch without sign-off; report ROAS weekly”",
+  description: "What does this agent own? e.g. “paid social and the ad budget, not the newsletter”",
+  instructions: "How should this agent work? e.g. “never launch without sign-off; report ROAS weekly”",
 };
 
 const REPLY_PLACEHOLDER: Record<DraftableField, string> = {
@@ -238,7 +238,7 @@ export function FieldCopilot({
       >
         {turns.length === 0 && !busy && (
           <p className="text-2xs text-muted-foreground" data-testid={`agent-copilot-empty-${field}`}>
-            Say what this teammate should own, and it will draft it. Then tell it what to change.
+            Say what this agent should own, and it will draft it. Then tell it what to change.
           </p>
         )}
         {turns.map((turn, i) => {
@@ -292,13 +292,21 @@ export function FieldCopilot({
                   )}
                   <p className="whitespace-pre-wrap text-sm">{turn.draft}</p>
                   <div className="flex items-center gap-2">
+                    {/* Honours `disabled` like every other control here. It
+                        did not, and the panel can outlive the condition that
+                        disabled it: a form mid-submit has already captured its
+                        payload, so a draft accepted now is one the request did
+                        not carry and the reset after a successful write throws
+                        away. `close()` is not enough either — the panel may
+                        already be open when the form goes busy. */}
                     <Button
                       type="button"
                       size="sm"
                       className="h-7"
+                      disabled={disabled}
                       onClick={() => {
                         const text = turn.draft;
-                        if (!text) return;
+                        if (!text || disabled) return;
                         epoch.current += 1;
                         onAccept(text);
                         close();

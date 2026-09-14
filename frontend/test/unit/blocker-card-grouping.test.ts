@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ApprovalSummary } from "@/api/types";
-import { approvalBatchKey, buildTimelineItems } from "@/views/chat/model";
+import { approvalBatchKey, buildTimelineItems } from "@/views/room/model";
 
 /**
  * A blocker folds by its root cause (#1862): every card stalled on one broken

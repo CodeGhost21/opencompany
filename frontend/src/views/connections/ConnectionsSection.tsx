@@ -1,7 +1,13 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { resolveConnectionPage } from "@/views/connection-pages";
+import { ApiKeyView } from "@/views/connections/ApiKeyView";
+import { ComposioView } from "@/views/connections/ComposioView";
+import { HostingView } from "@/views/HostingView";
+import { InferenceView } from "@/views/InferenceView";
 import { McpServersView } from "@/views/McpServersView";
 import { OAuthView } from "@/views/OAuthView";
+import { SearchView } from "@/views/SearchView";
+import { SkillsView } from "@/views/SkillsView";
 
 interface Props {
   client: OpenCompanyClient;
@@ -27,39 +33,84 @@ interface Props {
  * # This is not a revert of the Connections split
  *
  * A single "Connections" **page** once carried five subjects and was broken
- * apart on purpose (see the comment above the `inference` entry in
- * `settings-pages.ts`). Nothing here puts them back on one page: Apps and MCP
- * Servers are still two pages answering one question each. What they gain is a
- * parent, which is what the original split had no room to give them — and the
- * three credential forms that argument also covers (Inference, Hosting, Search)
- * deliberately stayed in Settings, beside the things they unlock.
+ * apart on purpose. Nothing here puts them back on one page: every entry in
+ * `CONNECTION_PAGES` is still one page answering one question. What they gain
+ * is a parent, which is what the original split had no room to give them.
  *
- * # Where the rail went
+ * Inference, Skills, Hosting and Search have since joined Apps and MCP Servers
+ * under that parent, and the settings rail they left is down to who can sign
+ * in, how the company behaves, what it did and what it spends. The argument
+ * for each move — and for why "a credential form belongs beside what it
+ * unlocks" turned out to point *here* rather than away — is on
+ * `CONNECTION_PAGES` in `views/connection-pages.ts`.
  *
- * This section shipped with a 240px sub-rail inside the content area, modelled
- * on `finance/FinanceSection.tsx`. That rail is gone: sub-navigation lives in
- * the **sidebar** now, under the section's own row
- * (`components/sidebar-navigation.tsx`). Two reasons, and neither is layout
- * fashion. A rail inside the page puts the same kind of list in two different
- * places depending on which section an operator is in — the sidebar for the
- * sections without sub-pages, a rail for the ones with — so there is no rule to
- * learn. And it charges the content pane 240px on every page under it, on a
- * screen that already has a sidebar.
+ * # Where the rail went, twice
  *
- * What is left is the dispatch, which is all this component ever did besides
- * draw the rail. `OAuthView` and `McpServersView` are re-parented, not
- * rewritten. The one content change is `OAuthView`'s title: the page is called
- * **Apps** now, because "OAuth" names the protocol a connection happens to use
- * rather than the thing an operator came to find, and under a section already
- * named Connections it said the same word twice.
+ * This section shipped with a 240px sub-rail of its own inside the content
+ * area, modelled on `finance/FinanceSection.tsx` (PR #1977). It gave that up
+ * for rows in the sidebar under its own section row, on the argument that a
+ * per-section rail puts the same kind of list in two different places and
+ * charges the content pane 240px on a screen that already has a sidebar.
+ *
+ * Sub-navigation is a content rail again (issue #2130) — but the **shared** one,
+ * `components/section-rail.tsx`, built from the same `NAV_SECTIONS` table every
+ * section reads, because the sidebar's middle region is the Room channel list
+ * now and is pinned there on every section. The reversal and what it is worth
+ * are argued on `NAV_SECTIONS` in `components/sidebar-navigation.tsx`; the
+ * "two different places" half of the old argument is answered by there being
+ * exactly one rail implementation and never two rails on screen.
+ *
+ * This file is unchanged by either move, and that is the point worth keeping:
+ * what is left is the dispatch, which is all this component ever did besides
+ * draw a rail. Every view under it is re-parented, not rewritten.
+ * The one content change was `OAuthView`'s title: the page is called **Apps**
+ * now, because "OAuth" names the protocol a connection happens to use rather
+ * than the thing an operator came to find, and under a section already named
+ * Connections it said the same word twice.
  */
 export function ConnectionsSection({ client, company, sub }: Props) {
   const page = resolveConnectionPage(sub);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Remounted per company, the same rule `SkillsView`/`HostingView` below
+          apply: React otherwise preserves `status`, `billing` and `canManage`
+          from the previous company until the new requests resolve, so the
+          page can briefly show the previous company's balance, account links
+          and credential controls under the new company's name. */}
+      {page === "api-key" && (
+        <ApiKeyView key={company ?? "self"} client={client} company={company} />
+      )}
       {page === "apps" && <OAuthView client={client} company={company} />}
+      {/* Remounted per company for the reason every credential page on this
+          rail is: a key typed for one company must never ride into another
+          company's Save. */}
+      {page === "composio" && (
+        <ComposioView key={company ?? "self"} client={client} company={company} />
+      )}
       {page === "mcp" && <McpServersView client={client} company={company} />}
+      {/* Remounted per company, the same rule every other view on this rail
+          follows. Without it this hook stays mounted across a switch, so a
+          read started for the previous company can land after the new one's
+          and render its providers and routes under the new scope — and a row
+          control pressed then writes to the company now in scope. */}
+      {page === "inference" && (
+        <InferenceView key={company ?? "self"} client={client} company={company} />
+      )}
+      {/* Remounted per company, the same rule `SettingsSection` applied while
+          this page lived on its rail: `canManage` and the Add dialog's draft
+          must not carry one company's admin authority into another's
+          still-resolving read. */}
+      {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
+      {/* Both remounted per company for the reason they were on the settings
+          rail: a deploy token or a search key typed for one company must never
+          ride into another company's Save. */}
+      {page === "hosting" && (
+        <HostingView key={company ?? "self"} client={client} company={company} />
+      )}
+      {page === "search" && (
+        <SearchView key={company ?? "self"} client={client} company={company} />
+      )}
     </div>
   );
 }

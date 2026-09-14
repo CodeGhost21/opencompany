@@ -1785,14 +1785,17 @@ mod tests {
             self.inner.read_capped(company, id, max_bytes).await
         }
 
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            self.inner.write(company, id, content, author).await
+            self.inner
+                .write_with_revision(company, id, content, author, expected_updated_at)
+                .await
         }
 
         async fn create(

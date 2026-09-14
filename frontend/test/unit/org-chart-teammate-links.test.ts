@@ -15,7 +15,8 @@ import { OrgChartView } from "@/views/company/OrgChartView";
  * row's name was plain text, and the "Not on a desk" chips were bordered pills
  * with no `href`, no handler and no tooltip — every visual signal of a control
  * and none of the behaviour. `AgentDetailView` had existed at `#/team/<agentId>`
- * since #264, so the destination was never missing; only the link was.
+ * (now `#/company/agent/<agentId>`) since #264, so the destination was never
+ * missing; only the link was.
  *
  * These assertions read the DOM the operator actually gets, because the failure
  * is invisible to a type check and to every derivation test in
@@ -87,7 +88,7 @@ function linkFor(who: string): [string, string] | undefined {
 }
 
 describe("a staffed seat", () => {
-  it("is an anchor to that teammate's detail page", async () => {
+  it("is an anchor to that agent's detail page", async () => {
     await render(
       client({
         desks: [desk({ id: "research", name: "Research Desk", members: ["maya", "ravi"] })],
@@ -97,8 +98,8 @@ describe("a staffed seat", () => {
 
     // The href is the whole assertion: the id routed on is the desk's own
     // member id, which is the id `AgentDetailView` resolves against the host.
-    expect(linkFor("Maya")?.[1]).toBe("#/team/maya");
-    expect(linkFor("Ravi")?.[1]).toBe("#/team/ravi");
+    expect(linkFor("Maya")?.[1]).toBe("#/company/agent/maya");
+    expect(linkFor("Ravi")?.[1]).toBe("#/company/agent/ravi");
   });
 
   it("does not swallow the row's drag handle", async () => {
@@ -112,7 +113,7 @@ describe("a staffed seat", () => {
     // Re-ordering a desk is a drag on the row. A link is draggable by default,
     // and the browser's drag-a-link gesture would take precedence over the
     // row's — so the anchor opts out and the drag falls through to the row.
-    const anchor = container.querySelector<HTMLAnchorElement>('a[href="#/team/maya"]');
+    const anchor = container.querySelector<HTMLAnchorElement>('a[href="#/company/agent/maya"]');
     expect(anchor?.getAttribute("draggable")).toBe("false");
     expect(container.querySelector('[data-seat-id="maya"]')?.getAttribute("draggable")).toBe(
       "true",
@@ -127,7 +128,7 @@ describe("a staffed seat", () => {
       }),
     );
 
-    // `#/team/ghost` would land on "no such teammate" — a dead end that only
+    // `#/company/agent/ghost` would land on "no such teammate" — a dead end that only
     // repeats what the badge beside the name already says.
     expect(container.textContent).toContain("Not on the roster");
     expect(linkFor("ghost")).toBeUndefined();
@@ -148,11 +149,11 @@ describe("a Not-on-a-desk chip", () => {
     );
 
     expect(container.textContent).toContain("Not on a desk");
-    expect(linkFor("Priya")?.[1]).toBe("#/team/priya");
-    expect(linkFor("Sam")?.[1]).toBe("#/team/sam");
+    expect(linkFor("Priya")?.[1]).toBe("#/company/agent/priya");
+    expect(linkFor("Sam")?.[1]).toBe("#/company/agent/sam");
   });
 
-  it("never renders #/team/undefined for a teammate with no id", async () => {
+  it("never renders #/company/agent/undefined for an agent with no id", async () => {
     await render(
       client({
         desks: [],
@@ -162,7 +163,7 @@ describe("a Not-on-a-desk chip", () => {
 
     // The guard this test exists for: an id-less teammate must be flat text
     // with an explanation, not a pill pointing at a page that cannot exist.
-    expect(links().map(([, href]) => href)).not.toContain("#/team/undefined");
+    expect(links().map(([, href]) => href)).not.toContain("#/company/agent/undefined");
     expect(linkFor("Nameless id")).toBeUndefined();
     expect(container.textContent).toContain("Nameless id");
   });
@@ -179,7 +180,7 @@ describe("a People chip", () => {
     );
 
     expect(container.textContent).toContain("Dana");
-    // A person is a console user, not an agent: `#/team/u1` would 404, and
+    // A person is a console user, not an agent: `#/company/agent/u1` would 404, and
     // there is no person page to link to instead. So it must not be a link —
     // and must not keep the border that made the inert version read as one.
     expect(linkFor("Dana")).toBeUndefined();

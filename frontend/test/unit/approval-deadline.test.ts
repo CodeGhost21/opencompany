@@ -93,7 +93,7 @@ describe("the deadline on an approval card", () => {
     expect(link?.textContent).toContain("Open the conversation");
   });
 
-  it("links a native workflow gate to its exact run", async () => {
+  it("links a native automation gate to its exact run", async () => {
     await render(
       approval({
         kind: "workflow.approve",

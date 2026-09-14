@@ -60,7 +60,7 @@ test("a list row leads with its title and shows one readable status", async ({
     });
     expect(recorded.ok()).toBeTruthy();
 
-    await page.goto(`/#/ledgers/${slug}`);
+    await page.goto(`/#/company/work/${slug}`);
     // Declared ledgers open in their readable list form (`defaultLedgerMode`,
     // issue #1351), so the row below is the list row already — the "List"
     // toggle only exists when the board is the active view, and it is not for
