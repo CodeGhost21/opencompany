@@ -140,7 +140,15 @@ struct ModelCatalogDto {
 /// exactly the companies that never configured anything.
 async fn resolved_endpoint(
     runtime: &CompanyRuntime,
-) -> Result<Option<(String, Option<String>, catalogue::AuthStyle)>, ApiError> {
+) -> Result<
+    Option<(
+        String,
+        Option<String>,
+        catalogue::AuthStyle,
+        catalogue::CatalogShape,
+    )>,
+    ApiError,
+> {
     let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let platform = platform_default(&crate::app::config::ProcessEnv);
@@ -155,7 +163,11 @@ async fn resolved_endpoint(
     // value and the header it belongs in. Splitting them is how the catalog
     // read came to send every provider a bearer.
     let auth = catalogue::auth_style_for(&decl.provider);
-    Ok(Some((decl.base_url.clone(), bearer, auth)))
+    // Keys rework (#2306), slice 2a: the shape this endpoint's `/models`
+    // answers in, so a `tinyhumans` row (or an env default already pointed
+    // at the proxy) reads its paged envelope rather than the OpenAI shape.
+    let shape = catalogue::catalog_shape_for(&decl.provider, &decl.base_url);
+    Ok(Some((decl.base_url.clone(), bearer, auth, shape)))
 }
 
 /// `GET …/inference/models` — the model catalog of the endpoint **this company**
@@ -169,7 +181,7 @@ async fn resolved_endpoint(
 /// serves.
 async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let Some((base_url, bearer, auth)) = resolved_endpoint(runtime).await? else {
+    let Some((base_url, bearer, auth, shape)) = resolved_endpoint(runtime).await? else {
         // Nothing resolves — not even a platform default on this host. There is
         // no endpoint to ask, and saying so beats listing some other vendor's
         // catalog as if it were this company's.
@@ -194,6 +206,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         bearer.as_deref(),
         Some(runtime.id().as_ref()),
         auth,
+        shape,
     )
     .await
     {
@@ -1344,6 +1357,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                     bearer.as_deref(),
                     Some(runtime.id().as_ref()),
                     catalogue::auth_style_for(&decl.provider),
+                    catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
                 )
                 .await;
                 decl.with_vocabulary(vocabulary)

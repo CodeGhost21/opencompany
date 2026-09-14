@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::company::inference::catalogue::{self, AuthStyle};
-use crate::company::inference::{TierVocabulary, probe};
+use crate::company::inference::catalogue::{self, AuthStyle, CatalogShape};
+use crate::company::inference::{TierVocabulary, paged_catalog, probe};
 
 /// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -228,6 +228,7 @@ pub(crate) async fn discover_models(
     base_url: &str,
     bearer: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
     let policy = probe::default_policy();
     let credentialed = bearer.is_some_and(|b| !b.trim().is_empty());
@@ -279,6 +280,15 @@ pub(crate) async fn discover_models(
             ))
         })?;
 
+    // Keys rework (#2306), slice 2a: the TinyHumans proxy's catalog is a paged
+    // envelope, not the single-response OpenAI shape the rest of this function
+    // reads — a different fetch entirely, so it branches before the
+    // account-scoped/public-registry logic below, which is OpenRouter-specific
+    // and does not apply to it.
+    if shape == CatalogShape::PagedEnvelope {
+        return fetch_paged_catalog(&client, base, bearer, auth).await;
+    }
+
     // The account-scoped catalogue first, where the endpoint has one — see
     // `catalogue::scoped_catalog_path` for why, and why it is one host's rule
     // rather than a general assumption.
@@ -322,15 +332,36 @@ async fn fetch_catalog(
     bearer: Option<&str>,
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
-    // **The provider's own style, not bearer-for-everyone.** This is a NATIVE
-    // endpoint — `GET /v1/models` — and Anthropic's native API rejects a
-    // bearer-authenticated request with no `anthropic-version` header as
-    // malformed: a 400, not a 401. That 400 on a perfectly good key was the
-    // reported symptom, and it appeared here and nowhere else precisely because
-    // this is the one native call the console makes.
-    //
-    // Verified against `platform.claude.com/docs/en/api/models/list`, whose own
-    // curl example is `-H 'anthropic-version: 2023-06-01' -H "X-Api-Key: …"`.
+    let response = send_classified(client, url, bearer, auth).await?;
+    let named = crate::company::inference::catalogue::redact_endpoint(url);
+    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
+        DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
+    })?;
+    Ok(parse_models(payload))
+}
+
+/// One GET, applying this provider's auth style and classifying an HTTP
+/// failure the same way for every catalog reader — the OpenAI-shaped
+/// [`fetch_catalog`] above and every page of [`fetch_paged_catalog`] below
+/// (keys rework, issue #2306, slice 2a). Split out of `fetch_catalog` so the
+/// paged reader is not a second, silently-divergent copy of this
+/// request/classify logic.
+///
+/// **The provider's own style, not bearer-for-everyone.** This is a NATIVE
+/// endpoint — `GET /v1/models` — and Anthropic's native API rejects a
+/// bearer-authenticated request with no `anthropic-version` header as
+/// malformed: a 400, not a 401. That 400 on a perfectly good key was the
+/// reported symptom, and it appeared here and nowhere else precisely because
+/// this is the one native call the console makes.
+///
+/// Verified against `platform.claude.com/docs/en/api/models/list`, whose own
+/// curl example is `-H 'anthropic-version: 2023-06-01' -H "X-Api-Key: …"`.
+async fn send_classified(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    auth: AuthStyle,
+) -> Result<reqwest::Response, DiscoveryError> {
     let request = crate::company::inference::probe::apply_auth(client.get(url), auth, bearer);
     // Every message below names the endpoint **redacted**. A URL may carry
     // userinfo, and `reqwest` already masks it in its own `Display` — so a
@@ -343,7 +374,7 @@ async fn fetch_catalog(
         .await
         .map_err(|error| DiscoveryError::endpoint(format!("request to {named} failed: {error}")))?;
     let status = response.status();
-    let response = response.error_for_status().map_err(|error| {
+    response.error_for_status().map_err(|error| {
         let message = format!("request to {named} failed: {error}");
         match status {
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
@@ -352,11 +383,67 @@ async fn fetch_catalog(
             reqwest::StatusCode::NOT_FOUND => DiscoveryError::missing(message),
             _ => DiscoveryError::endpoint(message),
         }
-    })?;
-    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
-        DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
-    })?;
-    Ok(parse_models(payload))
+    })
+}
+
+/// Reads the TinyHumans proxy's paged catalog to `total` (keys rework, issue
+/// #2306, slice 2a): `GET {base}/models?limit=500&offset=N`, following
+/// [`paged_catalog::NextPage::At`] until the envelope says there is no more,
+/// or [`paged_catalog::MAX_PAGES`] is reached — at which point this reader
+/// stops rather than loop, and logs what it read.
+async fn fetch_paged_catalog(
+    client: &reqwest::Client,
+    base: &str,
+    bearer: Option<&str>,
+    auth: AuthStyle,
+) -> Result<Vec<InferenceModel>, DiscoveryError> {
+    let mut collector = paged_catalog::Collector::default();
+    loop {
+        let url = format!("{base}{}", paged_catalog::page_path(collector.offset()));
+        let named = crate::company::inference::catalogue::redact_endpoint(&url);
+        let mut response = send_classified(client, &url, bearer, auth).await?;
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| {
+            DiscoveryError::endpoint(format!(
+                "reading the model catalog from {named} failed: {e}"
+            ))
+        })? {
+            if body.len() + chunk.len() > paged_catalog::PAGE_BODY_CAP {
+                return Err(DiscoveryError::endpoint(format!(
+                    "a model catalog page from {named} is larger than 4 MiB"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8(body).map_err(|e| {
+            DiscoveryError::endpoint(format!("model catalog from {named} was not UTF-8: {e}"))
+        })?;
+        let page = paged_catalog::parse_page(&body).map_err(|e| {
+            DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {e}"))
+        })?;
+        match collector.push(page) {
+            paged_catalog::NextPage::At(_) => {}
+            paged_catalog::NextPage::Done => break,
+            paged_catalog::NextPage::Truncated { read, total } => {
+                tracing::warn!(
+                    base = %crate::company::inference::catalogue::redact_endpoint(base),
+                    read,
+                    total,
+                    "model catalog has more pages than one read follows"
+                );
+                break;
+            }
+        }
+    }
+    Ok(collector
+        .finish()
+        .into_iter()
+        .map(|e| InferenceModel {
+            id: e.id,
+            name: e.name,
+            context_length: e.context_length,
+        })
+        .collect())
 }
 
 struct CacheEntry {
@@ -446,6 +533,24 @@ fn cache_key(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 
+/// The cache key for `base_url`, read in `shape` (keys rework, issue #2306,
+/// slice 2a).
+///
+/// One URL can answer two different bodies depending which shape it is read
+/// as — 2a's own gated commit can point the legacy managed constants at the
+/// same host the `tinyhumans` row uses, and until then `OPENCOMPANY_INFERENCE_URL`
+/// can already alias the two. Folding both reads into one [`cache_key`] slot
+/// would serve a paged envelope to an OpenAI-shaped reader or vice versa,
+/// whichever fetched second. The separator is the same control character
+/// [`catalog_cache_scoped`] already uses between scope and endpoint, so no
+/// endpoint string can forge a shape suffix.
+fn shaped_endpoint(base_url: &str, shape: CatalogShape) -> String {
+    match shape {
+        CatalogShape::OpenAi => cache_key(base_url),
+        CatalogShape::PagedEnvelope => format!("{}\u{2}paged", cache_key(base_url)),
+    }
+}
+
 /// The cache slot for an endpoint read within `scope`.
 ///
 /// `scope` is `None` for a read that presented no credential — a public catalog,
@@ -532,6 +637,7 @@ pub(crate) async fn catalog_models(
     bearer: Option<&str>,
     scope: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Result<Vec<InferenceModel>, String> {
     // The partition follows the credential, not the caller: a read that presents
     // nothing has nothing company-specific to leak, and sharing it keeps one
@@ -540,7 +646,7 @@ pub(crate) async fn catalog_models(
         .filter(|bearer| !bearer.trim().is_empty())
         .and(scope)
         .filter(|scope| !scope.trim().is_empty());
-    let cache = catalog_cache_scoped(base_url, authenticated_scope);
+    let cache = catalog_cache_scoped(&shaped_endpoint(base_url, shape), authenticated_scope);
     let now = Instant::now();
     if let Some(models) = cache.lookup(now) {
         return Ok(models);
@@ -568,7 +674,7 @@ pub(crate) async fn catalog_models(
             return Err(FetchError::Failed(failure));
         }
 
-        let mut models = discover_models(base_url, bearer, auth)
+        let mut models = discover_models(base_url, bearer, auth, shape)
             .await
             .map_err(|error| {
                 if error.credential_specific {
@@ -627,8 +733,11 @@ pub(crate) async fn discovered_vocabulary(
     bearer: Option<&str>,
     scope: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Option<TierVocabulary> {
-    let models = catalog_models(base_url, bearer, scope, auth).await.ok()?;
+    let models = catalog_models(base_url, bearer, scope, auth, shape)
+        .await
+        .ok()?;
     Some(TierVocabulary::from_catalog_ids(
         models.iter().map(|model| model.id.as_str()),
     ))
@@ -662,6 +771,7 @@ pub(crate) async fn turn_vocabulary(
     bearer: Option<&str>,
     scope: Option<&str>,
     auth: AuthStyle,
+    shape: CatalogShape,
 ) -> Option<TierVocabulary> {
     // Owned, because the task has to be able to outlive this future — which is
     // the entire reason it is spawned. The bearer lives in process memory for
@@ -671,7 +781,7 @@ pub(crate) async fn turn_vocabulary(
     let bearer = bearer.map(str::to_string);
     let scope = scope.map(str::to_string);
     let read = tokio::spawn(async move {
-        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref(), auth).await
+        discovered_vocabulary(&base_url, bearer.as_deref(), scope.as_deref(), auth, shape).await
     });
     match tokio::time::timeout(TURN_CATALOG_BUDGET, read).await {
         Ok(Ok(vocabulary)) => vocabulary,
@@ -719,6 +829,7 @@ mod tests {
             "http://169.254.169.254/latest/meta-data",
             Some("pw-not-a-real-key"),
             AuthStyle::Bearer,
+            CatalogShape::OpenAi,
         )
         .await
         .expect_err("a link-local endpoint must not be fetched");
@@ -763,7 +874,14 @@ mod tests {
         });
 
         let started = Instant::now();
-        let vocabulary = turn_vocabulary(&endpoint, None, None, AuthStyle::Bearer).await;
+        let vocabulary = turn_vocabulary(
+            &endpoint,
+            None,
+            None,
+            AuthStyle::Bearer,
+            CatalogShape::OpenAi,
+        )
+        .await;
         let waited = started.elapsed();
 
         assert_eq!(
@@ -798,9 +916,15 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let endpoint = format!("http://alice:hunter2@{address}/v1");
 
-        let error = catalog_models(&endpoint, None, None, AuthStyle::Bearer)
-            .await
-            .expect_err("an empty catalogue is reported as a failure");
+        let error = catalog_models(
+            &endpoint,
+            None,
+            None,
+            AuthStyle::Bearer,
+            CatalogShape::OpenAi,
+        )
+        .await
+        .expect_err("an empty catalogue is reported as a failure");
         server.abort();
 
         assert!(
@@ -810,6 +934,261 @@ mod tests {
         assert!(
             !error.contains("hunter2") && !error.contains("alice"),
             "the cached failure must not carry the endpoint's userinfo: {error}"
+        );
+    }
+
+    // ---- the paged catalog (keys rework, issue #2306, slice 2a) ------------
+
+    /// Serves `/agent-integrations/openrouter/models`, calling `respond(offset)`
+    /// for each request to build the `(status, body)` it answers, and recording
+    /// every query string it was called with.
+    fn spawn_proxy_catalog(
+        respond: impl Fn(usize) -> (u16, String) + Clone + Send + Sync + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::extract::Query;
+        use axum::http::StatusCode;
+        use axum::response::{IntoResponse, Response};
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_for_route = seen.clone();
+        let app = axum::Router::new().route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(move |Query(params): Query<HashMap<String, String>>| {
+                let seen = seen_for_route.clone();
+                let respond = respond.clone();
+                async move {
+                    let query = params
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    seen.lock().unwrap().push(query);
+                    let offset: usize = params
+                        .get("offset")
+                        .and_then(|o| o.parse().ok())
+                        .unwrap_or(0);
+                    let (status, body) = respond(offset);
+                    let status = StatusCode::from_u16(status).unwrap();
+                    (status, [("content-type", "application/json")], body).into_response()
+                        as Response
+                }
+            }),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            format!("http://{address}/agent-integrations/openrouter"),
+            seen,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_paged_catalog_is_read_to_total_with_the_bearer() {
+        let (base, seen) = spawn_proxy_catalog(|offset| {
+            let body = if offset == 0 {
+                serde_json::json!({
+                    "success": true,
+                    "data": {"data": [{"id": "acme/test-model", "name": "Test", "context_length": 8192}], "total": 2},
+                })
+            } else {
+                serde_json::json!({
+                    "success": true,
+                    "data": {"data": [{"id": "acme/other-model"}], "total": 2},
+                })
+            };
+            (200, body.to_string())
+        });
+
+        let models = discover_models(
+            &base,
+            Some("th-not-a-real-key"),
+            AuthStyle::Bearer,
+            CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect("the paged catalog reads");
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "acme/test-model");
+        assert_eq!(models[0].name.as_deref(), Some("Test"));
+        assert_eq!(models[0].context_length, Some(8192));
+        assert_eq!(models[1].id, "acme/other-model");
+        assert_eq!(seen.lock().unwrap().len(), 2, "one request per page");
+    }
+
+    #[tokio::test]
+    async fn a_large_catalog_is_read_in_pages_of_500() {
+        const TOTAL: usize = 1_200;
+        let (base, seen) = spawn_proxy_catalog(|offset| {
+            let end = (offset + 500).min(TOTAL);
+            let data: Vec<serde_json::Value> = (offset..end)
+                .map(|i| serde_json::json!({"id": format!("acme/model-{i:04}")}))
+                .collect();
+            (
+                200,
+                serde_json::json!({
+                    "success": true,
+                    "data": {"data": data, "total": TOTAL},
+                })
+                .to_string(),
+            )
+        });
+
+        let models = discover_models(
+            &base,
+            Some("th-not-a-real-key"),
+            AuthStyle::Bearer,
+            CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect("the paged catalog reads");
+
+        assert_eq!(models.len(), TOTAL);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "offsets 0, 500, 1000: {seen:?}");
+        for id in [0usize, 500, 1199] {
+            assert!(
+                models.iter().any(|m| m.id == format!("acme/model-{id:04}")),
+                "missing model-{id:04}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_503_before_the_snapshot_loads_is_memoized_not_empty() {
+        let (base, _seen) = spawn_proxy_catalog(|_offset| {
+            (
+                503,
+                serde_json::json!({"success": false, "error": "loading"}).to_string(),
+            )
+        });
+
+        let scope = "paged-503-scope";
+        let error = catalog_models(
+            &base,
+            Some("th-not-a-real-key"),
+            Some(scope),
+            AuthStyle::Bearer,
+            CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect_err("a 503 is a failure");
+        assert!(error.contains("503"), "{error}");
+
+        let now = Instant::now();
+        assert!(
+            catalog_cache_scoped(
+                &shaped_endpoint(&base, CatalogShape::PagedEnvelope),
+                Some(scope)
+            )
+            .lookup_failure(now)
+            .is_some(),
+            "a 503 must be memoized"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_401_or_403_on_the_paged_catalog_is_not_memoized() {
+        for status in [401u16, 403] {
+            let (base, _seen) = spawn_proxy_catalog(move |_offset| {
+                (status, serde_json::json!({"error": "no"}).to_string())
+            });
+            let scope = format!("paged-{status}-scope");
+            catalog_models(
+                &base,
+                Some("th-not-a-real-key"),
+                Some(scope.as_str()),
+                AuthStyle::Bearer,
+                CatalogShape::PagedEnvelope,
+            )
+            .await
+            .expect_err("a credential failure");
+            let now = Instant::now();
+            assert!(
+                catalog_cache_scoped(
+                    &shaped_endpoint(&base, CatalogShape::PagedEnvelope),
+                    Some(scope.as_str())
+                )
+                .lookup_failure(now)
+                .is_none(),
+                "a {status} must not be memoized"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_openai_shaped_answer_is_not_read_as_the_paged_catalog() {
+        let (base, _seen) = spawn_proxy_catalog(|_offset| {
+            (
+                200,
+                serde_json::json!({"data": [{"id": "acme/test-model"}]}).to_string(),
+            )
+        });
+
+        let error = discover_models(
+            &base,
+            Some("th-not-a-real-key"),
+            AuthStyle::Bearer,
+            CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect_err("an OpenAI-shaped body is not the envelope");
+        assert!(error.to_string().contains("envelope"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_paged_failure_never_names_the_endpoint_credential() {
+        let (base, _seen) = spawn_proxy_catalog(|_offset| {
+            (
+                503,
+                serde_json::json!({"success": false, "error": "loading"}).to_string(),
+            )
+        });
+        let base = base.replacen("http://", "http://alice:hunter2@", 1);
+
+        let error = discover_models(
+            &base,
+            Some("th-not-a-real-key"),
+            AuthStyle::Bearer,
+            CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect_err("a 503 is a failure");
+        let text = error.to_string();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("alice"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_page_is_refused_not_buffered() {
+        let oversized = "x".repeat(paged_catalog::PAGE_BODY_CAP + 1);
+        let (base, _seen) = spawn_proxy_catalog(move |_offset| (200, oversized.clone()));
+
+        let error = discover_models(
+            &base,
+            Some("th-not-a-real-key"),
+            AuthStyle::Bearer,
+            CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect_err("an oversized page is refused");
+        assert!(error.to_string().contains("larger than"), "{error}");
+    }
+
+    #[test]
+    fn one_url_read_in_two_shapes_is_two_cache_slots() {
+        const ENDPOINT: &str = "https://shape-split.example/v1";
+        assert_eq!(
+            shaped_endpoint(ENDPOINT, CatalogShape::OpenAi),
+            cache_key(ENDPOINT)
+        );
+        assert_ne!(
+            shaped_endpoint(ENDPOINT, CatalogShape::OpenAi),
+            shaped_endpoint(ENDPOINT, CatalogShape::PagedEnvelope)
         );
     }
 
@@ -968,7 +1347,14 @@ mod tests {
         const ENDPOINT: &str = "https://vocabulary.example/v1";
         catalog_cache(ENDPOINT).store(vec![model("agentic-v1"), model("chat-v1")], Instant::now());
         assert_eq!(
-            discovered_vocabulary(ENDPOINT, None, None, AuthStyle::Bearer).await,
+            discovered_vocabulary(
+                ENDPOINT,
+                None,
+                None,
+                AuthStyle::Bearer,
+                CatalogShape::OpenAi
+            )
+            .await,
             Some(TierVocabulary::Tiers)
         );
     }

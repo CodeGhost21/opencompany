@@ -347,6 +347,37 @@ async fn add_provider(
         ))));
     }
 
+    // Keys rework (#2306), slice 2a: TinyHumans always needs a model, whatever
+    // its catalog contains — unlike `needs_an_explicit_model` below, this is
+    // not a content-based backstop; the console always asks (`asksForModel`)
+    // and the host refuses before any write so a curl caller gets the same
+    // floor. 2c generalizes this to every kind with `check_model_id`; this
+    // check is kept narrow to TinyHumans until that slice lands so it never
+    // has to move.
+    if plan.slug == crate::company::inference::MANAGED_SLUG && asked_model.is_none() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "Choose a model for TinyHumans.".to_string(),
+        )));
+    }
+
+    // Keys rework (#2306), slice 2a: `provider/tinyhumans/key` can already
+    // hold the legacy Managed row's key with no index record behind it (set
+    // through `PUT …/inference/managed/key`, or the account-key fan-out).
+    // Every rollback below clears that slot (`roll_back_add` →
+    // `store::delete_provider`, `clear_orphaned_key`), so a failed TinyHumans
+    // add would silently delete a key nothing here wrote. Read the old value
+    // now and put it back after any rollback.
+    let previous_key = if plan.slug == crate::company::inference::MANAGED_SLUG {
+        secrets
+            .get(runtime.id(), &store::provider_key_key(&plan.slug))
+            .await
+            .map_err(ApiError)?
+            .map(|crate::ports::types::SecretValue(raw)| raw)
+            .filter(|raw| !raw.trim().is_empty())
+    } else {
+        None
+    };
+
     // Step 3: the credential first. The probe resolves the key by slug, so it
     // has to land before the record does.
     let key = body.key.map(|k| k.trim().to_string()).unwrap_or_default();
@@ -389,6 +420,7 @@ async fn add_provider(
             if !key.is_empty() {
                 clear_orphaned_key(runtime, &plan.slug).await;
             }
+            restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
             return Err(ApiError(err));
         }
     };
@@ -407,6 +439,7 @@ async fn add_provider(
     let auth = catalogue::auth_style_for(&plan.kind);
     let credential = (!key.is_empty()).then_some(key.as_str());
     let worth_probing = plan.probes && (auth == catalogue::AuthStyle::None || credential.is_some());
+    let shape = catalogue::catalog_shape_for(&plan.kind, &provider.base_url);
     let outcome = if worth_probing {
         Some(
             probe::probe_models(
@@ -414,6 +447,7 @@ async fn add_provider(
                 credential,
                 auth,
                 probe::default_policy(),
+                shape,
             )
             .await,
         )
@@ -441,6 +475,7 @@ async fn add_provider(
             // caller, because a console is not a security boundary.
             if asked_model.is_none() && needs_an_explicit_model(&models) {
                 roll_back_add(runtime, &provider).await;
+                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
                 return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                     "{} does not resolve workload names like `agentic-v1`, so it needs a model id \
                      to route to. It publishes {} model{} — pick one and add it again.",
@@ -479,6 +514,7 @@ async fn add_provider(
                 && !body.add_anyway
             {
                 roll_back_add(runtime, &provider).await;
+                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
                 // The **refusal** wording, not `describe`'s: nothing was saved,
                 // and every one of `describe`'s sentences but the auth one
                 // opens by saying it was.
@@ -715,6 +751,16 @@ fn plan_add(
     let invalid = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
 
     if let Some(cloud) = catalogue::cloud_provider(kind) {
+        // Keys rework (#2306), slice 2a: TinyHumans is an ordinary cloud row,
+        // but unlike every other cloud kind it has no fallback identity to
+        // probe with (D-set forbids reusing `tinyhumans/key` or the instance
+        // token on an indexed row — `catalog_shape_for`'s doc explains why an
+        // indexed row never proxies). A keyless add would therefore add a row
+        // with nothing to authenticate its probe, silently landing on
+        // `unchecked` health forever.
+        if cloud.slug == crate::company::inference::MANAGED_SLUG && !has_key {
+            return Err(invalid("TinyHumans needs an API key.".to_string()));
+        }
         return Ok(AddPlan {
             slug: cloud.slug.to_string(),
             label: cloud.label.to_string(),
@@ -869,6 +915,38 @@ async fn clear_orphaned_key(runtime: &CompanyRuntime, slug: &str) {
             "could not clear the credential of a provider whose record failed to write;              it is orphaned at provider/<slug>/key and re-adding this slug would reuse it",
         );
     }
+}
+
+/// Puts back a key that an add replaced and then rolled back (keys rework,
+/// issue #2306, slice 2a). `None` does nothing.
+///
+/// `provider/<slug>/key` is one slot; a TinyHumans add overwrites it before it
+/// knows whether the add will stick (`add_provider` writes the key before the
+/// record, so the probe can read it by slug). A rollback then clears that same
+/// slot (`roll_back_add` → `store::delete_provider`; `clear_orphaned_key`),
+/// taking the legacy Managed row's key with it even though nothing about that
+/// row was touched. This restores exactly what was there before the request.
+async fn restore_previous_key(runtime: &CompanyRuntime, slug: &str, previous: Option<&str>) {
+    let Some(previous) = previous else {
+        return;
+    };
+    if let Err(err) = runtime
+        .secrets()
+        .set(
+            runtime.id(),
+            &store::provider_key_key(slug),
+            crate::ports::types::SecretValue(previous.to_string()),
+        )
+        .await
+    {
+        tracing::error!(
+            company = %runtime.id(),
+            provider = %slug,
+            error = %err,
+            "could not restore the key a rolled-back add had replaced",
+        );
+    }
+    crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 }
 
 /// Records health, never failing the request over it.
@@ -1552,6 +1630,7 @@ async fn test_managed(
         bearer.as_deref(),
         catalogue::AuthStyle::Bearer,
         probe::default_policy(),
+        catalogue::catalog_shape_for(inference::LEGACY_MANAGED, &base_url),
     )
     .await
     {
@@ -1644,6 +1723,7 @@ async fn list_provider_models(
         (!key.trim().is_empty()).then(|| key.trim()),
         Some(&scope),
         catalogue::auth_style_for(&provider.kind),
+        catalogue::catalog_shape_for(&provider.kind, &provider.base_url),
     )
     .await
     {
@@ -1807,6 +1887,7 @@ async fn test_provider(
         (!key.trim().is_empty()).then(|| key.trim()),
         catalogue::auth_style_for(&provider.kind),
         probe::default_policy(),
+        catalogue::catalog_shape_for(&provider.kind, &provider.base_url),
     )
     .await
     {
@@ -1891,6 +1972,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
         body.key.as_deref().filter(|k| !k.trim().is_empty()),
         auth,
         probe::default_policy(),
+        catalogue::catalog_shape_for(kind, body.base_url.trim()),
     )
     .await
     {

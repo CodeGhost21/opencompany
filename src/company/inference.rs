@@ -26,7 +26,9 @@
 //! and its `Debug` redacts the credential.
 
 pub mod catalogue;
+pub mod copy;
 pub mod dialect;
+pub mod paged_catalog;
 pub mod probe;
 pub mod resolve;
 pub mod store;
