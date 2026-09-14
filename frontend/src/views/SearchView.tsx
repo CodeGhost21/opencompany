@@ -145,25 +145,50 @@ export function SearchView({ client, company }: Props) {
   }, [load]);
 
   /**
-   * Runs one write, settling only the row it belongs to.
+   * Which configuration of each row a check belongs to.
    *
-   * Every call passes a `done` sentence: an action whose only feedback is the
-   * list quietly re-rendering leaves the operator unsure whether it fired, and
-   * on a page where one of the actions moves which account gets billed that is
-   * not a small doubt.
+   * Bumped whenever the row's configuration changes. A Test captures it before
+   * it awaits and discards its result if it moved — otherwise a check started
+   * against the old key and finishing after "Replace key" wrote the old key's
+   * verdict back onto the new one, and `forgetHealth` clearing the map first
+   * made no difference because the late write landed after it.
    */
+  const generations = useRef<Record<string, number>>({});
   /**
-   * Drops what a probe once said about a row.
+   * The same, for every row at once. Disconnect all has to invalidate a check
+   * on a row that has never been changed and so has no entry above.
+   */
+  const epoch = useRef(0);
+
+  /**
+   * Drops what a probe once said about a row, and anything still on its way.
    *
    * Health is the diagnosis of a *configuration*, so it stops meaning anything
    * the moment the configuration changes. Left behind, a row that was tested
    * with a rejected key still read "key rejected" after the key was replaced —
    * a red mark on a credential nothing had ever checked, and the same stale
-   * state survived remove-and-reconnect. Omit `slug` to forget all of them,
-   * which is what disconnecting everything means.
+   * state survived remove-and-reconnect. The row's test result and its clear
+   * timer go too, and any check still in flight is invalidated. Omit `slug` to
+   * forget all of them, which is what disconnecting everything means.
    */
   const forgetHealth = useCallback((slug?: string) => {
+    if (slug === undefined) epoch.current += 1;
+    const slugs =
+      slug === undefined
+        ? Object.keys({ ...generations.current, ...timers.current })
+        : [slug];
+    for (const each of slugs) {
+      generations.current[each] = (generations.current[each] ?? 0) + 1;
+      clearTimeout(timers.current[each]);
+      delete timers.current[each];
+    }
     setHealth((prior) => {
+      if (slug === undefined) return {};
+      const next = { ...prior };
+      delete next[slug];
+      return next;
+    });
+    setTests((prior) => {
       if (slug === undefined) return {};
       const next = { ...prior };
       delete next[slug];
@@ -171,6 +196,14 @@ export function SearchView({ client, company }: Props) {
     });
   }, []);
 
+  /**
+   * Runs one write, settling only the row it belongs to.
+   *
+   * Every call passes a `done` sentence: an action whose only feedback is the
+   * list quietly re-rendering leaves the operator unsure whether it fired, and
+   * on a page where one of the actions moves which account gets billed that is
+   * not a small doubt.
+   */
   const run = useCallback(
     async (
       slug: string,
@@ -204,33 +237,45 @@ export function SearchView({ client, company }: Props) {
 
   const onTest = useCallback(
     async (provider: SearchProvider) => {
-      setTests((prior) => ({ ...prior, [provider.slug]: { kind: "testing" } }));
+      const slug = provider.slug;
+      const generation = generations.current[slug] ?? 0;
+      const startedIn = epoch.current;
+      // Whether the row changed while this check was out. A stale verdict is
+      // not written at all — not as health, and not as a test result.
+      const stale = () =>
+        (generations.current[slug] ?? 0) !== generation ||
+        epoch.current !== startedIn;
+      setTests((prior) => ({ ...prior, [slug]: { kind: "testing" } }));
       try {
-        const result = await testSearchProvider(client, company, {
-          slug: provider.slug,
-        });
+        const result = await testSearchProvider(client, company, { slug });
+        if (stale()) return;
         setStatus(result.status);
         if (result.ok) {
-          forgetHealth(provider.slug);
-          settleTest(provider.slug, { kind: "done", ok: true, message: "ok" });
+          setHealth((prior) => {
+            const next = { ...prior };
+            delete next[slug];
+            return next;
+          });
+          settleTest(slug, { kind: "done", ok: true, message: "ok" });
         } else {
           const probeClass = result.probeClass ?? "unknown";
-          setHealth((prior) => ({ ...prior, [provider.slug]: probeClass }));
-          settleTest(provider.slug, {
+          setHealth((prior) => ({ ...prior, [slug]: probeClass }));
+          settleTest(slug, {
             kind: "done",
             ok: false,
             message: describeTest(probeClass, provider.label),
           });
         }
       } catch (err) {
-        settleTest(provider.slug, {
+        if (stale()) return;
+        settleTest(slug, {
           kind: "done",
           ok: false,
           message: reason(err),
         });
       }
     },
-    [client, company, forgetHealth, settleTest],
+    [client, company, settleTest],
   );
 
   /** The add/connect/replace/re-address submit, whichever the dialog is for. */
