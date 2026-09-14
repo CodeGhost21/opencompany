@@ -126,6 +126,20 @@ pub trait HarnessModel: ChatModel<()> {
     fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
         None
     }
+
+    /// A sibling of this model that resolves every turn against agent
+    /// `agent_id`'s own `{provider, model}` pair (keys rework, issue #2306,
+    /// slice 3a), or `None` when this implementation cannot pin (test
+    /// doubles). Only that agent's own turns use the sibling this returns;
+    /// internal passes (title, triage, planning, and the rest — Q13) keep
+    /// resolving against the company default via the un-pinned model.
+    fn pinned(
+        &self,
+        _agent_id: &str,
+        _choice: &inference::store::ModelChoice,
+    ) -> Option<Arc<dyn HarnessModel>> {
+        None
+    }
 }
 
 /// Resolve a [`HostedProvider`] configuration (and its default model) from the
@@ -2031,6 +2045,20 @@ pub struct TenantProvider {
     /// provider, differing only in this — which is what lets one ride the
     /// subscription while the other runs on a key of its own.
     scope: inference::HarnessScope,
+    /// `Some` only on a sibling built by [`pinned`](HarnessModel::pinned) —
+    /// every provider built by [`new`](Self::new) is unpinned, resolving
+    /// against the harness's own config/default exactly as before slice 3a.
+    pin: Option<AgentPin>,
+}
+
+/// One agent's `{provider, model}` pair, carried with the agent's id so a
+/// turn-time refusal can name it (keys rework, issue #2306, slice 3a) —
+/// `resolve_for_turn` itself sees only the [`inference::store::ModelChoice`]
+/// and has no agent to name, so the id travels beside it instead.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentPin {
+    pub agent_id: String,
+    pub choice: inference::store::ModelChoice,
 }
 
 impl TenantProvider {
@@ -2054,6 +2082,7 @@ impl TenantProvider {
             // No turn has been issued yet, so there is no model to name.
             model: RwLock::new(None),
             scope: inference::HarnessScope::default(),
+            pin: None,
         }
     }
 
@@ -2103,13 +2132,42 @@ impl TenantProvider {
     /// still routes per workload exactly as it always did, so `tier` still
     /// has to reach it.
     async fn resolve(&self, tier: &str) -> anyhow::Result<InferenceDecl> {
+        // Checked **before** `resolve_for_turn`, and only here: that function
+        // sees just the `ModelChoice`, so a refusal it raises for a gone pin
+        // cannot name the agent. This pre-check can, because `AgentPin`
+        // carries the id alongside the choice (phase-3.md use case 4). If the
+        // row vanishes between this read and `resolve_for_turn`'s own, that
+        // function's generic "this agent is set to …" still fires — fail
+        // closed either way, just with a less specific sentence on the race.
+        if let Some(AgentPin { agent_id, choice }) = &self.pin {
+            match inference::store::get_provider(
+                &self.company,
+                self.secrets.as_ref(),
+                &choice.provider,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
+            {
+                None => anyhow::bail!(
+                    "agent `{agent_id}` is set to `{}`, which this company does not have. \
+                     Choose another in Team → {agent_id} → Model.",
+                    choice.provider
+                ),
+                Some(row) if !row.enabled => anyhow::bail!(
+                    "agent `{agent_id}` is set to `{}`, which is switched off. Switch it on in \
+                     Connections → API Keys → LLM, or choose another in Team → {agent_id} → Model.",
+                    row.label
+                ),
+                Some(_) => {}
+            }
+        }
         let decl = inference::resolve_for_turn(
             &self.company,
             &self.manifest,
             self.env_default.as_ref(),
             self.secrets.as_ref(),
             &self.scope,
-            None, // the agent pair: slice 3a passes `self.pin.clone()`
+            self.pin.as_ref().map(|p| p.choice.clone()),
             tier,
         )
         .await
@@ -2241,6 +2299,34 @@ impl HarnessModel for TenantProvider {
 
     fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
         *self.model.read().unwrap()
+    }
+
+    /// Builds a sibling that resolves every turn against `agent_id`'s own
+    /// pair instead of this harness's own config/default (keys rework, issue
+    /// #2306, slice 3a) — a fresh, independent `TenantProvider`, not a
+    /// wrapper, so its own `slug`/`model` telemetry cells track that agent's
+    /// turns rather than sharing this provider's (G8: a shared cell would
+    /// attribute a pinned agent's usage to whichever of it and the default
+    /// finished a turn last).
+    fn pinned(
+        &self,
+        agent_id: &str,
+        choice: &inference::store::ModelChoice,
+    ) -> Option<Arc<dyn HarnessModel>> {
+        Some(Arc::new(TenantProvider {
+            company: self.company.clone(),
+            secrets: self.secrets.clone(),
+            manifest: self.manifest.clone(),
+            env_default: self.env_default.clone(),
+            client: self.client.clone(),
+            slug: RwLock::new("subscription"),
+            model: RwLock::new(None),
+            scope: self.scope.clone(),
+            pin: Some(AgentPin {
+                agent_id: agent_id.to_string(),
+                choice: choice.clone(),
+            }),
+        }))
     }
 }
 
@@ -4924,6 +5010,214 @@ mod tests {
             err.to_string()
                 .contains("No model is chosen for this company"),
             "{err}"
+        );
+    }
+
+    // ---- agent pin: `pinned` / `AgentPin` (keys rework, issue #2306, slice 3a) ----
+
+    /// A `ModelChoice` builder for the pin tests below.
+    fn choice(provider: &str, model: &str) -> inference::store::ModelChoice {
+        inference::store::ModelChoice {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    /// An OpenAI-compatible stub that records every request's `model` field
+    /// and `Authorization` header, in arrival order.
+    async fn spawn_capturing_stub() -> (String, Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>)
+    {
+        use axum::Router;
+        use axum::extract::Json as JsonExtract;
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+
+        let seen: Arc<std::sync::Mutex<Vec<(String, Option<String>)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = Arc::clone(&seen);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(
+                move |headers: HeaderMap, JsonExtract(body): JsonExtract<serde_json::Value>| {
+                    let capture = Arc::clone(&capture);
+                    async move {
+                        let model = body["model"].as_str().unwrap_or_default().to_string();
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        capture.lock().unwrap().push((model, auth));
+                        axum::Json(serde_json::json!({
+                            "choices": [{ "message": { "role": "assistant", "content": "ok" } }],
+                            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// Two agents pinned to two different providers reach two different
+    /// endpoints with their own chosen models and their own keys, from one
+    /// shared base provider — proving the pin, not any default or vocabulary
+    /// lookup, drives the turn, and that the unpinned base's own resolution
+    /// is unaffected by either agent's pin.
+    #[tokio::test]
+    async fn two_agents_pinned_to_two_providers_reach_two_endpoints() {
+        let (url_a, seen_a) = spawn_capturing_stub().await;
+        let (url_b, seen_b) = spawn_capturing_stub().await;
+
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        for (slug, url) in [("acme", &url_a), ("other-co", &url_b)] {
+            inference::store::put_provider(
+                &company,
+                secrets.as_ref(),
+                inference::store::ProviderDraft {
+                    slug: slug.to_string(),
+                    label: slug.to_string(),
+                    kind: "openai_compatible".to_string(),
+                    base_url: url.to_string(),
+                    models: BTreeMap::new(),
+                    enabled: true,
+                },
+            )
+            .await
+            .unwrap();
+            secrets
+                .set(
+                    &company,
+                    &inference::store::provider_key_key(slug),
+                    crate::ports::types::SecretValue("sk-not-a-real-key".to_string()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let base =
+            TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
+        let a = base
+            .pinned("researcher", &choice("acme", "test-model-large"))
+            .expect("this provider can pin");
+        let b = base
+            .pinned("web_search", &choice("other-co", "test-model-small"))
+            .expect("this provider can pin");
+
+        a.invoke(&(), user_request("hi")).await.expect("turn a");
+        b.invoke(&(), user_request("hi")).await.expect("turn b");
+
+        let calls_a = seen_a.lock().unwrap().clone();
+        let calls_b = seen_b.lock().unwrap().clone();
+        assert_eq!(calls_a.len(), 1, "{calls_a:?}");
+        assert_eq!(calls_a[0].0, "test-model-large", "{calls_a:?}");
+        assert_eq!(calls_a[0].1.as_deref(), Some("Bearer sk-not-a-real-key"));
+        assert_eq!(calls_b.len(), 1, "{calls_b:?}");
+        assert_eq!(calls_b[0].0, "test-model-small", "{calls_b:?}");
+        assert_eq!(calls_b[0].1.as_deref(), Some("Bearer sk-not-a-real-key"));
+
+        // The base (unpinned) provider resolves independently of either
+        // pin: with no explicit company default, it falls back to the first
+        // provider added ("acme", mock A) — the pre-2b positional-primary
+        // rule, untouched by 3a — on its own unmapped-tier default, never on
+        // either agent's pinned model.
+        base.invoke(&(), user_request("hi"))
+            .await
+            .expect("base turn");
+        let calls_a = seen_a.lock().unwrap().clone();
+        assert_eq!(calls_a.len(), 2, "{calls_a:?}");
+        assert!(
+            !["test-model-large", "test-model-small"].contains(&calls_a[1].0.as_str()),
+            "the unpinned base must not pick up either agent's pinned model: {calls_a:?}"
+        );
+        assert_eq!(
+            seen_b.lock().unwrap().len(),
+            1,
+            "mock B must see only the pin"
+        );
+    }
+
+    /// A pin naming a provider this company does not have fails closed and
+    /// names the agent — never the default, which must receive no request at
+    /// all.
+    #[tokio::test]
+    async fn a_pinned_turn_naming_a_gone_provider_names_the_agent() {
+        let (default_url, default_seen) = spawn_capturing_stub().await;
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let mut manifest = manifest_inference("openai_compatible");
+        manifest.base_url = Some(default_url);
+        let base = TenantProvider::new(company.clone(), secrets.clone(), manifest, None);
+
+        let pinned = base
+            .pinned("researcher", &choice("acme", "test-model-large"))
+            .expect("this provider can pin");
+        let err = pinned
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect_err("the pinned provider does not exist");
+        let text = err.to_string();
+        assert!(
+            text.contains("agent `researcher` is set to `acme`, which this company does not have."),
+            "{text}"
+        );
+        assert!(text.contains("Team → researcher → Model"), "{text}");
+        assert!(
+            default_seen.lock().unwrap().is_empty(),
+            "the default must never receive the turn a bad pin refused"
+        );
+    }
+
+    /// A pin naming a provider that is switched off fails closed with a
+    /// distinct sentence naming that state.
+    #[tokio::test]
+    async fn a_pinned_turn_naming_a_switched_off_provider_names_the_agent() {
+        let company = CompanyId::new("acme");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        inference::store::put_provider(
+            &company,
+            secrets.as_ref(),
+            inference::store::ProviderDraft {
+                slug: "acme".to_string(),
+                label: "Acme".to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: "http://127.0.0.1:9/v1".to_string(),
+                models: BTreeMap::new(),
+                enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let base =
+            TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
+        let pinned = base
+            .pinned("researcher", &choice("acme", "test-model-large"))
+            .expect("this provider can pin");
+        let err = pinned
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect_err("the pinned provider is switched off");
+        let text = err.to_string();
+        assert!(text.contains("agent `researcher` is set to"), "{text}");
+        assert!(text.contains("which is switched off"), "{text}");
+    }
+
+    /// The trait default: an implementation that reports no telemetry
+    /// identity of its own (a test double) also reports it cannot pin,
+    /// rather than fabricating a sibling.
+    #[tokio::test]
+    async fn the_default_pinned_is_none_for_a_double() {
+        let double = MockProvider::default();
+        assert!(
+            double
+                .pinned("researcher", &choice("acme", "test-model-large"))
+                .is_none()
         );
     }
 
