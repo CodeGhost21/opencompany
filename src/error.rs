@@ -412,6 +412,28 @@ pub enum OpenCompanyError {
     #[cfg(feature = "openhuman")]
     #[error("harness error: {0}")]
     Harness(String),
+
+    /// A mutation would remove, clear, disable or switch something another
+    /// piece of config still depends on (keys rework, issue #2306): a
+    /// provider row or key the company default or an agent pair names, a
+    /// Composio credential a workload still resolves through, and so on.
+    /// Refused unless the request confirms it (`confirmInUse: true`, or
+    /// `?confirmInUse=true` for a DELETE). Renders as `409 Conflict` like
+    /// [`Self::Conflict`], but with the stable code `in_use` and — following
+    /// the same one-off pattern [`Self::WorkflowInvalid`] uses for
+    /// `problems` — one additive `usedBy` key in the HTTP envelope
+    /// (`src/server/error.rs`) so a client can render exactly what would
+    /// break without re-deriving it. See `docs/key-reworks/in-use-guards.md`.
+    #[error("{message}")]
+    InUse {
+        /// One sentence naming every dependent, e.g. "Anthropic is used by
+        /// the company default and 2 agents: Researcher, Web search."
+        message: String,
+        /// The `usedBy` shape from `docs/key-reworks/in-use-guards.md` §1,
+        /// computed before the mutation would have applied. Serialized
+        /// as-is under the `usedBy` key.
+        used_by: serde_json::Value,
+    },
 }
 
 impl OpenCompanyError {
@@ -514,6 +536,7 @@ impl OpenCompanyError {
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]
             Self::Harness(_) => "harness_error".to_string(),
+            Self::InUse { .. } => "in_use".to_string(),
         }
     }
 }
