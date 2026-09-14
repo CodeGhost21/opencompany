@@ -1412,7 +1412,7 @@ mod tests {
         //
         // So the assertion is about shape rather than content: any file that
         // mentions the header must reach this constant for its value.
-        let root = repo_root().join("src");
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
