@@ -642,7 +642,18 @@ export function ComposioSection({
                         : "paste the company's Composio token"
                     }
                     value={secret}
-                    onChange={(e) => setSecret(e.target.value)}
+                    onChange={(e) => {
+                      setSecret(e.target.value);
+                      // A refusal is a verdict on the key that was SUBMITTED,
+                      // and "add anyway" is only earned by that key. Leaving it
+                      // standing while the field changes would let the button
+                      // store a different, never-probed value with the check
+                      // skipped — a key nobody tried, handed the escape hatch
+                      // the flow reserves for one that was. So editing retires
+                      // the refusal, and with it the offer; the next Save
+                      // probes the new value like any other.
+                      if (outcome?.kind === "rejected") setOutcome(null);
+                    }}
                     // Enter submits, the idiom the console's other credential
                     // field already uses (`McpServersSection`). Not while the
                     // confirmation is up: there the keyboard belongs to the

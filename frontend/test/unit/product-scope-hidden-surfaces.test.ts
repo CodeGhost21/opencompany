@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioStatus } from "@/api/composio";
+import { ApiError } from "@/api/types";
 import { INFERENCE_PROVIDERS, SETUP_INFERENCE_OPTIONS } from "@/api/setup";
 import { HostSwitcher, hostSwitcherMenu } from "@/components/host-switcher";
 import { canCreateCompanies, offersCompanyCreation } from "@/components/create-company-dialog";
@@ -239,6 +240,73 @@ async function mountComposio(status: ComposioStatus) {
     );
   });
 }
+
+/**
+ * Type into a React-controlled input.
+ *
+ * Setting `.value` directly does not reach React: its onChange listens for an
+ * `input` event, and it tracks the last value it rendered through the native
+ * setter on the prototype. Going through that setter and then dispatching is
+ * what makes the change look like typing.
+ */
+function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+describe("add anyway is earned by the key that was refused, not by the field", () => {
+  it("retires the offer the moment the key is edited", async () => {
+    // The hole this closes: a refusal of key A left `outcome` standing while
+    // the operator typed key B, so "Add anyway" stored B with the probe skipped
+    // — a key nobody had tried, handed the one escape hatch the flow reserves
+    // for a key that was.
+    const status = composioStatus({
+      mode: "byok",
+      credentialSource: "static",
+      managedCredentialSource: "attested",
+    });
+    const client = {
+      ...(composioClient(status) as unknown as Record<string, unknown>),
+      // The probe's own refusal, as the host envelope reports it.
+      put: async () => {
+        throw new ApiError(400, "invalid_request", "Composio rejected this key", true);
+      },
+    } as unknown as OpenCompanyClient;
+    await act(async () => {
+      root.render(
+        createElement(ComposioSection, {
+          client,
+          company: "acme",
+          canManage: true,
+          onChanged: () => {},
+        }),
+      );
+    });
+
+    await act(async () => {
+      find("composio-row-byok-replace")!.click();
+    });
+    const field = document.getElementById("composio-api-key") as HTMLInputElement | null;
+    expect(field, "the credential dialog opened").not.toBeNull();
+
+    await act(async () => {
+      typeInto(field!, "ak_not_a_real_key_A");
+    });
+    await act(async () => {
+      find("composio-form-save")!.click();
+    });
+    expect(find("composio-skip-verify"), "a probe refusal offers add anyway").not.toBeNull();
+
+    await act(async () => {
+      typeInto(field!, "ak_not_a_real_key_B");
+    });
+    expect(
+      find("composio-skip-verify"),
+      "an edited key has not been tried, so it is not offered the escape hatch",
+    ).toBeNull();
+  });
+});
 
 describe("Composio offers both routes, and says which one is live", () => {
   it("offers a real choice between the two accounts", async () => {
