@@ -12,6 +12,11 @@ the harness does with the result lives beside the other runtime docs.
 | [`connect-flow.md`](connect-flow.md) | Adding a key: the classified probe, and why this one validates a draft |
 | [`architecture.md`](architecture.md) | Module seams, and how each one is tested |
 
+**Keys rework (2026-09-14, issue #2306).** The two credential slots are renamed
+to `composio/tinyhumans/key` and `composio/byok/key` (legacy addresses stay as
+read fallbacks), and the account key fills the TinyHumans slot. See
+[`docs/key-reworks/`](../../key-reworks/README.md), slices 1a and 4a.
+
 ## The stance
 
 **This is a UI-consistency change, not a rebuild.** Composio already has the

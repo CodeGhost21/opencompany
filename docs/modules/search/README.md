@@ -20,6 +20,11 @@ goal is that an operator who has used the LLM page finds this one obvious.
 | [`architecture.md`](architecture.md) | the module seams and how each is tested |
 | [`known-defects.md`](known-defects.md) | what is deliberately **not** inherited from the inference design |
 
+**Keys rework (2026-09-14, issue #2306).** The per-provider endpoint moves into
+the `search/providers` record, with `search/provider/<slug>/endpoint` kept as a
+read fallback and still written for one release. See
+[`docs/key-reworks/phase-1b-search-endpoint.md`](../../key-reworks/phase-1b-search-endpoint.md).
+
 ## The two rules that outrank the redesign
 
 Both are already in the code and neither is negotiable.
