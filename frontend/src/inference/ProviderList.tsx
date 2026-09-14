@@ -12,12 +12,31 @@ import { Switch } from "@/components/ui/switch";
 import { Monogram } from "./AddProviderDialog";
 import { cn } from "@/lib/utils";
 import { categoryOf, endpointHost } from "./catalogue";
-import { providerMenu } from "./connect";
+import { defaultBadgeLabel, isFullDefault, providerMenu, rowNeedsModel } from "./connect";
 import { healthLabel, testOutcome } from "./classify";
 import type { TestState } from "./classify";
-import { routingBadge } from "./routing";
 import type { ManagedState } from "@/api/inference";
-import type { Provider, ProviderHealth } from "./types";
+import type { DefaultChoice, Provider, ProviderHealth } from "./types";
+
+/**
+ * Whether the separate legacy Managed row renders (keys rework, issue #2306,
+ * slice 2a, decision Q3: exactly one TinyHumans row is ever shown).
+ *
+ * `false` once `providers` already lists a `tinyhumans` row — an added row, or
+ * entry zero on a managed config — because that row is then the one TinyHumans
+ * row this page shows. `legacyRow` absent (an older host) reads as
+ * `configured`, which is what every host did before this rework.
+ *
+ * @deprecated keys-rework #2306: the legacy row this gates is transitional —
+ * it exists only for a company whose managed chain resolves through the
+ * company account or the instance identity with **no** indexed row yet.
+ * Removable once every such company has an ordinary `tinyhumans` row (item 10,
+ * dropping the fallback chains, is the thing that would make that universal —
+ * see `docs/key-reworks/not-handled.md`).
+ */
+export function showsLegacyManagedRow(managed: ManagedState | undefined): boolean {
+  return managed?.configured === true && managed.legacyRow !== false;
+}
 
 /**
  * The one sub-line the managed row shows, given what its chain resolves to.
@@ -31,6 +50,10 @@ import type { Provider, ProviderHealth } from "./types";
  * is the decision the operator is on this page to make: connecting their own
  * account moves the bill for every turn, and a row that says only "on" hides
  * that it has not happened.
+ *
+ * @deprecated keys-rework #2306: describes the legacy row only — see
+ * {@link showsLegacyManagedRow}. An ordinary `tinyhumans` row uses
+ * {@link rowSubline} like every other provider.
  */
 export function managedRow(source: ManagedState["source"] | undefined): string {
   switch (source) {
@@ -154,6 +177,7 @@ function TestControl({
 export function ProviderList({
   providers,
   managed,
+  defaultChoice,
   canManage,
   busySlug,
   onToggle,
@@ -168,12 +192,13 @@ export function ProviderList({
   onManagedTest,
   onManagedReplaceKey,
   onManagedRemoveKey,
-  routingState,
   testState,
 }: {
   providers: readonly Provider[];
   /** What the managed chain resolves to. `undefined` when the host did not say. */
   managed?: ManagedState;
+  /** The stored company default, so rows can show "Default · <model>" and "Needs a model". */
+  defaultChoice?: DefaultChoice | null;
   canManage: boolean;
   /** The slug currently mid-request, so its own controls settle rather than the whole list. */
   busySlug?: string | null;
@@ -189,7 +214,7 @@ export function ProviderList({
    * reimplemented — one way to add a provider, not two that can drift.
    */
   onAdd: () => void;
-  /** Switch managed in or out of routing — never its credential. */
+  /** Switch the legacy managed row on or off — never its credential. */
   onManagedToggle: (enabled: boolean) => void;
   onManagedTest: () => void;
   /** Open the managed key dialog, to add or replace step 1 of its chain. */
@@ -202,12 +227,6 @@ export function ProviderList({
    * rather than going blank or claiming to be off.
    */
   onManagedRemoveKey: () => void;
-  /**
-   * Whether any workload routes through a provider, and whether it can serve
-   * them. Decided by `providerRoutingState` from the same routing table the
-   * Routing tab renders — a second read would be a second chance to disagree.
-   */
-  routingState: (provider: Provider) => "inUse" | "parked" | null;
   /** What each row's Test is doing, keyed by slug. */
   testState: (slug: string) => TestState;
 }) {
@@ -244,13 +263,13 @@ export function ProviderList({
       {/* Always first and always present. It is not in `providers` because it is
           not a record — it is the fallback every company has whether or not it
           has configured anything. */}
-      {/* Present only when the chain actually resolves. **Not** keyed on a
-          provider record existing: steps 3 and 4 answer from the company
-          identity or the instance environment, neither of which is a record, so
-          a hosted tenant has a working managed provider nobody ever added. When
-          nothing resolves it is not a connected row — it is an entry in the add
-          dialog's Cloud list, like anything else that is not connected. */}
-      {managed?.configured && (
+      {/* Present only for the transitional case: the legacy chain actually
+          resolves (company account or instance identity) and no `tinyhumans`
+          row exists yet (`showsLegacyManagedRow` — keys rework, issue #2306,
+          decision Q3: exactly one TinyHumans row is ever shown). Once a row
+          exists it appears below like any other provider and this one is
+          gone. @deprecated keys-rework #2306: see `showsLegacyManagedRow`. */}
+      {managed && showsLegacyManagedRow(managed) && (
         <li className="flex items-center gap-3 px-4 py-3" data-testid="inference-provider-managed">
           <Monogram label={MANAGED_LABEL} />
           <span className="grid min-w-0 flex-1 leading-tight">
@@ -269,11 +288,12 @@ export function ProviderList({
             onTest={onManagedTest}
           />
 
-          {/* The full set of row controls, because every one of them means
-              something here. The credential can be replaced or removed, the
-              chain can be checked, and managed can be excluded from routing —
-              which is a different statement from removing its key, and the one
-              the toggle makes. */}
+          {/* @deprecated keys-rework #2306, decision X3: once a `tinyhumans`
+              row exists this whole li is gone and the row's own ordinary
+              toggle (below, on every provider) is the one and only switch —
+              this one exists solely for the pre-row transitional state, and
+              `ProvidersTab` confirms before calling `onManagedToggle`, same as
+              every other provider's toggle. */}
           <Switch
             checked={managed.enabled !== false}
             disabled={!canManage || busySlug === MANAGED_SLUG}
@@ -298,14 +318,24 @@ export function ProviderList({
             />
             <DropdownMenuContent align="end">
               {/* No Test here. One affordance per action — the icon button on
-                  the row is discoverable and its answer lands where it belongs. */}
+                  the row is discoverable and its answer lands where it belongs.
+                  Decision X6: "Add a key"/"Replace key" here open the ordinary
+                  TinyHumans add flow (`onManagedReplaceKey` → the same catalogue
+                  row every other provider connects through), never the deprecated
+                  `PUT …/inference/managed/key` route directly — the console no
+                  longer calls it to add or replace a key. */}
               <DropdownMenuItem onClick={onManagedReplaceKey}>
                 {managed.source === "provider_key" ? "Replace key" : "Add a key"}
               </DropdownMenuItem>
               {/* Offered only when there is a key of this row's own to remove.
                   The company account and the instance identity are not this
                   row's to take away — and the copy says what actually happens,
-                  which is a fall back rather than a switch-off. */}
+                  which is a fall back rather than a switch-off.
+                  @deprecated keys-rework #2306: this is the one remaining
+                  caller of the legacy key route (`setManagedKey("")`), kept
+                  because a pre-row credential has no ordinary row to attach an
+                  edit to. Removable once item 10 (dropping the fallback
+                  chains) makes this transitional row unreachable. */}
               {managed.source === "provider_key" && (
                 <DropdownMenuItem variant="destructive" onClick={onManagedRemoveKey}>
                   Remove key
@@ -320,6 +350,7 @@ export function ProviderList({
         <ProviderRow
           key={provider.id}
           provider={provider}
+          defaultChoice={defaultChoice}
           canManage={canManage}
           busy={busySlug === provider.slug}
           onToggle={onToggle}
@@ -329,7 +360,6 @@ export function ProviderList({
           onRemoveKey={onRemoveKey}
           onReplaceKey={onReplaceKey}
           onMakeDefault={onMakeDefault}
-          routingState={routingState(provider)}
           testState={testState}
         />
       ))}
@@ -355,12 +385,20 @@ export function rowSubline(provider: Provider): string {
   const category = categoryOf(provider.kind);
   if (category === "local") return "Runs on this machine";
   if (category === "cli") return "Uses a login another CLI already holds";
+  // Decision X5 (orchestrator, 2026-09-15): a key with no chosen model is not
+  // "connected" — never claim health or readiness a turn cannot actually get.
+  // `modelAmbiguous` gets its own chip below rather than this line, because
+  // "Needs a model" there already says it and doing both would repeat it.
+  if (provider.keyConfigured && !provider.model && !provider.modelAmbiguous) {
+    return "Key added — choose a model";
+  }
   if (provider.keyConfigured) return "•••• configured";
   return endpointHost(provider.baseUrl) || "no key";
 }
 
 function ProviderRow({
   provider,
+  defaultChoice,
   canManage,
   busy,
   onToggle,
@@ -370,10 +408,10 @@ function ProviderRow({
   onRemoveKey,
   onReplaceKey,
   onMakeDefault,
-  routingState,
   testState,
 }: {
   provider: Provider;
+  defaultChoice?: DefaultChoice | null;
   canManage: boolean;
   busy: boolean;
   onToggle: (provider: Provider, enabled: boolean) => void;
@@ -383,17 +421,19 @@ function ProviderRow({
   onRemoveKey: (provider: Provider) => void;
   onReplaceKey: (provider: Provider) => void;
   onMakeDefault: (provider: Provider) => void;
-  /** `inUse`, `parked`, or `null` when nothing routes here. */
-  routingState: "inUse" | "parked" | null;
   testState: (slug: string) => TestState;
 }) {
-  const routing = routingBadge(routingState);
   // **Entry zero has nowhere to store an `enabled` flag**, so it is always on and
   // the host refuses to switch it off — "cannot be switched off from the list;
   // reset the inference config instead". The console could not tell which row
   // that was, so it rendered a live switch whose only outcome was a 400.
   const entryZero = provider.origin === "entryZero";
-  const menu = providerMenu(provider);
+  // The menu's own "Set as default" gates on `isDefault`, but that field is
+  // the host's resolved *fallback* answer — a company that has never chosen
+  // reports its first enabled row here too. Passing `isFullDefault` instead
+  // means a row that IS the resolved fallback but has no model yet still
+  // offers the action, so an operator can give it one.
+  const menu = providerMenu({ ...provider, isDefault: isFullDefault(provider, defaultChoice) });
   return (
     <li
       className="flex items-center gap-3 px-4 py-3"
@@ -405,29 +445,47 @@ function ProviderRow({
         <span className="truncate text-xs text-muted-foreground">{rowSubline(provider)}</span>
       </span>
 
-      {/* A word, not a sentence. What a default is, is not something this page
-          has to explain — where unrouted work goes is the only thing an
-          operator needs to be able to see, and moving it is a menu item. */}
+      {/* A word plus its model, not a sentence — "Default · acme/test-model",
+          or plain "Default" for a resolved-but-unmarked fallback with nothing
+          stored yet. What a default is, is not something this page has to
+          explain; moving it is a menu item. */}
       {provider.isDefault && (
-        <Badge variant="secondary" data-testid={`inference-provider-${provider.slug}-default`}>
-          Default
+        <Badge
+          variant="secondary"
+          className="max-w-48 truncate"
+          data-testid={`inference-provider-${provider.slug}-default`}
+        >
+          {defaultBadgeLabel(provider, defaultChoice)}
         </Badge>
       )}
 
-      {/* **Routing health, which the row carried none of.** A confirmation on
-          the toggle helps whoever clicks it; this helps everyone who looks at
-          the page afterwards, including the person who did not. `Parked` is the
-          one state the switch position alone cannot express: switched off *and*
-          still routed, so four workloads are waiting on it. */}
-      {routing && (
-        <Badge
-          variant="outline"
-          className={cn(routingState === "parked" && "border-status-blocked text-status-blocked-text")}
-          data-testid={`inference-provider-${provider.slug}-routing`}
-        >
-          {routing}
-        </Badge>
-      )}
+      {/* This row's own model is ambiguous (two or more distinct stored ids,
+          never guessed), or it is the provider a bare-slug default names with
+          no model chosen yet. Either way the row cannot serve a turn until an
+          admin picks one — named here rather than left to `rowSubline` alone,
+          which one fixed testid could not since several rows can need this at
+          once. */}
+      {rowNeedsModel(provider, defaultChoice) &&
+        (canManage ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-6 border-status-blocked px-2 text-xs text-status-blocked-text"
+            data-testid={`inference-provider-${provider.slug}-needs-model`}
+            onClick={() => onEdit(provider)}
+          >
+            Needs a model
+          </Button>
+        ) : (
+          <Badge
+            variant="outline"
+            className="border-status-blocked text-status-blocked-text"
+            data-testid={`inference-provider-${provider.slug}-needs-model`}
+          >
+            Needs a model
+          </Badge>
+        ))}
 
       <Health slug={provider.slug} health={provider.health} />
 

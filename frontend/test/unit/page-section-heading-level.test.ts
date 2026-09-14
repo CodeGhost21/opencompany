@@ -68,12 +68,11 @@ const PAGES = [
     sections: ["connections/McpServersSection"],
   },
   {
-    // Two sections, one per tab, and both outside `views/` — hence the `../`.
-    // The single-provider form they replace was one section under this page's
-    // h1; the split means there are now two, and they are peers of each other
-    // rather than one nested in the other.
+    // One section, outside `views/` — hence the `../`. The Routing tab was
+    // removed in the keys rework (issue #2306, phase 5b); a company now has
+    // one default provider and model, and an agent may pin its own.
     view: "InferenceView",
-    sections: ["../inference/ProvidersTab", "../inference/RoutingTab"],
+    sections: ["../inference/ProvidersTab"],
   },
   {
     view: "FeedbackView",

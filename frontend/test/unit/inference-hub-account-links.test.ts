@@ -68,12 +68,12 @@ describe("the LLM page does not carry them", () => {
     // The enforcement is structural: if a later change renders them back onto
     // this page, the condition the old tests protected — hide them once the
     // config no longer rides the proxy — comes back with it, unpinned.
+    // The Routing tab was removed in the keys rework (issue #2306, phase 5b);
+    // there is one page now.
     const sources = await Promise.all(
-      [
-        import("@/inference/ProvidersTab?raw"),
-        import("@/inference/RoutingTab?raw"),
-        import("@/inference/ProviderList?raw"),
-      ].map((p) => p.then((m) => (m as { default: string }).default)),
+      [import("@/inference/ProvidersTab?raw"), import("@/inference/ProviderList?raw")].map((p) =>
+        p.then((m) => (m as { default: string }).default),
+      ),
     );
     for (const source of sources) {
       expect(source).not.toContain("HubAccountLinks");
