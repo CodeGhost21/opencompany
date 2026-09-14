@@ -10,10 +10,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { VERSION_FILES, readVersions } from './version-files.mjs';
 
-const here = path.dirname(new URL(import.meta.url).pathname);
+const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
 const bump = path.join(here, 'bump-version.mjs');
 const verify = path.join(here, 'verify-version-sync.mjs');
@@ -61,7 +62,7 @@ test('patch, minor and major each move every file and only the version lines', (
     const next = expect(current.split('.').map(Number));
 
     const out = run(bump, [type, '--root', root]);
-    assert.equal(out, `version=${next}\ntag=v${next}\n`);
+    assert.equal(out, `version=${next}\ntag=v${next}\nfiles=${VERSION_FILES.map((f) => f.file).join(' ')}\n`);
     assert.deepEqual(new Set(Object.values(readVersions(root))), new Set([next]));
     run(verify, [next, '--root', root]);
 
@@ -102,7 +103,7 @@ test('appends outputs to GITHUB_OUTPUT when set', () => {
   const root = copyTree();
   const outFile = path.join(root, 'gh-output');
   run(bump, ['patch', '--root', root], { GITHUB_OUTPUT: outFile });
-  assert.match(fs.readFileSync(outFile, 'utf8'), /^version=\d+\.\d+\.\d+\ntag=v\d+\.\d+\.\d+\n$/);
+  assert.match(fs.readFileSync(outFile, 'utf8'), /^version=\d+\.\d+\.\d+\ntag=v\d+\.\d+\.\d+\nfiles=Cargo\.toml .*\n$/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

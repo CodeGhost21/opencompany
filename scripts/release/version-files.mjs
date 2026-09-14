@@ -12,6 +12,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const SEMVER = /^\d+\.\d+\.\d+$/;
 
@@ -136,6 +137,11 @@ export function writeVersions(root, next) {
   for (const entry of VERSION_FILES) entry.write(root, next);
 }
 
+/** The first positional argument (not a flag, not a flag's value), or null. */
+export function positional(argv) {
+  return argv.find((a, i) => !a.startsWith('--') && argv[i - 1] !== '--root') ?? null;
+}
+
 /** `--root <dir>` from argv, else the repository root this script lives in. */
 export function resolveRoot(argv) {
   const i = argv.indexOf('--root');
@@ -144,5 +150,5 @@ export function resolveRoot(argv) {
     if (!dir) throw new Error('--root needs a directory');
     return path.resolve(dir);
   }
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 }

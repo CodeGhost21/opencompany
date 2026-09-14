@@ -10,10 +10,10 @@
 // PR so a drift is caught at the PR that introduces it rather than at the
 // release that trips over it.
 
-import { readVersions, resolveRoot } from './version-files.mjs';
+import { positional, readVersions, resolveRoot } from './version-files.mjs';
 
 const argv = process.argv.slice(2);
-const expected = argv.find((a) => !a.startsWith('--') && argv[argv.indexOf(a) - 1] !== '--root') || null;
+const expected = positional(argv);
 
 const versions = readVersions(resolveRoot(argv));
 const unique = [...new Set(Object.values(versions))];
